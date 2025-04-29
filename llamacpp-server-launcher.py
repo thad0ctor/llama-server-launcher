@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 from threading import Thread
 import traceback
 import ctypes
@@ -281,7 +281,7 @@ def analyze_gguf_model_static(model_path_str):
             analysis_result["architecture"] = llm_meta.metadata.get('general.architecture', 'unknown')
             if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('qwen2.architecture', 'unknown')
             if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('gemma.architecture', 'unknown')
-            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llllm_meta.metadata.get('bert.architecture', 'unknown')
+            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('bert.architecture', 'unknown')
 
 
         # Attempt 2: Check direct attributes if metadata didn't yield layers
@@ -335,6 +335,22 @@ def analyze_gguf_model_static(model_path_str):
 # ═════════════════════════════════════════════════════════════════════
 class LlamaCppLauncher:
     """Tk‑based launcher for llama.cpp HTTP server."""
+
+    # ──────────────────────────────────────────────────────────────────
+    #  Predefined Chat Templates
+    # ──────────────────────────────────────────────────────────────────
+    # Define predefined chat templates here
+    _predefined_templates = {
+        "None (Use Model Default)": "", # Empty string means no --chat-template argument
+        "Alpaca": "### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}",
+        "ChatML": "<|im_start|>system\\n{{system_message}}<|im_end|>\\n<|im_start|>user\\n{{prompt}}<|im_end|>\\n<|im_start|>assistant\\n",
+        "Llama 2 Chat": "[INST] <<SYS>>\\n{{system_message}}\\n<</SYS>>\\n\\n{{prompt}}[/INST]",
+        "Vicuna": "A chat between a curious user and an AI assistant.\nThe assistant gives helpful, harmless, honest answers.\nUSER: {{prompt}}\nASSISTANT: ",
+        # Add more templates as needed based on common formats
+        # "Gemma": "<start_of_turn>user\\n{{prompt}}<end_of_turn>\\n<start_of_turn>model\\n",
+        # "Mistral": "[INST] {{prompt}} [/INST]",
+    }
+
 
     # ──────────────────────────────────────────────────────────────────
     #  construction / persistence
@@ -410,6 +426,16 @@ class LlamaCppLauncher:
         # --- NEW Parameters ---
         self.ignore_eos      = tk.BooleanVar(value=False) # --ignore-eos
         self.n_predict       = tk.StringVar(value="-1")   # --n-predict
+
+        # --- Chat Template Parameters (NEW) ---
+        # BooleanVar: True for custom entry, False for predefined combobox
+        self.use_custom_template = tk.BooleanVar(value=False)
+        # StringVar: Holds the key name of the selected predefined template
+        self.predefined_template_name = tk.StringVar(value="None (Use Model Default)")
+        # StringVar: Holds the user's custom template string
+        self.custom_template_string = tk.StringVar(value="")
+        # StringVar: Holds the *actual* template string being used (either from predefined or custom) for display and command line
+        self.current_template_display = tk.StringVar(value="")
 
 
         # --- Model Info Variables ---
@@ -504,6 +530,13 @@ class LlamaCppLauncher:
         self.mlock.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.no_kv_offload.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
 
+        # --- Chat Template Trace Bindings (NEW) ---
+        self.use_custom_template.trace_add("write", lambda *args: self._update_template_controls_state())
+        # Trace on combobox variable to update the displayed template string
+        self.predefined_template_name.trace_add("write", lambda *args: self._update_effective_template_display())
+        # Trace on custom entry variable to update the displayed template string (conditionally)
+        self.custom_template_string.trace_add("write", lambda *args: self._update_effective_template_display())
+
 
         # Populate model directories listbox
         self._update_model_dirs_listbox()
@@ -522,6 +555,10 @@ class LlamaCppLauncher:
 
         # Run initial Flash Attention check (might trigger venv check if venv is pre-filled)
         self._check_venv_flash_attn()
+
+        # Update chat template display and controls initially
+        self._update_template_controls_state() # Sets initial state based on self.use_custom_template
+        self._update_effective_template_display() # Sets initial displayed template based on selected/custom value
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -595,6 +632,7 @@ class LlamaCppLauncher:
                  messagebox.showerror("Config Error", f"Failed to set up configuration directory.\nSaving/loading configurations is disabled.\nError: {e}")
                  # Return a dummy non-existent path to prevent errors later
                  return Path("/dev/null") if sys.platform != "win32" else Path("NUL") # Use platform-appropriate null device
+
 
     def _load_saved_configs(self):
         if not self.config_path.exists() or not self.config_path.is_file() or self.config_path.name in ("null", "NUL"):
@@ -680,13 +718,16 @@ class LlamaCppLauncher:
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
+        nb.add(chat_frame, text="Chat Template") # Add the new tab
         nb.add(cfg_frame,  text="Configurations")
+
 
         self._setup_main_tab(main_frame)
         self._setup_advanced_tab(adv_frame)
+        self._setup_chat_template_tab(chat_frame) # Setup the new tab
         self._setup_config_tab(cfg_frame)
 
         bar = ttk.Frame(self.root); bar.pack(fill="x", padx=10, pady=(0, 10))
@@ -795,7 +836,7 @@ class LlamaCppLauncher:
         # Recommendation label for threads
         ttk.Label(inner, textvariable=self.recommended_threads_var, font=("TkSmallCaptionFont")).grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Number of main threads. (llama.cpp default is often logical cores)", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1 # Add descriptive text below reco label
+            .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1
 
         # --- Context Size ---
         ttk.Label(inner, text="Context Size:")\
@@ -863,6 +904,69 @@ class LlamaCppLauncher:
 
         # Make column 2 (info/small font text) expand slightly if needed, but column 1 for entry/listbox is primary
         inner.columnconfigure(2, weight=1)
+
+    # ═════════════════════════════════════════════════════════════════
+    #  UI action handlers (e.g., browse, clear)
+    # ═════════════════════════════════════════════════════════════════
+    def _browse_dir(self, var):
+        """Opens a directory chooser and sets the given StringVar."""
+        # Get the current value to use as initial directory
+        current_dir = var.get().strip()
+        initial_dir = current_dir if current_dir and Path(current_dir).is_dir() else str(Path.home())
+
+        directory = filedialog.askdirectory(title="Select Directory", initialdir=initial_dir)
+        if directory:
+            try:
+                 # Resolve the path before setting to handle symlinks etc.
+                 resolved_path = Path(directory).resolve()
+                 var.set(str(resolved_path))
+            except Exception as e:
+                 print(f"Error resolving path '{directory}': {e}", file=sys.stderr)
+                 # Fallback to setting the raw path if resolving fails
+                 var.set(directory)
+
+    def _clear_venv(self):
+        """Clears the virtual environment directory entry."""
+        self.venv_dir.set("")
+        # Setting the variable automatically triggers the trace, which calls _check_venv_flash_attn()
+
+    def _override_ctx_size(self, event=None):
+        """Manually set context size from entry."""
+        try:
+            value = int(self.ctx_entry.get())
+            # Clamp value to a reasonable range (e.g., 1024 to 131072, matching slider)
+            clamped_value = max(1024, min(131072, value))
+            self.ctx_size.set(clamped_value)
+            self._sync_ctx_display(clamped_value) # Update entry/label to clamped value
+        except ValueError:
+            # Revert entry and label to current valid value if input is invalid
+            current_value = self.ctx_size.get()
+            self._sync_ctx_display(current_value)
+            messagebox.showwarning("Invalid Input", "Context size must be an integer.")
+
+    def _update_ctx_label_from_slider(self, value_str):
+        """Callback for slider to update label and entry."""
+        try:
+            # Slider value comes as a float string, convert to int
+            value = int(float(value_str))
+            self._sync_ctx_display(value)
+        except ValueError:
+            pass # Should not happen with slider
+
+
+    def _sync_ctx_display(self, value):
+        """Syncs the context size label and entry to a given integer value."""
+        if hasattr(self, 'ctx_label') and self.ctx_label.winfo_exists():
+            self.ctx_label.config(text=f"{value:,}")
+        if hasattr(self, 'ctx_entry') and self.ctx_entry.winfo_exists():
+            # Update entry text without triggering its FocusOut/Return binding
+            # Temporarily unbind, update, rebind
+            self.ctx_entry.unbind("<FocusOut>")
+            self.ctx_entry.unbind("<Return>")
+            self.ctx_entry.delete(0, tk.END)
+            self.ctx_entry.insert(0, str(value))
+            self.ctx_entry.bind("<FocusOut>", self._override_ctx_size)
+            self.ctx_entry.bind("<Return>", self._override_ctx_size)
 
     # ░░░░░ ADVANCED TAB ░░░░░
     def _setup_advanced_tab(self, parent):
@@ -1093,7 +1197,7 @@ class LlamaCppLauncher:
             .grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, textvariable=self.recommended_threads_batch_var, font=("TkSmallCaptionFont")).grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Number of threads to use for batch processing (llama.cpp default: 4)", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1 # Add descriptive text below reco label
+            .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1 # Add descriptive text below reco label
 
 
         # Disable Conv Batching (--no-cnv) - Moved here as it's related to batching
@@ -1138,6 +1242,89 @@ class LlamaCppLauncher:
 
 
         inner.columnconfigure(2, weight=1) # Allow the description columns to expand
+
+
+    # ░░░░░ CHAT TEMPLATE TAB ░░░░░ (NEW)
+    def _setup_chat_template_tab(self, parent):
+        frame = ttk.Frame(parent, padding=10); frame.pack(fill="both", expand=True)
+        frame.columnconfigure(1, weight=1) # Allow column 1 to expand for entries/combobox
+
+        r = 0
+        ttk.Label(frame, text="Chat Template Settings", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0,5)); r += 1
+
+        ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
+
+        # --- Template Source Selection (Radio Buttons) ---
+        ttk.Label(frame, text="Select Template Source:").grid(column=0, row=r, sticky="w", padx=5, pady=3); r += 1
+
+        radio_frame = ttk.Frame(frame)
+        radio_frame.grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=3); r += 1
+
+        # Use Predefined Radio Button
+        ttk.Radiobutton(radio_frame, text="Use Predefined Template:",
+                        variable=self.use_custom_template, value=False)\
+            .pack(side="left", padx=(0, 10))
+
+        # Use Custom Radio Button
+        ttk.Radiobutton(radio_frame, text="Use Custom Template:",
+                        variable=self.use_custom_template, value=True)\
+            .pack(side="left")
+
+
+        # --- Predefined Template Dropdown ---
+        ttk.Label(frame, text="Predefined Template:").grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        self.predefined_template_combobox = ttk.Combobox(frame, textvariable=self.predefined_template_name,
+                                                        values=list(self._predefined_templates.keys()),
+                                                        state="readonly") # Readonly combobox
+        self.predefined_template_combobox.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2)
+        # Binding for combobox selection is handled by trace on self.predefined_template_name
+
+        r += 1 # Next row
+
+
+        # --- Custom Template Entry ---
+        ttk.Label(frame, text="Custom Template String (--chat-template):")\
+            .grid(column=0, row=r, sticky="nw", padx=5, pady=3)
+        # Use a ScrolledText for potentially long custom templates
+        self.custom_template_entry = scrolledtext.ScrolledText(frame,
+                                                               wrap=tk.WORD, # Wrap words
+                                                               height=8,     # Height in lines
+                                                               width=60,     # Width in characters (approx)
+                                                               relief=tk.SUNKEN,
+                                                               bd=1)
+        # Set initial value from StringVar
+        self.custom_template_entry.insert(tk.END, self.custom_template_string.get())
+        # Bind events to sync ScrolledText content with StringVar
+        self.custom_template_entry.bind('<<Modified>>', self._on_custom_template_modified)
+        self.custom_template_string.trace_add("write", lambda *args: self._update_custom_template_text()) # Update text widget if string var changes
+
+        self.custom_template_entry.grid(column=1, row=r, sticky="nsew", padx=5, pady=3, columnspan=2)
+        frame.rowconfigure(r, weight=1) # Allow text area row to expand
+        r += 1
+
+
+        # --- Effective Template Display ---
+        ttk.Label(frame, text="Effective Template:").grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        # Display the currently active template string (read-only)
+        # Use a disabled Entry or read-only ScrolledText
+        self.effective_template_display = ttk.Entry(frame, textvariable=self.current_template_display,
+                                                    state="readonly")
+        self.effective_template_display.grid(column=1, row=r, sticky="ew", padx=5, pady=3)
+        ttk.Button(frame, text="Copy", command=self._copy_template_display)\
+            .grid(column=2, row=r, sticky="w", padx=5, pady=3)
+
+        r += 1
+
+
+        ttk.Label(frame, text="Enter a Go-template string. e.g., \"### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}\"", font=("TkSmallCaptionFont"))\
+            .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
+        ttk.Label(frame, text="Use double backslashes (\\\\) for newline characters within the template string.", font=("TkSmallCaptionFont"), foreground="orange")\
+             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
+
+
+        # Initial state update based on self.use_custom_template
+        self._update_template_controls_state()
 
 
     # ░░░░░ CONFIG TAB ░░░░░
@@ -2039,137 +2226,100 @@ sys.exit(0) # Indicate success
 
 
     # ═════════════════════════════════════════════════════════════════
-    #  misc helpers
+    #  Chat Template Logic (NEW)
     # ═════════════════════════════════════════════════════════════════
-    def _clear_venv(self):
-        self.venv_dir.set("")
-        # The trace on venv_dir will trigger the status update
-
-
-    def _update_ctx_label_from_slider(self, value_str):
-        try:
-            # Slider value is a string representation of a float
-            value = int(float(value_str))
-            # Round to nearest 1024 (common practice for context size)
-            # Use max to ensure a minimum size (e.g., 512 or 1024)
-            rounded = max(1024, int(round(value / 1024.0) * 1024)) # Use 1024.0 for float division
-            self.ctx_size.set(rounded)
-            self._sync_ctx_display(rounded)
-        except ValueError:
-            pass # Should not happen with slider
-
-    def _override_ctx_size(self, event=None):
-        """Callback for context size entry or 'Set' button."""
-        if not hasattr(self, 'ctx_entry') or not self.ctx_entry.winfo_exists():
-             return # Avoid errors during initial setup
-
-        try:
-            raw_str = self.ctx_entry.get().replace(',', '') # Remove commas before converting
-            raw = int(raw_str)
-            # Round to nearest 1024 (common practice for context size)
-            rounded = max(1024, int(round(raw/1024.0)*1024)) # Use 1024.0 for float division
-            self.ctx_size.set(rounded)
-            self._sync_ctx_display(rounded)
-        except ValueError:
-            messagebox.showerror("Input Error", "Context size must be a valid number.")
-            # Revert entry to current valid value on error
-            self._sync_ctx_display(self.ctx_size.get())
-        # Context size doesn't affect current recommendations, no need to call _update_recommendations
-
-
-    def _sync_ctx_display(self, value):
-        """Ensures the context size label and entry show the same value."""
-        formatted_value = f"{value:,}"
-        str_value = str(value)
-        if hasattr(self, 'ctx_label') and self.ctx_label.winfo_exists():
-            self.ctx_label.config(text=formatted_value)
-        if hasattr(self, 'ctx_entry') and self.ctx_entry.winfo_exists():
-            # Only update if the entry value is different to avoid infinite loops with validation/binding
-            # Convert current entry text to int for comparison, ignoring commas
-            try:
-                 current_entry_int = int(self.ctx_entry.get().replace(',', ''))
-            except ValueError:
-                 current_entry_int = None # Treat invalid entry as different
-
-            if current_entry_int != value:
-                 self.ctx_entry.delete(0, tk.END)
-                 self.ctx_entry.insert(0, str_value)
-
-
-    def _browse_dir(self, var_to_set):
-        """Helper to browse for a directory and set a StringVar."""
-        setting_key = None
-        title = "Select Directory"
-        # Determine setting key and title based on which variable is being set
-        if var_to_set == self.llama_cpp_dir:
-            setting_key = "last_llama_cpp_dir"
-            title = "Select LLaMa.cpp Root Directory"
-        elif var_to_set == self.venv_dir:
-             setting_key = "last_venv_dir"
-             title = "Select Virtual Environment Directory"
-        # No setting_key needed for model_dirs as it's a list
-
-        # Use the current value of the variable as initial dir if it's a valid directory path.
-        # If not, use the saved setting for that variable.
-        # If neither is a valid directory, default to the user's home directory.
-        current_val = var_to_set.get().strip()
-        initial = None
-        if current_val and Path(current_val).is_dir():
-             initial = current_val
-        elif setting_key and self.app_settings.get(setting_key) and Path(self.app_settings.get(setting_key)).is_dir():
-             initial = self.app_settings.get(setting_key)
+    def _update_template_controls_state(self, *args):
+        """Enables/disables template controls based on radio button selection."""
+        if self.use_custom_template.get():
+            self.predefined_template_combobox.config(state=tk.DISABLED)
+            if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+                 self.custom_template_entry.config(state=tk.NORMAL)
         else:
-             initial = str(Path.home())
+            self.predefined_template_combobox.config(state="readonly") # Re-enable readonly state
+            if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+                 self.custom_template_entry.config(state=tk.DISABLED)
+
+        # Also update the effective template display
+        self._update_effective_template_display()
 
 
-        d = filedialog.askdirectory(initialdir=initial, title=title)
-        if d:
-            resolved_d = str(Path(d).resolve()) # Resolve the selected directory path
-            var_to_set.set(resolved_d)
-            # Save to app_settings immediately for relevant directory selections
-            if setting_key:
-                self.app_settings[setting_key] = resolved_d
-            # For venv dir, setting the variable triggers the trace which calls _check_venv_flash_attn
+    def _update_effective_template_display(self, *args):
+        """Updates the displayed effective template string."""
+        if self.use_custom_template.get():
+            effective_template = self.custom_template_string.get()
+        else:
+            selected_name = self.predefined_template_name.get()
+            effective_template = self._predefined_templates.get(selected_name, "") # Default to empty if key not found
+
+        # Ensure the displayed entry is writable before setting, then set back to readonly
+        if hasattr(self, 'effective_template_display') and self.effective_template_display.winfo_exists():
+             self.effective_template_display.config(state=tk.NORMAL)
+             self.current_template_display.set(effective_template)
+             self.effective_template_display.config(state="readonly")
+
+        # Note: The trace on self.custom_template_string updates the display
+        # only when the mode is custom. The combobox selection updates it
+        # directly via its trace binding.
 
 
-    def _find_server_executable(self, base_dir: Path) -> Path | None:
-        """Finds the llama-server executable within common build directories."""
-        exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
-        simple_exe_name = "server.exe" if sys.platform == "win32" else "server" # Older common name
-
-        # List of directories relative to base_dir to check
-        search_dirs = [
-            Path("."), Path("server"),
-            Path("build"), Path("bin"), Path("build/bin"),
-            Path("Release"), Path("Debug"),
-            Path("build/Release"), Path("build/Debug"),
-            Path("build/bin/Release"), Path("build/bin/Debug"),
-            Path("bin/Release"), Path("bin/Debug"),
-        ]
-
-        # Combine base_dir with search_dirs and executable names
-        potential_paths = []
-        for search_dir in search_dirs:
-             potential_paths.append(base_dir / search_dir / exe_name)
-             potential_paths.append(base_dir / search_dir / simple_exe_name)
-
-        # Also check directly in base_dir
-        potential_paths.append(base_dir / exe_name)
-        potential_paths.append(base_dir / simple_exe_name)
-
-
-        for p in potential_paths:
-             try:
-                # Check if the path points to a file that exists
-                if p.is_file():
-                     print(f"Found server executable at: {p}", file=sys.stderr)
-                     return p.resolve() # Return resolved path for consistency
-             except Exception:
-                 # Ignore errors checking potential paths (e.g., permission errors, path too long)
+    def _on_custom_template_modified(self, event=None):
+        """Callback for ScrolledText modifications to sync with StringVar."""
+        # This is a bit tricky with ScrolledText. A standard Entry's textvariable
+        # handles this sync automatically. With ScrolledText, we need to manually
+        # get the content and update the StringVar.
+        # We only want to update the StringVar (and trigger its trace) when the
+        # text widget is actually enabled (i.e., custom mode is active).
+        if self.use_custom_template.get() and hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+            try:
+                # Get the content from the text widget (from 1.0 to end-1c)
+                content = self.custom_template_entry.get("1.0", tk.END).strip()
+                # Update the StringVar if it's different
+                if self.custom_template_string.get() != content:
+                    self.custom_template_string.set(content)
+                # Clear the modified flag so the event fires again on next change
+                self.custom_template_entry.edit_modified(False)
+            except tk.TclError:
+                 # Handle case where widget might be destroyed during update
                  pass
 
-        print(f"Server executable ('{exe_name}' or '{simple_exe_name}') not found in common locations under {base_dir}", file=sys.stderr)
-        return None
+
+    def _update_custom_template_text(self, *args):
+        """Updates the custom template ScrolledText widget from the StringVar."""
+        # This trace is needed if the StringVar is set externally (e.g., by loading a config)
+        # It should only update the text widget if the content is different, to avoid loops.
+        # We also need to ensure the widget is enabled before updating.
+        if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+            content = self.custom_template_string.get()
+            widget_content = self.custom_template_entry.get("1.0", tk.END).strip()
+
+            if content != widget_content:
+                 # Temporarily enable if it's disabled, update, then restore state
+                 original_state = self.custom_template_entry.cget('state')
+                 if original_state == tk.DISABLED:
+                      self.custom_template_entry.config(state=tk.NORMAL)
+
+                 self.custom_template_entry.delete("1.0", tk.END)
+                 self.custom_template_entry.insert(tk.END, content)
+                 self.custom_template_entry.edit_modified(False) # Clear modified flag
+
+                 if original_state == tk.DISABLED:
+                      self.custom_template_entry.config(state=tk.DISABLED)
+
+
+    def _copy_template_display(self):
+        """Copies the effective template string to the clipboard."""
+        template_string = self.current_template_display.get()
+        if template_string:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(template_string)
+                print("DEBUG: Copied effective template to clipboard.", file=sys.stderr)
+            except Exception as e:
+                print(f"ERROR: Failed to copy to clipboard: {e}", file=sys.stderr)
+                messagebox.showerror("Copy Error", f"Failed to copy template to clipboard:\n{e}")
+        else:
+            messagebox.showinfo("Copy Info", "No template string to copy.")
+
 
     # ═════════════════════════════════════════════════════════════════
     #  Default Configuration Name Generation
@@ -2220,6 +2370,7 @@ sys.exit(0) # Indicate success
             "mlock":         False, # Default for --mlock flag
             "no_kv_offload": False, # Default for --no-kv-offload flag
             "no_cnv":        False, # Default for --no-cnv flag
+            # Chat template is not included in default name for brevity
         }
 
         current_params = {
@@ -2329,7 +2480,7 @@ sys.exit(0) # Indicate success
 
         # Let's add a simple heuristic: only update if the current name is "default_config"
         # or if it matches a previously generated name (this part is hard without storing the previous name).
-        # A slightly better approach: if the current name is "default_config" OR if it starts with the model name part (and the model name part exists), AND it's different from the newly generated name, update it.
+        # A slightly better approach: if the current name is "default_config" OR if the current name is empty, OR if it starts with the model name part (and the model name part exists), then replace it with the generated name, but *only* if the generated name is different.
 
         model_name_prefix = ""
         if parts and parts[0] != "default": # If model name was successfully added as the first part
@@ -2401,6 +2552,10 @@ sys.exit(0) # Indicate success
             # --- NEW: Add new parameters to config ---
             "ignore_eos":    self.ignore_eos.get(),
             "n_predict":     self.n_predict.get(),
+            # --- NEW: Add chat template parameters ---
+            "use_custom_template": self.use_custom_template.get(),
+            "predefined_template_name": self.predefined_template_name.get(),
+            "custom_template_string": self.custom_template_string.get(),
         }
 
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
@@ -2466,6 +2621,18 @@ sys.exit(0) # Indicate success
         # --- NEW: Load new parameters ---
         self.ignore_eos.set(cfg.get("ignore_eos", False))
         self.n_predict.set(cfg.get("n_predict", "-1")) # Default -1 for backward compatibility
+
+        # --- NEW: Load chat template parameters ---
+        # Load mode first
+        self.use_custom_template.set(cfg.get("use_custom_template", False))
+        # Load predefined name and custom string
+        self.predefined_template_name.set(cfg.get("predefined_template_name", "None (Use Model Default)"))
+        self.custom_template_string.set(cfg.get("custom_template_string", ""))
+        # Update UI state and display based on loaded values
+        self._update_template_controls_state() # This re-enables/disables controls
+        # The trace on custom_template_string or predefined_template_name should trigger display update,
+        # but let's call it explicitly for robustness after loading
+        self._update_effective_template_display()
 
 
         # Load GPU selections - This needs to update the checkboxes
@@ -2713,6 +2880,12 @@ sys.exit(0) # Indicate success
         # --- NEW: Generation options ---
         self._add_arg(cmd, "--ignore-eos", self.ignore_eos.get()) # Omit if False (default)
         self._add_arg(cmd, "--n-predict", self.n_predict.get(), "-1") # Omit if -1 (default)
+
+        # --- NEW: Chat template option ---
+        effective_template = self.current_template_display.get().strip()
+        if effective_template: # Only add the argument if the effective template string is non-empty
+             cmd.extend(["--chat-template", effective_template])
+             print(f"DEBUG: Adding --chat-template: {effective_template[:50]}...", file=sys.stderr)
 
 
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
@@ -3085,6 +3258,16 @@ if __name__ == "__main__":
                                                                 selectforeground=[('readonly', listbox_select_fg), ('!readonly', listbox_select_fg)],
                                                                 background=[('readonly', bg_color), ('!readonly', bg_color)])
                                          style.map('TEntry', fieldbackground=[('!disabled', entry_bg)], foreground=[('!disabled', entry_fg)])
+                                    except tk.TclError: pass
+                                    # ScrolledText is tk, needs option_add
+                                    try:
+                                        root.option_add('*ScrolledText.background', entry_bg)
+                                        root.option_add('*ScrolledText.foreground', entry_fg)
+                                        # Need to set insertbackground for cursor color in dark themes
+                                        root.option_add('*ScrolledText.insertBackground', fg_color)
+                                        # Selection colors
+                                        root.option_add('*ScrolledText.selectBackground', listbox_select_bg)
+                                        root.option_add('*ScrolledText.selectForeground', listbox_select_fg)
                                     except tk.TclError: pass
 
 
