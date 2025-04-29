@@ -336,21 +336,16 @@ def analyze_gguf_model_static(model_path_str):
 class LlamaCppLauncher:
     """Tk‑based launcher for llama.cpp HTTP server."""
 
-    # ──────────────────────────────────────────────────────────────────
-    #  Predefined Chat Templates
-    # ──────────────────────────────────────────────────────────────────
-    # Define predefined chat templates here
-    _predefined_templates = {
-        "None (Use Model Default)": "", # Empty string means no --chat-template argument
+    # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+    # Define hardcoded templates, now primarily just the "default" option
+    _default_templates = {
+        "Let llama.cpp Decide (Use Model Default)": "", # Key for the explicit default option
+        # Add other core templates here if you want them available even without the JSON file
         "Alpaca": "### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}",
         "ChatML": "<|im_start|>system\\n{{system_message}}<|im_end|>\\n<|im_start|>user\\n{{prompt}}<|im_end|>\\n<|im_start|>assistant\\n",
         "Llama 2 Chat": "[INST] <<SYS>>\\n{{system_message}}\\n<</SYS>>\\n\\n{{prompt}}[/INST]",
         "Vicuna": "A chat between a curious user and an AI assistant.\nThe assistant gives helpful, harmless, honest answers.\nUSER: {{prompt}}\nASSISTANT: ",
-        # Add more templates as needed based on common formats
-        # "Gemma": "<start_of_turn>user\\n{{prompt}}<end_of_turn>\\n<start_of_turn>model\\n",
-        # "Mistral": "[INST] {{prompt}} [/INST]",
     }
-
 
     # ──────────────────────────────────────────────────────────────────
     #  construction / persistence
@@ -367,9 +362,26 @@ class LlamaCppLauncher:
         self.ram_info = {}
         self.cpu_info = {"logical_cores": 4, "physical_cores": 2} # Default fallback
 
+        # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+        # Load external chat templates before creating widgets
+        self.config_path = self._get_config_path() # Need config path first
+        loaded_templates = self._find_and_load_chat_templates()
+
+        # Combine hardcoded default templates with loaded templates
+        self._all_templates = self._default_templates.copy() # Start with hardcoded ones
+        self._all_templates.update(loaded_templates) # Overwrite/add with loaded ones
+
+        # Ensure the primary default key ("Let llama.cpp Decide...") is always present and maps to ""
+        # Use a standard key name regardless of what the user might have named it in JSON if they included it
+        default_key = "Let llama.cpp Decide (Use Model Default)"
+        self._all_templates[default_key] = "" # Force the empty string value
+
+        # Reconstruct _all_templates dict to ensure the default key is first, then sort the rest
+        sorted_keys_after_default = sorted([k for k in self._all_templates.keys() if k != default_key])
+        final_template_keys = [default_key] + sorted_keys_after_default
+        self._all_templates = {k: self._all_templates[k] for k in final_template_keys}
 
         # ------------------------------------------------ persistence --
-        self.config_path = self._get_config_path()
         self.saved_configs = {}
         self.app_settings = {
             "last_llama_cpp_dir": "",
@@ -427,11 +439,11 @@ class LlamaCppLauncher:
         self.ignore_eos      = tk.BooleanVar(value=False) # --ignore-eos
         self.n_predict       = tk.StringVar(value="-1")   # --n-predict
 
-        # --- Chat Template Parameters (NEW) ---
-        # BooleanVar: True for custom entry, False for predefined combobox
-        self.use_custom_template = tk.BooleanVar(value=False)
+        # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+        # Variable for template source: 'default', 'predefined', 'custom'
+        self.template_source = tk.StringVar(value="default") # Initial state: Let llama.cpp decide
         # StringVar: Holds the key name of the selected predefined template
-        self.predefined_template_name = tk.StringVar(value="None (Use Model Default)")
+        self.predefined_template_name = tk.StringVar(value=default_key) # Set default to the primary default key
         # StringVar: Holds the user's custom template string
         self.custom_template_string = tk.StringVar(value="")
         # StringVar: Holds the *actual* template string being used (either from predefined or custom) for display and command line
@@ -530,11 +542,14 @@ class LlamaCppLauncher:
         self.mlock.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.no_kv_offload.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
 
-        # --- Chat Template Trace Bindings (NEW) ---
-        self.use_custom_template.trace_add("write", lambda *args: self._update_template_controls_state())
-        # Trace on combobox variable to update the displayed template string
+        # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+        # Bind trace to the new template source variable
+        self.template_source.trace_add("write", lambda *args: self._update_template_controls_state())
+        self.template_source.trace_add("write", lambda *args: self._update_effective_template_display())
+
+        # Trace on combobox variable to update the displayed template string (only when in predefined mode)
         self.predefined_template_name.trace_add("write", lambda *args: self._update_effective_template_display())
-        # Trace on custom entry variable to update the displayed template string (conditionally)
+        # Trace on custom entry variable to update the displayed template string (only when in custom mode)
         self.custom_template_string.trace_add("write", lambda *args: self._update_effective_template_display())
 
 
@@ -556,9 +571,9 @@ class LlamaCppLauncher:
         # Run initial Flash Attention check (might trigger venv check if venv is pre-filled)
         self._check_venv_flash_attn()
 
-        # Update chat template display and controls initially
-        self._update_template_controls_state() # Sets initial state based on self.use_custom_template
-        self._update_effective_template_display() # Sets initial displayed template based on selected/custom value
+        # Update chat template display and controls initially based on initial state
+        self._update_template_controls_state() # Sets initial state based on self.template_source
+        self._update_effective_template_display() # Sets initial displayed template based on source
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -675,7 +690,6 @@ class LlamaCppLauncher:
             }
             self.saved_configs = {}
 
-
     def _save_configs(self):
         if self.config_path.name in ("null", "NUL"):
              print("Config saving is disabled.", file=sys.stderr)
@@ -710,6 +724,18 @@ class LlamaCppLauncher:
             else:
                  messagebox.showerror("Config Save Error", f"Failed to save settings to:\n{self.config_path}\n\nError: {exc}")
 
+    # --- FIX: Define the _save_configuration method that calls _save_configs and updates saved_configs ---
+    def _save_configuration(self):
+        name = self.config_name.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Please enter a name for the configuration.")
+            return
+
+        current_cfg = self._current_cfg()
+        self.saved_configs[name] = current_cfg
+        self._save_configs()
+        self._update_config_listbox()
+        messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")
 
     # ═════════════════════════════════════════════════════════════════
     #  UI builders
@@ -768,6 +794,7 @@ class LlamaCppLauncher:
             .grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
         vf = ttk.Frame(inner); vf.grid(column=3, row=r, sticky="w", padx=5, pady=3)
         ttk.Button(vf, text="Browse…", width=8, command=lambda: self._browse_dir(self.venv_dir)).pack(side="left", padx=2)
+        # The button command now correctly references the method within the class
         ttk.Button(vf, text="Clear",   width=8, command=self._clear_venv).pack(side="left", padx=2)
         ttk.Label(inner, text="If set, activates this Python venv before launching.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
@@ -967,6 +994,65 @@ class LlamaCppLauncher:
             self.ctx_entry.insert(0, str(value))
             self.ctx_entry.bind("<FocusOut>", self._override_ctx_size)
             self.ctx_entry.bind("<Return>", self._override_ctx_size)
+
+
+    # ═════════════════════════════════════════════════════════════════
+    #  JSON Chat Template Loading
+    # ═════════════════════════════════════════════════════════════════
+    def _load_chat_templates_from_json(self, file_path):
+        """Loads chat templates from a JSON file."""
+        try:
+            if file_path.is_file():
+                content = file_path.read_text(encoding='utf-8')
+                loaded_templates = json.loads(content)
+                if not isinstance(loaded_templates, dict):
+                    print(f"Warning: Chat templates file '{file_path}' is not a valid JSON object (dictionary). Ignoring.", file=sys.stderr)
+                    return {}
+                # Filter out any keys that are not non-empty strings or values that are not strings
+                valid_templates = {k: v for k, v in loaded_templates.items() if isinstance(k, str) and k and isinstance(v, str)}
+                print(f"Successfully loaded {len(valid_templates)} chat templates from {file_path}", file=sys.stderr)
+                return valid_templates
+            else:
+                # print(f"DEBUG: Chat templates file not found at {file_path}", file=sys.stderr) # Too noisy for expected paths
+                return {}
+        except FileNotFoundError:
+             # print(f"DEBUG: Chat templates file not found at {file_path}", file=sys.stderr) # Too noisy
+            return {}
+        except json.JSONDecodeError as e:
+            print(f"Error decoding chat templates JSON from {file_path}: {e}", file=sys.stderr)
+            messagebox.showwarning("Chat Template Load Error", f"Failed to decode chat templates JSON from:\n{file_path}\nError: {e}\n\nUsing default templates only.")
+            return {}
+        except Exception as e:
+            print(f"Unexpected error loading chat templates from {file_path}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            messagebox.showwarning("Chat Template Load Error", f"Unexpected error loading chat templates from:\n{file_path}\nError: {e}\n\nUsing default templates only.")
+            return {}
+
+    def _find_and_load_chat_templates(self):
+         """Finds and loads chat templates from the default JSON file locations."""
+         template_file_name = "chat_templates.json"
+
+         # 1. Check script directory
+         script_dir = Path(__file__).parent
+         local_path = script_dir / template_file_name
+         loaded = self._load_chat_templates_from_json(local_path)
+         if loaded: return loaded
+
+         # 2. Check user config directory (same as config path's parent)
+         # Ensure config_path is set before trying to get its parent
+         if hasattr(self, 'config_path') and self.config_path and self.config_path.parent.exists():
+            config_dir = self.config_path.parent
+            fallback_path = config_dir / template_file_name
+            loaded = self._load_chat_templates_from_json(fallback_path)
+            if loaded: return loaded
+         else:
+             print("DEBUG: Config path not set or config directory does not exist. Skipping check for templates in config dir.", file=sys.stderr)
+
+
+         # If not found in either place
+         print(f"Note: Chat templates file '{template_file_name}' not found. Using hardcoded templates.", file=sys.stderr)
+         return {} # Return empty dict if not found
+
 
     # ░░░░░ ADVANCED TAB ░░░░░
     def _setup_advanced_tab(self, parent):
@@ -1255,59 +1341,70 @@ class LlamaCppLauncher:
 
         ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
 
+        # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # --- Template Source Selection (Radio Buttons) ---
         ttk.Label(frame, text="Select Template Source:").grid(column=0, row=r, sticky="w", padx=5, pady=3); r += 1
 
         radio_frame = ttk.Frame(frame)
         radio_frame.grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=3); r += 1
 
-        # Use Predefined Radio Button
-        ttk.Radiobutton(radio_frame, text="Use Predefined Template:",
-                        variable=self.use_custom_template, value=False)\
+        # Radio Button for "Let llama.cpp Decide"
+        ttk.Radiobutton(radio_frame, text="Let llama.cpp Decide",
+                        variable=self.template_source, value="default")\
             .pack(side="left", padx=(0, 10))
 
-        # Use Custom Radio Button
+        # Radio Button for "Use Predefined Template"
+        ttk.Radiobutton(radio_frame, text="Use Predefined Template:",
+                        variable=self.template_source, value="predefined")\
+            .pack(side="left", padx=(0, 10))
+
+        # Radio Button for "Use Custom Template:"
         ttk.Radiobutton(radio_frame, text="Use Custom Template:",
-                        variable=self.use_custom_template, value=True)\
+                        variable=self.template_source, value="custom")\
             .pack(side="left")
+
+        r += 1 # Advance row for the combobox/entry below
 
 
         # --- Predefined Template Dropdown ---
+        # This is now only active when "Use Predefined Template" is selected via radio button
         ttk.Label(frame, text="Predefined Template:").grid(column=0, row=r, sticky="w", padx=5, pady=3)
         self.predefined_template_combobox = ttk.Combobox(frame, textvariable=self.predefined_template_name,
-                                                        values=list(self._predefined_templates.keys()),
-                                                        state="readonly") # Readonly combobox
+                                                        # Use keys from the combined dictionary
+                                                        values=list(self._all_templates.keys()),
+                                                        state="readonly") # State managed by _update_template_controls_state
         self.predefined_template_combobox.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2)
-        # Binding for combobox selection is handled by trace on self.predefined_template_name
+        # Binding remains for combobox selection, but it's traced to update effective display
+        # self.predefined_template_name.trace_add("write", lambda *args: self._update_effective_template_display()) # Already exists
+
 
         r += 1 # Next row
 
 
         # --- Custom Template Entry ---
+        # This is now only active when "Use Custom Template" is selected via radio button
         ttk.Label(frame, text="Custom Template String (--chat-template):")\
             .grid(column=0, row=r, sticky="nw", padx=5, pady=3)
-        # Use a ScrolledText for potentially long custom templates
         self.custom_template_entry = scrolledtext.ScrolledText(frame,
                                                                wrap=tk.WORD, # Wrap words
                                                                height=8,     # Height in lines
                                                                width=60,     # Width in characters (approx)
                                                                relief=tk.SUNKEN,
                                                                bd=1)
-        # Set initial value from StringVar
-        self.custom_template_entry.insert(tk.END, self.custom_template_string.get())
-        # Bind events to sync ScrolledText content with StringVar
+        # Set initial value from StringVar (already does this in __init__ via trace)
+        # self.custom_template_entry.insert(tk.END, self.custom_template_string.get()) # Remove explicit insert here
+        # Bind events to sync ScrolledText content with StringVar (already exists)
         self.custom_template_entry.bind('<<Modified>>', self._on_custom_template_modified)
-        self.custom_template_string.trace_add("write", lambda *args: self._update_custom_template_text()) # Update text widget if string var changes
+        self.custom_template_string.trace_add("write", lambda *args: self._update_custom_template_text()) # Already exists and calls _update_effective_template_display
+
 
         self.custom_template_entry.grid(column=1, row=r, sticky="nsew", padx=5, pady=3, columnspan=2)
         frame.rowconfigure(r, weight=1) # Allow text area row to expand
         r += 1
 
 
-        # --- Effective Template Display ---
+        # --- Effective Template Display --- (Logic remains the same, only the source changes)
         ttk.Label(frame, text="Effective Template:").grid(column=0, row=r, sticky="w", padx=5, pady=3)
-        # Display the currently active template string (read-only)
-        # Use a disabled Entry or read-only ScrolledText
         self.effective_template_display = ttk.Entry(frame, textvariable=self.current_template_display,
                                                     state="readonly")
         self.effective_template_display.grid(column=1, row=r, sticky="ew", padx=5, pady=3)
@@ -1316,15 +1413,118 @@ class LlamaCppLauncher:
 
         r += 1
 
-
+        # Keep help labels, adjust wording if necessary
         ttk.Label(frame, text="Enter a Go-template string. e.g., \"### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}\"", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
         ttk.Label(frame, text="Use double backslashes (\\\\) for newline characters within the template string.", font=("TkSmallCaptionFont"), foreground="orange")\
              .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
 
 
-        # Initial state update based on self.use_custom_template
-        self._update_template_controls_state()
+        # Initial state update based on self.template_source (called in __init__)
+
+
+    # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+    # Modify _update_template_controls_state
+    def _update_template_controls_state(self, *args):
+        """Enables/disables template controls based on radio button selection."""
+        source = self.template_source.get()
+        if hasattr(self, 'predefined_template_combobox') and self.predefined_template_combobox.winfo_exists():
+            if source == "predefined":
+                self.predefined_template_combobox.config(state="readonly")
+            else:
+                self.predefined_template_combobox.config(state=tk.DISABLED)
+
+        if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+            if source == "custom":
+                self.custom_template_entry.config(state=tk.NORMAL)
+            else:
+                self.custom_template_entry.config(state=tk.DISABLED)
+
+        # Trigger update of the effective template display (trace handles it)
+        # self._update_effective_template_display()
+
+
+    # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+    # Modify _update_effective_template_display
+    def _update_effective_template_display(self, *args):
+        """Updates the displayed effective template string based on current source."""
+        source = self.template_source.get()
+        effective_template = "" # Default to empty
+
+        if source == "default":
+            effective_template = "" # Explicitly empty when llama.cpp decides
+        elif source == "predefined":
+            selected_name = self.predefined_template_name.get()
+            # Get template string from the combined dictionary
+            effective_template = self._all_templates.get(selected_name, "") # Default to empty if key not found
+        elif source == "custom":
+            effective_template = self.custom_template_string.get()
+
+        # Ensure the displayed entry is writable before setting, then set back to readonly
+        if hasattr(self, 'effective_template_display') and self.effective_template_display.winfo_exists():
+             self.effective_template_display.config(state=tk.NORMAL)
+             self.current_template_display.set(effective_template)
+             self.effective_template_display.config(state="readonly")
+
+
+    def _on_custom_template_modified(self, event=None):
+        """Callback for ScrolledText modifications to sync with StringVar."""
+        # This is a bit tricky with ScrolledText. A standard Entry's textvariable
+        # handles this sync automatically. With ScrolledText, we need to manually
+        # get the content and update the StringVar.
+        # We only want to update the StringVar (and trigger its trace) when the
+        # text widget is actually enabled (i.e., custom mode is active).
+        if self.template_source.get() == "custom" and hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+            try:
+                # Get the content from the text widget (from 1.0 to end-1c)
+                content = self.custom_template_entry.get("1.0", tk.END).strip()
+                # Update the StringVar if it's different
+                if self.custom_template_string.get() != content:
+                    self.custom_template_string.set(content)
+                # Clear the modified flag so the event fires again on next change
+                self.custom_template_entry.edit_modified(False)
+            except tk.TclError:
+                 # Handle case where widget might be destroyed during update
+                 pass
+
+
+    def _update_custom_template_text(self, *args):
+        """Updates the custom template ScrolledText widget from the StringVar."""
+        # This trace is needed if the StringVar is set externally (e.g., by loading a config)
+        # It should only update the text widget if the content is different, to avoid loops.
+        # We also need to ensure the widget is enabled before updating.
+        if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
+            content = self.custom_template_string.get()
+            widget_content = self.custom_template_entry.get("1.0", tk.END).strip()
+
+            if content != widget_content:
+                 # Temporarily enable if it's disabled, update, then restore state
+                 # Check current state, don't just rely on self.template_source == "custom"
+                 original_state = self.custom_template_entry.cget('state')
+                 if original_state == tk.DISABLED:
+                      self.custom_template_entry.config(state=tk.NORMAL)
+
+                 self.custom_template_entry.delete("1.0", tk.END)
+                 self.custom_template_entry.insert(tk.END, content)
+                 self.custom_template_entry.edit_modified(False) # Clear modified flag
+
+                 if original_state == tk.DISABLED:
+                      self.custom_template_entry.config(state=tk.DISABLED)
+
+
+    def _copy_template_display(self):
+        """Copies the effective template string to the clipboard."""
+        template_string = self.current_template_display.get()
+        if template_string:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(template_string)
+                print("DEBUG: Copied effective template to clipboard.", file=sys.stderr)
+            except Exception as e:
+                print(f"ERROR: Failed to copy to clipboard: {e}", file=sys.stderr)
+                messagebox.showerror("Copy Error", f"Failed to copy template to clipboard:\n{e}")
+        else:
+            messagebox.showinfo("Copy Info", "No template string to copy.")
 
 
     # ░░░░░ CONFIG TAB ░░░░░
@@ -1338,6 +1538,10 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=5, pady=3)
         ttk.Entry(frame, textvariable=self.config_name, width=30)\
             .grid(column=1, row=r, sticky="ew", padx=5, pady=3)
+        # --- FIX: Correct the command here from _save_configuration to _save_configuration ---
+        # The previous error was likely a copy-paste issue where the comment matched but the code was different,
+        # or the method was defined elsewhere and moved/deleted.
+        # Ensure the command points to the newly added _save_configuration method.
         ttk.Button(frame, text="Save Current Settings", command=self._save_configuration).grid(column=2, row=r, padx=5, pady=3); r += 1
 
         ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
@@ -1357,7 +1561,6 @@ class LlamaCppLauncher:
 
         frame.columnconfigure(1, weight=1); frame.rowconfigure(4, weight=1)
         self._update_config_listbox()
-
 
     # ═════════════════════════════════════════════════════════════════
     #  Listbox Resizing Logic
@@ -2026,13 +2229,22 @@ class LlamaCppLauncher:
         # No action needed if no GPUs, no error, and no specific message
 
 
+    def _on_gpu_selection_changed(self, index):
+         """Callback when a GPU checkbox is changed."""
+         # This callback doesn't need to do much itself, as the state is held by the BooleanVar.
+         # Its primary purpose is to trigger recalculation/update of things that depend on selected GPUs.
+         print(f"DEBUG: GPU {index} selection changed. Recalculating recommendations...", file=sys.stderr)
+         self._update_recommendations()
+         self._generate_default_config_name() # Update default config name as it depends on selected GPUs
+
+
     # ═════════════════════════════════════════════════════════════════
     #  Recommendation Logic
     # ═════════════════════════════════════════════════════════════════
     def _update_recommendations(self):
         """Updates recommended values displayed in the UI."""
         print("DEBUG: Updating recommendations...", file=sys.stderr)
-        # Update KV Cache Type display (always reflects current selection)
+        # Update current KV Cache Type display (always reflects current selection)
         self.model_kv_cache_type_var.set(self.cache_type_k.get())
 
         # --- Threads & Threads Batch Recommendation ---
@@ -2228,97 +2440,7 @@ sys.exit(0) # Indicate success
     # ═════════════════════════════════════════════════════════════════
     #  Chat Template Logic (NEW)
     # ═════════════════════════════════════════════════════════════════
-    def _update_template_controls_state(self, *args):
-        """Enables/disables template controls based on radio button selection."""
-        if self.use_custom_template.get():
-            self.predefined_template_combobox.config(state=tk.DISABLED)
-            if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
-                 self.custom_template_entry.config(state=tk.NORMAL)
-        else:
-            self.predefined_template_combobox.config(state="readonly") # Re-enable readonly state
-            if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
-                 self.custom_template_entry.config(state=tk.DISABLED)
-
-        # Also update the effective template display
-        self._update_effective_template_display()
-
-
-    def _update_effective_template_display(self, *args):
-        """Updates the displayed effective template string."""
-        if self.use_custom_template.get():
-            effective_template = self.custom_template_string.get()
-        else:
-            selected_name = self.predefined_template_name.get()
-            effective_template = self._predefined_templates.get(selected_name, "") # Default to empty if key not found
-
-        # Ensure the displayed entry is writable before setting, then set back to readonly
-        if hasattr(self, 'effective_template_display') and self.effective_template_display.winfo_exists():
-             self.effective_template_display.config(state=tk.NORMAL)
-             self.current_template_display.set(effective_template)
-             self.effective_template_display.config(state="readonly")
-
-        # Note: The trace on self.custom_template_string updates the display
-        # only when the mode is custom. The combobox selection updates it
-        # directly via its trace binding.
-
-
-    def _on_custom_template_modified(self, event=None):
-        """Callback for ScrolledText modifications to sync with StringVar."""
-        # This is a bit tricky with ScrolledText. A standard Entry's textvariable
-        # handles this sync automatically. With ScrolledText, we need to manually
-        # get the content and update the StringVar.
-        # We only want to update the StringVar (and trigger its trace) when the
-        # text widget is actually enabled (i.e., custom mode is active).
-        if self.use_custom_template.get() and hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
-            try:
-                # Get the content from the text widget (from 1.0 to end-1c)
-                content = self.custom_template_entry.get("1.0", tk.END).strip()
-                # Update the StringVar if it's different
-                if self.custom_template_string.get() != content:
-                    self.custom_template_string.set(content)
-                # Clear the modified flag so the event fires again on next change
-                self.custom_template_entry.edit_modified(False)
-            except tk.TclError:
-                 # Handle case where widget might be destroyed during update
-                 pass
-
-
-    def _update_custom_template_text(self, *args):
-        """Updates the custom template ScrolledText widget from the StringVar."""
-        # This trace is needed if the StringVar is set externally (e.g., by loading a config)
-        # It should only update the text widget if the content is different, to avoid loops.
-        # We also need to ensure the widget is enabled before updating.
-        if hasattr(self, 'custom_template_entry') and self.custom_template_entry.winfo_exists():
-            content = self.custom_template_string.get()
-            widget_content = self.custom_template_entry.get("1.0", tk.END).strip()
-
-            if content != widget_content:
-                 # Temporarily enable if it's disabled, update, then restore state
-                 original_state = self.custom_template_entry.cget('state')
-                 if original_state == tk.DISABLED:
-                      self.custom_template_entry.config(state=tk.NORMAL)
-
-                 self.custom_template_entry.delete("1.0", tk.END)
-                 self.custom_template_entry.insert(tk.END, content)
-                 self.custom_template_entry.edit_modified(False) # Clear modified flag
-
-                 if original_state == tk.DISABLED:
-                      self.custom_template_entry.config(state=tk.DISABLED)
-
-
-    def _copy_template_display(self):
-        """Copies the effective template string to the clipboard."""
-        template_string = self.current_template_display.get()
-        if template_string:
-            try:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(template_string)
-                print("DEBUG: Copied effective template to clipboard.", file=sys.stderr)
-            except Exception as e:
-                print(f"ERROR: Failed to copy to clipboard: {e}", file=sys.stderr)
-                messagebox.showerror("Copy Error", f"Failed to copy template to clipboard:\n{e}")
-        else:
-            messagebox.showinfo("Copy Info", "No template string to copy.")
+    # Handled by _update_template_controls_state, _update_effective_template_display, etc. above
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -2348,6 +2470,7 @@ sys.exit(0) # Indicate success
 
 
         # 2. Key Parameters (add if NOT default)
+        # Define defaults, ensuring threads match detected, and excluding chat template params
         default_params = {
             "cache_type_k":  "f16",
             "threads":       str(self.physical_cores), # Default based on detection
@@ -2370,7 +2493,7 @@ sys.exit(0) # Indicate success
             "mlock":         False, # Default for --mlock flag
             "no_kv_offload": False, # Default for --no-kv-offload flag
             "no_cnv":        False, # Default for --no-cnv flag
-            # Chat template is not included in default name for brevity
+            # Chat template parameters are deliberately excluded from default name generation
         }
 
         current_params = {
@@ -2468,33 +2591,23 @@ sys.exit(0) # Indicate success
 
         print(f"DEBUG: Generated config name: {generated_name}", file=sys.stderr)
 
-        # Only update the variable if it's currently the default name or a previously generated name pattern
-        # This prevents overwriting a name the user has manually typed.
-        current_config_name = self.config_name.get().strip()
-        # Check if the current name looks like a generated name (starts with model name or "default")
-        # This check is a bit heuristic, a perfect check would require storing the *last* generated name.
-        # A simpler approach: if the name is "default_config" or if it starts with the current model name part, update it.
-        # Even simpler: just update it always. The user can change it back or type over it. Let's stick to the simple approach for now.
-        # No, let's refine. Store the last auto-generated name. Only overwrite if the current name matches it.
-        # This requires adding an attribute to store the last generated name.
-
-        # Let's add a simple heuristic: only update if the current name is "default_config"
-        # or if it matches a previously generated name (this part is hard without storing the previous name).
-        # A slightly better approach: if the current name is "default_config" OR if the current name is empty, OR if it starts with the model name part (and the model name part exists), then replace it with the generated name, but *only* if the generated name is different.
-
-        model_name_prefix = ""
-        if parts and parts[0] != "default": # If model name was successfully added as the first part
-             model_name_prefix = parts[0]
-
         # Decide whether to set the config_name variable
-        # Rule: If the current name is 'default_config' OR if the current name is empty, OR if it starts with the model name part (and the model name part exists), then replace it with the generated name, but *only* if the generated name is different.
+        # Rule: If the current name is 'default_config' OR if the current name is empty,
+        # OR if it starts with the model name part (and the model name part exists),
+        # then replace it with the generated name, but *only* if the generated name is different.
+        current_config_name = self.config_name.get().strip()
+        model_name_prefix = parts[0] if parts and parts[0] != "default" else ""
+
         update_variable = False
         if current_config_name == "default_config":
              update_variable = True
         elif not current_config_name: # If currently empty
              update_variable = True
-        elif model_name_prefix and current_config_name.startswith(model_name_prefix): # If it starts with the model name part (could be "model_name" or "model_name_param=val")
-            update_variable = True
+        elif model_name_prefix and current_config_name.startswith(model_name_prefix):
+            # Check if the current name is *only* the model name prefix, or starts with it followed by '_'
+            # This heuristic avoids overwriting names like "modelname_manualedit" if they start with the model name
+            if current_config_name == model_name_prefix or current_config_name.startswith(model_name_prefix + "_"):
+                 update_variable = True
 
 
         if update_variable and generated_name != current_config_name:
@@ -2506,7 +2619,7 @@ sys.exit(0) # Indicate success
 
     def _update_default_config_name_if_needed(self, *args):
         """Traced callback for variables that influence the default config name."""
-        # This trace function is bound to variables like self.n_predict and self.ignore_eos.
+        # This trace function is bound to variables that influence the generated config name.
         # It's called whenever those variables change.
         # We only want to regenerate and update the config name if the user hasn't
         # already manually set a custom name.
@@ -2552,8 +2665,9 @@ sys.exit(0) # Indicate success
             # --- NEW: Add new parameters to config ---
             "ignore_eos":    self.ignore_eos.get(),
             "n_predict":     self.n_predict.get(),
-            # --- NEW: Add chat template parameters ---
-            "use_custom_template": self.use_custom_template.get(),
+            # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+            # Save the new template source variable
+            "template_source": self.template_source.get(),
             "predefined_template_name": self.predefined_template_name.get(),
             "custom_template_string": self.custom_template_string.get(),
         }
@@ -2562,23 +2676,6 @@ sys.exit(0) # Indicate success
         cfg["gpu_indices"] = self.app_settings.get("selected_gpus", [])
 
         return cfg
-
-    def _save_configuration(self):
-        name = self.config_name.get().strip()
-        if not name:
-            # If the user clears the name and tries to save, regenerate a default name
-            self._generate_default_config_name()
-            name = self.config_name.get().strip() # Get the generated name
-            if not name or name == "default_config": # If still empty or generic
-                 return messagebox.showerror("Error","Enter a configuration name or select a model to generate one.")
-
-        if name in self.saved_configs:
-             if not messagebox.askyesno("Overwrite", f"Configuration '{name}' already exists. Overwrite?"):
-                 return
-        self.saved_configs[name] = self._current_cfg()
-        self._save_configs() # This now includes saving selected_gpus from app_settings
-        self._update_config_listbox()
-        messagebox.showinfo("Saved", f"Configuration '{name}' saved.")
 
     def _load_configuration(self):
         if not self.config_listbox.curselection():
@@ -2622,18 +2719,22 @@ sys.exit(0) # Indicate success
         self.ignore_eos.set(cfg.get("ignore_eos", False))
         self.n_predict.set(cfg.get("n_predict", "-1")) # Default -1 for backward compatibility
 
-        # --- NEW: Load chat template parameters ---
-        # Load mode first
-        self.use_custom_template.set(cfg.get("use_custom_template", False))
-        # Load predefined name and custom string
-        self.predefined_template_name.set(cfg.get("predefined_template_name", "None (Use Model Default)"))
-        self.custom_template_string.set(cfg.get("custom_template_string", ""))
-        # Update UI state and display based on loaded values
-        self._update_template_controls_state() # This re-enables/disables controls
-        # The trace on custom_template_string or predefined_template_name should trigger display update,
-        # but let's call it explicitly for robustness after loading
-        self._update_effective_template_display()
+        # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+        # Load template parameters
+        # Default the source to 'default' for backward compatibility
+        loaded_source = cfg.get("template_source", "default")
+        self.template_source.set(loaded_source)
 
+        # Default the predefined name to the *first* key in _all_templates if not found
+        # This handles cases where the saved name might no longer exist in _all_templates
+        default_predefined_key = list(self._all_templates.keys())[0] if self._all_templates else ""
+        self.predefined_template_name.set(cfg.get("predefined_template_name", default_predefined_key))
+
+        self.custom_template_string.set(cfg.get("custom_template_string", ""))
+
+        # Update UI state and display based on loaded values
+        # The trace on self.template_source should trigger _update_template_controls_state and _update_effective_template_display
+        # No need to call explicitly here if trace is reliable.
 
         # Load GPU selections - This needs to update the checkboxes
         # Check for the 'gpu_indices' key directly in the config dictionary first
@@ -2724,6 +2825,57 @@ sys.exit(0) # Indicate success
                  self.config_listbox.see(new_index)
             except ValueError: pass
 
+    # ═════════════════════════════════════════════════════════════════
+    #  Executable Finding
+    # ═════════════════════════════════════════════════════════════════
+    # This method was called in _build_cmd but not defined in your code.
+    # Adding a standard implementation here.
+    def _find_server_executable(self, llama_base_dir):
+        """Finds the llama-server executable within the llama.cpp directory."""
+        exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+        simple_exe_name = "server.exe" if sys.platform == "win32" else "server" # Sometimes built as just 'server'
+
+        # Define common potential locations relative to the base directory
+        search_paths = [
+            Path("."), # Current directory (might be where user launched from, useful for local builds)
+            Path("build/bin/Release"),
+            Path("build/bin"),
+            Path("build"),
+            Path("bin"),
+            Path("server"), # Some build scripts might put it directly in 'server'
+        ]
+
+        for rel_path in search_paths:
+            # Check for the primary name
+            full_path = llama_base_dir / rel_path / exe_name
+            if full_path.is_file():
+                print(f"DEBUG: Found server executable at: {full_path}", file=sys.stderr)
+                return full_path.resolve() # Return the resolved path
+
+            # Check for the simple name if the primary wasn't found
+            if exe_name != simple_exe_name: # Avoid checking the same path twice
+                 full_path_simple = llama_base_dir / rel_path / simple_exe_name
+                 if full_path_simple.is_file():
+                     print(f"DEBUG: Found simple server executable at: {full_path_simple}", file=sys.stderr)
+                     return full_path_simple.resolve() # Return the resolved path
+
+
+        # If not found in common locations, check the base directory itself
+        direct_path = llama_base_dir / exe_name
+        if direct_path.is_file():
+             print(f"DEBUG: Found server executable directly in base dir: {direct_path}", file=sys.stderr)
+             return direct_path.resolve()
+
+        if exe_name != simple_exe_name:
+             direct_path_simple = llama_base_dir / simple_exe_name
+             if direct_path_simple.is_file():
+                  print(f"DEBUG: Found simple server executable directly in base dir: {direct_path_simple}", file=sys.stderr)
+                  return direct_path_simple.resolve()
+
+
+        print(f"DEBUG: Server executable '{exe_name}' or '{simple_exe_name}' not found in {llama_base_dir} or common subdirectories.", file=sys.stderr)
+        return None # Executable not found anywhere
+
 
     # ═════════════════════════════════════════════════════════════════
     #  command‑line builder
@@ -2741,6 +2893,7 @@ sys.exit(0) # Indicate success
              messagebox.showerror("Error", f"Invalid LLaMa.cpp directory:\n{llama_dir_str}")
              return None
 
+        # This call now succeeds because _find_server_executable is added
         exe_path = self._find_server_executable(llama_base_dir)
         if not exe_path:
             search_locs_str = "\n - ".join([str(p) for p in [
@@ -2881,11 +3034,19 @@ sys.exit(0) # Indicate success
         self._add_arg(cmd, "--ignore-eos", self.ignore_eos.get()) # Omit if False (default)
         self._add_arg(cmd, "--n-predict", self.n_predict.get(), "-1") # Omit if -1 (default)
 
-        # --- NEW: Chat template option ---
-        effective_template = self.current_template_display.get().strip()
-        if effective_template: # Only add the argument if the effective template string is non-empty
-             cmd.extend(["--chat-template", effective_template])
-             print(f"DEBUG: Adding --chat-template: {effective_template[:50]}...", file=sys.stderr)
+        # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
+        # Add --chat-template option ONLY if the source is not "default" (llama.cpp decides)
+        source = self.template_source.get()
+        if source in ["predefined", "custom"]:
+             effective_template = self.current_template_display.get().strip()
+             if effective_template: # Only add the argument if the effective template string is non-empty
+                  # No default_value check needed here because if it's empty, the arg isn't added anyway by the outer if
+                  cmd.extend(["--chat-template", effective_template])
+                  print(f"DEBUG: Adding --chat-template: {effective_template[:50]}...", file=sys.stderr)
+             else:
+                  print("DEBUG: Chat template source is predefined/custom, but effective template string is empty. Omitting --chat-template.", file=sys.stderr)
+        else: # source == "default"
+             print("DEBUG: Chat template source is 'Let llama.cpp Decide'. Omitting --chat-template.", file=sys.stderr)
 
 
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
@@ -2971,91 +3132,182 @@ sys.exit(0) # Indicate success
     # ═════════════════════════════════════════════════════════════════
     def launch_server(self):
         cmd_list = self._build_cmd()
-        if not cmd_list: return
+        if not cmd_list:
+            # _build_cmd already showed an error message
+            return
+
         venv_path_str = self.venv_dir.get().strip()
+        use_venv = bool(venv_path_str)
 
         try:
             if sys.platform == "win32":
-                 # On Windows, shell=True is often required for activate.bat and start
-                 final_cmd_str = subprocess.list2cmdline(cmd_list)
-                 if venv_path_str:
-                    venv_path = Path(venv_path_str).resolve() # Resolve venv path
-                    act_script = venv_path / "Scripts" / "activate.bat"
-                    if not act_script.is_file():
-                        messagebox.showerror("Error", f"Venv activation script (activate.bat) not found:\n{act_script}")
-                        return
-                    # Use 'start' to open a new window with a title
-                    command = f'start "LLaMa.cpp Server" cmd /k ""{str(act_script)}" && {final_cmd_str}"'
-                 else:
-                    command = f'start "LLaMa.cpp Server" {final_cmd_str}'
-                 subprocess.Popen(command, shell=True)
+                # Always use a temporary batch script on Windows for reliability,
+                # especially with venvs and complex arguments like chat templates.
+                import tempfile
+                # Use mkstemp to create a secure temporary file
+                # Changed prefix to avoid potential clashes, suffix to .bat
+                fd, tmp_path = tempfile.mkstemp(suffix=".bat", prefix="llamacpp_launch_")
+                os.close(fd)  # Close the file descriptor immediately
+
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        f.write("@echo off\n")  # Turn off echo in the batch file
+
+                        if use_venv:
+                            venv_path = Path(venv_path_str).resolve()
+                            # Check for activate.bat
+                            act_script = venv_path / "Scripts" / "activate.bat"
+                            if not act_script.is_file():
+                                messagebox.showerror("Error", f"Venv activation script (activate.bat) not found:\n{act_script}")
+                                # Clean up the temp file before returning
+                                try: os.unlink(tmp_path)
+                                except OSError: pass
+                                return
+
+                            # Use CALL to run the activation script so control returns to the batch file
+                            f.write(f'CALL "{str(act_script)}"\n')
+                            # Check if activation succeeded
+                            f.write(f'IF %ERRORLEVEL% NEQ 0 (\n')
+                            f.write(f'    ECHO Error: Failed to activate virtual environment.\n')
+                            f.write(f'    PAUSE\n')
+                            f.write(f'    EXIT /b %ERRORLEVEL%\n') # Exit the batch script with the error code
+                            f.write(f')\n')
+                            f.write(f'ECHO Virtual environment activated: {venv_path}\n')
+
+
+                        f.write(f'ECHO Launching server...\n')
+
+                        # --- Manually construct the command string for batch ---
+                        # This is crucial for handling paths and complex strings correctly in cmd.exe
+                        batch_cmd_parts = []
+                        for i, arg in enumerate(cmd_list):
+                            # Simple double quoting for arguments that might contain spaces or problematic characters
+                            # Escape internal double quotes by doubling them (" becomes "")
+                            quoted_arg = arg.replace('"', '""')
+
+                            # Decide when to quote. Quote paths and values that might need it.
+                            # Executable path (index 0) and arguments that are values following flags (-m, --chat-template etc.)
+                            # Simple flags like --flash-attn don't need quoting.
+                            is_flag = arg.startswith('-') or arg.startswith('--')
+                            needs_quoting = False
+                            if i == 0: # Executable path always needs quoting if it contains spaces or starts with problematic char
+                                # Let's always quote the executable path for safety
+                                needs_quoting = True
+                            elif i > 0 and cmd_list[i-1] in ("-m", "--chat-template", "--threads", "--threads-batch", "--batch-size", "--ubatch-size", "--ctx-size", "--seed", "--temp", "--min-p", "--tensor-split", "--main-gpu", "--prio", "--n-predict", "--cache-type-k", "--cache-type-v", "--lora", "--lora-scaled", "--control-vector", "--control-vector-scaled", "--control-vector-layer-range"):
+                                # Value arguments following specific flags need quoting if they contain spaces etc.
+                                # Let's quote them unless they are very simple (like numbers or simple names)
+                                # A robust check is difficult, just quoting if they contain spaces is safer.
+                                if ' ' in arg or '"' in arg or '|' in arg or '<' in arg or '>' in arg or '^' in arg:
+                                    needs_quoting = True
+                                elif i > 0 and cmd_list[i-1] == "--chat-template":
+                                    # The chat template string itself is complex, always quote it
+                                    needs_quoting = True
+                            elif not is_flag and (' ' in arg or '"' in arg or '|' in arg or '<' in arg or '>' in arg or '^' in arg):
+                                # Other arguments that are not flags but contain problematic chars
+                                needs_quoting = True
+
+                            if needs_quoting:
+                                batch_cmd_parts.append(f'"{quoted_arg}"')
+                            else:
+                                batch_cmd_parts.append(arg)
+
+                        # Join the parts with spaces
+                        batch_command_str = " ".join(batch_cmd_parts)
+
+                        f.write(f'{batch_command_str}\n') # Write the carefully formatted command
+
+                        # Add error check after the command in case llama-server returns a non-zero exit code
+                        f.write(f'IF %ERRORLEVEL% NEQ 0 (\n')
+                        f.write(f'    ECHO Llama-server exited with error code: %ERRORLEVEL%.\n')
+                        f.write(f')\n')
+                        f.write(f'ECHO Server process likely finished or detached.\n')
+                        f.write(f'PAUSE\n') # Keep the window open after execution
+
+
+                    # Launch the temporary batch file in a new console window
+                    # Use shell=False here as we are launching the batch file directly
+                    # Use CREATE_NEW_CONSOLE flag to ensure a new window is opened
+                    print(f"DEBUG: Launching Windows batch script: {tmp_path}", file=sys.stderr)
+                    # Use the resolved path for Popen
+                    subprocess.Popen([str(Path(tmp_path).resolve())], shell=False, creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+                except Exception as write_exc:
+                     messagebox.showerror("Launch Error", f"Failed to write temporary launch script:\n{write_exc}")
+                     print(f"Error writing temp script: {write_exc}", file=sys.stderr)
+                     traceback.print_exc(file=sys.stderr)
+                     # Clean up the temp file on writing error as well
+                     try: os.unlink(tmp_path)
+                     except OSError: pass
+
+                finally:
+                    # Clean up the temporary file after a delay in a background thread.
+                    import time
+                    def cleanup(path, delay=5):
+                         time.sleep(delay)
+                         try: os.unlink(path)
+                         except OSError as e: print(f"Warning: Could not delete temporary file {path}: {e}", file=sys.stderr)
+                    # Start cleanup thread. It's daemon so it won't prevent app exit.
+                    cleanup_thread = Thread(target=cleanup, args=(tmp_path,), daemon=True)
+                    cleanup_thread.start()
+
 
             else: # Linux/macOS
-                # Build the base server command string
+                # Use the existing bash -c approach, which seems to work better
+                # on Unix-like systems for venv activation and command execution.
                 quoted_cmd_parts = [shlex.quote(arg) for arg in cmd_list]
                 server_command_str = " ".join(quoted_cmd_parts)
 
                 launch_command = server_command_str
-                if venv_path_str:
-                    venv_path = Path(venv_path_str).resolve() # Resolve venv path
+                if use_venv:
+                    venv_path = Path(venv_path_str).resolve()
                     act_script = venv_path / "bin" / "activate"
                     if not act_script.is_file():
                         messagebox.showerror("Error", f"Venv activation script not found:\n{act_script}")
                         return
-                    # Build command to activate venv and then run the server command
-                    # Use 'source' to activate venv in the current shell of the terminal
-                    # Add a pause at the end for xterm if needed
-                    if sys.platform == "darwin": # macOS terminal usually keeps window open
-                         pause_cmd = ""
-                    else: # Linux terminals might close immediately
-                         # Use a more robust check for interactive shell
-                         pause_cmd = ' ; [ -t 0 ] && read -p "Press Enter to close..."' # Check if stdin is a terminal
 
-                    # bash -c needs the entire command string to be quoted safely.
-                    # shlex.quote is used for individual parts *within* the bash command, then the whole string is quoted.
-                    # Ensure the activate script path is also quoted for 'source'
+                    if sys.platform == "darwin": pause_cmd = ""
+                    else: pause_cmd = ' ; [ -t 0 ] && read -p "Press Enter to close..."'
+
+                    # Use 'source' to activate in the current shell
+                    # Quote the venv path itself for 'source'
                     launch_command = f'echo "Activating venv: {venv_path}" && source {shlex.quote(str(act_script))} && echo "Launching server..." && {server_command_str}{pause_cmd}'
 
-
                 # Attempt to launch in a new terminal window
-                # Prioritize common desktop environment terminals
-                terminals = ['gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm']
-                # Command patterns for various terminals. Use bash -c to run multiple commands.
-                # Note: bash -c expects a single string argument containing the command(s) to execute.
-                # This string needs its internal quotes/special chars handled.
-                term_cmd_pattern = {
-                    'gnome-terminal': " -- bash -c {}",
-                    'konsole':        " -e bash -c {}",
-                    'xfce4-terminal': " -e bash -c {}",
-                    'xterm':          " -e bash -c {}", # xterm might need single quotes for the whole string depending on shell/version
-                }
+                terminals = ['gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm', 'cmd', 'powershell'] # Added cmd/powershell for robustness
                 launched = False
-                import shutil # Use shutil.which to find terminal executable
+                import shutil
                 for term in terminals:
-                    if shutil.which(term):
-                         # Quote the *entire* launch_command string that bash will execute
+                    term_path = shutil.which(term)
+                    if term_path:
+                         # Use the full path to the terminal executable
+                         term_cmd_base = [term_path]
                          quoted_full_command_for_bash = shlex.quote(launch_command)
 
-                         # Construct the command for the terminal emulator itself
-                         # Pass the quoted command string as a single argument to bash -c
-                         term_cmd_parts = [term]
                          # Add terminal-specific args
                          if term in ['gnome-terminal', 'konsole', 'xfce4-terminal']:
-                              term_cmd_parts.extend(['-e', 'bash', '-c', quoted_full_command_for_bash])
+                              term_cmd_parts = term_cmd_base + ['-e', 'bash', '-c', quoted_full_command_for_bash]
                          elif term == 'xterm':
-                             # xterm often works better with the command string single-quoted
-                             term_cmd_parts.extend(['-e', 'bash', '-c', "'" + quoted_full_command_for_bash.replace("'", "'\\''") + "'"]) # Escape single quotes within the command
+                             # Special handling for xterm's quoting requirements
+                             term_cmd_parts = term_cmd_base + ['-e', 'bash', '-c', "'" + quoted_full_command_for_bash.replace("'", "'\\''") + "'"]
+                         elif term in ['cmd', 'powershell'] and sys.platform == 'win32':
+                             # Fallback for Windows if run in a context where bash isn't available
+                             # This branch technically shouldn't be reached on Windows due to the sys.platform check,
+                             # but added for potential cross-platform fallback logic later.
+                             # Windows needs different quoting/handling. This is just a basic attempt.
+                             if term == 'cmd':
+                                 term_cmd_parts = term_cmd_base + ['/k', launch_command] # /k runs command and stays open
+                             else: # powershell
+                                 term_cmd_parts = term_cmd_base + ['-NoExit', '-Command', launch_command]
                          else:
                               # Fallback for other terminals, might not work
-                             term_cmd_parts.extend(['-e', 'bash', '-c', quoted_full_command_for_bash])
+                              # Assumes -e and bash -c work
+                             term_cmd_parts = term_cmd_base + ['-e', 'bash', '-c', quoted_full_command_for_bash]
 
 
                          print(f"DEBUG: Attempting launch with terminal: {term_cmd_parts}", file=sys.stderr)
                          try:
                             # Use shell=False if passing command and args as a list.
-                            # If the terminal command itself requires complex shell expansion (e.g., xterm single quotes),
-                            # then shell=True might be needed for *that* command, but it's generally safer to avoid if possible.
-                            # Let's try shell=False first with the parts list.
+                            # Use shell=True as a fallback if shell=False fails.
                             subprocess.Popen(term_cmd_parts, shell=False)
                             launched = True
                             break
@@ -3063,25 +3315,27 @@ sys.exit(0) # Indicate success
                               print(f"DEBUG: Terminal '{term}' not found or not executable using shell=False.", file=sys.stderr)
                          except Exception as term_err:
                              print(f"DEBUG: Failed to launch with {term} using shell=False: {term_err}", file=sys.stderr)
-                             # If shell=False failed, try shell=True for commands that might expect it
+                             # Retry with shell=True as a fallback
                              try:
                                  # Reconstruct the command string if shell=True is needed
-                                 term_cmd_str = subprocess.list2cmdline(term_cmd_parts)
+                                 # This might fail for complex commands/args, shell=False is preferred
+                                 term_cmd_str = subprocess.list2cmdline(term_cmd_parts) # This might not be safe for all complex cases
                                  print(f"DEBUG: Retrying launch with {term} using shell=True: {term_cmd_str}", file=sys.stderr)
                                  subprocess.Popen(term_cmd_str, shell=True)
                                  launched = True
-                                 break # Successfully launched with this terminal
+                                 break
                              except Exception as term_err_shell:
                                   print(f"DEBUG: Failed to launch with {term} using shell=True: {term_err_shell}", file=sys.stderr)
 
-
                 if not launched:
-                     messagebox.showerror("Launch Error", "Could not find a supported terminal (gnome-terminal, konsole, xfce4-terminal, xterm) or launch the server script.")
+                     messagebox.showerror("Launch Error", "Could not find a supported terminal (gnome-terminal, konsole, xfce4-terminal, xterm, cmd, powershell) or launch the server script.")
+
 
         except Exception as exc:
-            messagebox.showerror("Launch Error", f"Failed to launch server process:\n{exc}")
-            print(f"Failed to launch server process: {exc}", file=sys.stderr)
+            messagebox.showerror("Launch Error", f"An unexpected error occurred during launch preparation:\n{exc}")
+            print(f"Unexpected error during launch preparation: {exc}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+
 
     def save_ps1_script(self):
         cmd_list = self._build_cmd()
@@ -3126,6 +3380,7 @@ sys.exit(0) # Indicate success
                 if venv:
                     try:
                          venv_path = Path(venv).resolve() # Resolve venv path for script
+                         # --- FIX: Correct the typo 'vvenv_path' to 'venv_path' ---
                          act_script = venv_path / "Scripts" / "Activate.ps1"
                          if act_script.exists():
                              # Use literal path syntax for PowerShell activation script source
@@ -3147,29 +3402,45 @@ sys.exit(0) # Indicate success
                 ps_cmd_parts = []
                 for arg in cmd_list:
                     # Escape internal double quotes and backticks for PowerShell string literals
+                    # Use simple escaping for PS
                     escaped_arg = arg.replace('"', '`"').replace('`', '``')
 
                     # Decide whether to enclose in double quotes or use literal string
-                    # Simple heuristic: if it contains spaces or characters problematic without quotes, use quotes.
-                    # More robust check: if it contains any character outside [a-zA-Z0-9-_./\\]
-                    if re.search(r'[\s"\';&()|<>*?$]', arg): # Add '$' as it's variable marker in PS
-                        ps_cmd_parts.append(f'"{escaped_arg}"') # Enclose in double quotes
+                    # Quoting logic for PowerShell arguments is complex.
+                    # A robust approach is to quote args that contain spaces or special chars.
+                    # Special PS chars: $, `, ", ', {, }, (, ), #, @, (, ), ,, =
+                    # Path separators / \ are usually fine unquoted if no spaces.
+                    # Let's quote if it contains spaces or specific PS command syntax chars.
+                    # This is a simplified check. shlex.quote is better but targetting PS specifically is hard.
+                    # Let's quote if it contains spaces, double quotes, single quotes, backticks, or dollar signs.
+                    if re.search(r'[\s"`\'$]', arg):
+                         # If it needs quoting, use double quotes. Escape internal double quotes.
+                         ps_cmd_parts.append(f'"{arg.replace('"', '""')}"')
                     else:
-                        ps_cmd_parts.append(escaped_arg) # Use literal string
+                        # Otherwise, use the raw string (with backtick/double quote escapes if needed)
+                        ps_cmd_parts.append(escaped_arg)
 
-                # For the executable path specifically, use & operator if it's not just a simple name (like "llama-server")
-                # Check if the first argument (executable path) contains path separators or spaces (after resolving)
-                exe_path_obj_resolved = Path(cmd_list[0]).resolve() # Resolve the executable path
-                exe_requires_call_operator = '/' in str(exe_path_obj_resolved) or '\\' in str(exe_path_obj_resolved) or ' ' in str(exe_path_obj_resolved)
 
-                if exe_requires_call_operator:
-                    # If the path needs the call operator, format it as '& "quoted_path"'
-                    quoted_exe_path = str(exe_path_obj_resolved).replace('"', '`"').replace('`', '``') # PowerShell escape the resolved path
-                    ps_cmd_parts[0] = f'& "{quoted_exe_path}"'
-                # Else: ps_cmd_parts[0] is already the potentially quoted simple executable name, which is fine.
+                # For the executable path specifically (first argument), it's safest to use the call operator '&'
+                # if the path contains spaces or is not just a simple command name in PATH.
+                # Let's always use '& "quoted_path"' for the executable path for reliability.
+                # Escape the *resolved* executable path for PowerShell double quotes
+                exe_path_obj = Path(cmd_list[0])
+                try:
+                    exe_path_obj_resolved = exe_path_obj.resolve()
+                    quoted_exe_path_ps = str(exe_path_obj_resolved).replace('"', '""')
+                    ps_cmd_parts[0] = f'& "{quoted_exe_path_ps}"'
+                except Exception:
+                    # Fallback if resolve fails, just quote the original path
+                    quoted_exe_path_ps = str(exe_path_obj).replace('"', '""')
+                    ps_cmd_parts[0] = f'& "{quoted_exe_path_ps}"'
 
 
                 fh.write(" ".join(ps_cmd_parts) + "\n\n")
+                # Check for non-zero exit code after the command
+                fh.write('if ($LASTEXITCODE -ne 0) {\n')
+                fh.write('    Write-Error "Llama-server exited with error code: $LASTEXITCODE."\n')
+                fh.write('}\n')
                 fh.write('Write-Host "Server process likely finished or detached." -ForegroundColor Yellow\n')
                 fh.write('# Pause if script is run directly by double-clicking or outside an interactive shell\n')
                 # Check if the host is ConsoleHost (typical when double-clicking or run from explorer)
@@ -3188,7 +3459,129 @@ sys.exit(0) # Indicate success
     def on_exit(self):
         self._save_configs()
         self.root.destroy()
+        
+    def save_ps1_script(self):
+        cmd_list = self._build_cmd()
+        if not cmd_list: return
 
+        selected_model_name = "" # Correct variable name
+        selection = self.model_listbox.curselection()
+        if selection:
+             selected_model_name = self.model_listbox.get(selection[0]) # This updates selected_model_name
+
+        default_name = "launch_llama_server.ps1"
+        if selected_model_name: # Check the correct variable here
+            # Sanitize model name for filename
+            # --- FIX: Use the correct variable selected_model_name ---
+            model_name_part = re.sub(r'[\\/*?:"<>| ]', '_', selected_model_name)
+            model_name_part = model_name_part[:50].strip('_') # Ensure no trailing underscore
+            if model_name_part:
+                default_name = f"launch_{model_name_part}.ps1"
+            else:
+                 default_name = "launch_selected_model.ps1" # Fallback if name is empty after sanitizing
+
+            if not default_name.lower().endswith(".ps1"): default_name += ".ps1"
+
+
+        path = filedialog.asksaveasfilename(defaultextension=".ps1",
+                                            initialfile=default_name,
+                                            filetypes=[("PowerShell Script", "*.ps1"), ("All Files", "*.*")])
+        if not path: return
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("<#\n")
+                fh.write(" .SYNOPSIS\n")
+                fh.write("    Launches the LLaMa.cpp server with saved settings.\n\n")
+                fh.write(" .DESCRIPTION\n")
+                fh.write("    Autogenerated PowerShell script from LLaMa.cpp Launcher GUI.\n")
+                fh.write("    Activates virtual environment (if configured) and starts llama-server.\n")
+                fh.write("#>\n\n")
+                fh.write("$ErrorActionPreference = 'Continue'\n\n") # Use 'Continue' for better error reporting in script output
+
+
+                venv = self.venv_dir.get().strip()
+                if venv:
+                    try:
+                         venv_path = Path(venv).resolve() # Resolve venv path for script
+                         # --- FIX: Correct the typo 'vvenv_path' to 'venv_path' ---
+                         act_script = venv_path / "Scripts" / "Activate.ps1"
+                         if act_script.exists():
+                             # Use literal path syntax for PowerShell activation script source
+                             ps_act_path = f'"{str(act_script)}"' # Just quote the resolved path
+
+                             fh.write(f'Write-Host "Activating virtual environment: {venv}" -ForegroundColor Cyan\n')
+                             # Use 'try/catch' to report activation errors but continue if not critical
+                             fh.write(f'try {{ . {ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)" }}\n\n')
+                         else:
+                              fh.write(f'Write-Warning "Virtual environment activation script (Activate.ps1) not found at: {act_script}"\n\n')
+                    except Exception as path_ex:
+                         fh.write(f'Write-Warning "Could not process venv path \'{venv}\': {path_ex}"\n\n')
+
+                fh.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
+
+                # Build the command string for PowerShell
+                # Need to handle spaces, quotes, and special PS characters in arguments
+                # Use the call operator '&' for the executable path if it contains spaces or special characters.
+                ps_cmd_parts = []
+                for arg in cmd_list:
+                    # Escape internal double quotes and backticks for PowerShell string literals
+                    # Use simple escaping for PS
+                    escaped_arg = arg.replace('"', '`"').replace('`', '``')
+
+                    # Decide whether to enclose in double quotes or use literal string
+                    # Quoting logic for PowerShell arguments is complex.
+                    # A robust approach is to quote args that contain spaces or special chars.
+                    # Special PS chars: $, `, ", ', {, }, (, ), #, @, (, ), ,, =
+                    # Path separators / \ are usually fine unquoted if no spaces.
+                    # Let's quote if it contains spaces or specific PS command syntax chars.
+                    # This is a simplified check. shlex.quote is better but targetting PS specifically is hard.
+                    # Let's quote if it contains spaces, double quotes, single quotes, backticks, or dollar signs.
+                    if re.search(r'[\s"`\'$]', arg):
+                         # If it needs quoting, use double quotes. Escape internal double quotes.
+                         ps_cmd_parts.append(f'"{arg.replace('"', '""')}"')
+                    else:
+                        # Otherwise, use the raw string (with backtick/double quote escapes if needed)
+                        ps_cmd_parts.append(escaped_arg)
+
+
+                # For the executable path specifically (first argument), it's safest to use the call operator '&'
+                # if the path contains spaces or is not just a simple command name in PATH.
+                # Let's always use '& "quoted_path"' for the executable path for reliability.
+                # Escape the *resolved* executable path for PowerShell double quotes
+                exe_path_obj = Path(cmd_list[0])
+                try:
+                    exe_path_obj_resolved = exe_path_obj.resolve()
+                    quoted_exe_path_ps = str(exe_path_obj_resolved).replace('"', '""')
+                    ps_cmd_parts[0] = f'& "{quoted_exe_path_ps}"'
+                except Exception:
+                    # Fallback if resolve fails, just quote the original path
+                    quoted_exe_path_ps = str(exe_path_obj).replace('"', '""')
+                    ps_cmd_parts[0] = f'& "{quoted_exe_path_ps}"'
+
+
+                fh.write(" ".join(ps_cmd_parts) + "\n\n")
+                # Check for non-zero exit code after the command
+                fh.write('if ($LASTEXITCODE -ne 0) {\n')
+                fh.write('    Write-Error "Llama-server exited with error code: $LASTEXITCODE."\n')
+                fh.write('}\n')
+                fh.write('Write-Host "Server process likely finished or detached." -ForegroundColor Yellow\n')
+                fh.write('# Pause if script is run directly by double-clicking or outside an interactive shell\n')
+                # Check if the host is ConsoleHost (typical when double-clicking or run from explorer)
+                fh.write('if ($Host.Name -eq "ConsoleHost") {\n')
+                fh.write('    Read-Host -Prompt "Press Enter to close..."\n') # Added ... for consistency
+                fh.write('}\n')
+
+
+            messagebox.showinfo("Saved", f"PowerShell script written to:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Script Save Error", f"Could not save script:\n{exc}")
+            print(f"Script Save Error: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            
+    def on_exit(self):
+        self._save_configs()
+        self.root.destroy()
 
 # ═════════════════════════════════════════════════════════════════════
 #  main
@@ -3219,10 +3612,10 @@ if __name__ == "__main__":
                                fg_color = style.lookup('TLabel', 'foreground', default='#ffffff')
                                entry_bg = style.lookup('TEntry', 'fieldbackground', default='#3c3c3c')
                                entry_fg = style.lookup('TEntry', 'foreground', default='#ffffff')
-                               listbox_bg = style.lookup('Tlistbox', 'background', default=entry_bg) # Note: Listbox is tk, not ttk, needs option_add
-                               listbox_fg = style.lookup('Tlistbox', 'foreground', default=entry_fg) # Note: Listbox is tk, not ttk, needs option_add
-                               listbox_select_bg = style.lookup('Tlistbox', 'selectbackground', default='#505050') # Note: Listbox is tk, not ttk, needs option_add
-                               listbox_select_fg = style.lookup('Tlistbox', 'selectforeground', default='#ffffff') # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_bg = style.lookup('TListbox', 'background', default=entry_bg) # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_fg = style.lookup('TListbox', 'foreground', default=entry_fg) # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_select_bg = style.lookup('TListbox', 'selectbackground', default='#505050') # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_select_fg = style.lookup('TListbox', 'selectforeground', default='#ffffff') # Note: Listbox is tk, not ttk, needs option_add
 
 
                                # Apply to root and all widgets implicitly
