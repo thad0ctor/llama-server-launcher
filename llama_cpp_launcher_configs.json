@@ -1,0 +1,18 @@
+{
+  "configs": {},
+  "app_settings": {
+    "last_llama_cpp_dir": "H:/AI_Software/llama.cpp",
+    "last_venv_dir": "H:/AI_Software/tabbyAPI/venv",
+    "last_model_path": "H:\\Models\\unsloth\\Qwen3-235B-A22B-128K-GGUF\\Qwen3-235B-A22B-128K-Q4_0-00001-of-00003.gguf",
+    "model_dirs": [
+      "H:\\Models",
+      "G:\\Models"
+    ],
+    "model_list_height": 8,
+    "selected_gpus": [
+      0,
+      1,
+      2
+    ]
+  }
+}
