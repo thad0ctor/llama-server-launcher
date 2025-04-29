@@ -1,5 +1,36 @@
 {
-  "configs": {},
+  "configs": {
+    "Qwen3 A3B 30B Maxed": {
+      "llama_cpp_dir": "H:/AI_Software/llama.cpp",
+      "venv_dir": "H:/AI_Software/tabbyAPI/venv",
+      "model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q8_0.gguf",
+      "cache_type_k": "f16",
+      "threads": "24",
+      "threads_batch": "48",
+      "batch_size": "8192",
+      "ubatch_size": "4096",
+      "n_gpu_layers": "100",
+      "no_mmap": false,
+      "no_cnv": false,
+      "prio": "0",
+      "temperature": "0.8",
+      "min_p": "0.05",
+      "ctx_size": 131072,
+      "seed": "-1",
+      "flash_attn": true,
+      "tensor_split": ".42,.42,.16",
+      "main_gpu": "0",
+      "mlock": false,
+      "no_kv_offload": false,
+      "host": "127.0.0.1",
+      "port": "8080",
+      "gpu_indices": [
+        0,
+        1,
+        2
+      ]
+    }
+  },
   "app_settings": {
     "last_llama_cpp_dir": "H:/AI_Software/llama.cpp",
     "last_venv_dir": "H:/AI_Software/tabbyAPI/venv",

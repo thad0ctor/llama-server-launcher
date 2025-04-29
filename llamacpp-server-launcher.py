@@ -93,7 +93,7 @@ if MISSING_DEPS:
 
 
 # ═════════════════════════════════════════════════════════════════════
-#  Helper Functions (Adapted from provided code)
+#  Helper Functions (These remain outside the class as they don't need 'self')
 # ═════════════════════════════════════════════════════════════════════
 
 def get_gpu_info_static():
@@ -281,7 +281,7 @@ def analyze_gguf_model_static(model_path_str):
             analysis_result["architecture"] = llm_meta.metadata.get('general.architecture', 'unknown')
             if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('qwen2.architecture', 'unknown')
             if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('gemma.architecture', 'unknown')
-            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('bert.architecture', 'unknown')
+            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llllm_meta.metadata.get('bert.architecture', 'unknown')
 
 
         # Attempt 2: Check direct attributes if metadata didn't yield layers
@@ -345,15 +345,11 @@ class LlamaCppLauncher:
         self.root.geometry("900x850")
         self.root.minsize(800, 750)
 
-        # --- System Info ---
+        # --- System Info Attributes ---
+        # These will be populated by _fetch_system_info
         self.gpu_info = {"available": False, "device_count": 0, "devices": []}
         self.ram_info = {}
         self.cpu_info = {"logical_cores": 4, "physical_cores": 2} # Default fallback
-        self._fetch_system_info() # This updates self.gpu_info, self.ram_info, self.cpu_info
-
-        # Store detected CPU cores for initial thread defaults
-        self.logical_cores = self.cpu_info.get("logical_cores", 4)
-        self.physical_cores = self.cpu_info.get("physical_cores", 2) # Get physical cores
 
 
         # ------------------------------------------------ persistence --
@@ -377,9 +373,10 @@ class LlamaCppLauncher:
 
         # Basic settings
         self.cache_type_k    = tk.StringVar(value="f16") # KV cache type (applies to k & v)
-        # Set initial thread defaults based on detected CPU cores (User's request pattern)
-        self.threads         = tk.StringVar(value=str(self.physical_cores)) # --threads (default to physical cores recommendation)
-        self.threads_batch   = tk.StringVar(value=str(self.logical_cores)) # --threads-batch (default to logical cores recommendation)
+        # Set initial thread defaults based on detected CPU cores *after* fetching info
+        # These will be set in _fetch_system_info or immediately after if fetch works
+        self.threads         = tk.StringVar(value="4") # Initial default before info fetch
+        self.threads_batch   = tk.StringVar(value="4") # Initial default before info fetch
         self.batch_size      = tk.StringVar(value="512") # --batch-size (prompt)
         self.ubatch_size     = tk.StringVar(value="512") # --ubatch-size (unconditional batch)
         self.temperature     = tk.StringVar(value="0.8")
@@ -407,7 +404,13 @@ class LlamaCppLauncher:
         self.no_kv_offload   = tk.BooleanVar(value=False)
         self.host            = tk.StringVar(value="127.0.0.1")
         self.port            = tk.StringVar(value="8080")
-        self.config_name     = tk.StringVar(value="default_config")
+        self.config_name     = tk.StringVar(value="default_config") # Initial default name
+
+
+        # --- NEW Parameters ---
+        self.ignore_eos      = tk.BooleanVar(value=False) # --ignore-eos
+        self.n_predict       = tk.StringVar(value="-1")   # --n-predict
+
 
         # --- Model Info Variables ---
         self.model_architecture_var = tk.StringVar(value="N/A")
@@ -417,13 +420,14 @@ class LlamaCppLauncher:
 
         # --- Recommendation Variables ---
         self.recommended_tensor_split_var = tk.StringVar(value="N/A - Need >1 selected GPU & model layers")
-        self.recommended_threads_var = tk.StringVar(value=f"Recommended: {self.physical_cores} (Your CPU physical cores)") # New recommendation var
-        self.recommended_threads_batch_var = tk.StringVar(value=f"Recommended: {self.logical_cores} (Your CPU logical cores)") # Updated text
+        # Initial placeholder, will be updated after system info fetch
+        self.recommended_threads_var = tk.StringVar(value=f"Recommended: Detecting...")
+        self.recommended_threads_batch_var = tk.StringVar(value=f"Recommended: Detecting...")
 
 
         # --- Status Variables ---
         # Initial status reflects GUI environment, will update based on venv check
-        self.flash_attn_status_var = tk.StringVar(value=f"Status (GUI env): {'Installed (requires llama.cpp build support)' if FLASH_ATTN_GUI_AVAILABLE else 'Not Installed (Python package missing)'}")
+        self.flash_attn_status_var = tk.StringVar(value=f"Status (GUI env): {'Installed (requires llama.cpp build support)' if FLASH_ATTN_GUI_AVAILABLE else 'Not Installed (Python package missing in GUI env)'}")
         self.gpu_detected_status_var = tk.StringVar(value="") # Updates with GPU detection message
 
 
@@ -432,7 +436,23 @@ class LlamaCppLauncher:
         self.found_models = {} # {display_name: full_path_obj}
         self.current_model_analysis = {} # Holds the result of the last GGUF analysis
         self.analysis_thread = None
-        self.detected_gpu_devices = self.gpu_info.get("devices", []) # List of detected GPU info dicts
+        # detected_gpu_devices is populated by _fetch_system_info
+        self.detected_gpu_devices = [] # List of detected GPU info dicts
+        # logical_cores and physical_cores are populated by _fetch_system_info
+        self.logical_cores = 4 # Fallback
+        self.physical_cores = 2 # Fallback
+
+
+        # --- Fetch System Info ---
+        self._fetch_system_info()
+        # Update Tk vars based on detected info
+        self.threads.set(str(self.physical_cores))
+        self.threads_batch.set(str(self.logical_cores))
+        # Update recommendation vars based on detected info
+        self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
+        self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
+        # Display initial GPU detection status message
+        self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
 
 
         # load previous settings
@@ -460,8 +480,29 @@ class LlamaCppLauncher:
         # GPU selection updates handled in _on_gpu_selection_changed
         # Bind trace to venv_dir to trigger the flash attn check
         self.venv_dir.trace_add("write", lambda *args: self._check_venv_flash_attn())
-        # Update threads batch recommendation if threads variable changes (user manually set it)
-        # self.threads.trace_add("write", lambda *args: self._update_recommendations()) # Removed: threads change doesn't affect threads-batch reco pattern
+        # Bind trace to n_predict to update default config name if it's currently the generated one
+        self.n_predict.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Bind trace to ignore_eos to update default config name if needed
+        self.ignore_eos.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Bind trace to other variables that affect the default config name
+        self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.threads_batch.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.batch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.ubatch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.ctx_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.seed.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.temperature.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.min_p.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # GPU related updates are handled by _on_gpu_selection_changed (which calls _update_recommendations and then _generate_default_config_name)
+        self.flash_attn.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.tensor_split.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.main_gpu.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.no_mmap.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.no_cnv.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.prio.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.mlock.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.no_kv_offload.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
 
 
         # Populate model directories listbox
@@ -479,19 +520,15 @@ class LlamaCppLauncher:
         else:
              self.scan_status_var.set("Add directories and scan for models.")
 
-        # Display initial GPU detection status message
-        self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
-
-
         # Run initial Flash Attention check (might trigger venv check if venv is pre-filled)
         self._check_venv_flash_attn()
 
 
     # ═════════════════════════════════════════════════════════════════
-    #  System Info Fetching
+    #  System Info Fetching (Now a class method)
     # ═════════════════════════════════════════════════════════════════
     def _fetch_system_info(self):
-        """Fetches GPU, RAM, and CPU info."""
+        """Fetches GPU, RAM, and CPU info and populates class attributes."""
         print("Fetching system info...", file=sys.stderr)
         self.gpu_info = get_gpu_info_static()
         self.ram_info = get_ram_info_static()
@@ -510,6 +547,13 @@ class LlamaCppLauncher:
         # Store logical/physical cores for initial thread defaults and recommendations
         self.logical_cores = self.cpu_info.get("logical_cores", 4)
         self.physical_cores = self.cpu_info.get("physical_cores", 2) # Use fallback 2 if psutil failed or physical count is 0
+
+        # Update initial default values for threads and threads_batch if they are still the initial fallback values
+        # This handles the case where system info is fetched successfully *after* the variables were initialized
+        if self.threads.get() == "4" and self.physical_cores != 2: # Check against initial fallback 2
+             self.threads.set(str(self.physical_cores))
+        if self.threads_batch.get() == "4" and self.logical_cores != 4: # Check against initial fallback 4
+             self.threads_batch.set(str(self.logical_cores))
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -1069,6 +1113,30 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="0=Normal, 1=Medium, 2=High, 3=Realtime (OS dependent)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
+
+        # --- NEW: Generation Settings ---
+        ttk.Label(inner, text="Generation Settings", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
+        # --ignore-eos
+        ttk.Label(inner, text="Ignore EOS Token (--ignore-eos):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Checkbutton(inner, variable=self.ignore_eos)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, text="Don't stop generation at EOS token", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        # --n-predict
+        ttk.Label(inner, text="Max Tokens to Predict (--n-predict):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Entry(inner, textvariable=self.n_predict, width=10)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, text="Tokens to predict (e.g., 128, 512, -1 for unlimited/context size)", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+
         inner.columnconfigure(2, weight=1) # Allow the description columns to expand
 
 
@@ -1317,6 +1385,7 @@ class LlamaCppLauncher:
             self._reset_model_info_display()
             self.current_model_analysis = {}
             self._update_recommendations()
+            self._generate_default_config_name() # Generate default name for no model state
         else:
             self.scan_status_var.set(f"Scan complete. Found {len(model_names)} models.")
 
@@ -1353,6 +1422,7 @@ class LlamaCppLauncher:
                  self._reset_model_info_display()
                  self.current_model_analysis = {}
                  self._update_recommendations()
+                 self._generate_default_config_name() # Generate default name for no model state
 
 
     def _select_model_in_listbox(self, index):
@@ -1373,6 +1443,7 @@ class LlamaCppLauncher:
                 self._reset_model_info_display()
                 self.current_model_analysis = {}
                 self._update_recommendations()
+                self._generate_default_config_name() # Generate default name for no model state
          except Exception as e:
              print(f"ERROR during _select_model_in_listbox: {e}", file=sys.stderr)
              traceback.print_exc(file=sys.stderr)
@@ -1383,6 +1454,7 @@ class LlamaCppLauncher:
              self._reset_model_info_display()
              self.current_model_analysis = {}
              self._update_recommendations()
+             self._generate_default_config_name() # Generate default name for no model state
 
 
     def _on_model_selected(self, event=None):
@@ -1396,6 +1468,7 @@ class LlamaCppLauncher:
             self._reset_model_info_display()
             self.current_model_analysis = {}
             self._update_recommendations() # Update based on no model
+            self._generate_default_config_name() # Generate default name for no model state
             return
 
         index = selection[0]
@@ -1435,6 +1508,8 @@ class LlamaCppLauncher:
                  self.model_total_layers_var.set("Analysis Unavailable")
                  self.current_model_analysis = {}
                  self._update_recommendations() # Update recommendations based on no analysis
+                 self._generate_default_config_name() # Generate default name even without analysis
+
 
         else:
             print(f"WARNING: Selected model '{selected_name}' not found in self.found_models dictionary.", file=sys.stderr)
@@ -1445,6 +1520,7 @@ class LlamaCppLauncher:
             self._reset_model_info_display()
             self.current_model_analysis = {}
             self._update_recommendations() # Update recommendations based on no model
+            self._generate_default_config_name() # Generate default name for no model state
 
 
     def _run_gguf_analysis(self, model_path_str):
@@ -1497,6 +1573,10 @@ class LlamaCppLauncher:
 
         # --- Update Recommendations based on new analysis ---
         self._update_recommendations()
+
+        # --- Generate Default Config Name ---
+        # Call this after analysis completes, as n_layers is needed for the name
+        self._generate_default_config_name()
 
     def _reset_gpu_layer_controls(self):
          """Resets GPU layer slider state and max layers (but *not* entry StringVar)."""
@@ -2091,6 +2171,199 @@ sys.exit(0) # Indicate success
         print(f"Server executable ('{exe_name}' or '{simple_exe_name}') not found in common locations under {base_dir}", file=sys.stderr)
         return None
 
+    # ═════════════════════════════════════════════════════════════════
+    #  Default Configuration Name Generation
+    # ═════════════════════════════════════════════════════════════════
+    def _generate_default_config_name(self):
+        """Generates a default configuration name based on current settings."""
+        print("DEBUG: Generating default config name...", file=sys.stderr)
+        parts = []
+
+        # 1. Model Name
+        model_path_str = self.model_path.get().strip()
+        if model_path_str:
+            try:
+                model_name = Path(model_path_str).stem # Get filename without extension
+                # Sanitize the model name for filename use
+                safe_model_name = re.sub(r'[\\/*?:"<>| ]', '_', model_name)
+                safe_model_name = safe_model_name[:40].strip('_') # Truncate and clean
+                if safe_model_name:
+                    parts.append(safe_model_name)
+                else:
+                     parts.append("model") # Fallback if sanitization results in empty string
+            except Exception:
+                 parts.append("model") # Fallback on path error
+        else:
+            parts.append("default") # No model selected
+
+
+        # 2. Key Parameters (add if NOT default)
+        default_params = {
+            "cache_type_k":  "f16",
+            "threads":       str(self.physical_cores), # Default based on detection
+            "threads_batch": "4", # llama.cpp default
+            "batch_size":    "512", # llama.cpp default
+            "ubatch_size":   "512", # llama.cpp default
+            "ctx_size":      2048,
+            "seed":          "-1",
+            "temperature":   "0.8",
+            "min_p":         "0.05",
+            "n_gpu_layers":  "0", # String value from entry (default is 0)
+            "tensor_split":  "", # Empty string default
+            "main_gpu":      "0", # llama.cpp default
+            "prio":          "0", # llama.cpp default
+            "ignore_eos":    False, # Default for --ignore-eos flag
+            "n_predict":     "-1", # Default for --n-predict
+            # Booleans that are flags (present if True, absent if False)
+            "flash_attn":    False, # Default for --flash-attn flag
+            "no_mmap":       False, # Default for --no-mmap flag
+            "mlock":         False, # Default for --mlock flag
+            "no_kv_offload": False, # Default for --no-kv-offload flag
+            "no_cnv":        False, # Default for --no-cnv flag
+        }
+
+        current_params = {
+            "cache_type_k":  self.cache_type_k.get().strip(),
+            "threads":       self.threads.get().strip(),
+            "threads_batch": self.threads_batch.get().strip(),
+            "batch_size":    self.batch_size.get().strip(),
+            "ubatch_size":   self.ubatch_size.get().strip(),
+            "ctx_size":      self.ctx_size.get(), # int
+            "seed":          self.seed.get().strip(),
+            "temperature":   self.temperature.get().strip(),
+            "min_p":         self.min_p.get().strip(),
+            "n_gpu_layers":  self.n_gpu_layers.get().strip(), # String value from entry
+            "tensor_split":  self.tensor_split.get().strip(),
+            "main_gpu":      self.main_gpu.get().strip(),
+            "prio":          self.prio.get().strip(),
+            "ignore_eos":    self.ignore_eos.get(), # bool
+            "n_predict":     self.n_predict.get().strip(),
+            "flash_attn":    self.flash_attn.get(), # bool
+            "no_mmap":       self.no_mmap.get(),   # bool
+            "mlock":         self.mlock.get(),    # bool
+            "no_kv_offload": self.no_kv_offload.get(), # bool
+            "no_cnv":        self.no_cnv.get(),     # bool
+        }
+
+        # Add non-default parameters to name parts
+        for key, current_val in current_params.items():
+            default_val = default_params.get(key) # Get the default value
+
+            # Special handling for GPU Layers: use the internal integer value
+            if key == "n_gpu_layers":
+                 # Use the integer value after clamping, not the raw entry string
+                 gpu_layers_int = self.n_gpu_layers_int.get()
+                 max_layers = self.max_gpu_layers.get()
+                 # Compare the *effect* of the setting to the default (0 layers offloaded)
+                 if gpu_layers_int > 0:
+                      if max_layers > 0 and gpu_layers_int == max_layers:
+                           parts.append("gpu-all")
+                      else:
+                           parts.append(f"gpu={gpu_layers_int}")
+            # Special handling for Context Size: compare the integer value
+            elif key == "ctx_size":
+                 if current_val != default_val:
+                      parts.append(f"ctx={current_val}")
+            # Special handling for Boolean flags (add if True and default is False)
+            elif isinstance(current_val, bool):
+                 if current_val is True and default_val is False:
+                      # Use a short name for the flag
+                      flag_name_map = {
+                         "flash_attn": "fa",
+                         "no_mmap": "no-mmap",
+                         "mlock": "mlock",
+                         "no_kv_offload": "no-kv-offload",
+                         "no_cnv": "no-cnv",
+                         "ignore_eos": "no-eos",
+                      }
+                      parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
+            # Handle other string parameters
+            elif isinstance(current_val, str):
+                 # Compare stripped strings. Handle empty string vs None default.
+                 if current_val != default_val and current_val != "": # Also exclude empty strings
+                      # Use abbreviations for common parameters
+                      abbr_map = {
+                          "cache_type_k": "kv",
+                          "threads": "th",
+                          "threads_batch": "tb",
+                          "batch_size": "b",
+                          "ubatch_size": "ub",
+                          "seed": "s",
+                          "temperature": "temp",
+                          "min_p": "minp",
+                          "tensor_split": "split",
+                          "main_gpu": "main-gpu",
+                          "prio": "prio",
+                          "n_predict": "pred",
+                      }
+                      abbr = abbr_map.get(key, key.replace('_', '-')) # Use mapped name or just key
+                      parts.append(f"{abbr}={current_val}")
+
+        # 3. Assemble the name
+        # Join parts with underscores, ensure total length isn't excessive
+        generated_name = "_".join(parts)
+
+        # Avoid leading/trailing underscores or multiple consecutive underscores
+        generated_name = re.sub(r'_{2,}', '_', generated_name)
+        generated_name = generated_name.strip('_')
+
+        # Ensure it's not empty
+        if not generated_name:
+            generated_name = "default_config"
+
+        # Limit total length (e.g., 80 characters)
+        if len(generated_name) > 80:
+             generated_name = generated_name[:80].rstrip('_') # Truncate and remove trailing underscore if any
+
+        print(f"DEBUG: Generated config name: {generated_name}", file=sys.stderr)
+
+        # Only update the variable if it's currently the default name or a previously generated name pattern
+        # This prevents overwriting a name the user has manually typed.
+        current_config_name = self.config_name.get().strip()
+        # Check if the current name looks like a generated name (starts with model name or "default")
+        # This check is a bit heuristic, a perfect check would require storing the *last* generated name.
+        # A simpler approach: if the name is "default_config" or if it starts with the current model name part, update it.
+        # Even simpler: just update it always. The user can change it back or type over it. Let's stick to the simple approach for now.
+        # No, let's refine. Store the last auto-generated name. Only overwrite if the current name matches it.
+        # This requires adding an attribute to store the last generated name.
+
+        # Let's add a simple heuristic: only update if the current name is "default_config"
+        # or if it matches a previously generated name (this part is hard without storing the previous name).
+        # A slightly better approach: if the current name is "default_config" OR if it starts with the model name part (and the model name part exists), AND it's different from the newly generated name, update it.
+
+        model_name_prefix = ""
+        if parts and parts[0] != "default": # If model name was successfully added as the first part
+             model_name_prefix = parts[0]
+
+        # Decide whether to set the config_name variable
+        # Rule: If the current name is 'default_config' OR if the current name is empty, OR if it starts with the model name part (and the model name part exists), then replace it with the generated name, but *only* if the generated name is different.
+        update_variable = False
+        if current_config_name == "default_config":
+             update_variable = True
+        elif not current_config_name: # If currently empty
+             update_variable = True
+        elif model_name_prefix and current_config_name.startswith(model_name_prefix): # If it starts with the model name part (could be "model_name" or "model_name_param=val")
+            update_variable = True
+
+
+        if update_variable and generated_name != current_config_name:
+            self.config_name.set(generated_name)
+            print("DEBUG: Updated config_name variable.", file=sys.stderr)
+        elif not update_variable:
+             print("DEBUG: Did not update config_name variable as it seems manually set.", file=sys.stderr)
+
+
+    def _update_default_config_name_if_needed(self, *args):
+        """Traced callback for variables that influence the default config name."""
+        # This trace function is bound to variables like self.n_predict and self.ignore_eos.
+        # It's called whenever those variables change.
+        # We only want to regenerate and update the config name if the user hasn't
+        # already manually set a custom name.
+        # The _generate_default_config_name function already contains the logic
+        # to decide whether to overwrite the current self.config_name value.
+        # So we just call it here.
+        self._generate_default_config_name()
+
 
     # ═════════════════════════════════════════════════════════════════
     #  configuration (save / load / delete)
@@ -2125,6 +2398,9 @@ sys.exit(0) # Indicate success
             "no_kv_offload": self.no_kv_offload.get(),
             "host":          self.host.get(),
             "port":          self.port.get(),
+            # --- NEW: Add new parameters to config ---
+            "ignore_eos":    self.ignore_eos.get(),
+            "n_predict":     self.n_predict.get(),
         }
 
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
@@ -2135,7 +2411,12 @@ sys.exit(0) # Indicate success
     def _save_configuration(self):
         name = self.config_name.get().strip()
         if not name:
-            return messagebox.showerror("Error","Enter a configuration name.")
+            # If the user clears the name and tries to save, regenerate a default name
+            self._generate_default_config_name()
+            name = self.config_name.get().strip() # Get the generated name
+            if not name or name == "default_config": # If still empty or generic
+                 return messagebox.showerror("Error","Enter a configuration name or select a model to generate one.")
+
         if name in self.saved_configs:
              if not messagebox.askyesno("Overwrite", f"Configuration '{name}' already exists. Overwrite?"):
                  return
@@ -2157,8 +2438,8 @@ sys.exit(0) # Indicate success
         self.llama_cpp_dir.set(cfg.get("llama_cpp_dir",""))
         self.venv_dir.set(cfg.get("venv_dir","")) # Setting this triggers the venv trace -> flash attn check
         self.cache_type_k.set(cfg.get("cache_type_k","f16"))
-        # Load new parameters, providing defaults for backward compatibility with older configs
-        # Default to the *current* detected cores if not in the config
+        # Load parameters, providing defaults for backward compatibility with older configs
+        # Default to the *current* detected cores if not in the config for threads
         self.threads.set(cfg.get("threads", str(self.physical_cores))) # Default to detected physical cores
         self.threads_batch.set(cfg.get("threads_batch", str(self.logical_cores))) # Default to detected logical cores
         self.batch_size.set(cfg.get("batch_size", "512")) # Default to llama.cpp 512
@@ -2181,6 +2462,11 @@ sys.exit(0) # Indicate success
         self.host.set(cfg.get("host","127.0.0.1"))
         self.port.set(cfg.get("port","8080"))
         self.config_name.set(name)
+
+        # --- NEW: Load new parameters ---
+        self.ignore_eos.set(cfg.get("ignore_eos", False))
+        self.n_predict.set(cfg.get("n_predict", "-1")) # Default -1 for backward compatibility
+
 
         # Load GPU selections - This needs to update the checkboxes
         # Check for the 'gpu_indices' key directly in the config dictionary first
@@ -2237,6 +2523,7 @@ sys.exit(0) # Indicate success
              self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if model not found
              self.current_model_analysis = {} # Clear analysis data
              self._update_recommendations() # Update recommendations based on no model
+             self._generate_default_config_name() # Generate default name for no model state
              if loaded_model_path_str:
                   messagebox.showwarning("Model Not Found", f"The model from the config ('{Path(loaded_model_path_str).name if loaded_model_path_str else 'N/A'}') was not found in the current list.\nPlease ensure its directory is added and scanned, then select a model manually.")
 
@@ -2352,28 +2639,28 @@ sys.exit(0) # Indicate success
         # --- KV Cache Type ---
         # llama.cpp default is f16. Add args only if different.
         kv_cache_type_val = self.cache_type_k.get().strip()
+        # Add --cache-type-k and --cache-type-v if kv_cache_type_val is set and not 'f16'
+        if kv_cache_type_val and kv_cache_type_val != "f16":
+             cmd.extend(["--cache-type-k", kv_cache_type_val, "--cache-type-v", kv_cache_type_val])
+             print(f"DEBUG: Adding --cache-type-k/v {kv_cache_type_val} (non-default)", file=sys.stderr)
+        # If default, explicitly omit based on _add_arg logic when default_value is provided
+        # This is redundant if we handle the pair explicitly, but _add_arg handles the "non-default" logic well.
+        # Let's remove the manual pair logic and rely solely on _add_arg for --cache-type-k, assuming --cache-type-v
+        # is handled internally by llama.cpp or should be set separately if needed (it's not in the GUI).
+        # Ok, looking at llama.cpp, --cache-type-v defaults to k's value. So just setting k is sufficient.
+        # Let's just use _add_arg for --cache-type-k comparing against f16.
         self._add_arg(cmd, "--cache-type-k", kv_cache_type_val, "f16")
-        # If --cache-type-k is added and non-default, also add --cache-type-v with the same value
-        # Check if --cache-type-k is already in the command list
-        if "--cache-type-k" in cmd:
-             # Find the index of --cache-type-k
-             try:
-                 k_index = cmd.index("--cache-type-k")
-                 # The value should be the next element
-                 if k_index + 1 < len(cmd):
-                     k_value = cmd[k_index + 1]
-                     # Ensure we add --cache-type-v only if it's not already there (shouldn't be with this logic)
-                     if "--cache-type-v" not in cmd:
-                          cmd.extend(["--cache-type-v", k_value])
-                          print(f"DEBUG: Adding --cache-type-v {k_value} to match --cache-type-k", file=sys.stderr)
-             except ValueError:
-                 pass # Should not happen if "--cache-type-k" is in cmd
 
 
         # --- Threads & Batching ---
         # Llama.cpp internal defaults: --threads=hardware_concurrency() (logical), --threads-batch=4
-        self._add_arg(cmd, "--threads", self.threads.get(), str(self.logical_cores)) # Compare against internal default (logical)
-        self._add_arg(cmd, "--threads-batch", self.threads_batch.get(), "4")         # Compare against internal default (4)
+        # Note: The GUI default for --threads is physical cores, while llama.cpp default is logical.
+        # The _add_arg helper needs to compare against the *llama.cpp* default for omission.
+        # But the default *value* shown in the GUI should still be physical cores.
+        # Let's compare against the llama.cpp default (logical cores) when deciding whether to *add* the arg.
+        # This matches the _generate_default_config_name logic.
+        self._add_arg(cmd, "--threads", self.threads.get(), str(self.logical_cores)) # Omit if matches llama.cpp default (logical)
+        self._add_arg(cmd, "--threads-batch", self.threads_batch.get(), "4")         # Omit if matches llama.cpp default (4)
 
         # Llama.cpp internal defaults: --batch-size=512, --ubatch-size=512
         self._add_arg(cmd, "--batch-size", self.batch_size.get(), "512")
@@ -2389,14 +2676,13 @@ sys.exit(0) # Indicate success
 
         # Handle GPU arguments: --tensor-split takes precedence
         tensor_split_val = self.tensor_split.get().strip()
-        n_gpu_layers_val = self.n_gpu_layers.get().strip() # Get the user's desired n_gpu_layers value
+        n_gpu_layers_val = self.n_gpu_layers.get().strip() # Get the user's desired n_gpu_layers string value
 
         if tensor_split_val:
              cmd.extend(["--tensor-split", tensor_split_val])
              print(f"INFO: --tensor-split is set ('{tensor_split_val}'), this takes precedence over --n-gpu-layers for layer distribution.", file=sys.stderr)
-             # llama.cpp might still respect --n-gpu-layers if set (e.g., for validation or total count),
-             # so we include it *if* the user specified something other than the default 0.
-             # If it's "-1", we still pass "-1". If it's a number N > 0, pass N.
+             # If using --tensor-split, still pass --n-gpu-layers if it's *not* the default 0.
+             # This allows '-1' with tensor-split if that's a supported mode, or a specific count if needed.
              if n_gpu_layers_val != "0":
                   cmd.extend(["--n-gpu-layers", n_gpu_layers_val])
         else:
@@ -2415,14 +2701,18 @@ sys.exit(0) # Indicate success
         # Add --flash-attn flag if checked
         self._add_arg(cmd, "--flash-attn", self.flash_attn.get())
 
+        # Memory options
+        self._add_arg(cmd, "--no-mmap", self.no_mmap.get()) # Omit if False (default)
+        self._add_arg(cmd, "--mlock", self.mlock.get()) # Omit if False (default)
+        self._add_arg(cmd, "--no-kv-offload", self.no_kv_offload.get()) # Omit if False (default)
 
-        self._add_arg(cmd, "--no-mmap", self.no_mmap.get())
-        self._add_arg(cmd, "--mlock", self.mlock.get())
-        self._add_arg(cmd, "--no-kv-offload", self.no_kv_offload.get())
-        # --no-cnv is now in the Performance section but added here
-        self._add_arg(cmd, "--no-cnv", self.no_cnv.get())
-        # --prio is now in the Performance section but added here
-        self._add_arg(cmd, "--prio", self.prio.get(), "0")
+        # Performance options
+        self._add_arg(cmd, "--no-cnv", self.no_cnv.get()) # Omit if False (default)
+        self._add_arg(cmd, "--prio", self.prio.get(), "0") # Omit if 0 (default)
+
+        # --- NEW: Generation options ---
+        self._add_arg(cmd, "--ignore-eos", self.ignore_eos.get()) # Omit if False (default)
+        self._add_arg(cmd, "--n-predict", self.n_predict.get(), "-1") # Omit if -1 (default)
 
 
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
@@ -2756,10 +3046,11 @@ if __name__ == "__main__":
                                fg_color = style.lookup('TLabel', 'foreground', default='#ffffff')
                                entry_bg = style.lookup('TEntry', 'fieldbackground', default='#3c3c3c')
                                entry_fg = style.lookup('TEntry', 'foreground', default='#ffffff')
-                               listbox_bg = style.lookup('TListbox', 'background', default=entry_bg)
-                               listbox_fg = style.lookup('TListbox', 'foreground', default=entry_fg)
-                               listbox_select_bg = style.lookup('TListbox', 'selectbackground', default='#505050')
-                               listbox_select_fg = style.lookup('TListbox', 'selectforeground', default='#ffffff')
+                               listbox_bg = style.lookup('Tlistbox', 'background', default=entry_bg) # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_fg = style.lookup('Tlistbox', 'foreground', default=entry_fg) # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_select_bg = style.lookup('Tlistbox', 'selectbackground', default='#505050') # Note: Listbox is tk, not ttk, needs option_add
+                               listbox_select_fg = style.lookup('Tlistbox', 'selectforeground', default='#ffffff') # Note: Listbox is tk, not ttk, needs option_add
+
 
                                # Apply to root and all widgets implicitly
                                root.configure(bg=bg_color)
@@ -2778,6 +3069,7 @@ if __name__ == "__main__":
                                     style.configure('TButton', background=bg_color, foreground=fg_color) # Might not style button faces well
 
                                     # Listbox is tk, not ttk, needs option_add
+                                    # Use try/except as option_add might not be available in all contexts or for all styles
                                     try:
                                        root.option_add('*Listbox.background', listbox_bg)
                                        root.option_add('*Listbox.foreground', listbox_fg)
