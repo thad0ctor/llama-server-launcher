@@ -6,11 +6,11 @@ import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
-from threading import Thread # For background scanning AND analysis
-import traceback # For detailed error printing
-import ctypes # For Windows RAM info (fallback)
-import shlex # For more robust command quoting
-import math # For rounding calculations
+from threading import Thread
+import traceback
+import ctypes
+import shlex
+import math
 
 # --- New Imports ---
 try:
@@ -67,7 +67,7 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
     psutil = None
-    print("Warning: psutil library not found. RAM information may be limited, especially on non-Windows.", file=sys.stderr)
+    print("Warning: psutil library not found. RAM and CPU information may be limited.", file=sys.stderr)
 
 
 # --- Dependency Check (Printed to console/stderr) ---
@@ -87,9 +87,9 @@ if MISSING_DEPS:
     print("\n--- Missing Dependencies Warning ---", file=sys.stderr)
     print("The following Python libraries are recommended for full functionality but were not found:", file=sys.stderr)
     for dep in MISSING_DEPS:
-        print(f" - {dep}", file=sys.stderr)
-    print("Please install them (e.g., 'pip install llama-cpp-python torch psutil flash_attn') if you need GGUF analysis, GPU features, or Flash Attention status.", file=sys.stderr)
-    print("-------------------------------------\n", file=sys.stderr)
+        print(f" - {dep}")
+    print("Please install them (e.g., 'pip install llama-cpp-python torch psutil flash_attn') if you need GGUF analysis, GPU features, or Flash Attention status.")
+    print("-------------------------------------\n")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -202,6 +202,23 @@ def get_ram_info_static():
         print(f"Failed to get RAM info: {str(e)}", file=sys.stderr)
         return {"error": f"Failed to get RAM info: {str(e)}"}
 
+def get_cpu_info_static():
+    """Get system CPU information (static method)."""
+    try:
+        if PSUTIL_AVAILABLE and psutil:
+            logical_cores = psutil.cpu_count(logical=True)
+            physical_cores = psutil.cpu_count(logical=False)
+            return {
+                "logical_cores": logical_cores if logical_cores is not None else 4, # Default to 4 if psutil somehow returns None
+                "physical_cores": physical_cores if physical_cores is not None else (logical_cores // 2 if logical_cores is not None and logical_cores > 0 else 2), # Estimate physical if needed
+                "model_name": "N/A" # psutil doesn't easily give model name cross-platform
+            }
+        else:
+             return {"error": "psutil not installed, cannot get CPU info.", "logical_cores": 4, "physical_cores": 2} # Default to sensible minimums
+    except Exception as e:
+        print(f"Failed to get CPU info: {str(e)}", file=sys.stderr)
+        return {"error": f"Failed to get CPU info: {str(e)}", "logical_cores": 4, "physical_cores": 2}
+
 
 def analyze_gguf_model_static(model_path_str):
     """Analyze a GGUF model file and extract metadata (static method)."""
@@ -231,8 +248,9 @@ def analyze_gguf_model_static(model_path_str):
         try:
              # Use minimal parameters for quick metadata load
              # Setting n_gpu_layers=0 is important to avoid trying to load layers onto potentially unavailable GPUs
+             # Using minimal n_ctx, n_batch, n_threads for minimal resource usage
              llm_meta = Llama(model_path=str(model_path), n_ctx=32, n_threads=1, n_batch=32,
-                              verbose=False, n_gpu_layers=0, logits_all=True, main_gpu=0)
+                              verbose=False, n_gpu_layers=0, logits_all=False) # logits_all=False to save memory/time
         except Exception as load_exc:
              analysis_result["error"] = f"Failed to load model for metadata analysis: {load_exc}"
              print(f"ERROR: Failed to load model '{model_path.name}' for analysis: {load_exc}", file=sys.stderr)
@@ -330,7 +348,12 @@ class LlamaCppLauncher:
         # --- System Info ---
         self.gpu_info = {"available": False, "device_count": 0, "devices": []}
         self.ram_info = {}
-        self._fetch_system_info()
+        self.cpu_info = {"logical_cores": 4, "physical_cores": 2} # Default fallback
+        self._fetch_system_info() # This updates self.gpu_info, self.ram_info, self.cpu_info
+
+        # Store detected CPU cores for initial thread defaults
+        self.logical_cores = self.cpu_info.get("logical_cores", 4)
+        self.physical_cores = self.cpu_info.get("physical_cores", 2) # Get physical cores
 
 
         # ------------------------------------------------ persistence --
@@ -353,8 +376,12 @@ class LlamaCppLauncher:
         self.scan_status_var = tk.StringVar(value="Scan models to populate list.")
 
         # Basic settings
-        self.cache_type_k    = tk.StringVar(value="f16")
-        self.threads         = tk.StringVar(value="4")
+        self.cache_type_k    = tk.StringVar(value="f16") # KV cache type (applies to k & v)
+        # Set initial thread defaults based on detected CPU cores (User's request pattern)
+        self.threads         = tk.StringVar(value=str(self.physical_cores)) # --threads (default to physical cores recommendation)
+        self.threads_batch   = tk.StringVar(value=str(self.logical_cores)) # --threads-batch (default to logical cores recommendation)
+        self.batch_size      = tk.StringVar(value="512") # --batch-size (prompt)
+        self.ubatch_size     = tk.StringVar(value="512") # --ubatch-size (unconditional batch)
         self.temperature     = tk.StringVar(value="0.8")
         self.min_p           = tk.StringVar(value="0.05")
         self.ctx_size        = tk.IntVar(value=2048)
@@ -374,7 +401,7 @@ class LlamaCppLauncher:
 
         # Memory & other advanced
         self.no_mmap         = tk.BooleanVar(value=False)
-        self.no_cnv          = tk.BooleanVar(value=False)
+        self.no_cnv          = tk.BooleanVar(value=False) # Disable convolutional batching? (Might be related to -b / --batch-size internal implementation details)
         self.prio            = tk.StringVar(value="0")
         self.mlock           = tk.BooleanVar(value=False)
         self.no_kv_offload   = tk.BooleanVar(value=False)
@@ -390,6 +417,9 @@ class LlamaCppLauncher:
 
         # --- Recommendation Variables ---
         self.recommended_tensor_split_var = tk.StringVar(value="N/A - Need >1 selected GPU & model layers")
+        self.recommended_threads_var = tk.StringVar(value=f"Recommended: {self.physical_cores} (Your CPU physical cores)") # New recommendation var
+        self.recommended_threads_batch_var = tk.StringVar(value=f"Recommended: {self.logical_cores} (Your CPU logical cores)") # Updated text
+
 
         # --- Status Variables ---
         # Initial status reflects GUI environment, will update based on venv check
@@ -404,10 +434,12 @@ class LlamaCppLauncher:
         self.analysis_thread = None
         self.detected_gpu_devices = self.gpu_info.get("devices", []) # List of detected GPU info dicts
 
+
         # load previous settings
         self._load_saved_configs()
         self.llama_cpp_dir.set(self.app_settings.get("last_llama_cpp_dir", ""))
         self.venv_dir.set(self.app_settings.get("last_venv_dir", ""))
+        # Ensure model_dirs is loaded as list of Paths
         self.model_dirs = [Path(d) for d in self.app_settings.get("model_dirs", []) if d]
 
         # build GUI
@@ -428,6 +460,8 @@ class LlamaCppLauncher:
         # GPU selection updates handled in _on_gpu_selection_changed
         # Bind trace to venv_dir to trigger the flash attn check
         self.venv_dir.trace_add("write", lambda *args: self._check_venv_flash_attn())
+        # Update threads batch recommendation if threads variable changes (user manually set it)
+        # self.threads.trace_add("write", lambda *args: self._update_recommendations()) # Removed: threads change doesn't affect threads-batch reco pattern
 
 
         # Populate model directories listbox
@@ -435,7 +469,7 @@ class LlamaCppLauncher:
 
         # Update initial GPU checkbox states and recommendations based on loaded config and detected GPUs
         self._update_gpu_checkboxes()
-        self._update_recommendations() # Call initially to set KV cache type and initial tensor split message
+        self._update_recommendations() # Call initially to set all initial recommendations
 
         # Perform initial scan (in background) if dirs exist
         if self.model_dirs:
@@ -448,6 +482,7 @@ class LlamaCppLauncher:
         # Display initial GPU detection status message
         self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
 
+
         # Run initial Flash Attention check (might trigger venv check if venv is pre-filled)
         self._check_venv_flash_attn()
 
@@ -456,18 +491,25 @@ class LlamaCppLauncher:
     #  System Info Fetching
     # ═════════════════════════════════════════════════════════════════
     def _fetch_system_info(self):
-        """Fetches GPU and RAM info."""
+        """Fetches GPU, RAM, and CPU info."""
         print("Fetching system info...", file=sys.stderr)
         self.gpu_info = get_gpu_info_static()
         self.ram_info = get_ram_info_static()
+        self.cpu_info = get_cpu_info_static() # Fetch CPU info here
+
         print(f"GPU Info: {self.gpu_info}", file=sys.stderr)
         if not self.gpu_info["available"] and "message" in self.gpu_info:
              print(f"GPU Detection Info: {self.gpu_info['message']}", file=sys.stderr)
         if "error" in self.ram_info:
              print(f"RAM Detection Error: {self.ram_info['error']}", file=sys.stderr)
+        if "error" in self.cpu_info:
+             print(f"CPU Detection Error: {self.cpu_info['error']}", file=sys.stderr)
 
         # Store detected devices separately for easier access
         self.detected_gpu_devices = self.gpu_info.get("devices", [])
+        # Store logical/physical cores for initial thread defaults and recommendations
+        self.logical_cores = self.cpu_info.get("logical_cores", 4)
+        self.physical_cores = self.cpu_info.get("physical_cores", 2) # Use fallback 2 if psutil failed or physical count is 0
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -700,12 +742,18 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
-        ttk.Label(inner, text="Threads:")\
+
+        # --- Threads ---
+        ttk.Label(inner, text="Threads (--threads):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Entry(inner, textvariable=self.threads, width=10)\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Number of CPU threads to use (-t)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+        # Recommendation label for threads
+        ttk.Label(inner, textvariable=self.recommended_threads_var, font=("TkSmallCaptionFont")).grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="Number of main threads. (llama.cpp default is often logical cores)", font=("TkSmallCaptionFont"))\
+            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1 # Add descriptive text below reco label
+
+        # --- Context Size ---
         ttk.Label(inner, text="Context Size:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ctx_f = ttk.Frame(inner); ctx_f.grid(column=1, row=r, columnspan=3, sticky="ew", padx=5, pady=3)
@@ -726,18 +774,24 @@ class LlamaCppLauncher:
         ctx_f.columnconfigure(0, weight=3) # Slider expands
         ttk.Label(inner, text="Prompt context size in tokens (-c)", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
+
+        # --- Temperature ---
         ttk.Label(inner, text="Temperature:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Entry(inner, textvariable=self.temperature, width=10)\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Controls randomness (llama.cpp default: 0.8)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        # --- Min P ---
         ttk.Label(inner, text="Min P:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Entry(inner, textvariable=self.min_p, width=10)\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Minimum probability sampling (llama.cpp default: 0.05)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        # --- Seed ---
         ttk.Label(inner, text="Seed:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Entry(inner, textvariable=self.seed, width=10)\
@@ -745,6 +799,7 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="RNG seed (-1 for random)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
+        # --- Network Settings ---
         ttk.Label(inner, text="Network Settings", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
@@ -805,21 +860,43 @@ class LlamaCppLauncher:
             .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=3); r += 1
 
 
-        # --- System Info Display (RAM) ---
+        # --- System Info Display (RAM & CPU) ---
+        r += 1 # Add a small gap
+        ttk.Label(inner, text="System Information", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
         if self.ram_info and "error" not in self.ram_info:
-            r += 1 # Add a small gap
             ttk.Label(inner, text="System RAM (Total):", font=("TkSmallCaptionFont", 8, ("bold",)))\
                 .grid(column=0, row=r, sticky="w", padx=10, pady=(5,0))
             ttk.Label(inner, text=f"{self.ram_info.get('total_ram_gb', 'N/A')} GB", font="TkSmallCaptionFont")\
                 .grid(column=1, row=r, sticky="w", padx=5, pady=(5,0), columnspan=3)
             r += 1
             ttk.Label(inner, text="System RAM (Available):", font=("TkSmallCaptionFont", 8, ("bold",)))\
-                .grid(column=0, row=r, sticky="w", padx=10, pady=(0,10))
+                .grid(column=0, row=r, sticky="w", padx=10, pady=(0,5))
             ttk.Label(inner, text=f"{self.ram_info.get('available_ram_gb', 'N/A')} GB", font="TkSmallCaptionFont")\
-                .grid(column=1, row=r, sticky="w", padx=5, pady=(0,10), columnspan=3)
+                .grid(column=1, row=r, sticky="w", padx=5, pady=(0,5), columnspan=3)
             r += 1
         elif self.ram_info.get("error"):
              ttk.Label(inner, text=f"System RAM Info: {self.ram_info['error']}", font="TkSmallCaptionFont", foreground="red")\
+                .grid(column=0, row=r, sticky="w", padx=10, pady=3, columnspan=4); r += 1
+             r += 1 # Add spacing after error
+
+
+        if self.cpu_info and "error" not in self.cpu_info:
+            ttk.Label(inner, text="System CPU (Logical Cores):", font=("TkSmallCaptionFont", 8, ("bold",)))\
+                .grid(column=0, row=r, sticky="w", padx=10, pady=(5,0))
+            ttk.Label(inner, text=f"{self.cpu_info.get('logical_cores', 'N/A')}", font="TkSmallCaptionFont")\
+                .grid(column=1, row=r, sticky="w", padx=5, pady=(5,0), columnspan=3)
+            r += 1
+            ttk.Label(inner, text="System CPU (Physical Cores):", font=("TkSmallCaptionFont", 8, ("bold",)))\
+                .grid(column=0, row=r, sticky="w", padx=10, pady=(0,10))
+            ttk.Label(inner, text=f"{self.cpu_info.get('physical_cores', 'N/A')}", font="TkSmallCaptionFont")\
+                .grid(column=1, row=r, sticky="w", padx=5, pady=(0,10), columnspan=3)
+            r += 1
+        elif self.cpu_info.get("error"):
+            ttk.Label(inner, text=f"System CPU Info: {self.cpu_info['error']}", font="TkSmallCaptionFont", foreground="red")\
                 .grid(column=0, row=r, sticky="w", padx=10, pady=3, columnspan=4); r += 1
 
 
@@ -909,7 +986,7 @@ class LlamaCppLauncher:
         self.flash_attn_status_label.grid(column=3, row=r, sticky="w", padx=5, pady=3); r += 1
 
 
-        # --- Memory settings ---
+        # --- Memory & Cache settings ---
         ttk.Label(inner, text="Memory & Cache", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
@@ -941,6 +1018,41 @@ class LlamaCppLauncher:
             .grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Keep KV cache in CPU RAM even with GPU layers", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+
+        # --- Performance (Batching & Threading) ---
+        ttk.Label(inner, text="Performance Settings", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
+        # Threads (--threads) moved to Basic Settings now
+
+        ttk.Label(inner, text="Prompt Batch Size (--batch-size):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Entry(inner, textvariable=self.batch_size, width=10)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, text="Number of tokens to process in a single batch during prompt processing (default: 512)", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        ttk.Label(inner, text="Unconditional Batch Size (--ubatch-size):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Entry(inner, textvariable=self.ubatch_size, width=10)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, text="Overrides --batch-size for prompt processing; allows larger batch regardless of GPU mem.", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        # Threads Batch (--threads-batch)
+        ttk.Label(inner, text="Batch Threads (--threads-batch):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Entry(inner, textvariable=self.threads_batch, width=10)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, textvariable=self.recommended_threads_batch_var, font=("TkSmallCaptionFont")).grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="Number of threads to use for batch processing (llama.cpp default: 4)", font=("TkSmallCaptionFont"))\
+            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1 # Add descriptive text below reco label
+
+
+        # Disable Conv Batching (--no-cnv) - Moved here as it's related to batching
         ttk.Label(inner, text="Disable Conv Batching (--no-cnv):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Checkbutton(inner, variable=self.no_cnv)\
@@ -948,17 +1060,14 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="Disable convolutional batching for prompt processing", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
-        # --- Performance ---
-        ttk.Label(inner, text="Performance", font=("TkDefaultFont", 12, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
-        ttk.Separator(inner, orient="horizontal")\
-            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
+        # --- Scheduling Priority --- (Already existed, just moved)
         ttk.Label(inner, text="Scheduling Priority (--prio):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Combobox(inner, textvariable=self.prio, width=10, values=("0","1","2","3"), state="readonly")\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="0=Normal, 1=Medium, 2=High, 3=Realtime (OS dependent)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3)
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
         inner.columnconfigure(2, weight=1) # Allow the description columns to expand
 
@@ -1000,17 +1109,30 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     def _start_resize(self, event):
         self._resize_start_y = event.y_root
-        self._resize_start_height = self.model_listbox.cget("height")
+        # Ensure we get an integer height
+        try:
+            self._resize_start_height = int(self.model_listbox.cget("height"))
+        except tk.TclError:
+             self._resize_start_height = 8 # Fallback default
+        self._resize_start_height = max(3, self._resize_start_height) # Minimum height
+
     def _do_resize(self, event):
         delta_y = event.y_root - self._resize_start_y
-        # Estimate pixels per line (this can vary by font/OS, adjust if needed)
-        pixels_per_line = self.model_listbox.winfo_reqheight() / max(1, self.model_listbox.size()) if self.model_listbox.size() > 0 else 15
+        # Estimate pixels per line. Use font metrics if possible, otherwise a sensible default.
+        try:
+             font_obj = tk.font.Font(font=self.model_listbox['font'])
+             pixels_per_line = font_obj.metrics('linespace')
+             if pixels_per_line <= 0: pixels_per_line = 15 # Fallback
+        except Exception:
+             pixels_per_line = 15 # Fallback default
+
         delta_lines = round(delta_y / pixels_per_line)
         new_height = max(3, min(30, self._resize_start_height + delta_lines)) # Clamp height
         if new_height != self.model_listbox.cget("height"):
             self.model_listbox.config(height=new_height)
+
     def _end_resize(self, event):
-        final_height = self.model_listbox.cget("height")
+        final_height = int(self.model_listbox.cget("height")) # Ensure int
         if final_height != self.app_settings.get("model_list_height"):
             self.app_settings["model_list_height"] = final_height
             self._save_configs()
@@ -1019,10 +1141,11 @@ class LlamaCppLauncher:
     #  Model Directory and Scanning Logic
     # ═════════════════════════════════════════════════════════════════
     def _add_model_dir(self):
-        initial_dir = self.model_dirs[-1] if self.model_dirs else str(Path.home())
+        # Use the last added directory or home as initial
+        initial_dir = self.model_dirs[-1] if self.model_dirs and self.model_dirs[-1].is_dir() else str(Path.home())
         directory = filedialog.askdirectory(title="Select Model Directory", initialdir=initial_dir)
         if directory:
-            p = Path(directory)
+            p = Path(directory).resolve() # Resolve path to handle symlinks etc.
             if p not in self.model_dirs:
                 self.model_dirs.append(p)
                 self._update_model_dirs_listbox()
@@ -1037,23 +1160,57 @@ class LlamaCppLauncher:
             messagebox.showerror("Error", "Select a directory to remove.")
             return
         index = selection[0]
-        if messagebox.askyesno("Confirm Remove", f"Remove directory:\n{self.model_dirs[index]}?"):
-            del self.model_dirs[index]
-            self._update_model_dirs_listbox()
-            self._save_configs()
-            self._trigger_scan() # Re-scan after removing a directory
+        try:
+             dir_to_remove_str = self.model_dirs_listbox.get(index)
+             dir_to_remove_path = Path(dir_to_remove_str).resolve() # Resolve before comparing
+             # Find the actual path object in our list
+             actual_index = -1
+             for i, p in enumerate(self.model_dirs):
+                 if p.resolve() == dir_to_remove_path:
+                     actual_index = i
+                     break
+
+             if actual_index != -1:
+                if messagebox.askyesno("Confirm Remove", f"Remove directory:\n{self.model_dirs[actual_index]}?"):
+                    del self.model_dirs[actual_index]
+                    self._update_model_dirs_listbox()
+                    self._save_configs()
+                    self._trigger_scan() # Re-scan after removing a directory
+             else:
+                  messagebox.showerror("Error", "Selected directory path mismatch or not found internally.")
+
+        except IndexError:
+            messagebox.showerror("Error", "Invalid selection.")
+        except Exception as e:
+             messagebox.showerror("Error", f"An error occurred removing directory:\n{e}")
+
 
     def _update_model_dirs_listbox(self):
         current_selection = self.model_dirs_listbox.curselection()
+        selected_text = self.model_dirs_listbox.get(current_selection[0]) if current_selection else None
+
         self.model_dirs_listbox.delete(0, tk.END)
+        resolved_model_dirs_strs = []
         for p in self.model_dirs:
-            self.model_dirs_listbox.insert(tk.END, str(p))
-        if current_selection:
-            new_index = min(current_selection[0], self.model_dirs_listbox.size() - 1)
-            if new_index >= 0:
+            try:
+                 resolved_str = str(p.resolve()) # Resolve path for display and comparison
+                 resolved_model_dirs_strs.append(resolved_str)
+                 self.model_dirs_listbox.insert(tk.END, resolved_str)
+            except Exception as e:
+                 print(f"Warning: Could not resolve path '{p}': {e}", file=sys.stderr)
+                 self.model_dirs_listbox.insert(tk.END, f"[Invalid Path] {p}")
+
+        # Attempt to re-select the previously selected item based on resolved path
+        if selected_text:
+            try:
+                new_index = resolved_model_dirs_strs.index(selected_text)
                 self.model_dirs_listbox.selection_set(new_index)
                 self.model_dirs_listbox.activate(new_index)
                 self.model_dirs_listbox.see(new_index)
+            except ValueError:
+                pass # Previous selection not found in the new list
+
+        self.model_dirs = [Path(d) for d in resolved_model_dirs_strs] # Update internal list with resolved paths
 
 
     def _trigger_scan(self):
@@ -1066,6 +1223,13 @@ class LlamaCppLauncher:
         self._reset_model_info_display()
         self.current_model_analysis = {} # Clear analysis result
         self._update_recommendations() # Update recommendations display
+        # Disable Add/Remove buttons during scan to prevent modifying the list while scanning
+        # Need to find the buttons - assuming they are in the dir_btn_frame
+        if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
+             for child in self.dir_btn_frame.winfo_children():
+                 if isinstance(child, ttk.Button):
+                      child.config(state=tk.DISABLED)
+
         scan_thread = Thread(target=self._scan_model_dirs, daemon=True)
         scan_thread.start()
 
@@ -1080,6 +1244,7 @@ class LlamaCppLauncher:
         processed_multipart_bases = set()
 
         for model_dir in self.model_dirs:
+            # Skip invalid or non-existent directories silently during scan
             if not model_dir.is_dir(): continue
             print(f"DEBUG: Scanning directory: {model_dir}", file=sys.stderr)
             try:
@@ -1097,7 +1262,8 @@ class LlamaCppLauncher:
                         base_name = first_part_match.group(1)
                         if base_name not in processed_multipart_bases:
                             # Store the path to the first part
-                            found[base_name] = gguf_path
+                            # Resolve the path before storing to avoid issues with relative paths later
+                            found[base_name] = gguf_path.resolve()
                             processed_multipart_bases.add(base_name)
                         continue
 
@@ -1113,7 +1279,8 @@ class LlamaCppLauncher:
                          display_name = gguf_path.stem
                          # Only add if we haven't already added a multi-part version with the same base name
                          if display_name not in found:
-                            found[display_name] = gguf_path
+                            # Resolve the path before storing
+                            found[display_name] = gguf_path.resolve()
 
             except Exception as e:
                 print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
@@ -1136,6 +1303,13 @@ class LlamaCppLauncher:
             self.model_listbox.insert(tk.END, name)
         self.root.update_idletasks()
 
+        # Re-enable Add/Remove buttons after scan
+        if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
+             for child in self.dir_btn_frame.winfo_children():
+                 if isinstance(child, ttk.Button):
+                      child.config(state=tk.NORMAL)
+
+
         if not model_names:
             self.scan_status_var.set("No GGUF models found in specified directories.")
             self.model_path.set("")
@@ -1150,17 +1324,16 @@ class LlamaCppLauncher:
             selected_idx = -1
             if last_path_str:
                  try:
-                     last_path_obj = Path(last_path_str)
+                     last_path_obj = Path(last_path_str).resolve() # Resolve the saved path
                      found_display_name = None
-                     # Find the display name associated with the saved path
+                     # Find the display name associated with the saved path in the *resolved* found_models
                      for display_name, full_path in self.found_models.items():
                          if full_path == last_path_obj:
                              found_display_name = display_name
                              break
-                     # If found, get its index in the current listbox
+                     # If found, get its index in the current listbox (which is sorted model_names)
                      if found_display_name:
-                         listbox_items = self.model_listbox.get(0, tk.END)
-                         selected_idx = listbox_items.index(found_display_name)
+                         selected_idx = model_names.index(found_display_name)
                  except (ValueError, OSError, IndexError): # Add IndexError just in case listbox is empty
                      pass # Handle potential errors with old paths or empty listbox
 
@@ -1229,7 +1402,7 @@ class LlamaCppLauncher:
         selected_name = self.model_listbox.get(index)
 
         if selected_name in self.found_models:
-            full_path = self.found_models[selected_name]
+            full_path = self.found_models[selected_name] # Use the resolved path from scan results
             full_path_str = str(full_path)
             self.model_path.set(full_path_str)
             # Save last model path immediately on selection
@@ -1264,7 +1437,7 @@ class LlamaCppLauncher:
                  self._update_recommendations() # Update recommendations based on no analysis
 
         else:
-            print(f"WARNING: Selected model '{selected_name}' not found in self.found_models.", file=sys.stderr)
+            print(f"WARNING: Selected model '{selected_name}' not found in self.found_models dictionary.", file=sys.stderr)
             self.model_path.set("")
             self.app_settings["last_model_path"] = ""
             self._save_configs()
@@ -1428,25 +1601,13 @@ class LlamaCppLauncher:
         # If entry is empty, treat as 0
         if current_str == "":
             current_str = "0"
-            # Optionally, set the StringVar to "0" here if desired, but validation handles ""
-            # self.n_gpu_layers.set("0") # This might cause issues with validation
-            # Let validation and subsequent logic handle empty strings
 
         try:
             value = int(current_str)
             max_layers = self.max_gpu_layers.get()
 
             # Determine the internal clamped integer value based on the input value
-            int_val_for_set = 0
-            if value == -1:
-                 if max_layers > 0: int_val_for_set = max_layers
-                 else: int_val_for_set = 0
-            elif value >= 0:
-                 if max_layers > 0: int_val_for_set = min(value, max_layers)
-                 else: int_val_for_set = 0
-            # else: value < -1 (invalid, will be caught by validation)
-
-            # Set the internal state (IntVar and trigger recommendations)
+            # This logic is now encapsulated in _set_gpu_layers
             self._set_gpu_layers(value) # Use the helper which will calculate int_val based on max_layers
 
 
@@ -1505,15 +1666,15 @@ class LlamaCppLauncher:
             if value == -1: return True
 
             # Do not allow negative numbers other than -1
-            if value < 0: return False
+            if value < -1: return False
 
             # Allow any non-negative integer if max layers is unknown or 0
-            max_val = self.max_gpu_layers.get()
-            if max_val <= 0:
-                 return True # Allow any non-negative integer
+            # Note: Even if max_layers is 0, allowing positive input in the entry is fine;
+            # the _sync_gpu_layers_from_entry will clamp it to 0 for the internal value/slider.
+            if value >= 0: return True
 
-            # If max layers is known and positive, only allow values up to max_val
-            return value <= max_val
+            # This part should not be reached if value < -1 is handled
+            return False
 
         except ValueError:
             # Reject non-numeric input (other than "", "-")
@@ -1564,45 +1725,38 @@ class LlamaCppLauncher:
         """Displays VRAM information for detected GPUs."""
         # Clear any previous VRAM info labels in this grid location
         # Use grid_slaves to find widgets at specific row/column
-        for widget in parent.grid_slaves(row=row, column=0): widget.grid_forget()
-        for widget in parent.grid_slaves(row=row, column=1): widget.grid_forget()
-        for widget in parent.grid_slaves(row=row, column=2): widget.grid_forget()
-        for widget in parent.grid_slaves(row=row, column=3): widget.grid_forget()
+        # We need to find the frame first if it exists to clear its contents, or create it
+        if not hasattr(self, '_vram_info_frame') or not self._vram_info_frame.winfo_exists():
+            self._vram_info_frame = ttk.Frame(parent)
+            self._vram_info_frame.grid(column=0, row=row, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
+            # Allow VRAM frame contents to align left but not be squeezed
+            self._vram_info_frame.columnconfigure(0, weight=0)
+        else:
+             # Clear existing widgets within the frame
+             for child in self._vram_info_frame.winfo_children():
+                  child.destroy()
+             # Ensure it's still on the correct row (might not be necessary if grid setup is static)
+             self._vram_info_frame.grid(column=0, row=row, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
 
 
         if self.gpu_info['available'] and self.gpu_info['device_count'] > 0:
-            vram_info_frame = ttk.Frame(parent)
-            vram_info_frame.grid(column=0, row=row, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
-            # Allow VRAM frame contents to align left but not be squeezed
-            vram_info_frame.columnconfigure(0, weight=0)
-
-            ttk.Label(vram_info_frame, text="VRAM (Total GB):", font=("TkSmallCaptionFont", 8, ("bold",)))\
+            ttk.Label(self._vram_info_frame, text="VRAM (Total GB):", font=("TkSmallCaptionFont", 8, ("bold",)))\
                 .pack(side="left", padx=(0, 5))
 
             # Display VRAM for each detected GPU
             for gpu in self.detected_gpu_devices:
-                 ttk.Label(vram_info_frame, text=f"GPU {gpu['id']}: {gpu['total_memory_gb']:.2f} GB", font="TkSmallCaptionFont")\
+                 ttk.Label(self._vram_info_frame, text=f"GPU {gpu['id']}: {gpu['total_memory_gb']:.2f} GB", font="TkSmallCaptionFont")\
                     .pack(side="left", padx=5)
 
             # Add a label that expands to push the GPU info left
-            ttk.Label(vram_info_frame, text="").pack(side="left", expand=True, fill="x")
-
+            ttk.Label(self._vram_info_frame, text="").pack(side="left", expand=True, fill="x")
 
         elif self.gpu_detected_status_var.get():
-             # Display specific GPU detection message if available but no devices
-             # This is already handled by the label linked to self.gpu_detected_status_var
-             pass
-        # No action needed if no GPUs and no specific message
+             # If there was a specific error message about GPU detection, display it here instead
+             ttk.Label(self._vram_info_frame, textvariable=self.gpu_detected_status_var, font="TkSmallCaptionFont", foreground="orange")\
+                 .pack(side="left", padx=5, expand=True, fill="x")
 
-
-    def _on_gpu_selection_changed(self, index):
-        """Callback when a GPU checkbox is toggled."""
-        print(f"DEBUG: GPU {index} selection changed. State: {self.gpu_vars[index].get()}", file=sys.stderr)
-        # Update the selected_gpus list in app_settings from the current state of all checkboxes
-        currently_selected_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
-        self.app_settings["selected_gpus"] = currently_selected_indices
-        # No need to save configs immediately, will save on exit or config save
-        self._update_recommendations() # Update recommendations based on new GPU selection
+        # No action needed if no GPUs, no error, and no specific message
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -1613,6 +1767,12 @@ class LlamaCppLauncher:
         print("DEBUG: Updating recommendations...", file=sys.stderr)
         # Update KV Cache Type display (always reflects current selection)
         self.model_kv_cache_type_var.set(self.cache_type_k.get())
+
+        # --- Threads & Threads Batch Recommendation ---
+        # Reco is always the detected CPU cores, based on the user's request pattern
+        self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
+        self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
+
 
         # --- Tensor Split Recommendation (VRAM-based) ---
         n_layers = self.current_model_analysis.get("n_layers")
@@ -1628,19 +1788,20 @@ class LlamaCppLauncher:
         else:
             # Gather VRAM for *selected* GPUs, maintaining their order
             selected_gpu_vram = []
+            vram_info_found = True
             for gpu_id in selected_gpu_indices:
                  # Find the VRAM for this GPU ID in the detected list
                  gpu_details = next((gpu for gpu in self.detected_gpu_devices if gpu['id'] == gpu_id), None)
-                 if gpu_details:
+                 if gpu_details and gpu_details.get('total_memory_gb') is not None:
                       selected_gpu_vram.append((gpu_id, gpu_details['total_memory_gb']))
                  else:
                       print(f"WARNING: VRAM info missing for selected GPU ID {gpu_id}. Cannot calculate VRAM-based split.", file=sys.stderr)
                       self.recommended_tensor_split_var.set("N/A - VRAM info missing for selected GPU(s)")
-                      return
+                      vram_info_found = False
+                      break # Cannot proceed with VRAM-based split if info is missing
 
-            if not selected_gpu_vram: # Should be covered by num_selected_gpus <= 1, but defensive
-                 self.recommended_tensor_split_var.set("N/A - Selected GPUs VRAM info missing")
-                 return
+            if not vram_info_found or not selected_gpu_vram: # Should be covered by above, but defensive
+                 return # Exit if VRAM info is incomplete
 
             total_selected_vram = sum(vram for gpu_id, vram in selected_gpu_vram)
             if total_selected_vram == 0:
@@ -1661,11 +1822,13 @@ class LlamaCppLauncher:
             fractional_parts_in_order = [(gpu_id, float_layers_per_gpu[gpu_id] - rounded_layers[gpu_id]) for gpu_id in selected_gpu_indices]
             fractional_parts_sorted = sorted(fractional_parts_in_order, key=lambda item: item[1], reverse=True)
 
-            for i in range(remainder):
-                # Give an extra layer to the GPU with the largest remaining fraction
-                # We need to find which original GPU ID this corresponds to based on the sorted list
-                gpu_id_to_add_layer = fractional_parts_sorted[i % len(fractional_parts_sorted)][0] # Cycle through the top fractional GPUs
-                rounded_layers[gpu_id_to_add_layer] += 1
+            # Use a list to track which GPU IDs have received an extra layer to handle remainders efficiently
+            gpu_ids_receiving_extra = [item[0] for item in fractional_parts_sorted[:remainder]]
+
+
+            for gpu_id_to_add_layer in gpu_ids_receiving_extra:
+                 rounded_layers[gpu_id_to_add_layer] += 1
+
 
             # Ensure the final split list is in the order of *selected* GPU indices
             recommended_split_list = [rounded_layers[gpu_id] for gpu_id in selected_gpu_indices]
@@ -1677,17 +1840,18 @@ class LlamaCppLauncher:
                  layers_per_gpu_equal = n_layers // num_selected_gpus
                  remainder_equal = n_layers % num_selected_gpus
                  equal_split_list = [layers_per_gpu_equal + (1 if i < remainder_equal else 0) for i in range(num_selected_gpus)]
-                 recommended_split_str = "Error Calculating, try: " + ",".join(map(str, equal_split_list))
+                 recommended_split_str = "Calculation Error, try: " + ",".join(map(str, equal_split_list))
                  self.recommended_tensor_split_var.set(recommended_split_str)
             else:
                 recommended_split_str = ",".join(map(str, recommended_split_list))
                 self.recommended_tensor_split_var.set(recommended_split_str)
 
-
         # --- GPU Layers Recommendation ---
         # Displaying "Max Layers" from analysis serves as the recommendation for the upper bound.
-        # A VRAM-based recommendation for the *number* of layers is too complex to be accurate
-        # without specific model layer sizes, which are not easily available via llama-cpp-python metadata.
+        # A VRAM-based recommendation for the *number* of layers to offload is too complex to be accurate
+        # without specific model layer sizes and precise VRAM usage estimations, which are not easily
+        # available via llama-cpp-python metadata or simple system queries.
+        # The existing status label next to the slider is sufficient to show the maximum.
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -1750,6 +1914,7 @@ sys.exit(0) # Indicate success
             try:
                 # Run the python executable in the venv with the check script code
                 # Set a timeout to prevent hanging if something goes wrong
+                # Use the full path to the python executable
                 process = subprocess.run([str(python_exe), "-c", self._FLASH_ATTN_CHECK_SCRIPT],
                                          capture_output=True, text=True, timeout=10) # 10 sec timeout
 
@@ -1765,12 +1930,15 @@ sys.exit(0) # Indicate success
                     else:
                         status_message = f"Status (Venv): Unexpected output. Return code 0. Output: {stdout} | Error: {stderr}"
                 elif process.returncode != 0:
-                    if "FLASH_ATTN_NOT_INSTALLED" in stdout: # Still check stdout even on non-zero return code
+                    # Check stdout even on non-zero return code, as the script might print status then exit with 1 on non-zero
+                    if "FLASH_ATTN_NOT_INSTALLED" in stdout:
                          status_message = "Status (Venv): Not Installed (Python package missing)"
                     elif "FLASH_ATTN_CHECK_ERROR" in stdout:
-                         status_message = f"Status (Venv): Check Error: {stdout}"
+                         # Extract just the error message part
+                         error_part = stdout.split("FLASH_ATTN_CHECK_ERROR: ", 1)[-1]
+                         status_message = f"Status (Venv): Check Error: {error_part}"
                     else:
-                         status_message = f"Status (Venv): Process failed. Return code {process.returncode}. Error: {stderr}"
+                         status_message = f"Status (Venv): Process failed. Return code {process.returncode}. Error: {stderr if stderr else 'No stderr output.'}"
 
 
                 # Update GUI on the main thread
@@ -1803,7 +1971,8 @@ sys.exit(0) # Indicate success
             # Slider value is a string representation of a float
             value = int(float(value_str))
             # Round to nearest 1024 (common practice for context size)
-            rounded = max(1024, round(value / 1024) * 1024)
+            # Use max to ensure a minimum size (e.g., 512 or 1024)
+            rounded = max(1024, int(round(value / 1024.0) * 1024)) # Use 1024.0 for float division
             self.ctx_size.set(rounded)
             self._sync_ctx_display(rounded)
         except ValueError:
@@ -1815,9 +1984,10 @@ sys.exit(0) # Indicate success
              return # Avoid errors during initial setup
 
         try:
-            raw = int(self.ctx_entry.get())
+            raw_str = self.ctx_entry.get().replace(',', '') # Remove commas before converting
+            raw = int(raw_str)
             # Round to nearest 1024 (common practice for context size)
-            rounded = max(1024, round(raw/1024)*1024)
+            rounded = max(1024, int(round(raw/1024.0)*1024)) # Use 1024.0 for float division
             self.ctx_size.set(rounded)
             self._sync_ctx_display(rounded)
         except ValueError:
@@ -1835,33 +2005,50 @@ sys.exit(0) # Indicate success
             self.ctx_label.config(text=formatted_value)
         if hasattr(self, 'ctx_entry') and self.ctx_entry.winfo_exists():
             # Only update if the entry value is different to avoid infinite loops with validation/binding
-            if self.ctx_entry.get() != str_value:
+            # Convert current entry text to int for comparison, ignoring commas
+            try:
+                 current_entry_int = int(self.ctx_entry.get().replace(',', ''))
+            except ValueError:
+                 current_entry_int = None # Treat invalid entry as different
+
+            if current_entry_int != value:
                  self.ctx_entry.delete(0, tk.END)
                  self.ctx_entry.insert(0, str_value)
 
 
     def _browse_dir(self, var_to_set):
+        """Helper to browse for a directory and set a StringVar."""
+        setting_key = None
+        title = "Select Directory"
+        # Determine setting key and title based on which variable is being set
         if var_to_set == self.llama_cpp_dir:
             setting_key = "last_llama_cpp_dir"
             title = "Select LLaMa.cpp Root Directory"
         elif var_to_set == self.venv_dir:
              setting_key = "last_venv_dir"
              title = "Select Virtual Environment Directory"
-        else:
-             setting_key = None
-             title = "Select Directory"
+        # No setting_key needed for model_dirs as it's a list
 
-        # Use the current value of the variable as initial dir if it's valid
-        initial = var_to_set.get() if var_to_set.get() and Path(var_to_set.get()).is_dir() else (self.app_settings.get(setting_key) if setting_key else str(Path.home()))
-        if initial and not Path(initial).is_dir(): initial = str(Path.home())
+        # Use the current value of the variable as initial dir if it's a valid directory path.
+        # If not, use the saved setting for that variable.
+        # If neither is a valid directory, default to the user's home directory.
+        current_val = var_to_set.get().strip()
+        initial = None
+        if current_val and Path(current_val).is_dir():
+             initial = current_val
+        elif setting_key and self.app_settings.get(setting_key) and Path(self.app_settings.get(setting_key)).is_dir():
+             initial = self.app_settings.get(setting_key)
+        else:
+             initial = str(Path.home())
+
 
         d = filedialog.askdirectory(initialdir=initial, title=title)
         if d:
-            var_to_set.set(d)
-            # Save to app_settings immediately for directory selections
+            resolved_d = str(Path(d).resolve()) # Resolve the selected directory path
+            var_to_set.set(resolved_d)
+            # Save to app_settings immediately for relevant directory selections
             if setting_key:
-                self.app_settings[setting_key] = d
-            # For llama.cpp dir, trigger a scan? Maybe not automatically, user clicks Scan
+                self.app_settings[setting_key] = resolved_d
             # For venv dir, setting the variable triggers the trace which calls _check_venv_flash_attn
 
 
@@ -1919,7 +2106,10 @@ sys.exit(0) # Indicate success
             "venv_dir":      self.venv_dir.get(),
             "model_path":    self.model_path.get(),
             "cache_type_k":  self.cache_type_k.get(),
-            "threads":       self.threads.get(),
+            "threads":       self.threads.get(), # Save the user-set value
+            "threads_batch": self.threads_batch.get(), # Save the user-set value
+            "batch_size":    self.batch_size.get(), # Save the user-set value
+            "ubatch_size":   self.ubatch_size.get(), # Save the user-set value
             "n_gpu_layers":  gpu_layers_to_save, # Save the string value (can be -1)
             "no_mmap":       self.no_mmap.get(),
             "no_cnv":        self.no_cnv.get(),
@@ -1967,7 +2157,13 @@ sys.exit(0) # Indicate success
         self.llama_cpp_dir.set(cfg.get("llama_cpp_dir",""))
         self.venv_dir.set(cfg.get("venv_dir","")) # Setting this triggers the venv trace -> flash attn check
         self.cache_type_k.set(cfg.get("cache_type_k","f16"))
-        self.threads.set(cfg.get("threads","4"))
+        # Load new parameters, providing defaults for backward compatibility with older configs
+        # Default to the *current* detected cores if not in the config
+        self.threads.set(cfg.get("threads", str(self.physical_cores))) # Default to detected physical cores
+        self.threads_batch.set(cfg.get("threads_batch", str(self.logical_cores))) # Default to detected logical cores
+        self.batch_size.set(cfg.get("batch_size", "512")) # Default to llama.cpp 512
+        self.ubatch_size.set(cfg.get("ubatch_size", "512")) # Default to llama.cpp 512
+
         self.no_mmap.set(cfg.get("no_mmap",False))
         self.no_cnv.set(cfg.get("no_cnv",False))
         self.prio.set(cfg.get("prio","0"))
@@ -2016,14 +2212,14 @@ sys.exit(0) # Indicate success
         selected_idx = -1
         if loaded_model_path_str:
             try:
-                loaded_model_path_obj = Path(loaded_model_path_str)
+                loaded_model_path_obj = Path(loaded_model_path_str).resolve() # Resolve the saved path before lookup
                 found_display_name = None
-                # Find the display name associated with the saved path in the *currently found* models
+                # Find the display name associated with the saved path in the *currently found* models (which are resolved)
                 for display_name, full_path in self.found_models.items():
                     if full_path == loaded_model_path_obj:
                         found_display_name = display_name
                         break
-                # If found, get its index in the current listbox
+                # If found, get its index in the current listbox (which is sorted by display name)
                 if found_display_name:
                     listbox_items = self.model_listbox.get(0, tk.END)
                     selected_idx = listbox_items.index(found_display_name)
@@ -2085,7 +2281,7 @@ sys.exit(0) # Indicate success
             messagebox.showerror("Error", "LLaMa.cpp root directory is not set.")
             return None
         try:
-            llama_base_dir = Path(llama_dir_str)
+            llama_base_dir = Path(llama_dir_str).resolve() # Resolve the base dir
             if not llama_base_dir.is_dir(): raise NotADirectoryError()
         except Exception:
              messagebox.showerror("Error", f"Invalid LLaMa.cpp directory:\n{llama_dir_str}")
@@ -2112,33 +2308,32 @@ sys.exit(0) # Indicate success
             messagebox.showerror("Error", "No model selected. Please scan and select a model from the list.")
             return None
         try:
-            model_path_obj = Path(model_full_path_str)
-            if not model_path_obj.is_file():
-                 # The saved path might point to the first part of a multipart file.
-                 # Check if the selected model name in the listbox corresponds to a valid file path found during scan.
-                 selected_name = ""
-                 sel = self.model_listbox.curselection()
-                 if sel: selected_name = self.model_listbox.get(sel[0])
+            model_path_obj = Path(model_full_path_str).resolve() # Resolve the path from the variable
+            # Cross-check if the resolved path matches the one from our scan results
+            # This handles cases where the user might manually type a path or the saved path is slightly different
+            selected_name = ""
+            sel = self.model_listbox.curselection()
+            if sel: selected_name = self.model_listbox.get(sel[0])
 
-                 if selected_name and selected_name in self.found_models:
-                      actual_model_path_from_scan = self.found_models[selected_name]
-                      if actual_model_path_from_scan.is_file():
-                           # Use the actual path from the scan results
-                           model_full_path_str = str(actual_model_path_from_scan)
-                      else:
-                           # Selected name is in list, but the file it points to from the scan is missing
-                           error_msg = f"Selected model file not found based on scan results:\n{actual_model_path_from_scan}"
-                           error_msg += f"\n(Selected in GUI: {selected_name})"
-                           error_msg += "\n\nPlease re-scan models or check file existence."
-                           messagebox.showerror("Error", error_msg)
-                           return None
-                 else:
-                      # The path in self.model_path is not a file and doesn't match a name in found_models
-                      error_msg = f"Invalid or missing model path:\n{model_full_path_str}"
-                      if selected_name: error_msg += f"\n(Selected in GUI: {selected_name})"
-                      error_msg += "\n\nPlease re-scan models or select a valid model."
-                      messagebox.showerror("Error", error_msg)
-                      return None
+            scan_matched_path = self.found_models.get(selected_name)
+
+            if scan_matched_path and scan_matched_path == model_path_obj:
+                 # The path from the variable matches the resolved path of the selected item from the scan. Use it.
+                 final_model_path = str(model_path_obj)
+            elif model_path_obj.is_file():
+                 # The path from the variable is a valid file, but doesn't match the scan result for the selected item (or no item selected).
+                 # This could happen if the user manually pasted a path. Use it, but maybe warn?
+                 # For now, just use it if it's a valid file.
+                 final_model_path = str(model_path_obj)
+                 if selected_name and (not scan_matched_path or scan_matched_path != model_path_obj):
+                     print(f"Warning: Model path from entry '{model_full_path_str}' doesn't exactly match the selected item '{selected_name}' from scan ('{scan_matched_path if scan_matched_path else 'Not in scan list'}'). Using path from entry.", file=sys.stderr)
+            else:
+                 # The path from the variable is not a valid file and doesn't match the scan result for the selected item.
+                 error_msg = f"Invalid or missing model file:\n{model_full_path_str}"
+                 if selected_name: error_msg += f"\n(Selected in GUI: {selected_name})"
+                 error_msg += "\n\nPlease re-scan models or select a valid model file."
+                 messagebox.showerror("Error", error_msg)
+                 return None
 
         except Exception as e:
              # Catch other exceptions during path validation
@@ -2151,12 +2346,42 @@ sys.exit(0) # Indicate success
              messagebox.showerror("Error", error_msg)
              return None
 
-        cmd.extend(["-m", model_full_path_str])
+        cmd.extend(["-m", final_model_path])
 
         # --- Other Arguments ---
-        self._add_arg(cmd, "--cache-type-k", self.cache_type_k.get(), "f16")
-        self._add_arg(cmd, "--threads", self.threads.get(), "4")
-        cmd.extend(["--ctx-size", str(self.ctx_size.get())])
+        # --- KV Cache Type ---
+        # llama.cpp default is f16. Add args only if different.
+        kv_cache_type_val = self.cache_type_k.get().strip()
+        self._add_arg(cmd, "--cache-type-k", kv_cache_type_val, "f16")
+        # If --cache-type-k is added and non-default, also add --cache-type-v with the same value
+        # Check if --cache-type-k is already in the command list
+        if "--cache-type-k" in cmd:
+             # Find the index of --cache-type-k
+             try:
+                 k_index = cmd.index("--cache-type-k")
+                 # The value should be the next element
+                 if k_index + 1 < len(cmd):
+                     k_value = cmd[k_index + 1]
+                     # Ensure we add --cache-type-v only if it's not already there (shouldn't be with this logic)
+                     if "--cache-type-v" not in cmd:
+                          cmd.extend(["--cache-type-v", k_value])
+                          print(f"DEBUG: Adding --cache-type-v {k_value} to match --cache-type-k", file=sys.stderr)
+             except ValueError:
+                 pass # Should not happen if "--cache-type-k" is in cmd
+
+
+        # --- Threads & Batching ---
+        # Llama.cpp internal defaults: --threads=hardware_concurrency() (logical), --threads-batch=4
+        self._add_arg(cmd, "--threads", self.threads.get(), str(self.logical_cores)) # Compare against internal default (logical)
+        self._add_arg(cmd, "--threads-batch", self.threads_batch.get(), "4")         # Compare against internal default (4)
+
+        # Llama.cpp internal defaults: --batch-size=512, --ubatch-size=512
+        self._add_arg(cmd, "--batch-size", self.batch_size.get(), "512")
+        self._add_arg(cmd, "--ubatch-size", self.ubatch_size.get(), "512")
+
+
+        # Llama.cpp internal defaults: --ctx-size=2048, --seed=-1, --temp=0.8, --min-p=0.05
+        self._add_arg(cmd, "--ctx-size", str(self.ctx_size.get()), "2048") # Use str() for int var
         self._add_arg(cmd, "--seed", self.seed.get(), "-1")
         self._add_arg(cmd, "--temp", self.temperature.get(), "0.8")
         self._add_arg(cmd, "--min-p", self.min_p.get(), "0.05")
@@ -2182,34 +2407,9 @@ sys.exit(0) # Indicate success
 
         # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)
         # It specifies which GPU is considered the "primary" one, often GPU 0.
-        # Include --main-gpu if layers are offloaded or if a specific non-default GPU is selected.
+        # Llama.cpp default is 0. Include --main-gpu if the user set a non-default value.
         main_gpu_val = self.main_gpu.get().strip()
-        # Check if n_gpu_layers is not "0" OR if tensor_split is set OR if main_gpu is not "0"
-        # We only add --main-gpu if there are *any* selected GPUs and it's not the default '0'.
-        # If layers are offloaded (n_gpu_layers != 0 or tensor_split is set), --main-gpu might be implicitly needed by llama.cpp.
-        # If main_gpu is explicitly set to something other than '0', add it regardless.
-        # If multiple GPUs are selected via checkboxes but no tensor-split, we warn but don't add --main-gpu unless it's non-default.
-        selected_gpu_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
-        has_gpu_offload = (n_gpu_layers_val != "0" or tensor_split_val)
-
-        if (has_gpu_offload or main_gpu_val != "0") and self.gpu_info["available"] and self.gpu_info["device_count"] > 0:
-             # Validate main_gpu_val is an integer within range of available GPUs
-             try:
-                 main_gpu_int = int(main_gpu_val)
-                 if 0 <= main_gpu_int < self.gpu_info["device_count"]:
-                     cmd.extend(["--main-gpu", str(main_gpu_int)])
-                 else:
-                     print(f"Warning: Main GPU {main_gpu_val} specified, but only {self.gpu_info['device_count']} GPUs available. --main-gpu argument may be invalid.", file=sys.stderr)
-                     # Still include the argument as entered
-                     cmd.extend(["--main-gpu", main_gpu_val])
-             except ValueError:
-                 print(f"Warning: Invalid value '{main_gpu_val}' for --main-gpu. Argument may be ignored or cause errors.", file=sys.stderr)
-                 # Include the argument as entered
-                 cmd.extend(["--main-gpu", main_gpu_val])
-        elif main_gpu_val != "0":
-             # If user set non-default main-gpu but CUDA is unavailable or no GPUs detected
-              print(f"Warning: Main GPU {main_gpu_val} specified, but CUDA not available or no GPUs detected. --main-gpu argument may be ignored.", file=sys.stderr)
-              cmd.extend(["--main-gpu", main_gpu_val])
+        self._add_arg(cmd, "--main-gpu", main_gpu_val, "0")
 
 
         # Add --flash-attn flag if checked
@@ -2219,22 +2419,26 @@ sys.exit(0) # Indicate success
         self._add_arg(cmd, "--no-mmap", self.no_mmap.get())
         self._add_arg(cmd, "--mlock", self.mlock.get())
         self._add_arg(cmd, "--no-kv-offload", self.no_kv_offload.get())
+        # --no-cnv is now in the Performance section but added here
         self._add_arg(cmd, "--no-cnv", self.no_cnv.get())
+        # --prio is now in the Performance section but added here
         self._add_arg(cmd, "--prio", self.prio.get(), "0")
 
 
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
         # but are NOT using --tensor-split (which explicitly lists devices/split).
         # This warning is helpful because llama.cpp might use all GPUs by default unless restricted by env var or tensor-split.
+        selected_gpu_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
         if len(selected_gpu_indices) > 0 and len(selected_gpu_indices) < self.gpu_info["device_count"] and not tensor_split_val:
+             # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
              print(f"\nINFO: Specific GPUs ({selected_gpu_indices}) were selected via checkboxes, but --tensor-split was not used.", file=sys.stderr)
              print("      llama-server might default to using all available GPUs unless CUDA_VISIBLE_DEVICES is set.", file=sys.stderr)
              print("      To *restrict* which GPUs are used without --tensor-split, set the CUDA_VISIBLE_DEVICES environment variable before launching (e.g., 'set CUDA_VISIBLE_DEVICES=0,2' on Windows).", file=sys.stderr)
              print("      Alternatively, use --tensor-split to explicitly assign layers.", file=sys.stderr)
-
-
-        self._add_arg(cmd, "--host", self.host.get(), "127.0.0.1")
-        self._add_arg(cmd, "--port", self.port.get(), "8080")
+        elif len(selected_gpu_indices) > 0 and self.gpu_info["device_count"] > 0:
+             # If GPUs were selected (and there are GPUs), maybe a general reminder about env vars?
+             # Or just assume the user knows if they selected. Keep the message only for subset selection without tensor-split.
+             pass
 
 
         print("\n--- Generated Command ---", file=sys.stderr)
@@ -2247,40 +2451,56 @@ sys.exit(0) # Indicate success
         return cmd
 
     def _add_arg(self, cmd_list, arg_name, value, default_value=None):
-        """Adds argument to cmd list if not default (handles bools/strings)."""
+        """
+        Adds argument to cmd list if its value is non-empty or, if a default is given,
+        if the value is different from the default. Handles bools.
+        """
+        # Handle boolean flags (always added if True)
         is_bool_var = isinstance(value, tk.BooleanVar)
         is_bool_py = isinstance(value, bool)
 
         if is_bool_var:
-            if value.get(): cmd_list.append(arg_name)
+            if value.get():
+                 cmd_list.append(arg_name)
             return
 
         if is_bool_py:
-             if value: cmd_list.append(arg_name)
+             if value:
+                  cmd_list.append(arg_name)
              return
 
-        actual_value = str(value).strip()
+        # Handle non-boolean arguments (string, int, float)
+        # Get the string representation of the value
+        actual_value_str = str(value).strip()
 
-        # Special handling for tensor-split which defaults to empty string but is added if non-empty
-        if arg_name == "--tensor-split":
-            if actual_value:
-                 cmd_list.extend([arg_name, actual_value])
-            return
+        # Determine the string representation of the default value for comparison
+        # If default_value is None, there is no default specified for comparison purposes,
+        # so we add the argument if the actual value is non-empty.
+        # If default_value is not None, we compare against its string representation.
+        default_value_str = str(default_value).strip() if default_value is not None else None
 
-        # For other arguments, add if value is not empty or if it's not the default value
-        # Be careful with default_value checks for "0" or "-1" which are valid non-empty strings
-        if default_value is None:
-             # If no default is specified, add if the value is non-empty
-             if actual_value:
-                 cmd_list.extend([arg_name, actual_value])
-        elif str(actual_value) != str(default_value):
-             # If a default is specified, add if the actual value is different from the default
-             # Check specifically for empty string if the default is also empty, otherwise empty means don't add
-             if default_value == "":
-                 if actual_value != "": # Add if not empty and default is empty
-                     cmd_list.extend([arg_name, actual_value])
-             else: # Default is non-empty, add if value is different from default (even if empty)
-                  cmd_list.extend([arg_name, actual_value])
+        # Logic:
+        # 1. If actual_value_str is empty:
+        #    - If default_value_str is None or "", do not add (omitting means default).
+        #    - If default_value_str is non-empty, do not add (omitting means default).
+        #    => If actual_value_str is empty, never add the arg. The llama.cpp default will be used.
+        # 2. If actual_value_str is non-empty:
+        #    - If default_value_str is None, add the arg (no default to compare against).
+        #    - If default_value_str is not None and actual_value_str != default_value_str, add the arg.
+        #    - If default_value_str is not None and actual_value_str == default_value_str, do not add (redundant).
+        #    => Add the arg if actual_value_str is non-empty AND (default_value_str is None OR actual_value_str != default_value_str).
+
+        if actual_value_str: # Check if the user entered *any* value
+             if default_value_str is None or actual_value_str != default_value_str:
+                 # Add the argument if there's no default to compare against,
+                 # OR if the user's value is different from the default.
+                 cmd_list.extend([arg_name, actual_value_str])
+             else:
+                 # User entered the exact default value. Omit the argument.
+                 print(f"DEBUG: Omitting '{arg_name} {actual_value_str}' as it matches default '{default_value_str}'", file=sys.stderr)
+        else:
+             # User entered an empty string. Omit the argument.
+             print(f"DEBUG: Omitting '{arg_name}' due to empty value. Default '{default_value_str}' will be used.", file=sys.stderr)
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -2296,7 +2516,7 @@ sys.exit(0) # Indicate success
                  # On Windows, shell=True is often required for activate.bat and start
                  final_cmd_str = subprocess.list2cmdline(cmd_list)
                  if venv_path_str:
-                    venv_path = Path(venv_path_str)
+                    venv_path = Path(venv_path_str).resolve() # Resolve venv path
                     act_script = venv_path / "Scripts" / "activate.bat"
                     if not act_script.is_file():
                         messagebox.showerror("Error", f"Venv activation script (activate.bat) not found:\n{act_script}")
@@ -2314,7 +2534,7 @@ sys.exit(0) # Indicate success
 
                 launch_command = server_command_str
                 if venv_path_str:
-                    venv_path = Path(venv_path_str)
+                    venv_path = Path(venv_path_str).resolve() # Resolve venv path
                     act_script = venv_path / "bin" / "activate"
                     if not act_script.is_file():
                         messagebox.showerror("Error", f"Venv activation script not found:\n{act_script}")
@@ -2325,46 +2545,75 @@ sys.exit(0) # Indicate success
                     if sys.platform == "darwin": # macOS terminal usually keeps window open
                          pause_cmd = ""
                     else: # Linux terminals might close immediately
-                         pause_cmd = ' ; read -p "Press Enter to close..."'
+                         # Use a more robust check for interactive shell
+                         pause_cmd = ' ; [ -t 0 ] && read -p "Press Enter to close..."' # Check if stdin is a terminal
 
                     # bash -c needs the entire command string to be quoted safely.
                     # shlex.quote is used for individual parts *within* the bash command, then the whole string is quoted.
+                    # Ensure the activate script path is also quoted for 'source'
                     launch_command = f'echo "Activating venv: {venv_path}" && source {shlex.quote(str(act_script))} && echo "Launching server..." && {server_command_str}{pause_cmd}'
 
 
                 # Attempt to launch in a new terminal window
+                # Prioritize common desktop environment terminals
                 terminals = ['gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm']
                 # Command patterns for various terminals. Use bash -c to run multiple commands.
+                # Note: bash -c expects a single string argument containing the command(s) to execute.
+                # This string needs its internal quotes/special chars handled.
                 term_cmd_pattern = {
                     'gnome-terminal': " -- bash -c {}",
                     'konsole':        " -e bash -c {}",
                     'xfce4-terminal': " -e bash -c {}",
-                    'xterm':          " -e bash -c '{}'"
+                    'xterm':          " -e bash -c {}", # xterm might need single quotes for the whole string depending on shell/version
                 }
                 launched = False
                 import shutil # Use shutil.which to find terminal executable
                 for term in terminals:
                     if shutil.which(term):
-                         # Quote the *entire* command string that bash will execute
+                         # Quote the *entire* launch_command string that bash will execute
                          quoted_full_command_for_bash = shlex.quote(launch_command)
 
                          # Construct the command for the terminal emulator itself
-                         if term == 'xterm':
-                              term_cmd_str = f"{term}{term_cmd_pattern[term].format(quoted_full_command_for_bash)}"
+                         # Pass the quoted command string as a single argument to bash -c
+                         term_cmd_parts = [term]
+                         # Add terminal-specific args
+                         if term in ['gnome-terminal', 'konsole', 'xfce4-terminal']:
+                              term_cmd_parts.extend(['-e', 'bash', '-c', quoted_full_command_for_bash])
+                         elif term == 'xterm':
+                             # xterm often works better with the command string single-quoted
+                             term_cmd_parts.extend(['-e', 'bash', '-c', "'" + quoted_full_command_for_bash.replace("'", "'\\''") + "'"]) # Escape single quotes within the command
                          else:
-                              term_cmd_str = f"{term}{term_cmd_pattern[term].format(quoted_full_command_for_bash)}"
+                              # Fallback for other terminals, might not work
+                             term_cmd_parts.extend(['-e', 'bash', '-c', quoted_full_command_for_bash])
 
-                         print(f"DEBUG: Using terminal command: {term_cmd_str}", file=sys.stderr)
+
+                         print(f"DEBUG: Attempting launch with terminal: {term_cmd_parts}", file=sys.stderr)
                          try:
-                            # Use shell=True here as we are passing a single command string including spaces/quotes
-                            subprocess.Popen(term_cmd_str, shell=True)
+                            # Use shell=False if passing command and args as a list.
+                            # If the terminal command itself requires complex shell expansion (e.g., xterm single quotes),
+                            # then shell=True might be needed for *that* command, but it's generally safer to avoid if possible.
+                            # Let's try shell=False first with the parts list.
+                            subprocess.Popen(term_cmd_parts, shell=False)
                             launched = True
                             break
+                         except FileNotFoundError:
+                              print(f"DEBUG: Terminal '{term}' not found or not executable using shell=False.", file=sys.stderr)
                          except Exception as term_err:
-                             print(f"DEBUG: Failed to launch with {term}: {term_err}", file=sys.stderr)
+                             print(f"DEBUG: Failed to launch with {term} using shell=False: {term_err}", file=sys.stderr)
+                             # If shell=False failed, try shell=True for commands that might expect it
+                             try:
+                                 # Reconstruct the command string if shell=True is needed
+                                 term_cmd_str = subprocess.list2cmdline(term_cmd_parts)
+                                 print(f"DEBUG: Retrying launch with {term} using shell=True: {term_cmd_str}", file=sys.stderr)
+                                 subprocess.Popen(term_cmd_str, shell=True)
+                                 launched = True
+                                 break # Successfully launched with this terminal
+                             except Exception as term_err_shell:
+                                  print(f"DEBUG: Failed to launch with {term} using shell=True: {term_err_shell}", file=sys.stderr)
+
 
                 if not launched:
-                     messagebox.showerror("Launch Error", "Could not find a supported terminal (gnome-terminal, konsole, xfce4-terminal, xterm) to launch the server script.")
+                     messagebox.showerror("Launch Error", "Could not find a supported terminal (gnome-terminal, konsole, xfce4-terminal, xterm) or launch the server script.")
 
         except Exception as exc:
             messagebox.showerror("Launch Error", f"Failed to launch server process:\n{exc}")
@@ -2382,9 +2631,14 @@ sys.exit(0) # Indicate success
 
         default_name = "launch_llama_server.ps1"
         if selected_model_name:
-            model_name_part = re.sub(r'[\\/*?:"<>| ]', '_', selected_model_name)
+            # Sanitize model name for filename
+            model_name_part = re.sub(r'[\\/*?:"<>| ]', '_', selected_name)
             model_name_part = model_name_part[:50].strip('_') # Ensure no trailing underscore
-            default_name = f"launch_{model_name_part}.ps1"
+            if model_name_part:
+                default_name = f"launch_{model_name_part}.ps1"
+            else:
+                 default_name = "launch_selected_model.ps1" # Fallback if name is empty after sanitizing
+
             if not default_name.lower().endswith(".ps1"): default_name += ".ps1"
 
 
@@ -2402,18 +2656,21 @@ sys.exit(0) # Indicate success
                 fh.write("    Autogenerated PowerShell script from LLaMa.cpp Launcher GUI.\n")
                 fh.write("    Activates virtual environment (if configured) and starts llama-server.\n")
                 fh.write("#>\n\n")
-                fh.write("$ErrorActionPreference = 'Stop'\n\n")
+                fh.write("$ErrorActionPreference = 'Continue'\n\n") # Use 'Continue' for better error reporting in script output
+
 
                 venv = self.venv_dir.get().strip()
                 if venv:
                     try:
-                         venv_path = Path(venv)
+                         venv_path = Path(venv).resolve() # Resolve venv path for script
                          act_script = venv_path / "Scripts" / "Activate.ps1"
                          if act_script.exists():
-                             # Use Convert-Path to get absolute path and handle spaces for PowerShell
-                             ps_act_path = f'$(Convert-Path "{str(venv_path.resolve())}")\\Scripts\\Activate.ps1'
+                             # Use literal path syntax for PowerShell activation script source
+                             ps_act_path = f'"{str(act_script)}"' # Just quote the resolved path
+
                              fh.write(f'Write-Host "Activating virtual environment: {venv}" -ForegroundColor Cyan\n')
-                             fh.write(f'try {{ . "{ps_act_path}" }} catch {{ Write-Error "Failed to activate venv: $($_.Exception.Message)"; exit 1 }}\n\n')
+                             # Use 'try/catch' to report activation errors but continue if not critical
+                             fh.write(f'try {{ . {ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)" }}\n\n')
                          else:
                               fh.write(f'Write-Warning "Virtual environment activation script (Activate.ps1) not found at: {act_script}"\n\n')
                     except Exception as path_ex:
@@ -2426,32 +2683,35 @@ sys.exit(0) # Indicate success
                 # Use the call operator '&' for the executable path if it contains spaces or special characters.
                 ps_cmd_parts = []
                 for arg in cmd_list:
-                    # Escape internal double quotes and backticks for PowerShell string
+                    # Escape internal double quotes and backticks for PowerShell string literals
                     escaped_arg = arg.replace('"', '`"').replace('`', '``')
-                    # Wrap argument in double quotes if it contains spaces or special characters for PowerShell
-                    # Characters like $ {} ( ) , ; | & > < are problematic if not quoted or escaped
-                    if re.search(r'[ "\';&()|<>*?${}]', escaped_arg):
-                        ps_cmd_parts.append(f'"{escaped_arg}"')
+
+                    # Decide whether to enclose in double quotes or use literal string
+                    # Simple heuristic: if it contains spaces or characters problematic without quotes, use quotes.
+                    # More robust check: if it contains any character outside [a-zA-Z0-9-_./\\]
+                    if re.search(r'[\s"\';&()|<>*?$]', arg): # Add '$' as it's variable marker in PS
+                        ps_cmd_parts.append(f'"{escaped_arg}"') # Enclose in double quotes
                     else:
-                        ps_cmd_parts.append(escaped_arg)
+                        ps_cmd_parts.append(escaped_arg) # Use literal string
 
-                # For the executable path specifically, use & operator if needed.
-                # This is important if the path itself has spaces or special characters that need quoting.
-                exe_path_str = cmd_list[0]
-                # Check if the original path needed quoting (implies spaces/special chars that shlex quoted)
-                # Or if it looks like a non-simple path (contains directory separators)
-                needs_ps_call_operator = ' ' in exe_path_str or any(char in exe_path_str for char in "\"'&()|<>*?${}") or (sys.platform == "win32" and '\\' in exe_path_str) or (sys.platform != "win32" and '/' in exe_path_str)
+                # For the executable path specifically, use & operator if it's not just a simple name (like "llama-server")
+                # Check if the first argument (executable path) contains path separators or spaces (after resolving)
+                exe_path_obj_resolved = Path(cmd_list[0]).resolve() # Resolve the executable path
+                exe_requires_call_operator = '/' in str(exe_path_obj_resolved) or '\\' in str(exe_path_obj_resolved) or ' ' in str(exe_path_obj_resolved)
 
-                if needs_ps_call_operator:
-                     # If the path needed quoting or looks like a path, use the & operator with the quoted path
-                     ps_cmd_parts[0] = f'& {ps_cmd_parts[0]}'
-                # Else: The path is simple (like just "llama-server"), just using the quoted_cmd_list[0] is fine.
+                if exe_requires_call_operator:
+                    # If the path needs the call operator, format it as '& "quoted_path"'
+                    quoted_exe_path = str(exe_path_obj_resolved).replace('"', '`"').replace('`', '``') # PowerShell escape the resolved path
+                    ps_cmd_parts[0] = f'& "{quoted_exe_path}"'
+                # Else: ps_cmd_parts[0] is already the potentially quoted simple executable name, which is fine.
+
 
                 fh.write(" ".join(ps_cmd_parts) + "\n\n")
                 fh.write('Write-Host "Server process likely finished or detached." -ForegroundColor Yellow\n')
                 fh.write('# Pause if script is run directly by double-clicking or outside an interactive shell\n')
+                # Check if the host is ConsoleHost (typical when double-clicking or run from explorer)
                 fh.write('if ($Host.Name -eq "ConsoleHost") {\n')
-                fh.write('    Read-Host -Prompt "Press Enter to continue..."\n') # Added ... for consistency
+                fh.write('    Read-Host -Prompt "Press Enter to close..."\n') # Added ... for consistency
                 fh.write('}\n')
 
 
@@ -2487,7 +2747,8 @@ if __name__ == "__main__":
 
                      # Basic heuristic to attempt dark theme configuration if name suggests it
                      # This might be redundant or conflict if the theme itself handles it well
-                     if 'dark' in theme.lower() or 'black' in theme.lower() or 'highcontrast' in theme.lower() or theme == 'clam':
+                     # Only apply these if the theme name suggests dark and we successfully applied it
+                     if 'dark' in theme.lower() or 'black' in theme.lower() or 'highcontrast' in theme.lower():
                           try:
                                # Get background/foreground from the theme's defaults
                                # Use lookup with default to avoid errors if element doesn't exist in theme
@@ -2502,33 +2763,47 @@ if __name__ == "__main__":
 
                                # Apply to root and all widgets implicitly
                                root.configure(bg=bg_color)
-                               style.configure('.', background=bg_color, foreground=fg_color)
+                               # ttk widgets inherit from the style root, but apply explicit colors for safety
+                               # Note: Style configuration is complex and theme-dependent.
+                               # Applying these might override theme specifics.
+                               # It's often better to just let the theme handle it if possible.
+                               # Let's try just configuring the root and Listbox explicitly as they aren't ttk widgets.
+                               # The 'forest' themes handle this automatically. Only needed for fallback themes.
+                               if not theme.startswith('forest'):
+                                    style.configure('.', background=bg_color, foreground=fg_color)
+                                    style.configure('TFrame', background=bg_color)
+                                    style.configure('TLabel', background=bg_color, foreground=fg_color)
+                                    style.configure('TCheckbutton', background=bg_color, foreground=fg_color)
+                                    style.configure('TRadiobutton', background=bg_color, foreground=fg_color) # If used
+                                    style.configure('TButton', background=bg_color, foreground=fg_color) # Might not style button faces well
 
-                               # Listbox specifically needs its own bg/fg set if it's not a ttk widget
-                               # Use option_add for Listbox as it's a standard tk widget
-                               try:
-                                   root.option_add('*Listbox.background', listbox_bg)
-                                   root.option_add('*Listbox.foreground', listbox_fg)
-                                   root.option_add('*Listbox.selectBackground', listbox_select_bg)
-                                   root.option_add('*Listbox.selectForeground', listbox_select_fg)
-                               except tk.TclError: pass # Option might not exist for Listbox
+                                    # Listbox is tk, not ttk, needs option_add
+                                    try:
+                                       root.option_add('*Listbox.background', listbox_bg)
+                                       root.option_add('*Listbox.foreground', listbox_fg)
+                                       root.option_add('*Listbox.selectBackground', listbox_select_bg)
+                                       root.option_add('*Listbox.selectForeground', listbox_select_fg)
+                                    except tk.TclError: pass # Option might not exist for Listbox
 
-                               # Combobox dropdown list might need configuring
-                               # Styling the dropdown is complex and theme dependent; setting field bg/fg is usually enough
-                               try:
-                                    style.map('TCombobox', fieldbackground=[('readonly', entry_bg)], foreground=[('readonly', entry_fg)],
-                                              selectbackground=[('readonly', listbox_select_bg)], selectforeground=[('readonly', listbox_select_fg)])
-                               except tk.TclError: pass
+                                    # Combobox dropdown list might need configuring
+                                    try:
+                                         style.map('TCombobox', fieldbackground=[('readonly', entry_bg), ('!readonly', entry_bg)],
+                                                                foreground=[('readonly', entry_fg), ('!readonly', entry_fg)],
+                                                                selectbackground=[('readonly', listbox_select_bg), ('!readonly', listbox_select_bg)],
+                                                                selectforeground=[('readonly', listbox_select_fg), ('!readonly', listbox_select_fg)],
+                                                                background=[('readonly', bg_color), ('!readonly', bg_color)])
+                                         style.map('TEntry', fieldbackground=[('!disabled', entry_bg)], foreground=[('!disabled', entry_fg)])
+                                    except tk.TclError: pass
 
 
                           except tk.TclError as style_err:
-                               print(f"Note: Could not fully configure basic dark theme styles: {style_err}", file=sys.stderr)
-                     break
+                               print(f"Note: Could not fully configure basic dark theme styles after applying {theme}: {style_err}", file=sys.stderr)
+                     break # Stop after applying the first preferred theme found
                 except tk.TclError as e:
                      print(f"Failed to apply theme {theme}: {e}", file=sys.stderr)
-                     continue
+                     continue # Try the next theme
         if not used_theme:
-             print("Could not apply preferred ttk themes.", file=sys.stderr)
+             print("Could not apply preferred ttk themes. Using default theme.", file=sys.stderr)
     except Exception as e:
          print(f"ttk themes not available or failed to apply: {e}", file=sys.stderr)
 
