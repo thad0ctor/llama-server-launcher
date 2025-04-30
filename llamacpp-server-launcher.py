@@ -9,9 +9,9 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 from threading import Thread
 import traceback
 import ctypes
-import shlex
+import shlex # <-- Import shlex for parameter splitting
 import math
-import time # Added for cleanup delay
+import time
 
 # --- New Imports ---
 try:
@@ -377,9 +377,9 @@ class LlamaCppLauncher:
         # Qwen3 templates are removed as requested
     }
 
-    # ──────────────────────────────────────────────────────────────────
+    # ────────────────═════════════════════════════════════════════════
     #  construction / persistence
-    # ──────────────────────────────────────────────────────────────────
+    # ────────────────═════════════════════════════════════════════════
     def __init__(self, root: tk.Tk):
         """
         Initializes the LLaMa.cpp Server Launcher application GUI and state.
@@ -417,6 +417,8 @@ class LlamaCppLauncher:
             # Save/load selected GPU indices (indices of detected GPUs)
             "selected_gpus":      [],
         }
+        # List to store custom parameters entered by the user (strings)
+        self.custom_parameters_list = [] # <-- New attribute for custom parameters
 
         # --- Hardcoded Chat Templates ---
         # These templates are always available.
@@ -534,6 +536,10 @@ class LlamaCppLauncher:
         # predefined or custom) - primarily for display or internal logic.
         self.current_template_display = tk.StringVar(value="")
 
+        # --- Custom Parameters Variables ---
+        self.custom_param_entry_var = tk.StringVar() # For the entry field
+        self.custom_parameters_listbox_var = tk.StringVar() # For the listbox display
+
         # Widgets are created after __init__ finishes. Initial variable values
         # will populate the widgets when they are bound.
         # Further setup (like loading saved settings, fetching system info)
@@ -588,6 +594,9 @@ class LlamaCppLauncher:
         self.venv_dir.set(self.app_settings.get("last_venv_dir", ""))
         # Ensure model_dirs is loaded as list of Paths
         self.model_dirs = [Path(d) for d in self.app_settings.get("model_dirs", []) if d]
+        # Load custom parameters list
+        self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
+
 
         # build GUI
         self._create_widgets()
@@ -644,6 +653,9 @@ class LlamaCppLauncher:
 
         # Populate model directories listbox
         self._update_model_dirs_listbox()
+        # Populate custom parameters listbox
+        self._update_custom_parameters_listbox() # <-- Update custom parameters listbox
+
 
         # Update initial GPU checkbox states and recommendations based on loaded config and detected GPUs
         self._update_gpu_checkboxes()
@@ -762,10 +774,17 @@ class LlamaCppLauncher:
             # Ensure selected_gpus is a list
             if not isinstance(self.app_settings.get("selected_gpus"), list):
                  self.app_settings["selected_gpus"] = []
+            # Ensure custom_parameters is a list
+            if not isinstance(self.app_settings.get("custom_parameters"), list):
+                 self.app_settings["custom_parameters"] = []
+
 
             # Filter selected_gpus to only include indices of currently detected GPUs
             valid_gpu_indices = {gpu['id'] for gpu in self.detected_gpu_devices}
             self.app_settings["selected_gpus"] = [idx for idx in self.app_settings["selected_gpus"] if idx in valid_gpu_indices]
+
+            # Load custom parameters into the internal list
+            self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
 
 
         except json.JSONDecodeError as e:
@@ -774,18 +793,20 @@ class LlamaCppLauncher:
              # Reset to defaults on parse error
              self.app_settings = {
                  "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
-                 "model_dirs": [], "model_list_height": 8, "selected_gpus": []
+                 "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": []
              }
              self.saved_configs = {}
+             self.custom_parameters_list = [] # Reset internal list
         except Exception as exc:
             print(f"Config Load Error: Could not load config from {self.config_path}\nError: {exc}", file=sys.stderr)
             messagebox.showerror("Config Load Error", f"Could not load config from:\n{self.config_path}\n\nError: {exc}\n\nUsing default settings.")
             # Reset to defaults on other load errors
             self.app_settings = {
                 "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
-                "model_dirs": [], "model_list_height": 8, "selected_gpus": []
+                "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": []
             }
             self.saved_configs = {}
+            self.custom_parameters_list = [] # Reset internal list
 
     def _save_configs(self):
         if self.config_path.name in ("null", "NUL"):
@@ -796,6 +817,8 @@ class LlamaCppLauncher:
         self.app_settings["last_model_path"] = self.model_path.get()
         # Save selected GPU indices from the current state of the checkboxes
         self.app_settings["selected_gpus"] = [i for i, v in enumerate(self.gpu_vars) if v.get()]
+        # Save custom parameters list
+        self.app_settings["custom_parameters"] = self.custom_parameters_list
 
         payload = {
             "configs":      self.saved_configs,
@@ -1156,7 +1179,6 @@ class LlamaCppLauncher:
          print(f"Note: Chat templates file '{template_file_name}' not found. Using hardcoded templates.", file=sys.stderr)
          return {} # Return empty dict if not found
 
-
     # ░░░░░ ADVANCED TAB ░░░░░
     def _setup_advanced_tab(self, parent):
         canvas = tk.Canvas(parent, highlightthickness=0); vs = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -1170,7 +1192,7 @@ class LlamaCppLauncher:
         inner.columnconfigure(1, weight=1) # Make relevant columns expandable
 
         r = 0
-        # --- Model Information Display ---
+        # --- Model Information Display --- (Labels only, not editable)
         ttk.Label(inner, text="Model Information", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
@@ -1197,7 +1219,7 @@ class LlamaCppLauncher:
             .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=3); r += 1
 
 
-        # --- System Info Display (RAM & CPU) ---
+        # --- System Info Display (RAM & CPU) --- (Labels only, not editable)
         r += 1 # Add a small gap
         ttk.Label(inner, text="System Information", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
@@ -1243,37 +1265,33 @@ class LlamaCppLauncher:
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
 
-        # CUDA Devices Info & Checkboxes
-        # Use the status variable for the main message
+        # CUDA Devices Info & Checkboxes (Populated dynamically in _update_gpu_checkboxes)
         gpu_avail_text = "Available" if self.gpu_info['available'] else "Not available"
         ttk.Label(inner, text=f"CUDA Devices ({gpu_avail_text}):")\
             .grid(column=0, row=r, sticky="nw", padx=10, pady=3)
-        # Display detection message below if available
         ttk.Label(inner, textvariable=self.gpu_detected_status_var, font=("TkSmallCaptionFont"), foreground="orange")\
              .grid(column=1, row=r, sticky="nw", padx=5, pady=3, columnspan=3)
-
         r += 1
-        # Checkbox frame row
         self.gpu_checkbox_frame = ttk.Frame(inner)
         self.gpu_checkbox_frame.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=(0, 5))
-        # Checkboxes are populated dynamically in _update_gpu_checkboxes()
+        # The checkboxes themselves are added in _update_gpu_checkboxes and get their state there.
         r += 1
 
         # Display VRAM for each GPU in a separate row below checkboxes
         self._display_gpu_vram_info(inner, r)
-        r += 1 # Advance row count past VRAM info
+        r += 1
 
         # --- GPU Layers (Slider + Entry + Status Label) ---
         ttk.Label(inner, text="GPU Layers (--n-gpu-layers):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-
         gpu_layers_frame = ttk.Frame(inner)
         gpu_layers_frame.grid(column=1, row=r, columnspan=3, sticky="ew", padx=5, pady=3)
 
-        self.n_gpu_layers_entry = ttk.Entry(gpu_layers_frame, textvariable=self.n_gpu_layers, width=6)
+        # Entry should be enabled by default
+        self.n_gpu_layers_entry = ttk.Entry(gpu_layers_frame, textvariable=self.n_gpu_layers, width=6, state=tk.NORMAL)
         self.n_gpu_layers_entry.grid(column=0, row=0, sticky="w", padx=(0, 10))
-        # Validation command and bindings set in __init__
 
+        # Slider is intentionally disabled initially
         self.gpu_layers_slider = ttk.Scale(gpu_layers_frame, from_=0, to=self.max_gpu_layers.get(),
                                            orient="horizontal", variable=self.n_gpu_layers_int,
                                            command=self._sync_gpu_layers_from_slider, state=tk.DISABLED)
@@ -1282,7 +1300,7 @@ class LlamaCppLauncher:
         self.gpu_layers_status_label = ttk.Label(gpu_layers_frame, textvariable=self.gpu_layers_status_var, width=35, anchor="w")
         self.gpu_layers_status_label.grid(column=2, row=0, sticky="w", padx=(10, 0))
 
-        gpu_layers_frame.columnconfigure(1, weight=1) # Slider expands
+        gpu_layers_frame.columnconfigure(1, weight=1)
 
         ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Slider range updates with model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
@@ -1290,11 +1308,11 @@ class LlamaCppLauncher:
         # --- Tensor Split ---
         ttk.Label(inner, text="Tensor Split (--tensor-split):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.tensor_split, width=25)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.tensor_split_entry = ttk.Entry(inner, textvariable=self.tensor_split, width=25, state=tk.NORMAL)
+        self.tensor_split_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="e.g., '3,1' splits layers 75%/25% across GPUs 0 and 1.", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
-        # Recommendation display for Tensor Split
         ttk.Label(inner, text="Recommended Split (VRAM-based):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Label(inner, textvariable=self.recommended_tensor_split_var)\
@@ -1302,11 +1320,11 @@ class LlamaCppLauncher:
 
 
         # --- Main GPU ---
-        # Re-position Main GPU setting here, as it's related to multi-GPU
         ttk.Label(inner, text="Main GPU (--main-gpu):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.main_gpu, width=10)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.main_gpu_entry = ttk.Entry(inner, textvariable=self.main_gpu, width=10, state=tk.NORMAL)
+        self.main_gpu_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Primary GPU index (usually 0). Used with --n-gpu-layers when tensor-split is not set.", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
@@ -1314,11 +1332,11 @@ class LlamaCppLauncher:
         # --- Flash Attention ---
         ttk.Label(inner, text="Flash Attention (--flash-attn):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Checkbutton(inner, variable=self.flash_attn)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure checkbox is explicitly NORMAL
+        self.flash_attn_check = ttk.Checkbutton(inner, variable=self.flash_attn, state=tk.NORMAL)
+        self.flash_attn_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Use Flash Attention kernel (CUDA only, requires specific build)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, sticky="w", padx=5, pady=3);
-        # This label shows the status based on the venv check
         self.flash_attn_status_label = ttk.Label(inner, textvariable=self.flash_attn_status_var, font=("TkSmallCaptionFont", 8, ("bold",)))
         self.flash_attn_status_label.grid(column=3, row=r, sticky="w", padx=5, pady=3); r += 1
 
@@ -1328,33 +1346,39 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
         ttk.Label(inner, text="KV Cache Type (--cache-type-k):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        # Link this combobox variable change to update the Model Info section
-        ttk.Combobox(inner, textvariable=self.cache_type_k, width=10, state="readonly",
-                     values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1"))\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Combobox state is "readonly" for selection, but not disabled
+        self.cache_type_k_combo = ttk.Combobox(inner, textvariable=self.cache_type_k, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1"), state="readonly")
+        self.cache_type_k_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Quantization for KV cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
+
 
         ttk.Label(inner, text="Disable mmap (--no-mmap):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Checkbutton(inner, variable=self.no_mmap)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure checkbox is explicitly NORMAL
+        self.no_mmap_check = ttk.Checkbutton(inner, variable=self.no_mmap, state=tk.NORMAL)
+        self.no_mmap_check.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Load entire model into RAM instead of mapping file", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
         ttk.Label(inner, text="Lock in RAM (--mlock):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Checkbutton(inner, variable=self.mlock)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure checkbox is explicitly NORMAL
+        self.mlock_check = ttk.Checkbutton(inner, variable=self.mlock, state=tk.NORMAL)
+        self.mlock_check.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Prevent swapping model/KV cache (may require permissions)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
         ttk.Label(inner, text="Disable KV Offload (--no-kv-offload):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Checkbutton(inner, variable=self.no_kv_offload)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure checkbox is explicitly NORMAL
+        self.no_kv_offload_check = ttk.Checkbutton(inner, variable=self.no_kv_offload, state=tk.NORMAL)
+        self.no_kv_offload_check.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Keep KV cache in CPU RAM even with GPU layers", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
 
 
         # --- Performance (Batching & Threading) ---
@@ -1363,48 +1387,55 @@ class LlamaCppLauncher:
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
 
-        # Threads (--threads) moved to Basic Settings now
+        # Threads (--threads) moved to Basic Settings now (already checked in main tab setup)
 
         ttk.Label(inner, text="Prompt Batch Size (--batch-size):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.batch_size, width=10)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.batch_size_entry = ttk.Entry(inner, textvariable=self.batch_size, width=10, state=tk.NORMAL)
+        self.batch_size_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Number of tokens to process in a single batch during prompt processing (default: 512)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
 
         ttk.Label(inner, text="Unconditional Batch Size (--ubatch-size):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.ubatch_size, width=10)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.ubatch_size_entry = ttk.Entry(inner, textvariable=self.ubatch_size, width=10, state=tk.NORMAL)
+        self.ubatch_size_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Overrides --batch-size for prompt processing; allows larger batch regardless of GPU mem.", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
 
         # Threads Batch (--threads-batch)
         ttk.Label(inner, text="Batch Threads (--threads-batch):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.threads_batch, width=10)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.threads_batch_entry = ttk.Entry(inner, textvariable=self.threads_batch, width=10, state=tk.NORMAL)
+        self.threads_batch_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, textvariable=self.recommended_threads_batch_var, font=("TkSmallCaptionFont")).grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Number of threads to use for batch processing (llama.cpp default: 4)", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1 # Add descriptive text below reco label
+            .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1
 
 
         # Disable Conv Batching (--no-cnv) - Moved here as it's related to batching
         ttk.Label(inner, text="Disable Conv Batching (--no-cnv):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Checkbutton(inner, variable=self.no_cnv)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure checkbox is explicitly NORMAL
+        self.no_cnv_check = ttk.Checkbutton(inner, variable=self.no_cnv, state=tk.NORMAL)
+        self.no_cnv_check.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Disable convolutional batching for prompt processing", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
 
 
         # --- Scheduling Priority --- (Already existed, just moved)
         ttk.Label(inner, text="Scheduling Priority (--prio):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Combobox(inner, textvariable=self.prio, width=10, values=("0","1","2","3"), state="readonly")\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Combobox state is "readonly"
+        self.prio_combo = ttk.Combobox(inner, textvariable=self.prio, width=10, values=("0","1","2","3"), state="readonly")
+        self.prio_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="0=Normal, 1=Medium, 2=High, 3=Realtime (OS dependent)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
 
 
         # --- NEW: Generation Settings ---
@@ -1416,23 +1447,64 @@ class LlamaCppLauncher:
         # --ignore-eos
         ttk.Label(inner, text="Ignore EOS Token (--ignore-eos):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Checkbutton(inner, variable=self.ignore_eos)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure checkbox is explicitly NORMAL
+        self.ignore_eos_check = ttk.Checkbutton(inner, variable=self.ignore_eos, state=tk.NORMAL)
+        self.ignore_eos_check.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Don't stop generation at EOS token", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
 
         # --n-predict
         ttk.Label(inner, text="Max Tokens to Predict (--n-predict):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.n_predict, width=10)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.n_predict_entry = ttk.Entry(inner, textvariable=self.n_predict, width=10, state=tk.NORMAL)
+        self.n_predict_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Tokens to predict (e.g., 128, 512, -1 for unlimited/context size)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
+        # --- NEW: Custom Parameters Section ---
+        ttk.Label(inner, text="Custom Parameters", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
+        ttk.Label(inner, text="Add Parameter:").grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        # Ensure entry is explicitly NORMAL
+        self.custom_param_entry = ttk.Entry(inner, textvariable=self.custom_param_entry_var, state=tk.NORMAL)
+        self.custom_param_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2)
+        # Ensure button is explicitly NORMAL
+        self.add_custom_param_button = ttk.Button(inner, text="Add", command=self._add_custom_parameter, state=tk.NORMAL)
+        self.add_custom_param_button.grid(column=3, row=r, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="Enter full parameter string, e.g., '--my-flag true' or '--config-path /path/to/config'.", font=("TkSmallCaptionFont"))\
+             .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,5)); r += 1
 
 
-        inner.columnconfigure(2, weight=1) # Allow the description columns to expand
+        ttk.Label(inner, text="Added Parameters:").grid(column=0, row=r, sticky="nw", padx=10, pady=3)
+        custom_params_list_frame = ttk.Frame(inner)
+        custom_params_list_frame.grid(column=1, row=r, columnspan=2, sticky="nsew", padx=5, pady=3, rowspan=2)
+        custom_params_sb = ttk.Scrollbar(custom_params_list_frame, orient=tk.VERTICAL)
+        # Ensure listbox is explicitly NORMAL
+        self.custom_parameters_listbox = tk.Listbox(custom_params_list_frame,
+                                                    listvariable=self.custom_parameters_listbox_var,
+                                                    height=4, width=60, # Adjusted width
+                                                    yscrollcommand=custom_params_sb.set,
+                                                    exportselection=False, state=tk.NORMAL)
+        custom_params_sb.config(command=self.custom_parameters_listbox.yview)
+        self.custom_parameters_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        r += 1 # Advance row after adding the listbox frame
 
+        btn_frame = ttk.Frame(inner); btn_frame.grid(column=3, row=r-1, sticky="ew", padx=5, pady=3, rowspan=2)
+        # Ensure button is explicitly NORMAL
+        self.remove_custom_param_button = ttk.Button(btn_frame, text="Remove Selected", command=self._remove_custom_parameter, state=tk.NORMAL)
+        self.remove_custom_param_button.pack(side=tk.TOP, pady=2, fill=tk.X)
+        r += 1
 
+        # Ensure column 1 and 2 (entry, listbox frame) can expand
+        inner.columnconfigure(1, weight=1)
+        inner.columnconfigure(2, weight=1)
+
+        
     # ░░░░░ CHAT TEMPLATE TAB ░░░░░ (NEW)
     def _setup_chat_template_tab(self, parent):
         frame = ttk.Frame(parent, padding=10); frame.pack(fill="both", expand=True)
@@ -1767,41 +1839,17 @@ class LlamaCppLauncher:
             except Exception as e:
                  print(f"Warning: Could not resolve path for display '{p}': {e}", file=sys.stderr)
                  # If resolving fails, display the original path string with a warning
-                 displayed_paths_strs.append(str(p))
-                 self.model_dirs_listbox.insert(tk.END, f"[Invalid Path] {p}")
-
-        # Update the internal list to contain only successfully resolved paths or the original if resolve failed
-        # This ensures consistency between the displayed listbox items and the internal list contents for scanning
-        self.model_dirs = [Path(s) for s in displayed_paths_strs if not s.startswith("[Invalid Path]")]
-        # Add back any unresolved paths as Path objects if needed for some fallback logic, though scanning will likely skip them
-        # For simplicity, let's just keep the list clean with paths that could be resolved or were added
-        # The loop above added potentially unresolved paths as strings like "[Invalid Path]...", let's fix that.
-        # Instead, let's store the Path objects, but display the resolved string.
-
-        self.model_dirs_listbox.delete(0, tk.END)
-        displayed_paths = []
-        valid_model_dirs = [] # List to rebuild self.model_dirs with valid paths
-        for p in self.model_dirs:
-             try:
-                 resolved_p = p.resolve()
-                 resolved_str = str(resolved_p)
-                 self.model_dirs_listbox.insert(tk.END, resolved_str)
-                 displayed_paths.append(resolved_str)
-                 valid_model_dirs.append(resolved_p) # Keep resolved path
-             except Exception as e:
-                  print(f"Warning: Could not resolve and list path '{p}': {e}", file=sys.stderr)
-                  self.model_dirs_listbox.insert(tk.END, f"[UNRESOLVABLE] {p}")
-                  # Do not add to valid_model_dirs - scanning will skip anyway
-                  displayed_paths.append(f"[UNRESOLVABLE] {p}") # Add marker for comparison
+                 displayed_paths_strs.append(f"[UNRESOLVABLE] {p}") # Add marker for display
+                 self.model_dirs_listbox.insert(tk.END, f"[UNRESOLVABLE] {p}") # Add marker for display
 
 
-        self.model_dirs = valid_model_dirs # Update internal list with only resolved/valid paths
-
+        # Filter out unresolvable paths from the internal list for scanning
+        self.model_dirs = [Path(p_str.replace("[UNRESOLVABLE] ", "")) for p_str in displayed_paths_strs if not p_str.startswith("[UNRESOLVABLE]")]
 
         # Attempt to re-select the previously selected item based on resolved path string
-        if selected_text and selected_text in displayed_paths:
+        if selected_text and selected_text in displayed_paths_strs:
             try:
-                new_index = displayed_paths.index(selected_text)
+                new_index = displayed_paths_strs.index(selected_text)
                 self.model_dirs_listbox.selection_set(new_index)
                 self.model_dirs_listbox.activate(new_index)
                 self.model_dirs_listbox.see(new_index)
@@ -1867,32 +1915,36 @@ class LlamaCppLauncher:
                         base_name = first_part_match.group(1)
                         # Ensure the base name corresponds to the *first* part before adding
                         # Check if the resolved path points to this specific file
-                        try:
+                        try: # <-- This try block starts a new indentation level
                              resolved_gguf_path = gguf_path.resolve()
                              if base_name not in processed_multipart_bases:
                                  # Store the path to the first part
                                  found[base_name] = resolved_gguf_path
                                  processed_multipart_bases.add(base_name)
-                        except Exception as resolve_exc:
+                        # The 'except' needs to match the 'try' it belongs to
+                        except Exception as resolve_exc: # <-- Corrected indentation
                              print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr) # Log resolve errors
-                        continue
+                        # The 'continue' needs to align with the 'if first_part_match:' block
+                        continue # <-- Corrected indentation
 
                     # Handle subsequent parts of multi-part files: mark base as processed but don't add
                     multi_match = multipart_pattern.match(filename)
                     if multi_match:
                         base_name = multi_match.group(1)
                         processed_multipart_bases.add(base_name)
-                        continue
+                        # The 'continue' needs to align with the 'if multi_match:' block
+                        continue # <-- Corrected indentation
 
                     # Handle single-part files (not matching the multi-part patterns)
                     if filename.lower().endswith(".gguf") and gguf_path.stem not in processed_multipart_bases:
                          display_name = gguf_path.stem
-                         try:
+                         try: # <-- This try block starts a new indentation level
                              resolved_gguf_path = gguf_path.resolve()
                              # Only add if we haven't already added a multi-part version with the same base name
                              if display_name not in found:
                                 found[display_name] = resolved_gguf_path
-                         except Exception as resolve_exc:
+                         # The 'except' needs to match the 'try' it belongs to
+                         except Exception as resolve_exc: # <-- Corrected indentation
                              print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr) # Log resolve errors
 
 
@@ -1901,7 +1953,7 @@ class LlamaCppLauncher:
                 traceback.print_exc(file=sys.stderr)
 
         self.root.after(0, self._update_model_listbox_after_scan, found)
-
+        
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis
     # ═════════════════════════════════════════════════════════════════
@@ -2635,6 +2687,75 @@ sys.exit(0) # Indicate success
 
 
     # ═════════════════════════════════════════════════════════════════
+    #  Custom Parameter Logic (NEW)
+    # ═════════════════════════════════════════════════════════════════
+    def _add_custom_parameter(self):
+        """Adds the parameter string from the entry to the list."""
+        param_string = self.custom_param_entry_var.get().strip()
+        if not param_string:
+            messagebox.showwarning("Warning", "Please enter a parameter string.")
+            return
+
+        self.custom_parameters_list.append(param_string)
+        self._update_custom_parameters_listbox()
+        self.custom_param_entry_var.set("") # Clear the entry field
+        self._save_configs()
+        print(f"DEBUG: Added custom parameter: '{param_string}'", file=sys.stderr)
+
+
+    def _remove_custom_parameter(self):
+        """Removes the selected parameter from the list."""
+        selection = self.custom_parameters_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", "Select a parameter to remove.")
+            return
+
+        # Get the index of the selected item
+        index = selection[0]
+        # Get the string representation displayed in the listbox
+        selected_param_display = self.custom_parameters_listbox.get(index)
+
+        # Find the actual string in our internal list (handle potential duplicates)
+        # It's safer to rebuild the list excluding the selected item
+        new_list = []
+        removed = False
+        for item in self.custom_parameters_list:
+             # Compare against the displayed string for removal
+             if not removed and item == selected_param_display:
+                 removed = True
+                 print(f"DEBUG: Removed custom parameter: '{item}'", file=sys.stderr)
+             else:
+                 new_list.append(item)
+
+        self.custom_parameters_list = new_list
+        self._update_custom_parameters_listbox()
+        self._save_configs()
+        # If multiple identical items exist and user removes one, only the first one selected is removed
+
+
+    def _update_custom_parameters_listbox(self):
+        """Updates the listbox to display the current custom parameters list."""
+        # Preserve selection if possible (less critical for simple list)
+        current_selection = self.custom_parameters_listbox.curselection()
+        selected_text = self.custom_parameters_listbox.get(current_selection[0]) if current_selection else None
+
+
+        self.custom_parameters_listbox.delete(0, tk.END)
+        for param_string in self.custom_parameters_list:
+            self.custom_parameters_listbox.insert(tk.END, param_string)
+
+        # Attempt to re-select the previously selected item
+        if selected_text and selected_text in self.custom_parameters_list:
+             try:
+                  new_index = self.custom_parameters_list.index(selected_text)
+                  self.custom_parameters_listbox.selection_set(new_index)
+                  self.custom_parameters_listbox.activate(new_index)
+                  self.custom_parameters_listbox.see(new_index)
+             except ValueError:
+                  pass # Item no longer exists
+
+
+    # ═════════════════════════════════════════════════════════════════
     #  Default Configuration Name Generation
     # ═════════════════════════════════════════════════════════════════
     def _generate_default_config_name(self):
@@ -2700,7 +2821,7 @@ sys.exit(0) # Indicate success
             "mlock":         False, # Default for --mlock flag
             "no_kv_offload": False, # Default for --no-kv-offload flag
             "no_cnv":        False, # Default for --no-cnv flag
-            # Chat template parameters are deliberately excluded from default name generation
+            # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
         current_params = {
@@ -2883,6 +3004,8 @@ sys.exit(0) # Indicate success
             "template_source": self.template_source.get(),
             "predefined_template_name": self.predefined_template_name.get(),
             "custom_template_string": self.custom_template_string.get(),
+            # --- NEW: Save Custom Parameters ---
+            "custom_parameters": self.custom_parameters_list, # Save the list of strings
         }
 
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
@@ -2933,6 +3056,11 @@ sys.exit(0) # Indicate success
         # --- NEW: Load new parameters ---
         self.ignore_eos.set(cfg.get("ignore_eos", False))
         self.n_predict.set(cfg.get("n_predict", "-1")) # Default -1 for backward compatibility
+        # --- NEW: Load Custom Parameters ---
+        # Default to empty list [] for backward compatibility with older configs
+        self.custom_parameters_list = cfg.get("custom_parameters", [])
+        self._update_custom_parameters_listbox() # Update the GUI listbox
+
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Load template parameters
@@ -3255,20 +3383,41 @@ sys.exit(0) # Indicate success
         else: # source == "default"
              print("DEBUG: Chat template source is 'Let llama.cpp Decide'. Omitting --chat-template.", file=sys.stderr)
 
+        # --- NEW: Add Custom Parameters ---
+        print(f"DEBUG: Adding {len(self.custom_parameters_list)} custom parameters...", file=sys.stderr)
+        for param_string in self.custom_parameters_list:
+            try:
+                # Use shlex.split to correctly parse potentially quoted arguments
+                # shlex.split will split "--param value with spaces" into ["--param", "value with spaces"]
+                split_params = shlex.split(param_string)
+                cmd.extend(split_params)
+                print(f"DEBUG: Added custom param: {param_string} -> {split_params}", file=sys.stderr)
+            except Exception as e:
+                print(f"WARNING: Could not parse custom parameter '{param_string}': {e}. Skipping.", file=sys.stderr)
+                messagebox.showwarning("Custom Parameter Warning", f"Could not parse custom parameter '{param_string}': {e}\nIt will be ignored.")
+
 
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
         # but are NOT using --tensor-split (which explicitly lists devices/split).
         # This warning is helpful because llama.cpp might use all GPUs by default unless restricted by env var or tensor-split.
         selected_gpu_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
         detected_gpu_count = self.gpu_info.get("device_count", 0)
+        selected_indices_str = ",".join(map(str, sorted(selected_gpu_indices)))
+
 
         # Only warn if GPUs were detected, the user selected a *subset*, and --tensor-split is not used.
         if detected_gpu_count > 0 and len(selected_gpu_indices) > 0 and len(selected_gpu_indices) < detected_gpu_count and not tensor_split_val:
              # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
-             selected_indices_str = ",".join(map(str, sorted(selected_gpu_indices)))
              print(f"\nINFO: Specific GPUs ({selected_indices_str}) were selected via checkboxes, but --tensor-split was not used.", file=sys.stderr)
-             print("      llama-server might default to using all available GPUs unless CUDA_VISIBLE_DEVICES environment variable is set.", file=sys.stderr)
-             print(f"      To restrict server to GPUs {selected_indices_str} without --tensor-split, set CUDA_VISIBLE_DEVICES={selected_indices_str} environment variable *before* launching (e.g., 'set CUDA_VISIBLE_DEVICES={selected_indices_str}' on Windows cmd/batch, '$env:CUDA_VISIBLE_DEVICES=\"{selected_indices_str}\"' on Windows PowerShell, or 'export CUDA_VISIBLE_DEVICES={selected_indices_str}' on Linux/macOS bash).", file=sys.stderr)
+             # The PowerShell script will set CUDA_VISIBLE_DEVICES, so the warning applies more generally now.
+             print("      llama-server might default to using all available GPUs unless restricted by CUDA_VISIBLE_DEVICES environment variable.", file=sys.stderr)
+             if sys.platform != "win32":
+                  # Only print the bash/export example on Linux/macOS if needed
+                  print(f"      To restrict server to GPUs {selected_indices_str}, set CUDA_VISIBLE_DEVICES={selected_indices_str} environment variable *before* launching (e.g., 'export CUDA_VISIBLE_DEVICES={selected_indices_str}' on Linux/macOS bash).", file=sys.stderr)
+             else:
+                 # On Windows, the script *will* set it if GPUs are selected, but reinforce
+                  print(f"      The generated PowerShell script will set CUDA_VISIBLE_DEVICES={selected_indices_str}.", file=sys.stderr)
+
              print("      Alternatively, use --tensor-split to explicitly assign layers.", file=sys.stderr)
         elif len(selected_gpu_indices) > 0 and detected_gpu_count > 0:
              # If GPUs were selected (and there are GPUs), maybe a general reminder about env vars?
@@ -3289,7 +3438,7 @@ sys.exit(0) # Indicate success
         print("-------------------------\n", file=sys.stderr)
 
         return cmd
-    
+
     def _add_arg(self, cmd_list, arg_name, value, default_value=None):
         """
         Adds argument to cmd list if its value is non-empty or, if a default is given,
@@ -3359,6 +3508,10 @@ sys.exit(0) # Indicate success
 
         tmp_path = None # Initialize tmp_path outside try/except/finally
 
+        # Get selected GPU indices for CUDA_VISIBLE_DEVICES
+        selected_gpu_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
+        cuda_devices_value = ",".join(map(str, sorted(selected_gpu_indices)))
+
 
         try: # Main try block for creating script and launching process
             if sys.platform == "win32":
@@ -3375,6 +3528,17 @@ sys.exit(0) # Indicate success
                     f.write("$ErrorActionPreference = 'Continue'\n\n")
                     # Set console output encoding to UTF-8
                     f.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
+
+                    # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
+                    if cuda_devices_value:
+                        f.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
+                        f.write(f'$env:CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
+                    elif self.gpu_info.get("device_count", 0) > 0:
+                         # If GPUs are detected but none are selected, explicitly unset the variable
+                         # to rely on default llama.cpp behavior or let the OS handle it.
+                         # This avoids accidentally inheriting a variable from the environment.
+                         f.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
+                         f.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
 
 
                     if use_venv:
@@ -3408,6 +3572,8 @@ sys.exit(0) # Indicate success
                     f.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
 
                     # --- Build the command string for PowerShell using appropriate quoting ---
+                    # Join the cmd_list parts with spaces, and then quote each part individually for PowerShell
+                    # This handles parameters like --arg "value with spaces" correctly after shlex.split
                     ps_cmd_parts = []
                     # First argument is the executable path, handle specially with '&'.
                     exe_path_obj = Path(cmd_list[0]).resolve() # Resolve path for robustness
@@ -3416,38 +3582,62 @@ sys.exit(0) # Indicate success
                     quoted_exe_path_ps = str(exe_path_obj.as_posix()).replace('"', '`"').replace('`', '``')
                     ps_cmd_parts.append(f'& "{quoted_exe_path_ps}"') # Use double quotes for the path
 
-                    # Process remaining arguments
-                    i = 1 # Start index after the executable
-                    while i < len(cmd_list):
-                        arg_name = cmd_list[i]
-                        if arg_name == "--chat-template":
-                            # Special case for --chat-template: enclose the value in *single* quotes in the PowerShell command
-                            # and escape internal single quotes by doubling them.
-                            if i + 1 < len(cmd_list):
-                                template_string = cmd_list[i+1]
-                                # Escape internal single quotes by doubling them (' becomes '')
-                                escaped_template_string = template_string.replace("'", "''")
-                                # Enclose the *entire* escaped template string in single quotes (') for the final PS command string
-                                quoted_template_arg = f"'{escaped_template_string}'"
+                    # Process remaining arguments (from cmd_list, already includes custom params)
+                    # For each argument in cmd_list (after the executable), quote it for PowerShell
+                    # Use double quotes by default, escaping internal quotes and backticks
+                    # Special case --chat-template needs value in single quotes.
+                    for arg in cmd_list[1:]:
+                         if arg == "--chat-template" and len(cmd_list) > cmd_list.index("--chat-template") + 1:
+                             # This check is a bit redundant as build_cmd should ensure a value exists,
+                             # but defensive coding is good. Need to find the *next* argument in cmd_list.
+                             # Find index of the flag and get the next element
+                             try:
+                                 flag_index = cmd_list.index("--chat-template")
+                                 if flag_index + 1 < len(cmd_list):
+                                     template_string = cmd_list[flag_index + 1]
+                                     # Escape internal single quotes by doubling them (' becomes '')
+                                     escaped_template_string = template_string.replace("'", "''")
+                                     # Enclose the *entire* escaped template string in single quotes (') for the final PS command string
+                                     quoted_template_arg = f"'{escaped_template_string}'"
 
-                                ps_cmd_parts.append(arg_name)
-                                ps_cmd_parts.append(quoted_template_arg)
-                                i += 2 # Move past both the flag and its value
-                            else:
-                                # Should not happen if _build_cmd is correct, but handle defensively
-                                print("ERROR: --chat-template flag found without a value!", file=sys.stderr)
-                                ps_cmd_parts.append(arg_name) # Add the flag, skip expected value
-                                i += 1
-                        else:
-                            # For all other arguments, use double-quoting and standard PowerShell escapes
-                            arg_value = cmd_list[i]
-                            # Escape internal double quotes (") with backtick-double-quote (`")
-                            # Escape internal backticks (`) with double backticks (``)
-                            quoted_arg = f'"{arg_value.replace('"', '`"').replace('`', '``')}"'
-                            ps_cmd_parts.append(quoted_arg)
-                            i += 1 # Move to the next item
+                                     ps_cmd_parts.append("--chat-template")
+                                     ps_cmd_parts.append(quoted_template_arg)
+                                     # Need to skip the *next* element in the loop's iteration
+                                     # A simple loop like this is tricky. Let's reconstruct differently.
+
+                                     # Reworking the loop structure to handle pairs like --chat-template
+                                     # Re-initialize ps_cmd_parts and loop index
+                                     ps_cmd_parts = []
+                                     ps_cmd_parts.append(f'& "{quoted_exe_path_ps}"') # Add executable again
+
+                                     i = 1 # Start index after the executable
+                                     while i < len(cmd_list):
+                                         current_arg = cmd_list[i]
+                                         if current_arg == "--chat-template" and i + 1 < len(cmd_list):
+                                              template_string = cmd_list[i+1]
+                                              escaped_template_string = template_string.replace("'", "''")
+                                              quoted_template_arg = f"'{escaped_template_string}'"
+                                              ps_cmd_parts.append("--chat-template")
+                                              ps_cmd_parts.append(quoted_template_arg)
+                                              i += 2 # Skip both flag and value
+                                         else:
+                                              # Standard quoting for other args
+                                              quoted_arg = f'"{current_arg.replace('"', '`"').replace('`', '``')}"'
+                                              ps_cmd_parts.append(quoted_arg)
+                                              i += 1
+                                     break # Exit this inner while loop once reconstructed
+
+                             except ValueError: # --chat-template not found, should not happen here
+                                 pass # Continue with the original loop if this somehow occurs
 
 
+                         else:
+                             # Standard quoting for other args
+                             quoted_arg = f'"{arg.replace('"', '`"').replace('`', '``')}"'
+                             ps_cmd_parts.append(quoted_arg)
+
+
+                    # After processing all args, write the final command string
                     f.write(" ".join(ps_cmd_parts) + "\n\n") # Join all parts and write
 
 
@@ -3482,6 +3672,8 @@ sys.exit(0) # Indicate success
                 # because shlex.quote handles embedding complex strings correctly for bash.
 
                 # Ensure command parts are quoted correctly for bash -c
+                # cmd_list already includes custom parameters and other standard args.
+                # We just need to quote *each element* of the final cmd_list.
                 quoted_cmd_parts = [shlex.quote(arg) for arg in cmd_list]
                 server_command_str = " ".join(quoted_cmd_parts)
 
@@ -3516,6 +3708,38 @@ sys.exit(0) # Indicate success
                     full_script_content = f'echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
                     quoted_full_command_for_bash = shlex.quote(full_script_content)
 
+                # --- CUDA_VISIBLE_DEVICES for Linux/macOS (Bash) ---
+                # Add export CUDA_VISIBLE_DEVICES="..." *before* the main command in the bash script
+                # This should happen *after* venv activation if used.
+                cuda_env_line = ""
+                if cuda_devices_value:
+                    # Quote the value in case it contains spaces or special characters (unlikely for indices but safe)
+                    quoted_cuda_value = shlex.quote(cuda_devices_value)
+                    cuda_env_line = f'export CUDA_VISIBLE_DEVICES={quoted_cuda_value} && echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"'
+                elif self.gpu_info.get("device_count", 0) > 0:
+                    # Unset if GPUs detected but none selected
+                     cuda_env_line = f'unset CUDA_VISIBLE_DEVICES && echo "Clearing CUDA_VISIBLE_DEVICES environment variable."'
+
+                # Integrate the CUDA env line into the full script content
+                if cuda_env_line:
+                    # Place it after source but before the server command
+                    if use_venv:
+                        # Split the script after source and first echo
+                        parts = full_script_content.split('&& echo "Virtual environment activated." &&', 1)
+                        if len(parts) == 2:
+                             # Reconstruct with the cuda line inserted
+                             full_script_content = f"{parts[0]}&& echo \"Virtual environment activated.\" && {cuda_env_line} && {parts[1]}"
+                             quoted_full_command_for_bash = shlex.quote(full_script_content) # Re-quote the whole thing
+                        else:
+                             # Fallback if split failed
+                             print("WARNING: Could not insert CUDA_VISIBLE_DEVICES after venv activation. Adding before everything.", file=sys.stderr)
+                             full_script_content = f'{cuda_env_line} && {full_script_content}'
+                             quoted_full_command_for_bash = shlex.quote(full_script_content) # Re-quote
+
+                    else: # No venv, just prepend
+                        full_script_content = f'{cuda_env_line} && {full_script_content}'
+                        quoted_full_command_for_bash = shlex.quote(full_script_content) # Re-quote
+
 
                 # Attempt to launch in a new terminal window
                 # Use 'bash -c' to execute the command string.
@@ -3538,9 +3762,12 @@ sys.exit(0) # Indicate success
                         # Let's try common patterns, starting with -e
                         term_cmds = []
                         if term in ['gnome-terminal', 'xfce4-terminal', 'iterm']:
+                             # gnome-terminal/xfce4-terminal/iterm expect -e followed by command string or list
+                             # Pass 'bash -c command_string' as two arguments to -e
                              term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', quoted_full_command_for_bash])
                         elif term == 'konsole':
-                             term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash', '-c', quoted_full_command_for_bash])
+                             # Konsole needs --noclose and -e followed by the command list or string
+                             term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash -c ' + quoted_full_command_for_bash]) # Requires bash -c inside quotes
                         elif term == 'xterm':
                              # xterm can often take the command directly after its own flags
                              term_cmds.append(term_cmd_base + ['-e', 'bash -c ' + quoted_full_command_for_bash]) # Requires bash -c inside quotes
@@ -3648,6 +3875,18 @@ sys.exit(0) # Indicate success
                 fh.write("$ErrorActionPreference = 'Continue'\n\n") # Use 'Continue' for better error reporting in script output
                 fh.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
 
+                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
+                selected_gpu_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
+                cuda_devices_value = ",".join(map(str, sorted(selected_gpu_indices)))
+
+                if cuda_devices_value:
+                    fh.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
+                    fh.write(f'$env:CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
+                elif self.gpu_info.get("device_count", 0) > 0:
+                     # If GPUs are detected but none are selected, explicitly unset the variable
+                     fh.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
+                     fh.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
+
 
                 venv = self.venv_dir.get().strip()
                 if venv:
@@ -3681,6 +3920,7 @@ sys.exit(0) # Indicate success
                 fh.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
 
                 # --- Build the command string for PowerShell using appropriate quoting ---
+                # Similar logic as launch_server for Windows
                 ps_cmd_parts = []
                 # First argument is the executable path, handle specially with '&'.
                 exe_path_obj = Path(cmd_list[0]).resolve() # Resolve path for reliability.
@@ -3689,36 +3929,23 @@ sys.exit(0) # Indicate success
                 quoted_exe_path_ps = str(exe_path_obj.as_posix()).replace('"', '`"').replace('`', '``')
                 ps_cmd_parts.append(f'& "{quoted_exe_path_ps}"') # Still use double quotes here as it's a path
 
-                # Process remaining arguments
+                # Process remaining arguments (from cmd_list, already includes custom params)
+                # Reworking the loop structure to handle pairs like --chat-template
                 i = 1 # Start index after the executable
                 while i < len(cmd_list):
-                    arg_name = cmd_list[i]
-                    if arg_name == "--chat-template":
-                        # Special case for --chat-template: enclose the value in *single* quotes in the PowerShell command
-                        # and escape internal single quotes by doubling them.
-                        if i + 1 < len(cmd_list):
-                            template_string = cmd_list[i+1]
-                            # Escape internal single quotes by doubling them (' becomes '')
-                            escaped_template_string = template_string.replace("'", "''")
-                            # Enclose the *entire* escaped template string in single quotes
-                            quoted_template_arg = f"'{escaped_template_string}'"
-
-                            ps_cmd_parts.append(arg_name)
-                            ps_cmd_parts.append(quoted_template_arg)
-                            i += 2 # Move past both the flag and its value
-                        else:
-                            # Should not happen if _build_cmd is correct, but handle defensively
-                            print("ERROR (save_ps1): --chat-template flag found without a value!", file=sys.stderr)
-                            ps_cmd_parts.append(arg_name) # Add the flag, skip expected value
-                            i += 1
+                    current_arg = cmd_list[i]
+                    if current_arg == "--chat-template" and i + 1 < len(cmd_list):
+                         template_string = cmd_list[i+1]
+                         escaped_template_string = template_string.replace("'", "''")
+                         quoted_template_arg = f"'{escaped_template_string}'"
+                         ps_cmd_parts.append("--chat-template")
+                         ps_cmd_parts.append(quoted_template_arg)
+                         i += 2 # Skip both flag and value
                     else:
-                        # For all other arguments, use double-quoting and standard PowerShell escapes
-                        arg_value = cmd_list[i]
-                        # Escape internal double quotes (") with backtick-double-quote (`"`)
-                        # Escape internal backticks (`) with double backticks (``)
-                        quoted_arg = f'"{arg_value.replace('"', '`"').replace('`', '``')}"'
-                        ps_cmd_parts.append(quoted_arg)
-                        i += 1 # Move to the next item
+                         # Standard quoting for other args
+                         quoted_arg = f'"{current_arg.replace('"', '`"').replace('`', '``')}"'
+                         ps_cmd_parts.append(quoted_arg)
+                         i += 1
 
 
                 fh.write(" ".join(ps_cmd_parts) + "\n\n") # Join all parts and write
@@ -3774,7 +4001,7 @@ if __name__ == "__main__":
                      # Basic heuristic to attempt dark theme configuration if name suggests it
                      # This might be redundant or conflict if the theme itself handles it well
                      # Only apply these if the theme name suggests dark and we successfully applied it
-                     if 'dark' in theme.lower() or 'black' in theme.lower() or 'highcontrast' in theme.lower():
+                     if not theme.startswith('forest') and ('dark' in theme.lower() or 'black' in theme.lower() or 'highcontrast' in theme.lower()):
                           try:
                                # Get background/foreground from the theme's defaults
                                # Use lookup with default to avoid errors if element doesn't exist in theme
@@ -3804,42 +4031,42 @@ if __name__ == "__main__":
                                # It's often better to just let the theme handle it if possible.
                                # Let's try just configuring the root and Listbox/ScrolledText explicitly as they aren't ttk widgets.
                                # The 'forest' themes handle this automatically. Only needed for fallback themes.
-                               if not theme.startswith('forest'):
-                                    # Configure general style for implicit inheritance
-                                    style.configure('.', background=bg_color, foreground=fg_color)
-                                    # Explicitly configure some widget types
-                                    style.configure('TFrame', background=bg_color)
-                                    style.configure('TLabel', background=bg_color, foreground=fg_color)
-                                    style.configure('TCheckbutton', background=bg_color, foreground=fg_color)
-                                    style.configure('TRadiobutton', background=bg_color, foreground=fg_color) # If used
-                                    # style.configure('TButton', background=bg_color, foreground=fg_color) # Buttons are tricky
 
-                                    # Listbox is tk, not ttk, needs option_add
-                                    # Use try/except as option_add might not be available in all contexts or for all styles
-                                    try:
-                                       root.option_add('*Listbox.background', listbox_bg)
-                                       root.option_add('*Listbox.foreground', listbox_fg)
-                                       root.option_add('*Listbox.selectBackground', listbox_select_bg)
-                                       root.option_add('*Listbox.selectForeground', listbox_select_fg)
-                                    except tk.TclError: print("Note: Failed to configure Tk Listbox colors via option_add.", file=sys.stderr)
+                               # Configure general style for implicit inheritance
+                               style.configure('.', background=bg_color, foreground=fg_color)
+                               # Explicitly configure some widget types
+                               style.configure('TFrame', background=bg_color)
+                               style.configure('TLabel', background=bg_color, foreground=fg_color)
+                               style.configure('TCheckbutton', background=bg_color, foreground=fg_color)
+                               style.configure('TRadiobutton', background=bg_color, foreground=fg_color) # If used
+                               # style.configure('TButton', background=bg_color, foreground=fg_color) # Buttons are tricky
 
-                                    # Combobox dropdown list might need configuring (may inherit from Listbox options)
-                                    # Explicit mapping might be needed if listbox options don't propagate
-                                    try:
-                                         style.map('TCombobox', fieldbackground=[('readonly', entry_bg), ('!readonly', entry_bg)],
-                                                                foreground=[('readonly', entry_fg), ('!readonly', entry_fg)])
-                                         style.map('TEntry', fieldbackground=[('!disabled', entry_bg)], foreground=[('!disabled', entry_fg)])
-                                    except tk.TclError: print("Note: Failed to configure TCombobox/TEntry colors via map.", file=sys.stderr)
-                                    # ScrolledText is tk, needs option_add
-                                    try:
-                                        root.option_add('*ScrolledText.background', entry_bg)
-                                        root.option_add('*ScrolledText.foreground', entry_fg)
-                                        # Need to set insertbackground for cursor color in dark themes
-                                        root.option_add('*ScrolledText.insertBackground', fg_color)
-                                        # Selection colors
-                                        root.option_add('*ScrolledText.selectBackground', listbox_select_bg)
-                                        root.option_add('*ScrolledText.selectForeground', listbox_select_fg)
-                                    except tk.TclError: print("Note: Failed to configure Tk ScrolledText colors via option_add.", file=sys.stderr)
+                               # Listbox is tk, not ttk, needs option_add
+                               # Use try/except as option_add might not be available in all contexts or for all styles
+                               try:
+                                  root.option_add('*Listbox.background', listbox_bg)
+                                  root.option_add('*Listbox.foreground', listbox_fg)
+                                  root.option_add('*Listbox.selectBackground', listbox_select_bg)
+                                  root.option_add('*Listbox.selectForeground', listbox_select_fg)
+                               except tk.TclError: print("Note: Failed to configure Tk Listbox colors via option_add.", file=sys.stderr)
+
+                               # Combobox dropdown list might need configuring (may inherit from Listbox options)
+                               # Explicit mapping might be needed if listbox options don't propagate
+                               try:
+                                    style.map('TCombobox', fieldbackground=[('readonly', entry_bg), ('!readonly', entry_bg)],
+                                                             foreground=[('readonly', entry_fg), ('!readonly', entry_fg)])
+                                    style.map('TEntry', fieldbackground=[('!disabled', entry_bg)], foreground=[('!disabled', entry_fg)])
+                               except tk.TclError: print("Note: Failed to configure TCombobox/TEntry colors via map.", file=sys.stderr)
+                               # ScrolledText is tk, needs option_add
+                               try:
+                                   root.option_add('*ScrolledText.background', entry_bg)
+                                   root.option_add('*ScrolledText.foreground', entry_fg)
+                                   # Need to set insertbackground for cursor color in dark themes
+                                   root.option_add('*ScrolledText.insertBackground', fg_color)
+                                   # Selection colors
+                                   root.option_add('*ScrolledText.selectBackground', listbox_select_bg)
+                                   root.option_add('*ScrolledText.selectForeground', listbox_select_fg)
+                               except tk.TclError: print("Note: Failed to configure Tk ScrolledText colors via option_add.", file=sys.stderr)
 
 
                           except tk.TclError as style_err:

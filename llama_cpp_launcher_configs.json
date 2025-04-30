@@ -10,7 +10,7 @@
       "batch_size": "8192",
       "ubatch_size": "4096",
       "n_gpu_layers": "100",
-      "no_mmap": false,
+      "no_mmap": true,
       "no_cnv": false,
       "prio": "0",
       "temperature": "0.8",
@@ -20,10 +20,15 @@
       "flash_attn": true,
       "tensor_split": ".42,.42,.16",
       "main_gpu": "0",
-      "mlock": false,
+      "mlock": true,
       "no_kv_offload": false,
       "host": "127.0.0.1",
       "port": "8080",
+      "ignore_eos": true,
+      "n_predict": "32000",
+      "template_source": "default",
+      "predefined_template_name": "Let llama.cpp Decide (Use Model Default)",
+      "custom_template_string": "",
       "gpu_indices": [
         0,
         1,
@@ -64,12 +69,47 @@
         1,
         2
       ]
+    },
+    "Qwen3 A3B Q6 30B Maxed": {
+      "llama_cpp_dir": "H:/AI_Software/llama.cpp",
+      "venv_dir": "H:/AI_Software/tabbyAPI/venv",
+      "model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q6_K.gguf",
+      "cache_type_k": "f16",
+      "threads": "24",
+      "threads_batch": "48",
+      "batch_size": "12288",
+      "ubatch_size": "6144",
+      "n_gpu_layers": "100",
+      "no_mmap": true,
+      "no_cnv": false,
+      "prio": "0",
+      "temperature": "0.8",
+      "min_p": "0.05",
+      "ctx_size": 131072,
+      "seed": "-1",
+      "flash_attn": true,
+      "tensor_split": ".42,.42,.16",
+      "main_gpu": "0",
+      "mlock": true,
+      "no_kv_offload": false,
+      "host": "127.0.0.1",
+      "port": "8080",
+      "ignore_eos": true,
+      "n_predict": "32000",
+      "template_source": "default",
+      "predefined_template_name": "Let llama.cpp Decide (Use Model Default)",
+      "custom_template_string": "",
+      "gpu_indices": [
+        0,
+        1,
+        2
+      ]
     }
   },
   "app_settings": {
-    "last_llama_cpp_dir": "H:/AI_Software/llama.cpp",
-    "last_venv_dir": "H:/AI_Software/tabbyAPI/venv",
-    "last_model_path": "H:\\Models\\lmstudio-community\\Qwen3-32B-GGUF\\Qwen3-32B-Q6_K.gguf",
+    "last_llama_cpp_dir": "",
+    "last_venv_dir": "",
+    "last_model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q8_0.gguf",
     "model_dirs": [
       "H:\\Models",
       "G:\\Models"
@@ -79,6 +119,7 @@
       0,
       1,
       2
-    ]
+    ],
+    "custom_parameters": []
   }
 }
