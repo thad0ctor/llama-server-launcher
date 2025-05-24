@@ -2,7 +2,6 @@
   "configs": {
     "Qwen3 A3B 30B Maxed": {
       "llama_cpp_dir": "H:/AI_Software/llama.cpp",
-      "venv_dir": "H:/AI_Software/tabbyAPI/venv",
       "model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q8_0.gguf",
       "cache_type_k": "f16",
       "threads": "24",
@@ -37,7 +36,6 @@
     },
     "Qwen3 A3B 30B test": {
       "llama_cpp_dir": "H:/AI_Software/llama.cpp",
-      "venv_dir": "H:/AI_Software/tabbyAPI/venv",
       "model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q8_0.gguf",
       "cache_type_k": "f16",
       "threads": "24",
@@ -72,7 +70,6 @@
     },
     "Qwen3 A3B Q6 30B Maxed": {
       "llama_cpp_dir": "H:/AI_Software/llama.cpp",
-      "venv_dir": "H:/AI_Software/tabbyAPI/venv",
       "model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q6_K.gguf",
       "cache_type_k": "f16",
       "threads": "24",

@@ -13,6 +13,13 @@ import shlex # <-- Import shlex for parameter splitting
 import math
 import time
 
+# Add debug prints for Python environment
+print("\n=== Python Environment Debug Info ===", file=sys.stderr)
+print(f"Python executable: {sys.executable}", file=sys.stderr)
+print(f"Python version: {sys.version}", file=sys.stderr)
+print(f"sys.path: {sys.path}", file=sys.stderr)
+print("===================================\n", file=sys.stderr)
+
 # --- New Imports ---
 try:
     import torch
@@ -82,13 +89,14 @@ if LLAMA_CPP_PYTHON_AVAILABLE: # Only warn about these if llama_cpp is available
 
 # psutil check already prints a warning if not found.
 
+# Only print missing deps warning if there are actually missing deps
 if MISSING_DEPS:
-    print("\n--- Missing Dependencies Warning ---", file=sys.stderr)
-    print("The following Python libraries are recommended for full functionality but were not found:", file=sys.stderr)
+    print("\n--- Missing Dependencies Warning ---")
+    print("The following Python libraries are recommended for full functionality but were not found:")
     for dep in MISSING_DEPS:
-        print(f" - {dep}", file=sys.stderr) # Ensure print to stderr
-    print("Please install them (e.g., 'pip install llama-cpp-python torch psutil flash_attn') if you need GGUF analysis, GPU features, or Flash Attention status.", file=sys.stderr)
-    print("-------------------------------------\n", file=sys.stderr)
+        print(f" - {dep}")
+    print("Please install them (e.g., 'pip install llama-cpp-python torch psutil flash_attn') if you need GGUF analysis, GPU features, or Flash Attention status.")
+    print("-------------------------------------\n")
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -935,17 +943,27 @@ class LlamaCppLauncher:
                                              yscrollcommand=dir_sb.set, exportselection=False)
         dir_sb.config(command=self.model_dirs_listbox.yview)
         self.model_dirs_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        dir_sb.pack(side=tk.RIGHT, fill=tk.Y)
         r += 1 # Advance row count after adding the listbox frame
 
         inner.rowconfigure(r-1, weight=0) # Don't expand the directory listbox row with height
 
+        # Move directory buttons to the right of the listbox
         dir_btn_frame = ttk.Frame(inner)
-        dir_btn_frame.grid(column=2, row=r-1, sticky="ew", padx=5, pady=3, rowspan=2)
+        dir_btn_frame.grid(column=2, row=r-1, sticky="n", padx=5, pady=3)
         ttk.Button(dir_btn_frame, text="Add Dir…", width=10, command=self._add_model_dir)\
            .pack(side=tk.TOP, pady=2, fill=tk.X)
         ttk.Button(dir_btn_frame, text="Remove Dir", width=10, command=self._remove_model_dir)\
            .pack(side=tk.TOP, pady=2, fill=tk.X)
 
+        # Add scan button next to directory buttons
+        scan_btn = ttk.Button(dir_btn_frame, text="Scan Models", command=self._trigger_scan)
+        scan_btn.pack(side=tk.TOP, pady=2, fill=tk.X)
+
+        # Add some vertical space between directory section and model selection
+        r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=10); r += 1
 
         ttk.Label(inner, text="Select Model:")\
             .grid(column=0, row=r, sticky="nw", padx=10, pady=(10, 3))
@@ -969,8 +987,7 @@ class LlamaCppLauncher:
         self.resize_grip.bind("<B1-Motion>", self._do_resize)
         self.resize_grip.bind("<ButtonRelease-1>", self._end_resize)
 
-        scan_btn = ttk.Button(inner, text="Scan Models", command=self._trigger_scan)
-        scan_btn.grid(column=3, row=r, sticky="n", padx=5, pady=(10,3))
+        # Remove the old scan button position since we moved it
         r += 1
         self.scan_status_label = ttk.Label(inner, textvariable=self.scan_status_var, foreground="grey", font=("TkSmallCaptionFont"))
         self.scan_status_label.grid(column=1, row=r, columnspan=3, sticky="nw", padx=5, pady=(2,5));
@@ -2197,8 +2214,12 @@ class LlamaCppLauncher:
         # Call this after analysis completes, as n_layers is needed for the name
         self._generate_default_config_name()
 
-    def _reset_gpu_layer_controls(self):
-         """Resets GPU layer slider state and max layers (but *not* entry StringVar)."""
+    def _reset_gpu_layer_controls(self, keep_entry_enabled=False):
+         """Resets GPU layer slider state and max layers (but *not* entry StringVar).
+         
+         Args:
+             keep_entry_enabled (bool): If True, keeps the entry widget enabled even when resetting controls.
+         """
          print("DEBUG: _reset_gpu_layer_controls called", file=sys.stderr)
          # Reset max_gpu_layers first
          self.max_gpu_layers.set(0)
@@ -2209,6 +2230,10 @@ class LlamaCppLauncher:
          # Slider range and state
          if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
               self.gpu_layers_slider.config(to=0, state=tk.DISABLED) # Slider disabled if max_layers is 0
+
+         # Set entry state based on keep_entry_enabled parameter
+         if hasattr(self, 'n_gpu_layers_entry') and self.n_gpu_layers_entry.winfo_exists():
+              self.n_gpu_layers_entry.config(state=tk.NORMAL if keep_entry_enabled else tk.DISABLED)
 
          # IMPORTANT: Do NOT reset self.n_gpu_layers.get() or call _set_gpu_layers(0) here.
          # This preserves the user's last input in the entry.
@@ -3762,9 +3787,9 @@ sys.exit(0) # Indicate success
                         # Let's try common patterns, starting with -e
                         term_cmds = []
                         if term in ['gnome-terminal', 'xfce4-terminal', 'iterm']:
-                             # gnome-terminal/xfce4-terminal/iterm expect -e followed by command string or list
-                             # Pass 'bash -c command_string' as two arguments to -e
-                             term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', quoted_full_command_for_bash])
+                             # gnome-terminal/xfce4-terminal/iterm expect -- followed by command string or list
+                             # Pass 'bash -c command_string' as arguments after --
+                             term_cmds.append(term_cmd_base + ['--', 'bash', '-c', quoted_full_command_for_bash])
                         elif term == 'konsole':
                              # Konsole needs --noclose and -e followed by the command list or string
                              term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash -c ' + quoted_full_command_for_bash]) # Requires bash -c inside quotes
@@ -3917,7 +3942,7 @@ sys.exit(0) # Indicate success
                          fh.write(f'Write-Warning "Could not process venv path \'{warn_venv_path}\': {path_ex}"\n\n')
 
 
-                fh.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
+                f.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
 
                 # --- Build the command string for PowerShell using appropriate quoting ---
                 # Similar logic as launch_server for Windows
