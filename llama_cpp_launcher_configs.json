@@ -117,6 +117,8 @@
       1,
       2
     ],
-    "custom_parameters": []
+    "custom_parameters": [],
+    "host": "127.0.0.1",
+    "port": "8080"
   }
 }

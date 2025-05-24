@@ -424,6 +424,9 @@ class LlamaCppLauncher:
             "model_list_height":  8,
             # Save/load selected GPU indices (indices of detected GPUs)
             "selected_gpus":      [],
+            # Save/load network settings
+            "host":              "127.0.0.1",
+            "port":              "8080",
         }
         # List to store custom parameters entered by the user (strings)
         self.custom_parameters_list = [] # <-- New attribute for custom parameters
@@ -519,8 +522,8 @@ class LlamaCppLauncher:
         self.prio            = tk.StringVar(value="0") # --prio
         self.mlock           = tk.BooleanVar(value=False) # --mlock
         self.no_kv_offload   = tk.BooleanVar(value=False) # --no-kv-offload
-        self.host            = tk.StringVar(value="127.0.0.1") # --host
-        self.port            = tk.StringVar(value="8080") # --port
+        self.host            = tk.StringVar(value=self.app_settings.get("host", "127.0.0.1")) # --host
+        self.port            = tk.StringVar(value=self.app_settings.get("port", "8080")) # --port
 
         # --- Configuration Management ---
         self.config_name     = tk.StringVar(value="default_config") # Name for saving/loading configs
@@ -647,6 +650,10 @@ class LlamaCppLauncher:
         self.prio.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.mlock.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.no_kv_offload.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Add trace handler for port changes
+        self.port.trace_add("write", lambda *args: self._save_configs())
+        # Add trace handler for host changes
+        self.host.trace_add("write", lambda *args: self._save_configs())
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Bind trace to the new template source variable
@@ -775,6 +782,7 @@ class LlamaCppLauncher:
             data = json.loads(self.config_path.read_text(encoding="utf-8"))
             self.saved_configs = data.get("configs", {})
             loaded_app_settings = data.get("app_settings", {})
+            print(f"DEBUG: Loading app settings: {loaded_app_settings}") # Add debug print
             self.app_settings.update(loaded_app_settings)
             # Ensure model_list_height is a valid int
             if not isinstance(self.app_settings.get("model_list_height"), int):
@@ -786,7 +794,6 @@ class LlamaCppLauncher:
             if not isinstance(self.app_settings.get("custom_parameters"), list):
                  self.app_settings["custom_parameters"] = []
 
-
             # Filter selected_gpus to only include indices of currently detected GPUs
             valid_gpu_indices = {gpu['id'] for gpu in self.detected_gpu_devices}
             self.app_settings["selected_gpus"] = [idx for idx in self.app_settings["selected_gpus"] if idx in valid_gpu_indices]
@@ -794,6 +801,13 @@ class LlamaCppLauncher:
             # Load custom parameters into the internal list
             self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
 
+            # Ensure port and host are set from app_settings
+            if "port" in self.app_settings:
+                print(f"DEBUG: Setting port from app_settings: {self.app_settings['port']}") # Add debug print
+                self.port.set(self.app_settings["port"])
+            if "host" in self.app_settings:
+                print(f"DEBUG: Setting host from app_settings: {self.app_settings['host']}") # Add debug print
+                self.host.set(self.app_settings["host"])
 
         except json.JSONDecodeError as e:
              print(f"Config Load Error: Failed to parse JSON from {self.config_path}\nError: {e}", file=sys.stderr)
@@ -801,7 +815,8 @@ class LlamaCppLauncher:
              # Reset to defaults on parse error
              self.app_settings = {
                  "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
-                 "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": []
+                 "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": [],
+                 "host": "127.0.0.1", "port": "8080"  # Add default network settings
              }
              self.saved_configs = {}
              self.custom_parameters_list = [] # Reset internal list
@@ -811,7 +826,8 @@ class LlamaCppLauncher:
             # Reset to defaults on other load errors
             self.app_settings = {
                 "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
-                "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": []
+                "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": [],
+                "host": "127.0.0.1", "port": "8080"  # Add default network settings
             }
             self.saved_configs = {}
             self.custom_parameters_list = [] # Reset internal list
@@ -821,12 +837,17 @@ class LlamaCppLauncher:
              print("Config saving is disabled.", file=sys.stderr)
              return
 
+        # Save current values to app_settings
         self.app_settings["model_dirs"] = [str(p) for p in self.model_dirs]
         self.app_settings["last_model_path"] = self.model_path.get()
         # Save selected GPU indices from the current state of the checkboxes
         self.app_settings["selected_gpus"] = [i for i, v in enumerate(self.gpu_vars) if v.get()]
         # Save custom parameters list
         self.app_settings["custom_parameters"] = self.custom_parameters_list
+        # Save network settings - ensure these are saved
+        self.app_settings["host"] = self.host.get()
+        self.app_settings["port"] = self.port.get()
+        print(f"DEBUG: Saving port as {self.port.get()}") # Add debug print
 
         payload = {
             "configs":      self.saved_configs,
@@ -834,6 +855,7 @@ class LlamaCppLauncher:
         }
         try:
             self.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            print(f"DEBUG: Successfully saved config to {self.config_path}") # Add debug print
         except Exception as exc:
             print(f"Config Save Error: Failed to save settings to {self.config_path}\nError: {exc}", file=sys.stderr)
             # Attempt fallback only if the initial path wasn't already a fallback
@@ -3073,8 +3095,8 @@ sys.exit(0) # Indicate success
         self.main_gpu.set(cfg.get("main_gpu","0"))
         self.mlock.set(cfg.get("mlock",False))
         self.no_kv_offload.set(cfg.get("no_kv_offload",False))
-        self.host.set(cfg.get("host","127.0.0.1"))
-        self.port.set(cfg.get("port","8080"))
+        self.host.set(cfg.get("host", self.app_settings.get("host", "127.0.0.1"))) # --host
+        self.port.set(cfg.get("port", self.app_settings.get("port", "8080"))) # --port
         self.config_name.set(name) # Set the config name entry
 
 
