@@ -3394,6 +3394,10 @@ sys.exit(0) # Indicate success
         self._add_arg(cmd, "--ignore-eos", self.ignore_eos.get()) # Omit if False (default)
         self._add_arg(cmd, "--n-predict", self.n_predict.get(), "-1") # Omit if -1 (default)
 
+        # --- Network Settings ---
+        self._add_arg(cmd, "--host", self.host.get(), "127.0.0.1") # Add host if not default
+        self._add_arg(cmd, "--port", self.port.get(), "8080") # Add port if not default
+
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Add --chat-template option ONLY if the source is not "default" (llama.cpp decides)
         source = self.template_source.get()
