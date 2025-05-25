@@ -3747,50 +3747,23 @@ sys.exit(0) # Indicate success
                         return # Exit the launch process
 
                     # Build the core command that will be sourced
-                    # sourced_command = f'source {shlex.quote(str(act_script))} && echo "Virtual environment activated." && echo "Launching server..." && {server_command_str}'
-                    # It's better to source first, then execute the command in the activated shell
-                    # The full command string passed to bash -c needs careful quoting.
-                    # We pass a script string like: 'source ... && command ; exit_status=$? ; if ... read ; fi ; exit $exit_status'
-                    # Need to shlex.quote the *entire* argument string passed to bash -c.
-                    full_script_content = f'source {shlex.quote(str(act_script))} && echo "Virtual environment activated." && echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
-                    quoted_full_command_for_bash = shlex.quote(full_script_content)
+                    # Remove the extra quoting since we're passing the command directly
+                    full_script_content = f'source {str(act_script)} && echo "Virtual environment activated." && echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
 
                 else: # No venv
                     full_script_content = f'echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
-                    quoted_full_command_for_bash = shlex.quote(full_script_content)
 
                 # --- CUDA_VISIBLE_DEVICES for Linux/macOS (Bash) ---
                 # Add export CUDA_VISIBLE_DEVICES="..." *before* the main command in the bash script
                 # This should happen *after* venv activation if used.
                 cuda_env_line = ""
                 if cuda_devices_value:
-                    # Quote the value in case it contains spaces or special characters (unlikely for indices but safe)
-                    quoted_cuda_value = shlex.quote(cuda_devices_value)
-                    cuda_env_line = f'export CUDA_VISIBLE_DEVICES={quoted_cuda_value} && echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"'
-                elif self.gpu_info.get("device_count", 0) > 0:
-                    # Unset if GPUs detected but none selected
-                     cuda_env_line = f'unset CUDA_VISIBLE_DEVICES && echo "Clearing CUDA_VISIBLE_DEVICES environment variable."'
-
-                # Integrate the CUDA env line into the full script content
-                if cuda_env_line:
-                    # Place it after source but before the server command
+                    cuda_env_line = f'export CUDA_VISIBLE_DEVICES={cuda_devices_value} && echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" && '
+                    # Insert the CUDA environment line after venv activation if used
                     if use_venv:
-                        # Split the script after source and first echo
-                        parts = full_script_content.split('&& echo "Virtual environment activated." &&', 1)
-                        if len(parts) == 2:
-                             # Reconstruct with the cuda line inserted
-                             full_script_content = f"{parts[0]}&& echo \"Virtual environment activated.\" && {cuda_env_line} && {parts[1]}"
-                             quoted_full_command_for_bash = shlex.quote(full_script_content) # Re-quote the whole thing
-                        else:
-                             # Fallback if split failed
-                             print("WARNING: Could not insert CUDA_VISIBLE_DEVICES after venv activation. Adding before everything.", file=sys.stderr)
-                             full_script_content = f'{cuda_env_line} && {full_script_content}'
-                             quoted_full_command_for_bash = shlex.quote(full_script_content) # Re-quote
-
-                    else: # No venv, just prepend
-                        full_script_content = f'{cuda_env_line} && {full_script_content}'
-                        quoted_full_command_for_bash = shlex.quote(full_script_content) # Re-quote
-
+                        full_script_content = full_script_content.replace('echo "Virtual environment activated." && ', 'echo "Virtual environment activated." && ' + cuda_env_line)
+                    else:
+                        full_script_content = cuda_env_line + full_script_content
 
                 # Attempt to launch in a new terminal window
                 # Use 'bash -c' to execute the command string.
@@ -3815,7 +3788,8 @@ sys.exit(0) # Indicate success
                         if term in ['gnome-terminal', 'xfce4-terminal', 'iterm']:
                              # gnome-terminal/xfce4-terminal/iterm expect -- followed by command string or list
                              # Pass 'bash -c command_string' as arguments after --
-                             term_cmds.append(term_cmd_base + ['--', 'bash', '-c', quoted_full_command_for_bash])
+                             # Remove the extra single quotes around the command string
+                             term_cmds.append(term_cmd_base + ['--', 'bash', '-c', full_script_content])
                         elif term == 'konsole':
                              # Konsole needs --noclose and -e followed by the command list or string
                              term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash -c ' + quoted_full_command_for_bash]) # Requires bash -c inside quotes
