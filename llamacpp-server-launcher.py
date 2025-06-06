@@ -486,6 +486,7 @@ class LlamaCppLauncher:
 
         # --- Basic Server Settings ---
         self.cache_type_k    = tk.StringVar(value="f16") # KV cache type (applies to k & v)
+        self.cache_type_v    = tk.StringVar(value="f16") # V cache type
         # Initial default thread values before fetching system info.
         # These will be updated by _fetch_system_info or load_config.
         self.threads         = tk.StringVar(value="4")
@@ -1126,10 +1127,11 @@ class LlamaCppLauncher:
         """Manually set context size from entry."""
         try:
             value = int(self.ctx_entry.get())
-            # Clamp value to a reasonable range (e.g., 1024 to 131072, matching slider)
-            clamped_value = max(1024, min(131072, value))
-            self.ctx_size.set(clamped_value)
-            self._sync_ctx_display(clamped_value) # Update entry/label to clamped value
+            # Allow any positive value, not just clamped to slider range
+            if value < 1024:
+                value = 1024  # Minimum reasonable context size
+            self.ctx_size.set(value)
+            self._sync_ctx_display(value) # Update entry/label to value
         except ValueError:
             # Revert entry and label to current valid value if input is invalid
             current_value = self.ctx_size.get()
@@ -1394,6 +1396,13 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="Quantization for KV cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
+        ttk.Label(inner, text="V Cache Type (--cache-type-v):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        # Combobox state is "readonly" for selection, but not disabled
+        self.cache_type_v_combo = ttk.Combobox(inner, textvariable=self.cache_type_v, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1"), state="readonly")
+        self.cache_type_v_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="Quantization for V cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
         ttk.Label(inner, text="Disable mmap (--no-mmap):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
@@ -2848,6 +2857,7 @@ sys.exit(0) # Indicate success
         default_params_for_name = {
             # Values that are omitted by _add_arg if they match these
             "cache_type_k":  "f16",
+            "cache_type_v":  "f16", # Defaults to same as K cache type
             "threads":       str(self.logical_cores), # Llama.cpp default for threads is logical cores
             "threads_batch": "4", # Llama.cpp default for threads-batch is 4
             "batch_size":    "512", # Llama.cpp default
@@ -2873,6 +2883,7 @@ sys.exit(0) # Indicate success
 
         current_params = {
             "cache_type_k":  self.cache_type_k.get().strip(),
+            "cache_type_v":  self.cache_type_v.get().strip(),
             "threads":       self.threads.get().strip(),
             "threads_batch": self.threads_batch.get().strip(),
             "batch_size":    self.batch_size.get().strip(),
@@ -2936,6 +2947,7 @@ sys.exit(0) # Indicate success
                       # Use abbreviations for common parameters
                       abbr_map = {
                           "cache_type_k": "kv",
+                          "cache_type_v": "vv",
                           "threads": "th",
                           "threads_batch": "tb",
                           "batch_size": "b",
@@ -3024,6 +3036,7 @@ sys.exit(0) # Indicate success
             "venv_dir":      self.venv_dir.get(),
             "model_path":    self.model_path.get(),
             "cache_type_k":  self.cache_type_k.get(),
+            "cache_type_v":  self.cache_type_v.get(),
             "threads":       self.threads.get(), # Save the user-set value
             "threads_batch": self.threads_batch.get(), # Save the user-set value
             "batch_size":    self.batch_size.get(), # Save the user-set value
@@ -3074,6 +3087,7 @@ sys.exit(0) # Indicate success
         self.llama_cpp_dir.set(cfg.get("llama_cpp_dir",""))
         self.venv_dir.set(cfg.get("venv_dir","")) # Setting this triggers the venv trace -> flash attn check
         self.cache_type_k.set(cfg.get("cache_type_k","f16"))
+        self.cache_type_v.set(cfg.get("cache_type_v","f16"))
         # Load parameters, providing defaults for backward compatibility with older configs
         # Default to the *current* detected cores if not in the config for threads
         self.threads.set(cfg.get("threads", str(self.physical_cores))) # Default to detected physical cores
@@ -3355,9 +3369,17 @@ sys.exit(0) # Indicate success
         # Note: llama.cpp's --cache-type-v defaults to the value of --cache-type-k if not specified.
         # So just setting --cache-type-k is usually sufficient.
         if kv_cache_type_val and kv_cache_type_val != "f16":
-             cmd.extend(["--cache-type-k", kv_cache_type_val])
-             print(f"DEBUG: Adding --cache-type-k {kv_cache_type_val} (non-default)", file=sys.stderr)
+            cmd.extend(["--cache-type-k", kv_cache_type_val])
+            print(f"DEBUG: Adding --cache-type-k {kv_cache_type_val} (non-default)", file=sys.stderr)
+            # Always set V cache type to match K cache type to avoid unsupported combinations
+            cmd.extend(["--cache-type-v", kv_cache_type_val])
+            print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
 
+        # Remove the separate V cache type handling since we always want it to match K
+        # v_cache_type_val = self.cache_type_v.get().strip()
+        # if v_cache_type_val and v_cache_type_val != kv_cache_type_val:
+        #     cmd.extend(["--cache-type-v", v_cache_type_val])
+        #     print(f"DEBUG: Adding --cache-type-v {v_cache_type_val} (different from K cache type)", file=sys.stderr)
 
         # --- Threads & Batching ---
         # Llama.cpp internal defaults: --threads=hardware_concurrency() (logical), --threads-batch=4
