@@ -1779,7 +1779,7 @@ class LlamaCppLauncher:
         # Config name entry
         config_frame = ttk.Frame(inner); config_frame.pack(fill="x", padx=10, pady=5)
         ttk.Label(config_frame, text="Configuration Name:").pack(side="left", padx=(0,5))
-        ttk.Entry(config_frame, textvariable=self.config_name, width=60).pack(side="left", padx=5)
+        ttk.Entry(config_frame, textvariable=self.config_name).pack(side="left", fill="x", expand=True, padx=5)
 
         # Config buttons
         btn_frame = ttk.Frame(inner); btn_frame.pack(fill="x", padx=10, pady=5)
