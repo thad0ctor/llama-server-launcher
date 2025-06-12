@@ -9,6 +9,8 @@ and allows for custom variables to be added.
 import tkinter as tk
 from tkinter import ttk, messagebox
 import json
+import subprocess
+import sys
 from typing import Dict, List, Tuple, Optional
 
 class EnvironmentalVariablesManager:
@@ -179,6 +181,38 @@ class EnvironmentalVariablesManager:
             parts.append(f"{name}={value}")
         
         return " ".join(parts)
+
+    def generate_clear_env_vars_command(self) -> str:
+        """
+        Generate a bash command that sets all CUDA environmental variables to 0
+        to clear them from the system environment.
+        
+        Returns:
+            String containing bash export commands to clear all CUDA variables
+        """
+        clear_commands = []
+        
+        # Clear all predefined CUDA variables
+        for var_name in self.PREDEFINED_ENV_VARS:
+            clear_commands.append(f"export {var_name}=0")
+        
+        # Also clear any custom variables that might be CUDA-related
+        for name, _ in self.custom_env_vars:
+            if name.strip():
+                clear_commands.append(f"export {name.strip()}=0")
+        
+        # Add a command to show what was cleared
+        clear_commands.append("echo 'CUDA environmental variables cleared (set to 0):'")
+        
+        # Show the cleared variables
+        all_vars = list(self.PREDEFINED_ENV_VARS.keys()) + [name for name, _ in self.custom_env_vars if name.strip()]
+        for var_name in all_vars:
+            clear_commands.append(f"echo '{var_name}=0'")
+        
+        clear_commands.append("echo 'You can now run commands in this terminal with cleared CUDA variables.'")
+        clear_commands.append("bash")  # Keep the terminal open
+        
+        return "; ".join(clear_commands)
 
 
 class EnvironmentalVariablesTab:
@@ -356,6 +390,8 @@ class EnvironmentalVariablesTab:
                   command=self._enable_all_cuda_optimizations).pack(side="left", padx=5)
         ttk.Button(preset_frame, text="Disable All", 
                   command=self._disable_all_predefined).pack(side="left", padx=5)
+        ttk.Button(preset_frame, text="Clear All Variables (New Terminal)", 
+                  command=self._launch_clear_env_terminal).pack(side="left", padx=5)
     
     def _create_custom_vars_section(self, parent, start_row):
         """Create the custom variables section."""
@@ -448,9 +484,6 @@ class EnvironmentalVariablesTab:
         
         self._update_preview()
     
-
-
-    
     def _on_predefined_var_toggle(self, var_name):
         """Handle predefined variable checkbox toggle."""
         enabled = self.predefined_var_states[var_name].get()
@@ -530,4 +563,86 @@ class EnvironmentalVariablesTab:
         if hasattr(self, 'preview_text'):
             preview = self.env_manager.generate_env_string_preview()
             self.preview_text.delete(1.0, tk.END)
-            self.preview_text.insert(1.0, preview) 
+            self.preview_text.insert(1.0, preview)
+
+    def _launch_clear_env_terminal(self):
+        """Launch a new terminal with all CUDA environmental variables set to 0."""
+        try:
+            clear_command = self.env_manager.generate_clear_env_vars_command()
+            
+            # Determine the appropriate terminal command based on the system
+            if sys.platform.startswith('linux'):
+                # Try common Linux terminals
+                terminals = [
+                    ['gnome-terminal', '--', 'bash', '-c', clear_command],
+                    ['konsole', '-e', 'bash', '-c', clear_command],
+                    ['xterm', '-e', 'bash', '-c', clear_command],
+                    ['x-terminal-emulator', '-e', 'bash', '-c', clear_command]
+                ]
+                
+                launched = False
+                for terminal_cmd in terminals:
+                    try:
+                        subprocess.Popen(terminal_cmd)
+                        launched = True
+                        break
+                    except FileNotFoundError:
+                        continue
+                
+                if not launched:
+                    messagebox.showerror("Error", 
+                        "Could not find a suitable terminal emulator.\n"
+                        "Please install gnome-terminal, konsole, or xterm.")
+                    return
+                        
+            elif sys.platform == 'darwin':  # macOS
+                # Use Terminal.app on macOS
+                applescript = f'''
+                tell application "Terminal"
+                    do script "{clear_command}"
+                    activate
+                end tell
+                '''
+                subprocess.Popen(['osascript', '-e', applescript])
+                
+            elif sys.platform == 'win32':  # Windows
+                # Use cmd on Windows with PowerShell-style variable setting
+                win_clear_commands = []
+                
+                # Clear all predefined CUDA variables
+                for var_name in self.env_manager.PREDEFINED_ENV_VARS:
+                    win_clear_commands.append(f"set {var_name}=0")
+                
+                # Also clear any custom variables
+                for name, _ in self.env_manager.custom_env_vars:
+                    if name.strip():
+                        win_clear_commands.append(f"set {name.strip()}=0")
+                
+                win_clear_commands.extend([
+                    "echo CUDA environmental variables cleared (set to 0):",
+                    "echo.",
+                ])
+                
+                # Show the cleared variables
+                all_vars = list(self.env_manager.PREDEFINED_ENV_VARS.keys()) + [name for name, _ in self.env_manager.custom_env_vars if name.strip()]
+                for var_name in all_vars:
+                    win_clear_commands.append(f"echo {var_name}=0")
+                
+                win_clear_commands.extend([
+                    "echo.",
+                    "echo You can now run commands in this terminal with cleared CUDA variables.",
+                    "cmd /k"  # Keep command prompt open
+                ])
+                
+                win_command = " & ".join(win_clear_commands)
+                subprocess.Popen(['cmd', '/c', 'start', 'cmd', '/k', win_command])
+            
+            else:
+                messagebox.showerror("Error", f"Unsupported platform: {sys.platform}")
+                return
+                
+            messagebox.showinfo("Terminal Launched", 
+                "New terminal opened with CUDA environmental variables cleared (set to 0).")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch terminal: {str(e)}") 
