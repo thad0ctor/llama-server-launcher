@@ -13,6 +13,9 @@ import shlex # <-- Import shlex for parameter splitting
 import math
 import time
 
+# Import the environmental variables module
+from env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariablesTab
+
 # Add debug prints for Python environment
 print("\n=== Python Environment Debug Info ===", file=sys.stderr)
 print(f"Python executable: {sys.executable}", file=sys.stderr)
@@ -430,6 +433,9 @@ class LlamaCppLauncher:
         }
         # List to store custom parameters entered by the user (strings)
         self.custom_parameters_list = [] # <-- New attribute for custom parameters
+        
+        # --- Environmental Variables Manager ---
+        self.env_vars_manager = EnvironmentalVariablesManager()
 
         # --- Hardcoded Chat Templates ---
         # These templates are always available.
@@ -609,6 +615,8 @@ class LlamaCppLauncher:
         # Load custom parameters list
         self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
 
+        # Load environmental variables configuration
+        self.env_vars_manager.load_from_config(self.app_settings)
 
         # build GUI
         self._create_widgets()
@@ -901,16 +909,18 @@ class LlamaCppLauncher:
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
         nb.add(chat_frame, text="Chat Template") # Add the new tab
+        nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
         nb.add(cfg_frame,  text="Configurations")
 
 
         self._setup_main_tab(main_frame)
         self._setup_advanced_tab(adv_frame)
         self._setup_chat_template_tab(chat_frame) # Setup the new tab
+        self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_config_tab(cfg_frame)
 
         bar = ttk.Frame(self.root); bar.pack(fill="x", padx=10, pady=(0, 10))
@@ -1753,35 +1763,45 @@ class LlamaCppLauncher:
 
     # ░░░░░ CONFIG TAB ░░░░░
     def _setup_config_tab(self, parent):
-        frame = ttk.Frame(parent, padding=10); frame.pack(fill="both", expand=True)
-        r = 0
-        ttk.Label(frame, text="Save/Load Launch Configurations", font=("TkDefaultFont", 12, "bold"))\
-            .grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0,5)); r += 1
+        canvas = tk.Canvas(parent, highlightthickness=0); vs = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        inner  = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(yscrollcommand=vs.set,
+                                                             scrollregion=canvas.bbox("all")))
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+        canvas.pack(side="left", fill="both", expand=True); vs.pack(side="right", fill="y")
 
-        ttk.Label(frame, text="Configuration Name:")\
-            .grid(column=0, row=r, sticky="w", padx=5, pady=3)
-        ttk.Entry(frame, textvariable=self.config_name, width=30)\
-            .grid(column=1, row=r, sticky="ew", padx=5, pady=3)
-        # --- FIX: Correct the command here to _save_configuration ---
-        ttk.Button(frame, text="Save Current Settings", command=self._save_configuration).grid(column=2, row=r, padx=5, pady=3); r += 1
+        # Configuration Management
+        ttk.Label(inner, text="Configuration Management", font=("TkDefaultFont", 12, "bold")).pack(anchor="w", padx=10, pady=(10,5))
+        ttk.Separator(inner, orient="horizontal").pack(fill="x", padx=10, pady=5)
 
-        ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
+        # Config name entry
+        config_frame = ttk.Frame(inner); config_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Label(config_frame, text="Configuration Name:").pack(side="left", padx=(0,5))
+        ttk.Entry(config_frame, textvariable=self.config_name, width=25).pack(side="left", padx=5)
 
-        ttk.Label(frame, text="Saved Configurations:").grid(column=0, row=r, sticky="w", padx=5, pady=(10,3)); r += 1
+        # Config buttons
+        btn_frame = ttk.Frame(inner); btn_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Button(btn_frame, text="Save Configuration", command=self._save_configuration).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Load Configuration", command=self._load_configuration).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="Delete Configuration", command=self._delete_configuration).pack(side="left", padx=5)
 
-        lb_frame = ttk.Frame(frame); lb_frame.grid(column=0, row=r, columnspan=3,
-                                                   sticky="nsew", padx=5, pady=3)
-        sb = ttk.Scrollbar(lb_frame); sb.pack(side="right", fill="y")
-        self.config_listbox = tk.Listbox(lb_frame, yscrollcommand=sb.set, height=10, exportselection=False)
-        self.config_listbox.pack(side="left", fill="both", expand=True)
-        sb.config(command=self.config_listbox.yview); r += 1
+        # Config list
+        ttk.Label(inner, text="Saved Configurations:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=10, pady=(15,5))
+        list_frame = ttk.Frame(inner); list_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        list_sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        self.config_listbox = tk.Listbox(list_frame, yscrollcommand=list_sb.set, height=12, exportselection=False)
+        list_sb.config(command=self.config_listbox.yview)
+        self.config_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.config_listbox.bind("<<ListboxSelect>>", lambda e: self._on_config_selected())
 
-        btns = ttk.Frame(frame); btns.grid(column=0, row=r, columnspan=3, sticky="ew", padx=5, pady=5)
-        ttk.Button(btns, text="Load Selected",   command=self._load_configuration).pack(side="left", padx=5)
-        ttk.Button(btns, text="Delete Selected", command=self._delete_configuration).pack(side="left", padx=5)
-
-        frame.columnconfigure(1, weight=1); frame.rowconfigure(4, weight=1)
         self._update_config_listbox()
+
+    def _setup_env_vars_tab(self, parent):
+        """Set up the Environmental Variables tab using the EnvironmentalVariablesTab class."""
+        # Create the environmental variables tab using the dedicated class
+        self.env_vars_tab = EnvironmentalVariablesTab(parent, self.env_vars_manager)
 
     # ═════════════════════════════════════════════════════════════════
     #  Listbox Resizing Logic
@@ -3072,6 +3092,9 @@ sys.exit(0) # Indicate success
         # This is redundant with app_settings, but keeps config self-contained for this tab.
         cfg["gpu_indices"] = self.app_settings.get("selected_gpus", [])
 
+        # Add environmental variables configuration
+        cfg.update(self.env_vars_manager.save_to_config())
+
         return cfg
 
     def _load_configuration(self):
@@ -3122,6 +3145,8 @@ sys.exit(0) # Indicate success
         self.custom_parameters_list = cfg.get("custom_parameters", [])
         self._update_custom_parameters_listbox() # Update the GUI listbox
 
+        # Load environmental variables configuration
+        self.env_vars_manager.load_from_config(cfg)
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Load template parameters
@@ -3211,6 +3236,14 @@ sys.exit(0) # Indicate success
             self._save_configs()
             self._update_config_listbox()
             messagebox.showinfo("Deleted", f"Configuration '{name}' deleted.")
+
+    def _on_config_selected(self):
+        """Callback when a configuration is selected in the config listbox."""
+        if not self.config_listbox.curselection():
+            return
+        name = self.config_listbox.get(self.config_listbox.curselection())
+        # Update the config name field to show the selected configuration
+        self.config_name.set(name)
 
     def _update_config_listbox(self):
         current_selection = self.config_listbox.curselection()
@@ -3613,6 +3646,14 @@ sys.exit(0) # Indicate success
                          f.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
                          f.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
 
+                    # --- Add Environmental Variables ---
+                    env_vars = self.env_vars_manager.get_enabled_env_vars()
+                    if env_vars:
+                        f.write('Write-Host "Setting environmental variables..." -ForegroundColor DarkCyan\n')
+                        for var_name, var_value in env_vars.items():
+                            f.write(f'$env:{var_name}="{var_value}"\n')
+                        f.write('\n')
+
 
                     if use_venv:
                         venv_path = Path(venv_path_str).resolve()
@@ -3775,17 +3816,33 @@ sys.exit(0) # Indicate success
                 else: # No venv
                     full_script_content = f'echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
 
-                # --- CUDA_VISIBLE_DEVICES for Linux/macOS (Bash) ---
-                # Add export CUDA_VISIBLE_DEVICES="..." *before* the main command in the bash script
+                # --- CUDA_VISIBLE_DEVICES and Environmental Variables for Linux/macOS (Bash) ---
+                # Add export statements *before* the main command in the bash script
                 # This should happen *after* venv activation if used.
-                cuda_env_line = ""
+                env_commands = []
+                
+                # Add CUDA_VISIBLE_DEVICES
                 if cuda_devices_value:
-                    cuda_env_line = f'export CUDA_VISIBLE_DEVICES={cuda_devices_value} && echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" && '
-                    # Insert the CUDA environment line after venv activation if used
-                    if use_venv:
-                        full_script_content = full_script_content.replace('echo "Virtual environment activated." && ', 'echo "Virtual environment activated." && ' + cuda_env_line)
-                    else:
-                        full_script_content = cuda_env_line + full_script_content
+                    env_commands.append(f'export CUDA_VISIBLE_DEVICES={cuda_devices_value}')
+                    env_commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
+                
+                # Add environmental variables
+                env_vars = self.env_vars_manager.get_enabled_env_vars()
+                if env_vars:
+                    env_commands.append('echo "Setting environmental variables..."')
+                    for var_name, var_value in env_vars.items():
+                        env_commands.append(f'export {var_name}="{var_value}"')
+                
+                # Combine environment commands into a single string
+                env_line = ""
+                if env_commands:
+                    env_line = " && ".join(env_commands) + " && "
+                    
+                # Insert the environment line after venv activation if used
+                if use_venv and env_line:
+                    full_script_content = full_script_content.replace('echo "Virtual environment activated." && ', 'echo "Virtual environment activated." && ' + env_line)
+                elif env_line:
+                    full_script_content = env_line + full_script_content
 
                 # Attempt to launch in a new terminal window
                 # Use 'bash -c' to execute the command string.
@@ -3933,6 +3990,14 @@ sys.exit(0) # Indicate success
                      # If GPUs are detected but none are selected, explicitly unset the variable
                      fh.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
                      fh.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
+
+                # --- Add Environmental Variables ---
+                env_vars = self.env_vars_manager.get_enabled_env_vars()
+                if env_vars:
+                    fh.write('Write-Host "Setting environmental variables..." -ForegroundColor DarkCyan\n')
+                    for var_name, var_value in env_vars.items():
+                        fh.write(f'$env:{var_name}="{var_value}"\n')
+                    fh.write('\n')
 
 
                 venv = self.venv_dir.get().strip()

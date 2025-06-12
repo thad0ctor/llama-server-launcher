@@ -109,10 +109,10 @@
   "app_settings": {
     "last_llama_cpp_dir": "",
     "last_venv_dir": "",
-    "last_model_path": "H:\\Models\\lmstudio-community\\Qwen3-30B-A3B-GGUF\\Qwen3-30B-A3B-Q8_0.gguf",
+    "last_model_path": "",
     "model_dirs": [
-      "H:\\Models",
-      "G:\\Models"
+      "/home/rgilbreth/Documents/GitHub/llama-server-launcher/H:\\Models",
+      "/home/rgilbreth/Documents/GitHub/llama-server-launcher/G:\\Models"
     ],
     "model_list_height": 8,
     "selected_gpus": [
@@ -120,8 +120,8 @@
       1,
       2
     ],
-    "custom_parameters": [],
     "host": "127.0.0.1",
-    "port": "8080"
+    "port": "8080",
+    "custom_parameters": []
   }
 }
