@@ -4004,16 +4004,28 @@ sys.exit(0) # Indicate success
                 venv = self.venv_dir.get().strip()
                 if venv:
                     try:
-                        # --- FIX: Correct the typo 'vvenv_path' to 'venv_path' ---
                         venv_path = Path(venv).resolve() # Resolve venv path for script
-                        act_script = venv_path / "Scripts" / "Activate.ps1"
-                        if act_script.exists():
+                        
+                        # Check for multiple activation script locations (cross-platform support)
+                        possible_scripts = [
+                            venv_path / "Scripts" / "Activate.ps1",     # Windows
+                            venv_path / "bin" / "Activate.ps1",        # Linux/macOS with PowerShell Core
+                            venv_path / "Scripts" / "activate.ps1",    # Alternative naming
+                            venv_path / "bin" / "activate.ps1"         # Alternative naming
+                        ]
+                        
+                        act_script = None
+                        for script_path in possible_scripts:
+                            if script_path.exists():
+                                act_script = script_path
+                                break
+                        
+                        if act_script:
                             # Use literal path syntax for PowerShell activation script source
                             # Ensure path is correctly formatted for PowerShell ('/' separators often work better)
                             ps_act_path = str(act_script.as_posix())
                             # Quote path using double quotes and escape internal quotes/backticks
                             quoted_ps_act_path = f'"{ps_act_path.replace('"', '`"').replace('`', '``')}"'
-
 
                             fh.write(f'Write-Host "Activating virtual environment: {venv}" -ForegroundColor Cyan\n')
                             # Use 'try/catch' to report activation errors but continue if not critical
@@ -4021,16 +4033,18 @@ sys.exit(0) # Indicate success
                             fh.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Add exit code on failure and pause
 
                         else:
-                            # Format path for warning message
-                            warn_act_script_path = str(act_script).replace("'", "''") # Escape single quotes for PowerShell string
-                            fh.write(f'Write-Warning "Virtual environment activation script (Activate.ps1) not found at: \'{warn_act_script_path}\'"\n\n')
+                            # Format warning message with all checked paths
+                            checked_paths = [str(p) for p in possible_scripts]
+                            fh.write(f'Write-Warning "Virtual environment activation script not found in venv: {venv}"\n')
+                            fh.write(f'Write-Warning "Checked locations: {", ".join(checked_paths)}"\n')
+                            fh.write('Write-Warning "Note: PowerShell scripts work on Windows, Linux, and macOS with PowerShell Core installed."\n\n')
                     except Exception as path_ex:
                          # Format path for warning message
                          warn_venv_path = venv.replace("'", "''")
                          fh.write(f'Write-Warning "Could not process venv path \'{warn_venv_path}\': {path_ex}"\n\n')
 
 
-                f.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
+                fh.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
 
                 # --- Build the command string for PowerShell using appropriate quoting ---
                 # Similar logic as launch_server for Windows
