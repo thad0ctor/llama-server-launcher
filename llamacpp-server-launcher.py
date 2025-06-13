@@ -51,23 +51,7 @@ except Exception as e:
     print(f"Warning: llama-cpp-python import failed: {e}", file=sys.stderr)
 
 
-# Check for Flash Attention library in the *GUI's* environment (fallback/initial status)
-FLASH_ATTN_GUI_AVAILABLE = False
-# Flash Attention typically depends on a CUDA build of PyTorch and a compatible llama.cpp build
-# We check for the Python package as a proxy for availability in the environment.
-if TORCH_AVAILABLE and sys.platform != "darwin": # Flash Attention is CUDA/Linux/Windows specific currently, not macOS
-    try:
-        # A simple check is just importing the top level, hoping for the best.
-        import flash_attn
-        FLASH_ATTN_GUI_AVAILABLE = True
-    except ImportError:
-        FLASH_ATTN_GUI_AVAILABLE = False
-    except Exception as e:
-        FLASH_ATTN_GUI_AVAILABLE = False
-        print(f"Warning: Flash Attention library import failed in GUI environment: {e}", file=sys.stderr)
-else:
-     if sys.platform == "darwin":
-          print("Note: Flash Attention is generally not supported on macOS.", file=sys.stderr)
+
 
 
 try:
@@ -90,10 +74,6 @@ if not TORCH_AVAILABLE:
 if not LLAMA_CPP_PYTHON_AVAILABLE:
     MISSING_DEPS.append("llama-cpp-python (optional - provides fallback GGUF analysis if llama.cpp tools unavailable)")
 
-# Only mention flash_attn if PyTorch/CUDA is available (suggesting GPU interest) and not macOS
-if TORCH_AVAILABLE and sys.platform != "darwin" and not FLASH_ATTN_GUI_AVAILABLE:
-    MISSING_DEPS.append("flash_attn (optional - enables --flash-attn parameter)")
-
 # psutil check already prints a warning if not found.
 
 # Only print missing deps warning if there are actually missing deps
@@ -102,7 +82,7 @@ if MISSING_DEPS:
     print("The following Python libraries are recommended for full functionality but were not found:")
     for dep in MISSING_DEPS:
         print(f" - {dep}")
-    print("Please install them within your venv (e.g., 'pip install torch psutil flash_attn') for GPU features and enhanced functionality.")
+    print("Please install them within your venv (e.g., 'pip install torch llama-cpp-python') for GPU features and enhanced functionality.")
     print("Note: GGUF analysis works without llama-cpp-python using built-in tools or simple header parsing.")
     print("-------------------------------------\n")
 

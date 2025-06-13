@@ -1,6 +1,6 @@
-# llama-server-launcher
+# Llama.cpp Server Launcher
 
-**A user-friendly GUI (Tkinter) to easily configure and launch the `llama.cpp` HTTP server, manage model configurations, set environment variables, and generate launch scripts.**
+**A user-friendly GUI (Tkinter) to easily configure and launch the `llama.cpp` server, manage model configurations, set environment variables, and generate launch scripts.**
 
 This python script provides a comprehensive graphical interface for `llama.cpp`'s server, simplifying the managing of command-line arguments and models.
 
@@ -41,6 +41,35 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Includes platform-specific considerations for venv activation (for GPU recognition) and terminal launching.
 *   **Dependency Awareness:**
     *   Checks for optional but recommended dependencies for GPU detection and model information
+
+## 📋 Dependencies
+
+### Required
+*   **Python 3.7+** with tkinter support (typically included with Python)
+*   **llama.cpp** built with server support (`llama-server` executable)
+
+### Optional (Recommended)
+*   **PyTorch** (`torch`) - **Required if you want automatic GPU detection and selection**
+    *   Install in your virtual environment: `pip install torch`
+    *   Without PyTorch, you can still manually configure GPU settings
+    *   Enables automatic CUDA device detection and system resource information
+*   **llama-cpp-python** - **Optional fallback for GGUF model analysis**
+    *   Install in your virtual environment: `pip install llama-cpp-python`
+    *   Provides enhanced model analysis when llama.cpp tools are unavailable
+    *   The launcher works without it using built-in GGUF parsing and llama.cpp tools
+*   **psutil** - **Optional for enhanced system information**
+    *   Provides detailed CPU and RAM information across platforms
+    *   Install with: `pip install psutil`
+
+### Installation Example
+```bash
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install recommended dependencies
+pip install torch llama-cpp-python psutil
+```
 
 ## 🚀 Core Components
 
