@@ -1269,6 +1269,8 @@ class LlamaCppLauncher:
         # Save current values to app_settings
         self.app_settings["model_dirs"] = [str(p) for p in self.model_dirs]
         self.app_settings["last_model_path"] = self.model_path.get()
+        self.app_settings["last_llama_cpp_dir"] = self.llama_cpp_dir.get()
+        self.app_settings["last_venv_dir"] = self.venv_dir.get()
         # Save selected GPU indices from the current state of the checkboxes
         self.app_settings["selected_gpus"] = [i for i, v in enumerate(self.gpu_vars) if v.get()]
         # Save custom parameters list
