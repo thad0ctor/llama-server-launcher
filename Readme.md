@@ -15,7 +15,12 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Environment Variables (manage CUDA and custom variables)
     *   Configurations (save/load/import/export launch setups)
 
-    ![Parameter Customization](images/advanced.png)
+<details>
+<summary>📸 View Advanced Settings Screenshot</summary>
+
+![Parameter Customization](images/advanced.png)
+
+</details>
 
 *   **Comprehensive Parameter Control:** Fine-tune your `llama.cpp` server:
     *   **Model Management:** Scan directories for GGUF models, automatic model analysis (layers, architecture, size) with fallbacks, manual model info entry.
@@ -29,7 +34,12 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Detects and displays CUDA GPU(s) (via PyTorch), system RAM, and CPU core information.
     *   Supports manual GPU configuration if automatic detection is unavailable.
 
-    ![Chat Templates](images/chat-templates.png)
+<details>
+<summary>📸 View Chat Templates Screenshot</summary>
+
+![Chat Templates](images/chat-templates.png)
+
+</details>
 
 
 *   **Chat Template Flexibility:**
@@ -37,13 +47,23 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Option to let `llama.cpp` decide the template based on model metadata.
     *   Provide your own custom Jinja2 template string.
 
-    ![CUDA Flags](images/env.png)
+<details>
+<summary>📸 View Environment Variables Screenshot</summary>
+
+![CUDA Flags](images/env.png)
+
+</details>
 
 *   **Environment Variable Management:**
     *   Easily enable/disable common CUDA environment variables (e.g., `GGML_CUDA_FORCE_MMQ`).
     *   Add and manage custom environment variables to fine tune CUDA performance.
 
-    ![Configs](images/configs.png)
+<details>
+<summary>📸 View Configuration Management Screenshot</summary>
+
+![Configs](images/configs.png)
+
+</details>
 
 *   **Configuration Hub:**
     *   Save, load, and delete named launch configurations.
