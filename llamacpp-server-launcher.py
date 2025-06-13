@@ -1146,7 +1146,8 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     def _get_config_path(self):
         local_path = Path("llama_cpp_launcher_configs.json") # Renamed slightly to avoid potential clashes
-        print(f"DEBUG: Checking local config path: {local_path.resolve()}", file=sys.stderr)
+        print(f"DEBUG: Checking local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
+        print(f"DEBUG: Current working directory: {Path.cwd()}", file=sys.stderr)
         try:
             # Check if we can write to the current directory
             # Check if a config file exists and is empty (possibly from a failed previous run)
@@ -1157,7 +1158,7 @@ class LlamaCppLauncher:
 
             # Check write permissions AFTER cleanup attempt
             if os.access(".", os.W_OK):
-                 print(f"DEBUG: Using local config path: {local_path.resolve()}", file=sys.stderr)
+                 print(f"DEBUG: Using local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
                  return local_path
             else:
                  raise PermissionError("No write access in current directory.") # Force fallback
@@ -1179,7 +1180,7 @@ class LlamaCppLauncher:
                 if fallback_path.exists() and fallback_path.stat().st_size == 0:
                      try: fallback_path.unlink()
                      except OSError: pass
-                print(f"DEBUG: Using fallback config path: {fallback_path}", file=sys.stderr)
+                print(f"DEBUG: Using fallback config path FULL PATH: {fallback_path.resolve()}", file=sys.stderr)
                 return fallback_path
             except Exception as e_fallback:
                  print(f"CRITICAL ERROR: Could not use local config path or fallback config path {fallback_dir}. Configuration saving/loading is disabled. Error: {e_fallback}", file=sys.stderr)
@@ -1190,15 +1191,17 @@ class LlamaCppLauncher:
 
     def _load_saved_configs(self):
         if not self.config_path.exists() or not self.config_path.is_file() or self.config_path.name in ("null", "NUL"):
-             print("No config file found or config saving is disabled. Using default settings.", file=sys.stderr)
+             print(f"DEBUG: No config file found at: {self.config_path.resolve()} or config saving is disabled. Using default settings.", file=sys.stderr)
              return
 
-        print(f"DEBUG: Loading config from: {self.config_path}", file=sys.stderr)
+        print(f"DEBUG: Loading config from FULL PATH: {self.config_path.resolve()}", file=sys.stderr)
         try:
             data = json.loads(self.config_path.read_text(encoding="utf-8"))
             self.saved_configs = data.get("configs", {})
             loaded_app_settings = data.get("app_settings", {})
-            print(f"DEBUG: Loading app settings: {loaded_app_settings}") # Add debug print
+            print(f"DEBUG: Found {len(self.saved_configs)} saved configurations in config file", file=sys.stderr)
+            print(f"DEBUG: Loaded saved config names: {list(self.saved_configs.keys())}", file=sys.stderr)
+            print(f"DEBUG: Loading app settings from {self.config_path.resolve()}: {loaded_app_settings}", file=sys.stderr)
             self.app_settings.update(loaded_app_settings)
             # Ensure model_list_height is a valid int
             if not isinstance(self.app_settings.get("model_list_height"), int):
@@ -1291,7 +1294,7 @@ class LlamaCppLauncher:
         }
         try:
             self.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            print(f"DEBUG: Successfully saved config to {self.config_path}") # Add debug print
+            print(f"DEBUG: Successfully saved config to FULL PATH: {self.config_path.resolve()}") # Add debug print
         except Exception as exc:
             print(f"Config Save Error: Failed to save settings to {self.config_path}\nError: {exc}", file=sys.stderr)
             # Attempt fallback only if the initial path wasn't already a fallback
@@ -4603,7 +4606,7 @@ class LlamaCppLauncher:
                                               i += 2 # Skip both flag and value
                                          else:
                                               # Standard quoting for other args
-                                              quoted_arg = f'"{current_arg.replace('"', '`"').replace('`', '``')}"'
+                                              quoted_arg = f'"{current_arg.replace('"', '""').replace("`", "``")}"'
                                               ps_cmd_parts.append(quoted_arg)
                                               i += 1
                                      break # Exit this inner while loop once reconstructed
@@ -4614,7 +4617,7 @@ class LlamaCppLauncher:
 
                          else:
                              # Standard quoting for other args
-                             quoted_arg = f'"{arg.replace('"', '`"').replace('`', '``')}"'
+                             quoted_arg = f'"{arg.replace('"', '""').replace("`", "``")}"'
                              ps_cmd_parts.append(quoted_arg)
 
 
@@ -4936,7 +4939,7 @@ class LlamaCppLauncher:
                          i += 2 # Skip both flag and value
                     else:
                          # Standard quoting for other args
-                         quoted_arg = f'"{current_arg.replace('"', '`"').replace('`', '``')}"'
+                         quoted_arg = f'"{current_arg.replace('"', '""').replace("`", "``")}"'
                          ps_cmd_parts.append(quoted_arg)
                          i += 1
 
