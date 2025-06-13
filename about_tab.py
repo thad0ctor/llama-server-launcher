@@ -181,6 +181,9 @@ class AboutTab:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"backup_{timestamp}"
         
+        # Generate exclusion patterns from .gitignore
+        exclusions = self._get_backup_exclusions(current_dir)
+        
         script = f"""#!/bin/bash
 set -e
 
@@ -193,15 +196,33 @@ echo ""
 echo "Creating backup directory..."
 mkdir -p "{backup_path}"
 
-# Copy files to backup (excluding JSON files)
-echo "Backing up current files (excluding JSON files)..."
-find "{current_dir}" -maxdepth 1 -type f ! -name "*.json" ! -name "update_script.sh" -exec cp {{}} "{backup_path}/" \\;
+# Backup files (excluding JSON files, .gitignore patterns, and git data)
+echo "Backing up important files (excluding temporary/cache files)..."
 
-# Copy directories to backup (excluding .git if present)
+# Create exclusion arguments for find
+EXCLUDE_ARGS="-name backup -prune -o -name .git -prune -o -name update_script.sh -prune{exclusions}"
+
+# Backup files
+find "{current_dir}" -maxdepth 1 -type f $EXCLUDE_ARGS -name "*.py" -print -exec cp {{}} "{backup_path}/" \\; -o \\
+$EXCLUDE_ARGS -name "*.md" -print -exec cp {{}} "{backup_path}/" \\; -o \\
+$EXCLUDE_ARGS -name "version" -print -exec cp {{}} "{backup_path}/" \\; -o \\
+$EXCLUDE_ARGS -name ".git*" -print -exec cp {{}} "{backup_path}/" \\; 2>/dev/null || true
+
+# Backup important directories (excluding .git, __pycache__, etc.)
 for dir in "{current_dir}"/*; do
-    if [ -d "$dir" ] && [ "$(basename "$dir")" != ".git" ] && [ "$(basename "$dir")" != "backup" ]; then
-        echo "Backing up directory: $(basename "$dir")"
-        cp -r "$dir" "{backup_path}/"
+    if [ -d "$dir" ]; then
+        dirname=$(basename "$dir")
+        case "$dirname" in
+            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache)
+                echo "Skipping $dirname (cache/git/static data)"
+                ;;
+            *)
+                if [ ! -f "{current_dir}/.gitignore" ] || ! grep -q "^$dirname$" "{current_dir}/.gitignore" 2>/dev/null; then
+                    echo "Backing up directory: $dirname"
+                    cp -r "$dir" "{backup_path}/"
+                fi
+                ;;
+        esac
     fi
 done
 
@@ -209,16 +230,31 @@ echo "Backup completed in: {backup_path}"
 echo ""
 
 # Remove old files (keep JSON files and backup directory)
-echo "Removing old files..."
-find "{current_dir}" -maxdepth 1 -type f ! -name "*.json" ! -name "update_script.sh" -delete
+echo "Removing old files for clean installation..."
+
+# Remove Python files and other source files
+find "{current_dir}" -maxdepth 1 -type f -name "*.py" ! -name "update_script.sh" -delete 2>/dev/null || true
+find "{current_dir}" -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || true
+find "{current_dir}" -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
+find "{current_dir}" -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
+
+# Remove directories (except JSON config dirs, backup, and .git)
 for dir in "{current_dir}"/*; do
-    if [ -d "$dir" ] && [ "$(basename "$dir")" != "backup" ]; then
-        echo "Removing directory: $(basename "$dir")"
-        rm -rf "$dir"
+    if [ -d "$dir" ]; then
+        dirname=$(basename "$dir")
+        case "$dirname" in
+            backup|.git|images)
+                echo "Preserving $dirname"
+                ;;
+            *)
+                echo "Removing directory: $dirname"
+                rm -rf "$dir"
+                ;;
+        esac
     fi
 done
 
-echo "Old files removed."
+echo "Old files cleaned up."
 echo ""
 
 # Clone new version
@@ -229,8 +265,9 @@ cd temp_clone
 
 # Move files from temp clone to current directory
 echo "Installing new version..."
-mv * "{current_dir}/" 2>/dev/null || true
-mv .* "{current_dir}/" 2>/dev/null || true
+# Move all files except .git and images directories
+find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} "{current_dir}/" \\; 2>/dev/null || true
+echo "Skipped downloading images folder (using existing)"
 cd "{current_dir}"
 rm -rf temp_clone
 
@@ -238,6 +275,7 @@ echo ""
 echo "=== Update Complete ==="
 echo "New version installed successfully!"
 echo "Backup saved in: {backup_path}"
+echo "JSON configuration files were preserved."
 echo ""
 echo "You can now restart the application."
 echo ""
@@ -247,6 +285,37 @@ read -p "Press Enter to exit..."
 rm -f "{current_dir}/update_script.sh"
 """
         return script
+    
+    def _get_backup_exclusions(self, current_dir):
+        """Generate find exclusion arguments based on .gitignore patterns."""
+        exclusions = []
+        gitignore_path = current_dir / ".gitignore"
+        
+        # Default exclusions (common patterns)
+        default_exclusions = [
+            "__pycache__", "*.pyc", "*.pyo", "*.pyd",
+            ".pytest_cache", ".mypy_cache", ".coverage",
+            "*.egg-info", ".tox", ".venv", "venv",
+            ".DS_Store", "Thumbs.db", "*.tmp", "*.log"
+        ]
+        
+        # Add exclusions from .gitignore if it exists
+        try:
+            if gitignore_path.exists():
+                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            default_exclusions.append(line)
+        except Exception as e:
+            print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
+        
+        # Convert to find exclusion arguments
+        for pattern in default_exclusions:
+            if pattern:
+                exclusions.append(f" -o -name '{pattern}' -prune")
+        
+        return "".join(exclusions)
     
     def _open_url(self, url):
         """Open URL in the default web browser."""
