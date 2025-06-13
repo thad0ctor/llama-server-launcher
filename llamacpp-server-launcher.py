@@ -81,14 +81,18 @@ except ImportError:
 
 # --- Dependency Check (Printed to console/stderr) ---
 MISSING_DEPS = []
+
+# PyTorch is the primary requirement for GPU detection and features
+if not TORCH_AVAILABLE:
+    MISSING_DEPS.append("PyTorch (required for GPU detection and CUDA features)")
+
+# Optional dependencies
 if not LLAMA_CPP_PYTHON_AVAILABLE:
-    MISSING_DEPS.append("llama-cpp-python (for GGUF analysis)")
-if LLAMA_CPP_PYTHON_AVAILABLE: # Only warn about these if llama_cpp is available, suggesting GPU interest
-    if not TORCH_AVAILABLE:
-         MISSING_DEPS.append("PyTorch (with CUDA support likely needed for GPU detection/offload)")
-    # Only mention flash_attn if CUDA is available via torch, and not macOS
-    if TORCH_AVAILABLE and sys.platform != "darwin" and not FLASH_ATTN_GUI_AVAILABLE:
-         MISSING_DEPS.append("Flash Attention (Python package 'flash_attn' - optional for --flash-attn)")
+    MISSING_DEPS.append("llama-cpp-python (optional - provides fallback GGUF analysis if llama.cpp tools unavailable)")
+
+# Only mention flash_attn if PyTorch/CUDA is available (suggesting GPU interest) and not macOS
+if TORCH_AVAILABLE and sys.platform != "darwin" and not FLASH_ATTN_GUI_AVAILABLE:
+    MISSING_DEPS.append("flash_attn (optional - enables --flash-attn parameter)")
 
 # psutil check already prints a warning if not found.
 
@@ -98,7 +102,8 @@ if MISSING_DEPS:
     print("The following Python libraries are recommended for full functionality but were not found:")
     for dep in MISSING_DEPS:
         print(f" - {dep}")
-    print("Please install them (e.g., 'pip install llama-cpp-python torch psutil flash_attn') if you need GGUF analysis, GPU features, or Flash Attention status.")
+    print("Please install them within your venv (e.g., 'pip install torch psutil flash_attn') for GPU features and enhanced functionality.")
+    print("Note: GGUF analysis works without llama-cpp-python using built-in tools or simple header parsing.")
     print("-------------------------------------\n")
 
 
@@ -247,6 +252,398 @@ def get_cpu_info_static():
         return {"error": f"Failed to get CPU info: {str(e)}", "logical_cores": 4, "physical_cores": 2}
 
 
+def analyze_gguf_with_llamacpp_tools(model_path_str, llama_cpp_dir=None):
+    """Analyze GGUF model using llama.cpp tools instead of llama-cpp-python."""
+    import subprocess
+    import json
+    from pathlib import Path
+    
+    model_path = Path(model_path_str)
+    if not model_path.is_file():
+        return {"error": f"Model file not found: {model_path}", "n_layers": None, "architecture": "N/A", "file_size_bytes": 0}
+
+    # Calculate total size across all shards if this is a multi-part file
+    total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
+    
+    analysis_result = {
+        "path": str(model_path),
+        "file_size_bytes": total_size_bytes,
+        "file_size_gb": round(total_size_bytes / (1024**3), 2),
+        "architecture": "unknown",
+        "n_layers": None,
+        "metadata": {},
+        "error": None,
+        "message": None,
+        "shard_count": shard_count,
+        "all_shards": [str(p) for p in all_shards]
+    }
+
+    # Try to find llama-inspect or similar tools
+    tools_to_try = []
+    
+    if llama_cpp_dir:
+        llama_base_dir = Path(llama_cpp_dir)
+        # Common locations for llama.cpp tools
+        search_paths = [
+            llama_base_dir,
+            llama_base_dir / "build" / "bin",
+            llama_base_dir / "build",
+            llama_base_dir / "bin",
+        ]
+        
+        tool_names = ["llama-inspect", "gguf-dump", "llama-server"]
+        if sys.platform == "win32":
+            tool_names = [name + ".exe" for name in tool_names]
+        
+        for search_path in search_paths:
+            for tool_name in tool_names:
+                tool_path = search_path / tool_name
+                if tool_path.is_file():
+                    tools_to_try.append((str(tool_path), tool_name.replace(".exe", "")))
+
+    # Try each tool
+    for tool_path, tool_name in tools_to_try:
+        try:
+            if tool_name == "llama-inspect":
+                # llama-inspect typically outputs JSON or structured data
+                result = subprocess.run([tool_path, str(model_path)], 
+                                      capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    # Parse the output (this would need to be adapted based on actual llama-inspect output format)
+                    output = result.stdout.strip()
+                    # Try to extract key information from the output
+                    if "layers" in output.lower() or "block_count" in output.lower():
+                        # Parse layer count from output
+                        for line in output.split('\n'):
+                            if 'block_count' in line.lower() or 'n_layers' in line.lower():
+                                try:
+                                    # Extract number from line (this is a simple approach, may need refinement)
+                                    import re
+                                    numbers = re.findall(r'\d+', line)
+                                    if numbers:
+                                        analysis_result["n_layers"] = int(numbers[-1])
+                                        break
+                                except:
+                                    pass
+                    
+                    # Extract architecture if possible
+                    for line in output.split('\n'):
+                        if 'architecture' in line.lower():
+                            # Simple extraction - would need refinement based on actual output format
+                            parts = line.split()
+                            if len(parts) > 1:
+                                analysis_result["architecture"] = parts[-1]
+                            break
+                    
+                    analysis_result["message"] = f"Analyzed using {tool_name}"
+                    return analysis_result
+                    
+            elif tool_name == "llama-server":
+                # Try to get model info from llama-server without starting it
+                # Some versions support --model-info or similar flags
+                for flag in ["--model-info", "--print-model-info", "--help"]:
+                    try:
+                        result = subprocess.run([tool_path, flag, "-m", str(model_path)], 
+                                              capture_output=True, text=True, timeout=10)
+                        if result.returncode == 0 and ("layer" in result.stdout.lower() or "block" in result.stdout.lower()):
+                            # Similar parsing as above
+                            output = result.stdout.strip()
+                            for line in output.split('\n'):
+                                if 'block' in line.lower() or 'layer' in line.lower():
+                                    try:
+                                        import re
+                                        numbers = re.findall(r'\d+', line)
+                                        if numbers:
+                                            analysis_result["n_layers"] = int(numbers[-1])
+                                            analysis_result["message"] = f"Analyzed using {tool_name}"
+                                            return analysis_result
+                                    except:
+                                        pass
+                            break
+                    except:
+                        continue
+                        
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception as e:
+            print(f"DEBUG: Tool {tool_name} failed: {e}", file=sys.stderr)
+            continue
+
+    # If no tools worked, try simple GGUF header parsing
+    try:
+        return parse_gguf_header_simple(model_path_str)
+    except Exception as e:
+        analysis_result["error"] = f"All analysis methods failed. Last error: {e}"
+        analysis_result["message"] = "Could not analyze model with available tools"
+        return analysis_result
+
+
+def calculate_total_gguf_size(model_path_str):
+    """Calculate total size across all GGUF shards if this is a multi-part file."""
+    import re
+    from pathlib import Path
+    
+    model_path = Path(model_path_str)
+    
+    # Check if this looks like a multi-part GGUF file (e.g., "00001-of-00003.gguf")
+    shard_pattern = re.search(r'-(\d+)-of-(\d+)\.gguf$', model_path.name, re.IGNORECASE)
+    if not shard_pattern:
+        # Not a multi-part file, return single file size
+        return model_path.stat().st_size, 1, [model_path]
+    
+    current_shard = int(shard_pattern.group(1))
+    total_shards = int(shard_pattern.group(2))
+    
+    print(f"DEBUG: Detected multi-part GGUF: shard {current_shard} of {total_shards}", file=sys.stderr)
+    
+    # Find all related shard files
+    base_name = model_path.name[:shard_pattern.start()]  # Everything before "-00001-of-00003.gguf"
+    parent_dir = model_path.parent
+    
+    total_size = 0
+    found_shards = []
+    missing_shards = []
+    
+    for shard_num in range(1, total_shards + 1):
+        shard_name = f"{base_name}-{shard_num:05d}-of-{total_shards:05d}.gguf"
+        shard_path = parent_dir / shard_name
+        
+        if shard_path.exists():
+            shard_size = shard_path.stat().st_size
+            total_size += shard_size
+            found_shards.append(shard_path)
+            print(f"DEBUG: Found shard {shard_num}: {shard_path.name} ({shard_size / (1024**3):.2f} GB)", file=sys.stderr)
+        else:
+            missing_shards.append(shard_name)
+            print(f"DEBUG: Missing shard {shard_num}: {shard_name}", file=sys.stderr)
+    
+    if missing_shards:
+        print(f"WARNING: Missing {len(missing_shards)} shards: {missing_shards}", file=sys.stderr)
+        # Return what we found, but note it's incomplete
+        return total_size, len(found_shards), found_shards
+    
+    print(f"DEBUG: Total size across {total_shards} shards: {total_size / (1024**3):.2f} GB", file=sys.stderr)
+    return total_size, total_shards, found_shards
+
+
+def parse_gguf_header_simple(model_path_str):
+    """Simple GGUF header parser to extract basic metadata without dependencies."""
+    import struct
+    from pathlib import Path
+    
+    model_path = Path(model_path_str)
+    
+    # Calculate total size across all shards if this is a multi-part file
+    total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
+    
+    analysis_result = {
+        "path": str(model_path),
+        "file_size_bytes": total_size_bytes,
+        "file_size_gb": round(total_size_bytes / (1024**3), 2),
+        "architecture": "unknown",
+        "n_layers": None,
+        "metadata": {},
+        "error": None,
+        "message": f"Analyzed using simple GGUF parser ({shard_count} shard{'s' if shard_count != 1 else ''})",
+        "shard_count": shard_count,
+        "all_shards": [str(p) for p in all_shards]
+    }
+    
+    try:
+        with open(model_path, 'rb') as f:
+            # Read GGUF magic number
+            magic = f.read(4)
+            if magic != b'GGUF':
+                analysis_result["error"] = "Not a valid GGUF file"
+                return analysis_result
+            
+            # Read version
+            version = struct.unpack('<I', f.read(4))[0]
+            
+            # Read tensor count and metadata count
+            tensor_count = struct.unpack('<Q', f.read(8))[0]
+            metadata_count = struct.unpack('<Q', f.read(8))[0]
+            
+            # Read metadata key-value pairs
+            for _ in range(metadata_count):
+                try:
+                    # Read key length and key
+                    key_len = struct.unpack('<Q', f.read(8))[0]
+                    key = f.read(key_len).decode('utf-8')
+                    
+                    # Read value type
+                    value_type = struct.unpack('<I', f.read(4))[0]
+                    
+                    # Parse value based on type (improved error handling)
+                    value = None
+                    if value_type == 8:  # String
+                        try:
+                            value_len_bytes = f.read(8)
+                            if len(value_len_bytes) < 8:
+                                break  # End of file
+                            value_len = struct.unpack('<Q', value_len_bytes)[0]
+                            if value_len > 100000:  # Sanity check for string length
+                                print(f"DEBUG: Skipping large string for key '{key}': {value_len} bytes", file=sys.stderr)
+                                f.seek(f.tell() + value_len)  # Skip the string
+                                continue
+                            value_bytes = f.read(value_len)
+                            if len(value_bytes) < value_len:
+                                break  # End of file
+                            value = value_bytes.decode('utf-8', errors='replace')
+                        except Exception as e:
+                            print(f"DEBUG: Failed to read string for key '{key}': {e}", file=sys.stderr)
+                            continue
+                    elif value_type == 4:  # Uint32
+                        try:
+                            value_bytes = f.read(4)
+                            if len(value_bytes) < 4:
+                                break
+                            value = struct.unpack('<I', value_bytes)[0]
+                        except Exception as e:
+                            print(f"DEBUG: Failed to read uint32 for key '{key}': {e}", file=sys.stderr)
+                            continue
+                    elif value_type == 5:  # Int32
+                        try:
+                            value_bytes = f.read(4)
+                            if len(value_bytes) < 4:
+                                break
+                            value = struct.unpack('<i', value_bytes)[0]
+                        except Exception as e:
+                            print(f"DEBUG: Failed to read int32 for key '{key}': {e}", file=sys.stderr)
+                            continue
+                    elif value_type == 6:  # Uint64
+                        try:
+                            value_bytes = f.read(8)
+                            if len(value_bytes) < 8:
+                                break
+                            value = struct.unpack('<Q', value_bytes)[0]
+                        except Exception as e:
+                            print(f"DEBUG: Failed to read uint64 for key '{key}': {e}", file=sys.stderr)
+                            continue
+                    elif value_type == 7:  # Float32
+                        try:
+                            value_bytes = f.read(4)
+                            if len(value_bytes) < 4:
+                                break
+                            value = struct.unpack('<f', value_bytes)[0]
+                        except Exception as e:
+                            print(f"DEBUG: Failed to read float32 for key '{key}': {e}", file=sys.stderr)
+                            continue
+                    elif value_type == 9:  # Bool
+                        try:
+                            bool_byte = f.read(1)
+                            if len(bool_byte) < 1:
+                                break
+                            value = bool_byte[0] != 0
+                        except Exception as e:
+                            print(f"DEBUG: Failed to read bool for key '{key}': {e}", file=sys.stderr)
+                            continue
+                    elif value_type == 10:  # Array
+                        try:
+                            array_type_bytes = f.read(4)
+                            array_len_bytes = f.read(8)
+                            if len(array_type_bytes) < 4 or len(array_len_bytes) < 8:
+                                break
+                            array_type = struct.unpack('<I', array_type_bytes)[0]
+                            array_len = struct.unpack('<Q', array_len_bytes)[0]
+                            
+                            print(f"DEBUG: Skipping array for key '{key}': type {array_type}, length {array_len}", file=sys.stderr)
+                            
+                            # Skip array data based on type
+                            if array_type == 8:  # String array
+                                for i in range(min(array_len, 10000)):  # Limit to prevent infinite loops
+                                    try:
+                                        str_len_bytes = f.read(8)
+                                        if len(str_len_bytes) < 8:
+                                            break
+                                        str_len = struct.unpack('<Q', str_len_bytes)[0]
+                                        if str_len > 100000:  # Sanity check
+                                            break
+                                        f.seek(f.tell() + str_len)
+                                    except:
+                                        break
+                            elif array_type == 4:  # Uint32 array
+                                f.seek(f.tell() + array_len * 4)
+                            elif array_type == 6:  # Uint64 array
+                                f.seek(f.tell() + array_len * 8)
+                            elif array_type == 7:  # Float32 array
+                                f.seek(f.tell() + array_len * 4)
+                            else:
+                                # Unknown array type, try to skip conservatively
+                                print(f"DEBUG: Unknown array type {array_type}, attempting to skip", file=sys.stderr)
+                                break
+                        except Exception as e:
+                            print(f"DEBUG: Failed to skip array for key '{key}': {e}", file=sys.stderr)
+                            break
+                        continue
+                    else:
+                        print(f"DEBUG: Unknown value type {value_type} for key '{key}', skipping", file=sys.stderr)
+                        continue
+                    
+                    if value is not None:
+                        analysis_result["metadata"][key] = value
+                        
+                        # Extract key information
+                        if key == "general.architecture":
+                            analysis_result["architecture"] = str(value)
+                        elif any(pattern in key.lower() for pattern in ['.block_count', '.n_layers', '.layer_count', '.num_layer']):
+                            if isinstance(value, (int, float)) and value > 0:
+                                analysis_result["n_layers"] = int(value)
+                                print(f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}", file=sys.stderr)
+                        
+                        # Also check for model name patterns that might indicate layer count
+                        if 'name' in key.lower() and isinstance(value, str):
+                            # Try to extract parameter count from model name (e.g., "235B" -> estimate layers)
+                            import re
+                            param_match = re.search(r'(\d+)B', value.upper())
+                            if param_match and analysis_result["n_layers"] is None:
+                                param_count = int(param_match.group(1))
+                                # Rough estimate: large models typically have ~80-120 layers per billion parameters
+                                # For very large models like 235B, use a more conservative estimate
+                                if param_count >= 100:
+                                    estimated_layers = max(80, min(200, param_count // 2))  # Very conservative for huge models
+                                else:
+                                    estimated_layers = max(32, min(120, param_count * 2))  # More typical estimate
+                                print(f"DEBUG: Estimated {estimated_layers} layers from model name '{value}' ({param_count}B parameters)", file=sys.stderr)
+                                analysis_result["n_layers"] = estimated_layers
+                        
+                except Exception as parse_error:
+                    # Skip this metadata entry if parsing fails
+                    print(f"DEBUG: Failed to parse metadata entry: {parse_error}", file=sys.stderr)
+                    continue
+            
+            # If we still don't have layer count, make a reasonable guess based on file size
+            if analysis_result["n_layers"] is None:
+                file_size_gb = analysis_result["file_size_gb"]
+                if file_size_gb > 100:  # Very large model (100+ GB)
+                    estimated_layers = 120  # Conservative estimate for huge models
+                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on very large file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                elif file_size_gb > 50:  # Large model (50-100 GB)
+                    estimated_layers = 80
+                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on large file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                elif file_size_gb > 20:  # Medium-large model (20-50 GB)
+                    estimated_layers = 60
+                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on medium-large file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                elif file_size_gb > 10:  # Medium model (10-20 GB)
+                    estimated_layers = 40
+                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on medium file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                elif file_size_gb > 3:   # Small-medium model (3-10 GB)
+                    estimated_layers = 32
+                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small-medium file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                else:  # Small model (< 3 GB)
+                    estimated_layers = 24
+                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                
+                analysis_result["n_layers"] = estimated_layers
+                analysis_result["message"] += f" (estimated {estimated_layers} layers from file size)"
+            
+            return analysis_result
+            
+    except Exception as e:
+        analysis_result["error"] = f"Failed to parse GGUF header: {e}"
+        return analysis_result
+
+
 def analyze_gguf_model_static(model_path_str):
     """Analyze a GGUF model file and extract metadata (static method)."""
     if not LLAMA_CPP_PYTHON_AVAILABLE or not Llama:
@@ -256,22 +653,26 @@ def analyze_gguf_model_static(model_path_str):
     if not model_path.is_file():
          return {"error": f"Model file not found: {model_path}", "n_layers": None, "architecture": "N/A", "file_size_bytes": 0}
 
+    # Calculate total size across all shards if this is a multi-part file
+    total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
+    
     analysis_result = {
         "path": str(model_path),
-        "file_size_bytes": 0,
-        "file_size_gb": 0,
+        "file_size_bytes": total_size_bytes,
+        "file_size_gb": round(total_size_bytes / (1024**3), 2),
         "architecture": "unknown",
         "n_layers": None,
         "metadata": {},
         "error": None,
-        "message": None
+        "message": None,
+        "shard_count": shard_count,
+        "all_shards": [str(p) for p in all_shards]
     }
 
     llm_meta = None # Initialize llm_meta outside the try block
 
     try:
-        analysis_result["file_size_bytes"] = model_path.stat().st_size
-        analysis_result["file_size_gb"] = round(analysis_result["file_size_bytes"] / (1024**3), 2)
+        # File size already calculated from shards above, no need to recalculate
 
         try:
              # Use minimal parameters for quick metadata load
@@ -383,7 +784,7 @@ class LlamaCppLauncher:
         # Add other core templates here if you want them available even without the JSON file
         "Alpaca": "### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}",
         "ChatML": "<|im_start|>system\\n{{system_message}}<|im_end|>\\n<|im_start|>user\\n{{prompt}}<|im_end|>\\n<|im_start|>assistant\\n",
-        "Llama 2 Chat": "[INST] <<SYS>>\\n{{system_message}}\\n<</SYS>>\\n\\n{{prompt}}[/INST]",
+        "Llama 2 Chat": "  <<SYS>>\\n{{system_message}}\\n<</SYS>>\\n\\n{{prompt}} ",
         "Vicuna": "A chat between a curious user and an AI assistant.\nThe assistant gives helpful, harmless, honest answers.\nUSER: {{prompt}}\nASSISTANT: ",
         # Qwen3 templates are removed as requested
     }
@@ -400,7 +801,7 @@ class LlamaCppLauncher:
         """
         self.root = root
         self.root.title("LLaMa.cpp Server Launcher")
-        self.root.geometry("900x850")
+        self.root.geometry("900x1000")
         self.root.minsize(800, 750)
 
         # ------------------------------------------------ Internal Data Attributes --
@@ -430,6 +831,14 @@ class LlamaCppLauncher:
             # Save/load network settings
             "host":              "127.0.0.1",
             "port":              "8080",
+            # Manual GPU settings for when detection fails
+            "manual_gpu_mode":    False,
+            "manual_gpu_count":   "1",
+            "manual_gpu_vram":    "8.0",
+            # Manual model settings for when analysis fails
+            "manual_model_mode":  False,
+            "manual_model_layers": "32",
+            "manual_model_size_gb": "7.0",
         }
         # List to store custom parameters entered by the user (strings)
         self.custom_parameters_list = [] # <-- New attribute for custom parameters
@@ -522,10 +931,21 @@ class LlamaCppLauncher:
         # List of BooleanVars for dynamic GPU selection checkboxes (populated later)
         self.gpu_vars = []
 
+        # --- Manual GPU Entry Variables ---
+        # For when GPU detection fails but user wants to manually specify GPUs
+        self.manual_gpu_mode = tk.BooleanVar(value=False)  # Whether we're in manual GPU mode
+        self.manual_gpu_count = tk.StringVar(value="1")    # User-specified number of GPUs
+        self.manual_gpu_vram = tk.StringVar(value="8.0")   # User-specified VRAM per GPU (GB)
+
+        # --- Manual Model Entry Variables ---
+        # For when model analysis fails but user wants to manually specify model info
+        self.manual_model_mode = tk.BooleanVar(value=False)  # Whether we're in manual model mode
+        self.manual_model_layers = tk.StringVar(value="32")  # User-specified number of layers
+        self.manual_model_size_gb = tk.StringVar(value="7.0")  # User-specified model size (GB)
+
         # --- Memory & Other Advanced Settings ---
         self.no_mmap         = tk.BooleanVar(value=False) # --no-mmap
-        # Disable convolutional batching? (Related to -b / --batch-size implementation details)
-        self.no_cnv          = tk.BooleanVar(value=False) # --no-cnv
+
         self.prio            = tk.StringVar(value="0") # --prio
         self.mlock           = tk.BooleanVar(value=False) # --mlock
         self.no_kv_offload   = tk.BooleanVar(value=False) # --no-kv-offload
@@ -577,8 +997,6 @@ class LlamaCppLauncher:
 
 
         # --- Status Variables ---
-        # Initial status reflects GUI environment, will update based on venv check
-        self.flash_attn_status_var = tk.StringVar(value=f"Status (GUI env): {'Installed (requires llama.cpp build support)' if FLASH_ATTN_GUI_AVAILABLE else 'Not Installed (Python package missing in GUI env)'}")
         self.gpu_detected_status_var = tk.StringVar(value="") # Updates with GPU detection message
 
 
@@ -634,8 +1052,6 @@ class LlamaCppLauncher:
         # Context size updates handled in _override_ctx_size and _update_ctx_label_from_slider
         # n_gpu_layers updates handled in _set_gpu_layers (called by entry/slider sync)
         # GPU selection updates handled in _on_gpu_selection_changed
-        # Bind trace to venv_dir to trigger the flash attn check
-        self.venv_dir.trace_add("write", lambda *args: self._check_venv_flash_attn())
         # Bind trace to n_predict to update default config name if it's currently the generated one
         self.n_predict.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to ignore_eos to update default config name if needed
@@ -655,7 +1071,7 @@ class LlamaCppLauncher:
         self.tensor_split.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.main_gpu.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.no_mmap.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
-        self.no_cnv.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+
         self.prio.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.mlock.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.no_kv_offload.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -683,6 +1099,15 @@ class LlamaCppLauncher:
 
         # Update initial GPU checkbox states and recommendations based on loaded config and detected GPUs
         self._update_gpu_checkboxes()
+        
+        # If manual GPU mode was loaded from config, apply it
+        if self.manual_gpu_mode.get():
+            self._setup_manual_gpus()
+        
+        # If manual model mode was loaded from config, apply it
+        if self.manual_model_mode.get():
+            self._setup_manual_model()
+        
         self._update_recommendations() # Call initially to set all initial recommendations
 
         # Perform initial scan (in background) if dirs exist
@@ -693,8 +1118,7 @@ class LlamaCppLauncher:
         else:
              self.scan_status_var.set("Add directories and scan for models.")
 
-        # Run initial Flash Attention check (might trigger venv check if venv is pre-filled)
-        self._check_venv_flash_attn()
+
 
         # Update chat template display and controls initially based on initial state
         self._update_template_controls_state() # Sets initial state based on self.template_source
@@ -742,6 +1166,7 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     def _get_config_path(self):
         local_path = Path("llama_cpp_launcher_configs.json") # Renamed slightly to avoid potential clashes
+        print(f"DEBUG: Checking local config path: {local_path.resolve()}", file=sys.stderr)
         try:
             # Check if we can write to the current directory
             # Check if a config file exists and is empty (possibly from a failed previous run)
@@ -752,6 +1177,7 @@ class LlamaCppLauncher:
 
             # Check write permissions AFTER cleanup attempt
             if os.access(".", os.W_OK):
+                 print(f"DEBUG: Using local config path: {local_path.resolve()}", file=sys.stderr)
                  return local_path
             else:
                  raise PermissionError("No write access in current directory.") # Force fallback
@@ -773,7 +1199,7 @@ class LlamaCppLauncher:
                 if fallback_path.exists() and fallback_path.stat().st_size == 0:
                      try: fallback_path.unlink()
                      except OSError: pass
-                print(f"Note: Using fallback config path: {fallback_path}", file=sys.stderr)
+                print(f"DEBUG: Using fallback config path: {fallback_path}", file=sys.stderr)
                 return fallback_path
             except Exception as e_fallback:
                  print(f"CRITICAL ERROR: Could not use local config path or fallback config path {fallback_dir}. Configuration saving/loading is disabled. Error: {e_fallback}", file=sys.stderr)
@@ -787,6 +1213,7 @@ class LlamaCppLauncher:
              print("No config file found or config saving is disabled. Using default settings.", file=sys.stderr)
              return
 
+        print(f"DEBUG: Loading config from: {self.config_path}", file=sys.stderr)
         try:
             data = json.loads(self.config_path.read_text(encoding="utf-8"))
             self.saved_configs = data.get("configs", {})
@@ -809,6 +1236,16 @@ class LlamaCppLauncher:
 
             # Load custom parameters into the internal list
             self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
+
+            # Load manual GPU settings
+            self.manual_gpu_mode.set(self.app_settings.get("manual_gpu_mode", False))
+            self.manual_gpu_count.set(self.app_settings.get("manual_gpu_count", "1"))
+            self.manual_gpu_vram.set(self.app_settings.get("manual_gpu_vram", "8.0"))
+
+            # Load manual model settings
+            self.manual_model_mode.set(self.app_settings.get("manual_model_mode", False))
+            self.manual_model_layers.set(self.app_settings.get("manual_model_layers", "32"))
+            self.manual_model_size_gb.set(self.app_settings.get("manual_model_size_gb", "7.0"))
 
             # Ensure port and host are set from app_settings
             if "port" in self.app_settings:
@@ -857,6 +1294,16 @@ class LlamaCppLauncher:
         self.app_settings["host"] = self.host.get()
         self.app_settings["port"] = self.port.get()
         print(f"DEBUG: Saving port as {self.port.get()}") # Add debug print
+        
+        # Save manual GPU settings
+        self.app_settings["manual_gpu_mode"] = self.manual_gpu_mode.get()
+        self.app_settings["manual_gpu_count"] = self.manual_gpu_count.get()
+        self.app_settings["manual_gpu_vram"] = self.manual_gpu_vram.get()
+        
+        # Save manual model settings
+        self.app_settings["manual_model_mode"] = self.manual_model_mode.get()
+        self.app_settings["manual_model_layers"] = self.manual_model_layers.get()
+        self.app_settings["manual_model_size_gb"] = self.manual_model_size_gb.get()
 
         payload = {
             "configs":      self.saved_configs,
@@ -1132,7 +1579,6 @@ class LlamaCppLauncher:
     def _clear_venv(self):
         """Clears the virtual environment directory entry."""
         self.venv_dir.set("")
-        # Setting the variable automatically triggers the trace, which calls _check_venv_flash_attn()
 
     def _override_ctx_size(self, event=None):
         """Manually set context size from entry."""
@@ -1268,7 +1714,12 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="Current KV Cache Type:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Label(inner, textvariable=self.model_kv_cache_type_var)\
-            .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=3); r += 1
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=2)
+        
+        # Add Analyze Model button
+        self.analyze_model_button = ttk.Button(inner, text="Analyze Model", command=self._force_analyze_model)
+        self.analyze_model_button.grid(column=3, row=r, sticky="w", padx=5, pady=3)
+        r += 1
 
 
         # --- System Info Display (RAM & CPU) --- (Labels only, not editable)
@@ -1357,6 +1808,39 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Slider range updates with model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
+        # --- Manual Model Entry (when analysis fails) ---
+        self.manual_model_frame = ttk.Frame(inner)
+        self.manual_model_frame.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5)
+        
+        # Create manual model widgets (always create them, but control visibility)
+        self.manual_model_label = ttk.Label(self.manual_model_frame, text="Model analysis unavailable. Manual entry:", foreground="orange")
+        self.manual_model_label.pack(side="left", padx=5)
+        
+        # Layers entry
+        ttk.Label(self.manual_model_frame, text="Layers:").pack(side="left", padx=(10, 2))
+        self.manual_layers_entry = ttk.Entry(self.manual_model_frame, textvariable=self.manual_model_layers, width=5)
+        self.manual_layers_entry.pack(side="left", padx=2)
+        
+        # Size entry
+        ttk.Label(self.manual_model_frame, text="Size (GB):").pack(side="left", padx=(5, 2))
+        self.manual_size_entry = ttk.Entry(self.manual_model_frame, textvariable=self.manual_model_size_gb, width=6)
+        self.manual_size_entry.pack(side="left", padx=2)
+        
+        # Apply button
+        self.manual_apply_btn = ttk.Button(self.manual_model_frame, text="Apply", command=self._apply_manual_model_settings)
+        self.manual_apply_btn.pack(side="left", padx=(5, 2))
+        
+        # Toggle checkbox for manual mode
+        self.manual_model_cb = ttk.Checkbutton(self.manual_model_frame, text="Use manual model info", 
+                                         variable=self.manual_model_mode,
+                                         command=self._toggle_manual_model_mode)
+        self.manual_model_cb.pack(side="left", padx=(10, 0))
+        
+        # Initially hide the manual model frame (will be shown/hidden dynamically)
+        self._update_manual_model_visibility()
+        
+        r += 1
+
         # --- Tensor Split ---
         ttk.Label(inner, text="Tensor Split (--tensor-split):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
@@ -1388,9 +1872,7 @@ class LlamaCppLauncher:
         self.flash_attn_check = ttk.Checkbutton(inner, variable=self.flash_attn, state=tk.NORMAL)
         self.flash_attn_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Use Flash Attention kernel (CUDA only, requires specific build)", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, sticky="w", padx=5, pady=3);
-        self.flash_attn_status_label = ttk.Label(inner, textvariable=self.flash_attn_status_var, font=("TkSmallCaptionFont", 8, ("bold",)))
-        self.flash_attn_status_label.grid(column=3, row=r, sticky="w", padx=5, pady=3); r += 1
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
 
         # --- Memory & Cache settings ---
@@ -1474,17 +1956,8 @@ class LlamaCppLauncher:
         self.threads_batch_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, textvariable=self.recommended_threads_batch_var, font=("TkSmallCaptionFont")).grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Number of threads to use for batch processing (llama.cpp default: 4)", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1
+            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,3)); r += 1
 
-
-        # Disable Conv Batching (--no-cnv) - Moved here as it's related to batching
-        ttk.Label(inner, text="Disable Conv Batching (--no-cnv):")\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        # Ensure checkbox is explicitly NORMAL
-        self.no_cnv_check = ttk.Checkbutton(inner, variable=self.no_cnv, state=tk.NORMAL)
-        self.no_cnv_check.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="Disable convolutional batching for prompt processing", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
 
 
         # --- Scheduling Priority --- (Already existed, just moved)
@@ -1786,12 +2259,22 @@ class LlamaCppLauncher:
         ttk.Button(btn_frame, text="Save Configuration", command=self._save_configuration).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Load Configuration", command=self._load_configuration).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Delete Configuration", command=self._delete_configuration).pack(side="left", padx=5)
+        
+        # Import/Export buttons
+        import_export_frame = ttk.Frame(inner); import_export_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Button(import_export_frame, text="Export Selected", command=self._export_configurations).pack(side="left", padx=5)
+        ttk.Button(import_export_frame, text="Import from File", command=self._import_configurations).pack(side="left", padx=5)
+        
+        # Instructions for multi-select
+        instructions_frame = ttk.Frame(inner); instructions_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Label(instructions_frame, text="Tip: Hold Ctrl to select multiple configurations for export", 
+                 font=("TkSmallCaptionFont", 8), foreground="gray").pack(side="left")
 
         # Config list
         ttk.Label(inner, text="Saved Configurations:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", padx=10, pady=(15,5))
         list_frame = ttk.Frame(inner); list_frame.pack(fill="both", expand=True, padx=10, pady=5)
         list_sb = ttk.Scrollbar(list_frame, orient=tk.VERTICAL)
-        self.config_listbox = tk.Listbox(list_frame, yscrollcommand=list_sb.set, height=12, exportselection=False)
+        self.config_listbox = tk.Listbox(list_frame, yscrollcommand=list_sb.set, height=12, exportselection=False, selectmode=tk.EXTENDED)
         list_sb.config(command=self.config_listbox.yview)
         self.config_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         list_sb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -2137,6 +2620,7 @@ class LlamaCppLauncher:
             self.current_model_analysis = {}
             self._update_recommendations() # Update based on no model
             self._generate_default_config_name() # Generate default name for no model state
+            self._update_manual_model_visibility() # Update manual model section visibility
             return
 
         index = selection[0]
@@ -2173,15 +2657,24 @@ class LlamaCppLauncher:
                  self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
                  self.analysis_thread.start()
             else:
-                 self.gpu_layers_status_var.set("Analysis requires llama-cpp-python")
-                 self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if lib missing
-                 self._reset_model_info_display()
-                 self.model_architecture_var.set("Analysis Unavailable")
-                 self.model_filesize_var.set("Analysis Unavailable")
-                 self.model_total_layers_var.set("Analysis Unavailable")
-                 self.current_model_analysis = {}
-                 self._update_recommendations() # Update recommendations based on no analysis
-                 self._generate_default_config_name() # Generate default name even without analysis
+                 # Analysis not available - check what options we have
+                 llama_dir = self.llama_cpp_dir.get().strip()
+                 if llama_dir:
+                     self.gpu_layers_status_var.set("Analyzing model using llama.cpp tools...")
+                     # Try the analysis even without llama-cpp-python
+                     self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
+                     self.analysis_thread.start()
+                 else:
+                     self.gpu_layers_status_var.set("Analysis available: Set llama.cpp directory or install llama-cpp-python")
+                     self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if lib missing
+                     self._reset_model_info_display()
+                     self.model_architecture_var.set("Analysis Unavailable")
+                     self.model_filesize_var.set("Analysis Unavailable")
+                     self.model_total_layers_var.set("Analysis Unavailable")
+                     self.current_model_analysis = {}
+                     self._update_recommendations() # Update recommendations based on no analysis
+                     self._generate_default_config_name() # Generate default name even without analysis
+                     self._update_manual_model_visibility() # Update manual model section visibility
 
 
         else:
@@ -2194,6 +2687,7 @@ class LlamaCppLauncher:
             self.current_model_analysis = {}
             self._update_recommendations() # Update based on no model
             self._generate_default_config_name() # Generate default name for no model state
+            self._update_manual_model_visibility() # Update manual model section visibility
 
 
     def _run_gguf_analysis(self, model_path_str):
@@ -2202,7 +2696,27 @@ class LlamaCppLauncher:
         # Check if the currently selected model in the GUI still matches the one being analyzed
         # This prevents updating the UI with stale results if the user quickly selects another model
         if self.model_path.get() == model_path_str:
-             analysis_result = analyze_gguf_model_static(model_path_str)
+             # Try llama.cpp tools first, fall back to llama-cpp-python if available
+             llama_dir = self.llama_cpp_dir.get().strip() if hasattr(self, 'llama_cpp_dir') else None
+             
+             if llama_dir:
+                 print(f"DEBUG: Trying llama.cpp tools from: {llama_dir}", file=sys.stderr)
+                 analysis_result = analyze_gguf_with_llamacpp_tools(model_path_str, llama_dir)
+                 
+                 # If llama.cpp tools failed and we have llama-cpp-python available, try that as fallback
+                 if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
+                     print("DEBUG: llama.cpp tools failed, falling back to llama-cpp-python", file=sys.stderr)
+                     analysis_result = analyze_gguf_model_static(model_path_str)
+             else:
+                 # No llama.cpp directory set, try simple GGUF parser first
+                 print("DEBUG: No llama.cpp directory set, trying simple GGUF parser", file=sys.stderr)
+                 analysis_result = parse_gguf_header_simple(model_path_str)
+                 
+                 # If simple parser failed and we have llama-cpp-python available, try that as fallback
+                 if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
+                     print("DEBUG: Simple GGUF parser failed, falling back to llama-cpp-python", file=sys.stderr)
+                     analysis_result = analyze_gguf_model_static(model_path_str)
+             
              # Only update UI if the model path hasn't changed while analyzing
              if self.model_path.get() == model_path_str:
                 self.root.after(0, self._update_ui_after_analysis, analysis_result)
@@ -2215,13 +2729,67 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis - Updated Handler
     # ═════════════════════════════════════════════════════════════════
+    def _update_manual_model_visibility(self):
+        """Show or hide the manual model entry section based on analysis availability."""
+        # Check if model analysis failed or no model loaded
+        analysis_failed = (not self.current_model_analysis or 
+                          self.current_model_analysis.get("error") or 
+                          self.current_model_analysis.get("n_layers") is None or
+                          not self.model_path.get())
+        
+        # Also check if we're in manual mode (should always show in manual mode)
+        show_manual = analysis_failed or self.manual_model_mode.get()
+        
+        if hasattr(self, 'manual_model_frame') and self.manual_model_frame.winfo_exists():
+            if show_manual:
+                self.manual_model_frame.grid()  # Show the frame
+            else:
+                self.manual_model_frame.grid_remove()  # Hide the frame but keep its grid position
+
+    def _force_analyze_model(self):
+        """Forces analysis of the currently selected model."""
+        model_path_str = self.model_path.get().strip()
+        if not model_path_str:
+            print("DEBUG: No model selected for analysis", file=sys.stderr)
+            return
+            
+        print(f"DEBUG: Force analyzing model: {model_path_str}", file=sys.stderr)
+        
+        # Update button to show analysis is in progress
+        if hasattr(self, 'analyze_model_button') and self.analyze_model_button.winfo_exists():
+            self.analyze_model_button.config(text="Analyzing...", state=tk.DISABLED)
+        
+        # Update status
+        self.gpu_layers_status_var.set("Force analyzing model...")
+        self._reset_model_info_display()
+        self.current_model_analysis = {}
+        self._update_recommendations()
+        
+        # Cancel any existing analysis
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            print("DEBUG: Cancelling previous analysis thread for force analysis.", file=sys.stderr)
+        
+        # Start new analysis thread
+        self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(model_path_str,), daemon=True)
+        self.analysis_thread.start()
+
     def _update_ui_after_analysis(self, analysis_result):
         """Updates controls based on GGUF analysis results (runs in main thread)."""
         print("DEBUG: _update_ui_after_analysis running", file=sys.stderr)
+        
+        # Re-enable the analyze button
+        if hasattr(self, 'analyze_model_button') and self.analyze_model_button.winfo_exists():
+            self.analyze_model_button.config(text="Analyze Model", state=tk.NORMAL)
+        
         # Crucially, check if the analysis result is for the *currently selected* model
         if self.model_path.get() != analysis_result.get("path"):
              print("DEBUG: _update_ui_after_analysis received result for a different model. Ignoring.", file=sys.stderr)
              return # Ignore stale results
+
+        # If we're in manual model mode, don't override with analysis results
+        if self.manual_model_mode.get():
+            print("DEBUG: Manual model mode is active, skipping automatic analysis update.", file=sys.stderr)
+            return
 
         self.current_model_analysis = analysis_result
         error = analysis_result.get("error")
@@ -2231,8 +2799,19 @@ class LlamaCppLauncher:
         # --- Update Model Info Display ---
         arch = analysis_result.get("architecture", "unknown")
         file_size_gb = analysis_result.get("file_size_gb")
+        shard_count = analysis_result.get("shard_count", 1)
+        
         self.model_architecture_var.set(arch.capitalize() if arch and arch != "unknown" else "Unknown")
-        self.model_filesize_var.set(f"{file_size_gb:.2f} GB" if file_size_gb is not None and file_size_gb > 0 else "Unknown Size")
+        
+        # Show file size with shard info if applicable
+        if file_size_gb is not None and file_size_gb > 0:
+            if shard_count > 1:
+                self.model_filesize_var.set(f"{file_size_gb:.2f} GB ({shard_count} shards)")
+            else:
+                self.model_filesize_var.set(f"{file_size_gb:.2f} GB")
+        else:
+            self.model_filesize_var.set("Unknown Size")
+            
         self.model_total_layers_var.set(str(n_layers) if n_layers is not None else "Unknown")
 
         # --- Update GPU Layer Controls ---
@@ -2265,6 +2844,10 @@ class LlamaCppLauncher:
         # --- Generate Default Config Name ---
         # Call this after analysis completes, as n_layers is needed for the name
         self._generate_default_config_name()
+        
+        # --- Update Manual Model Visibility ---
+        # Hide/show manual model section based on analysis success
+        self._update_manual_model_visibility()
 
     def _reset_gpu_layer_controls(self, keep_entry_enabled=False):
          """Resets GPU layer slider state and max layers (but *not* entry StringVar).
@@ -2457,6 +3040,159 @@ class LlamaCppLauncher:
             return False
 
     # ═════════════════════════════════════════════════════════════════
+    #  Manual Model Setup (when analysis fails)
+    # ═════════════════════════════════════════════════════════════════
+    def _setup_manual_model(self):
+        """Set up manual model mode when analysis fails."""
+        try:
+            layers = int(self.manual_model_layers.get())
+            size_gb = float(self.manual_model_size_gb.get())
+            
+            if layers <= 0:
+                layers = 32
+                self.manual_model_layers.set("32")
+            if size_gb <= 0:
+                size_gb = 7.0
+                self.manual_model_size_gb.set("7.0")
+                
+        except ValueError:
+            layers = 32
+            size_gb = 7.0
+            self.manual_model_layers.set("32")
+            self.manual_model_size_gb.set("7.0")
+        
+        # Generate synthetic model analysis result
+        self.current_model_analysis = {
+            "path": self.model_path.get() or "Manual Model",
+            "file_size_bytes": int(size_gb * (1024**3)),
+            "file_size_gb": size_gb,
+            "architecture": "Manual",
+            "n_layers": layers,
+            "metadata": {},
+            "error": None,
+            "message": None,
+            "manual_mode": True
+        }
+        
+        # Update model info display
+        self.model_architecture_var.set("Manual Entry")
+        self.model_filesize_var.set(f"{size_gb:.2f} GB (Manual)")
+        self.model_total_layers_var.set(f"{layers} (Manual)")
+        
+        # Update GPU layer controls
+        self.max_gpu_layers.set(layers)
+        self.gpu_layers_status_var.set(f"Max Layers: {layers} (Manual)")
+        
+        if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
+            self.gpu_layers_slider.config(to=layers, state=tk.NORMAL)
+        
+        if hasattr(self, 'n_gpu_layers_entry') and self.n_gpu_layers_entry.winfo_exists():
+            self.n_gpu_layers_entry.config(state=tk.NORMAL)
+        
+        # Sync the controls based on current entry value
+        self._sync_gpu_layers_from_entry()
+        
+        print(f"DEBUG: Set up manual model with {layers} layers and {size_gb} GB size", file=sys.stderr)
+        
+        # Update recommendations and save settings
+        self._update_recommendations()
+        self._generate_default_config_name()
+        self._save_configs()
+
+    def _apply_manual_model_settings(self):
+        """Apply manual model settings without toggling the checkbox."""
+        self.manual_model_mode.set(True)
+        self._setup_manual_model()
+
+    def _toggle_manual_model_mode(self):
+        """Toggle between automatic and manual model analysis."""
+        if self.manual_model_mode.get():
+            # Switching to manual mode
+            self._setup_manual_model()
+        else:
+            # Switching back to automatic analysis
+            if self.model_path.get():
+                # Re-trigger analysis if a model is selected
+                self._on_model_selected()
+            else:
+                # No model selected, reset to default state
+                self._reset_gpu_layer_controls()
+                self._reset_model_info_display()
+                self.current_model_analysis = {}
+                self._update_recommendations()
+                self._generate_default_config_name()
+            self._save_configs()
+        
+        # Update manual model visibility after mode change
+        self._update_manual_model_visibility()
+
+    # ═════════════════════════════════════════════════════════════════
+    #  Manual GPU Setup (when detection fails)
+    # ═════════════════════════════════════════════════════════════════
+    def _setup_manual_gpus(self):
+        """Set up manual GPU mode when detection fails."""
+        try:
+            gpu_count = int(self.manual_gpu_count.get())
+            vram_gb = float(self.manual_gpu_vram.get())
+            
+            if gpu_count <= 0:
+                gpu_count = 1
+                self.manual_gpu_count.set("1")
+            if vram_gb <= 0:
+                vram_gb = 8.0
+                self.manual_gpu_vram.set("8.0")
+                
+        except ValueError:
+            gpu_count = 1
+            vram_gb = 8.0
+            self.manual_gpu_count.set("1")
+            self.manual_gpu_vram.set("8.0")
+        
+        # Generate synthetic GPU info
+        self.gpu_info = {
+            "available": True,
+            "device_count": gpu_count,
+            "devices": [],
+            "manual_mode": True
+        }
+        
+        self.detected_gpu_devices = []
+        for i in range(gpu_count):
+            gpu_info = {
+                "id": i,
+                "name": f"Manual GPU {i}",
+                "total_memory_bytes": int(vram_gb * (1024**3)),
+                "total_memory_gb": vram_gb,
+                "compute_capability": "Unknown",
+                "multi_processor_count": 0,
+                "manual": True
+            }
+            self.detected_gpu_devices.append(gpu_info)
+            self.gpu_info["devices"].append(gpu_info)
+        
+        print(f"DEBUG: Set up {gpu_count} manual GPUs with {vram_gb} GB VRAM each", file=sys.stderr)
+        
+        # Update GPU checkboxes and save settings
+        self._update_gpu_checkboxes()
+        self._save_configs()
+
+    def _apply_manual_gpu_settings(self):
+        """Apply manual GPU settings without toggling the checkbox."""
+        self.manual_gpu_mode.set(True)
+        self._setup_manual_gpus()
+
+    def _toggle_manual_gpu_mode(self):
+        """Toggle between automatic and manual GPU detection."""
+        if self.manual_gpu_mode.get():
+            # Switching to manual mode
+            self._setup_manual_gpus()
+        else:
+            # Switching back to automatic detection
+            self._fetch_system_info()  # Re-fetch to get actual detection results
+            self._update_gpu_checkboxes()
+            self._save_configs()
+
+    # ═════════════════════════════════════════════════════════════════
     #  dynamic GPU checkboxes and info display
     # ═════════════════════════════════════════════════════════════════
     def _update_gpu_checkboxes(self):
@@ -2471,8 +3207,13 @@ class LlamaCppLauncher:
         print(f"DEBUG: Detected GPUs: {self.detected_gpu_devices}", file=sys.stderr)
         print(f"DEBUG: Loaded selected GPUs indices: {loaded_selected_gpus}", file=sys.stderr)
 
+        # Check if we're in manual mode or if detection failed
+        is_manual_mode = self.manual_gpu_mode.get() or self.gpu_info.get("manual_mode", False)
 
         if count > 0:
+            # Show GPU checkboxes (either detected or manual)
+            mode_indicator = " (Manual)" if is_manual_mode else ""
+            
             for i in range(count):
                 # Get info for the detected GPU device
                 gpu_details = self.detected_gpu_devices[i] if i < len(self.detected_gpu_devices) else {}
@@ -2481,6 +3222,7 @@ class LlamaCppLauncher:
                 gpu_name_display = f"GPU {i}"
                 if gpu_details and gpu_details.get("name"):
                      gpu_name_display += f": {gpu_details['name']}"
+                gpu_name_display += mode_indicator
 
                 cb = ttk.Checkbutton(self.gpu_checkbox_frame, text=gpu_name_display, variable=v)
                 cb.pack(side="left", padx=3, pady=2)
@@ -2490,7 +3232,35 @@ class LlamaCppLauncher:
                 self.gpu_vars.append(v)
 
         else:
-             ttk.Label(self.gpu_checkbox_frame, text="(No CUDA devices detected)").pack(side="left", padx=5, pady=3)
+            # No GPUs detected - show manual entry option
+            no_gpu_label = ttk.Label(self.gpu_checkbox_frame, text="No CUDA devices detected.", foreground="orange")
+            no_gpu_label.pack(side="left", padx=5, pady=3)
+            
+            # Manual GPU entry controls
+            manual_frame = ttk.Frame(self.gpu_checkbox_frame)
+            manual_frame.pack(side="left", padx=(10, 5), pady=3)
+            
+            ttk.Label(manual_frame, text="Manual setup:").pack(side="left", padx=2)
+            
+            # GPU count entry
+            ttk.Label(manual_frame, text="GPUs:").pack(side="left", padx=(5, 2))
+            gpu_count_entry = ttk.Entry(manual_frame, textvariable=self.manual_gpu_count, width=3)
+            gpu_count_entry.pack(side="left", padx=2)
+            
+            # VRAM entry
+            ttk.Label(manual_frame, text="VRAM (GB):").pack(side="left", padx=(5, 2))
+            vram_entry = ttk.Entry(manual_frame, textvariable=self.manual_gpu_vram, width=5)
+            vram_entry.pack(side="left", padx=2)
+            
+            # Apply button
+            apply_btn = ttk.Button(manual_frame, text="Apply", command=self._apply_manual_gpu_settings)
+            apply_btn.pack(side="left", padx=(5, 2))
+            
+            # Toggle checkbox for manual mode
+            manual_cb = ttk.Checkbutton(manual_frame, text="Use manual settings", 
+                                       variable=self.manual_gpu_mode,
+                                       command=self._toggle_manual_gpu_mode)
+            manual_cb.pack(side="left", padx=(10, 0))
 
         # Trigger update recommendations after setting initial checkbox states
         # This ensures the recommendation is based on the *loaded* selection
@@ -2517,12 +3287,18 @@ class LlamaCppLauncher:
 
 
         if self.gpu_info['available'] and self.gpu_info['device_count'] > 0:
-            ttk.Label(self._vram_info_frame, text="VRAM (Total GB):", font=("TkSmallCaptionFont", 8, ("bold",)))\
+            is_manual_mode = self.gpu_info.get("manual_mode", False)
+            vram_label_text = "VRAM (Total GB):" if not is_manual_mode else "VRAM (Manual Setup):"
+            
+            ttk.Label(self._vram_info_frame, text=vram_label_text, font=("TkSmallCaptionFont", 8, ("bold",)))\
                 .pack(side="left", padx=(0, 5))
 
             # Display VRAM for each detected GPU
             for gpu in self.detected_gpu_devices:
-                 ttk.Label(self._vram_info_frame, text=f"GPU {gpu['id']}: {gpu['total_memory_gb']:.2f} GB", font="TkSmallCaptionFont")\
+                 gpu_text = f"GPU {gpu['id']}: {gpu['total_memory_gb']:.2f} GB"
+                 if is_manual_mode:
+                     gpu_text += " (Manual)"
+                 ttk.Label(self._vram_info_frame, text=gpu_text, font="TkSmallCaptionFont")\
                     .pack(side="left", padx=5)
 
             # Add a label that expands to push the GPU info left
@@ -2647,114 +3423,6 @@ class LlamaCppLauncher:
         # without specific model layer sizes and precise VRAM usage estimations, which are not easily
         # available via llama-cpp-python metadata or simple system queries.
         # The existing status label next to the slider is sufficient to show the maximum.
-
-
-    # ═════════════════════════════════════════════════════════════════
-    #  Venv Flash Attention Check
-    # ═════════════════════════════════════════════════════════════════
-
-    # This small script code will be executed in a subprocess
-    _FLASH_ATTN_CHECK_SCRIPT = """
-import sys
-try:
-    import flash_attn
-    # Optional: Check if flash_attn has a CUDA implementation (though typically it does if import succeeds)
-    # import torch
-    # if not hasattr(flash_attn, 'flash_attn_func') or not torch.cuda.is_available():
-    #     print("FLASH_ATTN_NOT_INSTALLED") # Consider it 'not installed' if CUDA part isn't there
-    # else:
-    print("FLASH_ATTN_INSTALLED")
-except ImportError:
-    print("FLASH_ATTN_NOT_INSTALLED")
-except Exception as e:
-    print(f"FLASH_ATTN_CHECK_ERROR: {e}")
-    sys.exit(1) # Indicate failure
-sys.exit(0) # Indicate success
-"""
-
-    def _check_venv_flash_attn(self):
-        """Checks if flash_attn is installed in the specified virtual environment."""
-        venv_path_str = self.venv_dir.get().strip()
-
-        if not venv_path_str:
-            # If no venv is set, report status based on the GUI's environment
-            gui_status = "Installed (GUI env, requires llama.cpp build support)" if FLASH_ATTN_GUI_AVAILABLE else "Not Installed (Python package missing in GUI env)"
-            # Add note about venv if CUDA is available but no venv is set and flash_attn is not available in GUI env
-            if self.gpu_info.get('available') and not FLASH_ATTN_GUI_AVAILABLE:
-                 gui_status += " - Consider setting a Venv with Flash Attention installed."
-            self.flash_attn_status_var.set(f"Status: {gui_status}")
-            return
-
-        venv_path = Path(venv_path_str)
-        if not venv_path.is_dir():
-             self.flash_attn_status_var.set("Status: Venv path invalid or not a directory.")
-             return
-
-        # Find the Python executable inside the venv
-        if sys.platform == "win32":
-            python_exe = venv_path / "Scripts" / "python.exe"
-        else: # Linux/macOS
-            python_exe = venv_path / "bin" / "python"
-
-        if not python_exe.is_file():
-             self.flash_attn_status_var.set("Status: Python executable not found in Venv 'Scripts' or 'bin'.")
-             return
-
-        # Update status display while checking
-        self.flash_attn_status_var.set("Status: Checking Venv...")
-        self.root.update_idletasks() # Update the GUI immediately
-
-        def run_check():
-            """Runs the subprocess check (in a separate thread)."""
-            try:
-                # Run the python executable in the venv with the check script code
-                # Set a timeout to prevent hanging if something goes wrong
-                # Use the full path to the python executable
-                process = subprocess.run([str(python_exe), "-c", self._FLASH_ATTN_CHECK_SCRIPT],
-                                         capture_output=True, text=True, timeout=10) # 10 sec timeout
-
-                stdout = process.stdout.strip()
-                stderr = process.stderr.strip()
-
-                status_message = "Status: Unknown error during check."
-                if process.returncode == 0:
-                    if "FLASH_ATTN_INSTALLED" in stdout:
-                        status_message = "Status (Venv): Installed (requires llama.cpp build support)"
-                    elif "FLASH_ATTN_NOT_INSTALLED" in stdout:
-                        status_message = "Status (Venv): Not Installed (Python package missing)"
-                    else:
-                        # Log unexpected output for debugging
-                        print(f"DEBUG: Venv check unexpected stdout: {stdout}", file=sys.stderr)
-                        print(f"DEBUG: Venv check stderr: {stderr}", file=sys.stderr)
-                        status_message = "Status (Venv): Unexpected check result."
-                elif process.returncode != 0:
-                    # Check stdout even on non-zero return code, as the script might print status then exit with 1 on non-zero
-                    if "FLASH_ATTN_NOT_INSTALLED" in stdout:
-                         status_message = "Status (Venv): Not Installed (Python package missing)"
-                    elif "FLASH_ATTN_CHECK_ERROR" in stdout:
-                         # Extract just the error message part
-                         error_part = stdout.split("FLASH_ATTN_CHECK_ERROR: ", 1)[-1]
-                         status_message = f"Status (Venv): Check Error: {error_part}"
-                    else:
-                         print(f"DEBUG: Venv check failed stdout: {stdout}", file=sys.stderr)
-                         print(f"DEBUG: Venv check failed stderr: {stderr}", file=sys.stderr)
-                         status_message = f"Status (Venv): Process failed (Code {process.returncode}). See console."
-
-                # Update GUI on the main thread
-                self.root.after(0, self.flash_attn_status_var.set, status_message)
-
-            except FileNotFoundError:
-                 self.root.after(0, self.flash_attn_status_var.set, "Status: Python executable not found in Venv.")
-            except subprocess.TimeoutExpired:
-                 self.root.after(0, self.flash_attn_status_var.set, "Status: Venv check timed out.")
-            except Exception as e:
-                 print(f"Error running Venv check subprocess: {e}", file=sys.stderr)
-                 traceback.print_exc(file=sys.stderr)
-                 self.root.after(0, self.flash_attn_status_var.set, f"Status: Error running Venv check: {e}")
-
-        # Run the check in a separate thread to keep the GUI responsive
-        check_thread = Thread(target=run_check, daemon=True)
-        check_thread.start()
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -2898,7 +3566,7 @@ sys.exit(0) # Indicate success
             "no_mmap":       False, # Default for --no-mmap flag
             "mlock":         False, # Default for --mlock flag
             "no_kv_offload": False, # Default for --no-kv-offload flag
-            "no_cnv":        False, # Default for --no-cnv flag
+    
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
@@ -2923,7 +3591,7 @@ sys.exit(0) # Indicate success
             "no_mmap":       self.no_mmap.get(),   # bool
             "mlock":         self.mlock.get(),    # bool
             "no_kv_offload": self.no_kv_offload.get(), # bool
-            "no_cnv":        self.no_cnv.get(),     # bool
+
         }
 
         # Add non-default parameters to name parts
@@ -2956,7 +3624,7 @@ sys.exit(0) # Indicate success
                          "no_mmap": "no-mmap",
                          "mlock": "mlock",
                          "no_kv_offload": "no-kv-offload",
-                         "no_cnv": "no-cnv",
+             
                          "ignore_eos": "no-eos",
                       }
                       parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
@@ -3064,7 +3732,7 @@ sys.exit(0) # Indicate success
             "ubatch_size":   self.ubatch_size.get(), # Save the user-set value
             "n_gpu_layers":  gpu_layers_to_save, # Save the string value (can be -1)
             "no_mmap":       self.no_mmap.get(),
-            "no_cnv":        self.no_cnv.get(),
+
             "prio":          self.prio.get(),
             "temperature":   self.temperature.get(),
             "min_p":         self.min_p.get(),
@@ -3120,7 +3788,7 @@ sys.exit(0) # Indicate success
         self.ubatch_size.set(cfg.get("ubatch_size", "512")) # Default to llama.cpp 512
 
         self.no_mmap.set(cfg.get("no_mmap",False))
-        self.no_cnv.set(cfg.get("no_cnv",False))
+
         self.prio.set(cfg.get("prio","0"))
         self.temperature.set(cfg.get("temperature","0.8"))
         self.min_p.set(cfg.get("min_p","0.05"))
@@ -3229,22 +3897,58 @@ sys.exit(0) # Indicate success
         messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
 
     def _delete_configuration(self):
-        if not self.config_listbox.curselection():
-            return messagebox.showerror("Error","Select a configuration to delete.")
-        name = self.config_listbox.get(self.config_listbox.curselection())
-        if messagebox.askyesno("Confirm Deletion", f"Are you sure you want to delete the configuration '{name}'?"):
-            self.saved_configs.pop(name, None)
-            self._save_configs()
-            self._update_config_listbox()
-            messagebox.showinfo("Deleted", f"Configuration '{name}' deleted.")
+        selected_indices = self.config_listbox.curselection()
+        if not selected_indices:
+            return messagebox.showerror("Error","Select one or more configurations to delete.")
+        
+        # Get the names of selected configurations
+        selected_names = []
+        for index in selected_indices:
+            name = self.config_listbox.get(index)
+            selected_names.append(name)
+        
+        if not selected_names:
+            return messagebox.showerror("Error", "No valid configurations selected for deletion.")
+        
+        # Create confirmation message
+        if len(selected_names) == 1:
+            confirm_msg = f"Are you sure you want to delete the configuration '{selected_names[0]}'?"
+            result_msg = f"Configuration '{selected_names[0]}' deleted."
+        else:
+            config_list = "\n".join(f"  • {name}" for name in selected_names)
+            confirm_msg = f"Are you sure you want to delete {len(selected_names)} configurations?\n\n{config_list}"
+            result_msg = f"Successfully deleted {len(selected_names)} configurations."
+        
+        # Ask for confirmation
+        if messagebox.askyesno("Confirm Deletion", confirm_msg):
+            # Delete the configurations
+            deleted_count = 0
+            for name in selected_names:
+                if name in self.saved_configs:
+                    self.saved_configs.pop(name, None)
+                    deleted_count += 1
+            
+            if deleted_count > 0:
+                self._save_configs()
+                self._update_config_listbox()
+                messagebox.showinfo("Deleted", result_msg)
+            else:
+                messagebox.showerror("Error", "No configurations were found to delete.")
 
     def _on_config_selected(self):
         """Callback when a configuration is selected in the config listbox."""
-        if not self.config_listbox.curselection():
+        selection = self.config_listbox.curselection()
+        if not selection:
             return
-        name = self.config_listbox.get(self.config_listbox.curselection())
-        # Update the config name field to show the selected configuration
-        self.config_name.set(name)
+        
+        # For single selection, update the config name field
+        # For multiple selections, show count in the config name field
+        if len(selection) == 1:
+            name = self.config_listbox.get(selection[0])
+            self.config_name.set(name)
+        else:
+            # Multiple selections - show count
+            self.config_name.set(f"({len(selection)} configs selected)")
 
     def _update_config_listbox(self):
         current_selection = self.config_listbox.curselection()
@@ -3262,6 +3966,188 @@ sys.exit(0) # Indicate success
                  self.config_listbox.activate(new_index)
                  self.config_listbox.see(new_index)
             except ValueError: pass
+
+    def _export_configurations(self):
+        """Export selected configurations to a JSON file."""
+        from tkinter import filedialog
+        import json
+        from datetime import datetime
+        
+        # Get selected configurations
+        selected_indices = self.config_listbox.curselection()
+        if not selected_indices:
+            messagebox.showerror("Error", "Please select at least one configuration to export.")
+            return
+        
+        # Get the names of selected configurations
+        selected_configs = {}
+        for index in selected_indices:
+            config_name = self.config_listbox.get(index)
+            if config_name in self.saved_configs:
+                selected_configs[config_name] = self.saved_configs[config_name]
+        
+        if not selected_configs:
+            messagebox.showerror("Error", "No valid configurations selected for export.")
+            return
+        
+        # Ask user for export file location
+        default_filename = f"llama_configs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        export_path = filedialog.asksaveasfilename(
+            title="Export Configurations",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=default_filename
+        )
+        
+        if not export_path:
+            return  # User cancelled
+        
+        try:
+            # Create export data structure
+            export_data = {
+                "export_info": {
+                    "exported_at": datetime.now().isoformat(),
+                    "source": "LLaMa.cpp Server Launcher",
+                    "version": "1.0",
+                    "config_count": len(selected_configs)
+                },
+                "configs": selected_configs
+            }
+            
+            # Write to file
+            with open(export_path, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, indent=2, ensure_ascii=False)
+            
+            messagebox.showinfo("Export Successful", 
+                              f"Successfully exported {len(selected_configs)} configuration(s) to:\n{export_path}")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export configurations:\n{str(e)}")
+
+    def _import_configurations(self):
+        """Import configurations from a JSON file."""
+        from tkinter import filedialog
+        import json
+        
+        # Ask user for import file
+        import_path = filedialog.askopenfilename(
+            title="Import Configurations",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if not import_path:
+            return  # User cancelled
+        
+        try:
+            # Read and parse the JSON file
+            with open(import_path, 'r', encoding='utf-8') as f:
+                import_data = json.load(f)
+            
+            # Handle different import formats
+            configs_to_import = {}
+            
+            if isinstance(import_data, dict):
+                # Check if it's our export format
+                if "configs" in import_data and isinstance(import_data["configs"], dict):
+                    configs_to_import = import_data["configs"]
+                    
+                    # Show import info if available
+                    if "export_info" in import_data:
+                        info = import_data["export_info"]
+                        config_count = info.get("config_count", len(configs_to_import))
+                        exported_at = info.get("exported_at", "Unknown")
+                        print(f"DEBUG: Importing {config_count} configs exported at {exported_at}", file=sys.stderr)
+                
+                # Check if it's a direct configs format (like our main config file)
+                elif "configs" in import_data and isinstance(import_data["configs"], dict):
+                    configs_to_import = import_data["configs"]
+                    
+                # Check if the entire file is just configs (legacy format)
+                else:
+                    # Assume each top-level key is a config name
+                    # Validate that values look like config objects
+                    valid_configs = {}
+                    for key, value in import_data.items():
+                        if isinstance(value, dict) and any(setting in value for setting in 
+                                                         ["model_path", "llama_cpp_dir", "n_gpu_layers", "ctx_size"]):
+                            valid_configs[key] = value
+                    
+                    if valid_configs:
+                        configs_to_import = valid_configs
+            
+            if not configs_to_import:
+                messagebox.showerror("Import Error", 
+                                   "No valid configurations found in the selected file.\n\n"
+                                   "Expected format: JSON file with configuration objects.")
+                return
+            
+            # Check for conflicts and get user preferences
+            conflicts = []
+            new_configs = []
+            
+            for config_name in configs_to_import.keys():
+                if config_name in self.saved_configs:
+                    conflicts.append(config_name)
+                else:
+                    new_configs.append(config_name)
+            
+            # Show preview dialog
+            import_summary = f"Found {len(configs_to_import)} configuration(s) to import:\n\n"
+            
+            if new_configs:
+                import_summary += f"New configurations ({len(new_configs)}):\n"
+                for name in new_configs[:5]:  # Show first 5
+                    import_summary += f"  • {name}\n"
+                if len(new_configs) > 5:
+                    import_summary += f"  ... and {len(new_configs) - 5} more\n"
+                import_summary += "\n"
+            
+            if conflicts:
+                import_summary += f"Configurations that will be overwritten ({len(conflicts)}):\n"
+                for name in conflicts[:5]:  # Show first 5
+                    import_summary += f"  • {name}\n"
+                if len(conflicts) > 5:
+                    import_summary += f"  ... and {len(conflicts) - 5} more\n"
+                import_summary += "\n"
+            
+            import_summary += "Do you want to proceed with the import?"
+            
+            if not messagebox.askyesno("Confirm Import", import_summary):
+                return
+            
+            # Perform the import
+            imported_count = 0
+            for config_name, config_data in configs_to_import.items():
+                try:
+                    # Basic validation of config data
+                    if not isinstance(config_data, dict):
+                        print(f"WARNING: Skipping invalid config '{config_name}' - not a dictionary", file=sys.stderr)
+                        continue
+                    
+                    # Import the configuration
+                    self.saved_configs[config_name] = config_data
+                    imported_count += 1
+                    
+                except Exception as e:
+                    print(f"WARNING: Failed to import config '{config_name}': {e}", file=sys.stderr)
+            
+            if imported_count > 0:
+                # Save the updated configurations
+                self._save_configs()
+                # Update the listbox
+                self._update_config_listbox()
+                
+                messagebox.showinfo("Import Successful", 
+                                  f"Successfully imported {imported_count} configuration(s).")
+            else:
+                messagebox.showerror("Import Error", "No configurations were successfully imported.")
+                
+        except json.JSONDecodeError as e:
+            messagebox.showerror("Import Error", f"Invalid JSON file:\n{str(e)}")
+        except FileNotFoundError:
+            messagebox.showerror("Import Error", f"File not found:\n{import_path}")
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import configurations:\n{str(e)}")
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -3465,7 +4351,7 @@ sys.exit(0) # Indicate success
         self._add_arg(cmd, "--no-kv-offload", self.no_kv_offload.get()) # Omit if False (default)
 
         # Performance options
-        self._add_arg(cmd, "--no-cnv", self.no_cnv.get()) # Omit if False (default)
+
         self._add_arg(cmd, "--prio", self.prio.get(), "0") # Omit if 0 (default)
 
         # --- NEW: Generation options ---
