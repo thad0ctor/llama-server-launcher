@@ -144,6 +144,9 @@ CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 cmake .. \
 make -j$(nproc)
 ```
 
+> **📚 Need More Build Help?**  
+> For additional building guidance, platform-specific instructions, and troubleshooting, refer to the official [llama.cpp documentation](https://github.com/ggerganov/llama.cpp#build).
+
 **Key Build Flags Explained:**
 - `-DGGML_CUDA=on` - Enables CUDA support
 - `-DGGML_CUDA_FORCE_MMQ=on` - Forces use of multi-matrix quantization for better performance
