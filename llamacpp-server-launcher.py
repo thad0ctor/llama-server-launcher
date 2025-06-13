@@ -16,6 +16,9 @@ import time
 # Import the environmental variables module
 from env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariablesTab
 
+# Import the about tab module
+from about_tab import create_about_tab
+
 # Add debug prints for Python environment
 print("\n=== Python Environment Debug Info ===", file=sys.stderr)
 print(f"Python executable: {sys.executable}", file=sys.stderr)
@@ -1341,12 +1344,13 @@ class LlamaCppLauncher:
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
         nb.add(chat_frame, text="Chat Template") # Add the new tab
         nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
         nb.add(cfg_frame,  text="Configurations")
+        nb.add(about_frame, text="About") # Add the about tab
 
 
         self._setup_main_tab(main_frame)
@@ -1354,6 +1358,7 @@ class LlamaCppLauncher:
         self._setup_chat_template_tab(chat_frame) # Setup the new tab
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_config_tab(cfg_frame)
+        self._setup_about_tab(about_frame) # Setup the about tab
 
         bar = ttk.Frame(self.root); bar.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bar, text="Launch Server",   command=self.launch_server).pack(side="left",  padx=5)
@@ -2271,6 +2276,12 @@ class LlamaCppLauncher:
         """Set up the Environmental Variables tab using the EnvironmentalVariablesTab class."""
         # Create the environmental variables tab using the dedicated class
         self.env_vars_tab = EnvironmentalVariablesTab(parent, self.env_vars_manager)
+
+    def _setup_about_tab(self, parent):
+        """Set up the About tab using the AboutTab class."""
+        # Create the about tab using the dedicated class
+        self.about_tab = create_about_tab()
+        self.about_tab.setup_about_tab(parent)
 
     # ═════════════════════════════════════════════════════════════════
     #  Listbox Resizing Logic
