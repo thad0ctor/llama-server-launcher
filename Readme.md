@@ -16,7 +16,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Configurations (save/load/import/export launch setups)
 
 <details>
-<summary>📸 View Advanced Settings Screenshot</summary>
+<summary><h3>📸 View Advanced Settings Screenshot</h3></summary>
 
 ![Parameter Customization](images/advanced.png)
 
@@ -35,7 +35,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Supports manual GPU configuration if automatic detection is unavailable.
 
 <details>
-<summary>📸 View Chat Templates Screenshot</summary>
+<summary><h3>📸 View Chat Templates Screenshot</h3></summary>
 
 ![Chat Templates](images/chat-templates.png)
 
@@ -48,7 +48,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Provide your own custom Jinja2 template string.
 
 <details>
-<summary>📸 View Environment Variables Screenshot</summary>
+<summary><h3>📸 View Environment Variables Screenshot</h3></summary>
 
 ![CUDA Flags](images/env.png)
 
@@ -59,7 +59,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   Add and manage custom environment variables to fine tune CUDA performance.
 
 <details>
-<summary>📸 View Configuration Management Screenshot</summary>
+<summary><h3>📸 View Configuration Management Screenshot</h3></summary>
 
 ![Configs](images/configs.png)
 
@@ -105,6 +105,57 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install recommended dependencies
 pip install torch llama-cpp-python psutil
 ```
+
+## 🛠️ Installation & Setup
+
+### 1. Clone the Launcher
+```bash
+git clone https://github.com/thad0ctor/llama-server-launcher.git
+cd llama-server-launcher
+```
+
+### 2. Setup Dependencies
+Follow the [Dependencies](#-dependencies) section above to install Python dependencies in your virtual environment.
+
+### 3. Build llama.cpp with CUDA Support
+
+You'll need to build `llama.cpp` separately and point the launcher to the build directory. Here's an example build configuration:
+
+> **⚠️ Example Environment Disclaimer:**  
+> The following build example was tested on **Ubuntu 24.04** with **CUDA 12.9** and **GCC 13**. Your build flags may need adjustment based on your system configuration, CUDA version, GCC version, and GPU architecture.
+
+```bash
+# Navigate to your llama.cpp directory
+cd /path/to/llama.cpp
+
+# Clean previous builds
+rm -rf build CMakeCache.txt CMakeFiles
+mkdir build && cd build
+
+# Configure with CUDA support and optimization flags
+CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 cmake .. \
+  -DGGML_CUDA=on \
+  -DGGML_CUDA_FORCE_MMQ=on \
+  -DCMAKE_CUDA_ARCHITECTURES=120 \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DCMAKE_CUDA_FLAGS="--use_fast_math"
+
+# Build with all available cores
+make -j$(nproc)
+```
+
+**Key Build Flags Explained:**
+- `-DGGML_CUDA=on` - Enables CUDA support
+- `-DGGML_CUDA_FORCE_MMQ=on` - Forces use of multi-matrix quantization for better performance
+- `-DCMAKE_CUDA_ARCHITECTURES=120` - Targets specific GPU architecture (adjust for your GPU)
+- `-DCMAKE_CUDA_FLAGS="--use_fast_math"` - Enables fast math optimizations
+
+### 4. Configure the Launcher
+1. Run the launcher: `python llamacpp-server-launcher.py`
+2. In the **Main** tab, set the **"llama.cpp Directory"** to your llama.cpp build folder
+3. The launcher will automatically find the `llama-server` executable
+
+&nbsp;
 
 ## 🚀 Core Components
 
