@@ -145,7 +145,7 @@ make -j$(nproc)
 ```
 
 > **📚 Need More Build Help?**  
-> For additional building guidance, platform-specific instructions, and troubleshooting, refer to the official [llama.cpp documentation](https://github.com/ggerganov/llama.cpp#build).
+> For additional building guidance, platform-specific instructions, and troubleshooting, refer to the official [llama.cpp documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md).
 
 **Key Build Flags Explained:**
 - `-DGGML_CUDA=on` - Enables CUDA support
