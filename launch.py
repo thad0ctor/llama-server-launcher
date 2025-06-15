@@ -119,14 +119,14 @@ class LaunchManager:
 
         # --- Other Arguments ---
         # --- KV Cache Type ---
-        # Check if ik_llama backend is using -ctk flag
-        ik_llama_uses_ctk = False
+        # Check if ik_llama backend is using -ctk or -ctv flags
+        ik_llama_uses_cache_flags = False
         if backend == "ik_llama":
             ik_llama_flags = self.launcher.ik_llama_tab.get_ik_llama_flags()
-            ik_llama_uses_ctk = "-ctk" in ik_llama_flags
+            ik_llama_uses_cache_flags = "-ctk" in ik_llama_flags or "-ctv" in ik_llama_flags
         
-        # Only add standard cache type flags if ik_llama is not using -ctk
-        if not ik_llama_uses_ctk:
+        # Only add standard cache type flags if ik_llama is not using -ctk/-ctv
+        if not ik_llama_uses_cache_flags:
             # llama.cpp default is f16. Add args only if different.
             kv_cache_type_val = self.launcher.cache_type_k.get().strip()
             # Note: llama.cpp's --cache-type-v defaults to the value of --cache-type-k if not specified.
@@ -138,7 +138,7 @@ class LaunchManager:
                 cmd.extend(["--cache-type-v", kv_cache_type_val])
                 print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
         else:
-            print("DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk is enabled", file=sys.stderr)
+            print("DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk/-ctv is enabled", file=sys.stderr)
 
         # Remove the separate V cache type handling since we always want it to match K
         # v_cache_type_val = self.launcher.cache_type_v.get().strip()

@@ -30,6 +30,7 @@ class IkLlamaTab:
         self.ser_value = tk.StringVar(value="")  # Smart Expert Reduction
         self.amb_value = tk.StringVar(value="")  # Attention Max Batch
         self.ctk_value = tk.StringVar(value="f16")  # KV Cache Type K
+        self.ctv_value = tk.StringVar(value="f16")  # KV Cache Type V
         
         # Set up trace bindings for config saving
         self.rtr_enabled.trace_add("write", lambda *args: self.launcher._save_configs())
@@ -37,6 +38,7 @@ class IkLlamaTab:
         self.ser_value.trace_add("write", lambda *args: self.launcher._save_configs())
         self.amb_value.trace_add("write", lambda *args: self.launcher._save_configs())
         self.ctk_value.trace_add("write", lambda *args: self.launcher._save_configs())
+        self.ctv_value.trace_add("write", lambda *args: self.launcher._save_configs())
         
         # Also trigger default config name updates
         self.rtr_enabled.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
@@ -44,6 +46,7 @@ class IkLlamaTab:
         self.ser_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.amb_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.ctk_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
+        self.ctv_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
     
     def create_tab(self, parent):
         """
@@ -169,12 +172,29 @@ class IkLlamaTab:
             column=0, row=row, sticky="w", padx=10, pady=(15, 5))
         row += 1
         
-        kv_cache_options = ["f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k"]
+        # Full precision and quantized cache type options
+        kv_cache_options = ["f16", "f32", "bf16", "q4_0", "q4_1", "q5_0", "q5_1", "q6_0", "q8_0", "iq4_nl", "q8_KV"]
         self.ctk_combo = ttk.Combobox(scrollable_frame, textvariable=self.ctk_value, 
                                      values=kv_cache_options, state="readonly", width=18)
         self.ctk_combo.grid(column=0, row=row, sticky="w", padx=10, pady=5)
         
-        ttk.Label(scrollable_frame, text="KV cache data type for K tensor", 
+        ttk.Label(scrollable_frame, text="KV cache data type for K tensor (precision or quantized)", 
+                 font=("TkSmallCaptionFont",)).grid(
+            column=1, row=row, sticky="w", padx=5, pady=5, columnspan=2)
+        row += 1
+        
+        # KV Cache Type V option
+        ttk.Label(scrollable_frame, text="KV Cache Type V (-ctv):", 
+                 font=("TkDefaultFont", 10, "bold")).grid(
+            column=0, row=row, sticky="w", padx=10, pady=(15, 5))
+        row += 1
+        
+        # Use the same cache type options for V cache
+        self.ctv_combo = ttk.Combobox(scrollable_frame, textvariable=self.ctv_value, 
+                                     values=kv_cache_options, state="readonly", width=18)
+        self.ctv_combo.grid(column=0, row=row, sticky="w", padx=10, pady=5)
+        
+        ttk.Label(scrollable_frame, text="KV cache data type for V tensor (precision or quantized)", 
                  font=("TkSmallCaptionFont",)).grid(
             column=1, row=row, sticky="w", padx=5, pady=5, columnspan=2)
         row += 1
@@ -195,7 +215,8 @@ class IkLlamaTab:
                     "• FMoE (-fmoe): Fused MoE - optimized mixture of experts for CUDA and some CPU configurations\n"
                     "• SER (-ser): Smart expert reduction trades quality for speed (format: experts,factor)\n"
                     "• AMB (-amb): Sets K*Q tensor compute buffer size in MiB for memory optimization\n"
-                    "• CTK (-ctk): Sets KV cache quantization type for K tensor to save VRAM\n"
+                    "• CTK (-ctk): Sets KV cache type for K tensor (f16/f32/bf16/q4_0/q4_1/q5_0/q5_1/q6_0/q8_0/iq4_nl/q8_KV)\n"
+                    "• CTV (-ctv): Sets KV cache type for V tensor (f16/f32/bf16/q4_0/q4_1/q5_0/q5_1/q6_0/q8_0/iq4_nl/q8_KV)\n"
                     "• These flags are specific to ik_llama and will be ignored by standard llama.cpp")
         ttk.Label(scrollable_frame, text=help_text, font=("TkSmallCaptionFont",), 
                  wraplength=700, justify="left").grid(
@@ -232,6 +253,11 @@ class IkLlamaTab:
         if ctk_val and ctk_val != "f16":  # f16 is default, no need to specify
             flags.extend(["-ctk", ctk_val])
         
+        # KV Cache Type V
+        ctv_val = self.ctv_value.get().strip()
+        if ctv_val and ctv_val != "f16":  # f16 is default, no need to specify
+            flags.extend(["-ctv", ctv_val])
+        
         return flags
     
     def save_to_config(self):
@@ -246,7 +272,8 @@ class IkLlamaTab:
             "ik_llama_fmoe_enabled": self.fmoe_enabled.get(),
             "ik_llama_ser_value": self.ser_value.get(),
             "ik_llama_amb_value": self.amb_value.get(),
-            "ik_llama_ctk_value": self.ctk_value.get()
+            "ik_llama_ctk_value": self.ctk_value.get(),
+            "ik_llama_ctv_value": self.ctv_value.get()
         }
     
     def load_from_config(self, config_data):
@@ -260,4 +287,5 @@ class IkLlamaTab:
         self.fmoe_enabled.set(config_data.get("ik_llama_fmoe_enabled", False))
         self.ser_value.set(config_data.get("ik_llama_ser_value", ""))
         self.amb_value.set(config_data.get("ik_llama_amb_value", ""))
-        self.ctk_value.set(config_data.get("ik_llama_ctk_value", "f16")) 
+        self.ctk_value.set(config_data.get("ik_llama_ctk_value", "f16"))
+        self.ctv_value.set(config_data.get("ik_llama_ctv_value", "f16")) 
