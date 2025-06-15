@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Environmental Variables Module for LLaMa.cpp Server Launcher
 

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json
 import os
 import re
@@ -42,9 +43,16 @@ except Exception as e:
     Llama = None
     print(f"Warning: llama-cpp-python import failed: {e}", file=sys.stderr)
 
-# Add debug prints for Python environment
-
-
+# Check for requests module (required for version checking)
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    print("Warning: requests library not found. Version checking and updates will not work.", file=sys.stderr)
+except Exception as e:
+    REQUESTS_AVAILABLE = False
+    print(f"Warning: requests import failed: {e}", file=sys.stderr)
 
 try:
     import psutil
@@ -58,6 +66,10 @@ except ImportError:
 # --- Dependency Check (Printed to console/stderr) ---
 MISSING_DEPS = []
 
+# Required dependencies
+if not REQUESTS_AVAILABLE:
+    MISSING_DEPS.append("requests (required for version checking and updates)")
+
 # PyTorch is the primary requirement for GPU detection and features
 if not TORCH_AVAILABLE:
     MISSING_DEPS.append("PyTorch (required for GPU detection and CUDA features)")
@@ -66,7 +78,8 @@ if not TORCH_AVAILABLE:
 if not LLAMA_CPP_PYTHON_AVAILABLE:
     MISSING_DEPS.append("llama-cpp-python (optional - provides fallback GGUF analysis if llama.cpp tools unavailable)")
 
-# psutil check already prints a warning if not found.
+if not PSUTIL_AVAILABLE:
+    MISSING_DEPS.append("psutil (optional - provides enhanced system information)")
 
 # Only print missing deps warning if there are actually missing deps
 if MISSING_DEPS:
@@ -74,7 +87,7 @@ if MISSING_DEPS:
     print("The following Python libraries are recommended for full functionality but were not found:")
     for dep in MISSING_DEPS:
         print(f" - {dep}")
-    print("Please install them within your venv (e.g., 'pip install torch llama-cpp-python') for GPU features and enhanced functionality.")
+    print("Please install them using 'pip install -r requirements.txt' or individually with pip.")
     print("Note: GGUF analysis works without llama-cpp-python using built-in tools or simple header parsing.")
     print("-------------------------------------\n")
 

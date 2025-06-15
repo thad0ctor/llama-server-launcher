@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Launch functionality extracted from LLaMa.cpp Server Launcher.
 Contains command building and server launching methods.

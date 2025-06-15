@@ -90,6 +90,8 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 ### Required
 *   **Python 3.7+** with tkinter support (typically included with Python)
 *   **llama.cpp** built with server support (`llama-server and ik_llama` executable)
+*   **requests** - Required for version checking and updates
+    *   Install with: `pip install requests`
 
 ### Optional (Recommended)
 *   **PyTorch** (`torch`) - **Required if you want automatic GPU detection and selection**
@@ -110,8 +112,11 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install recommended dependencies
-pip install torch llama-cpp-python psutil
+# Option 1: Install using requirements.txt (recommended)
+pip install -r requirements.txt
+
+# Option 2: Install dependencies individually
+pip install requests torch llama-cpp-python psutil
 ```
 
 ## 🛠️ Installation & Setup
@@ -123,7 +128,11 @@ cd llama-server-launcher
 ```
 
 ### 2. Setup Dependencies
-Follow the [Dependencies](#-dependencies) section above to install Python dependencies in your virtual environment.
+Install the required Python dependencies using the provided requirements.txt file:
+```bash
+pip install -r requirements.txt
+```
+Or follow the [Dependencies](#-dependencies) section above to install dependencies individually.
 
 ### 3. Build llama.cpp with CUDA Support
 
