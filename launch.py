@@ -527,8 +527,11 @@ class LaunchManager:
                                               ps_cmd_parts.append(quoted_template_arg)
                                               i += 2 # Skip both flag and value
                                          else:
-                                              # Standard quoting for other args
-                                              quoted_arg = f'"{current_arg.replace('"', '""').replace("`", "``")}"'
+                                              # Standard quoting for other args - fixed for KDE Konsole
+                                              # Separate the string operations to avoid complex escaping
+                                              escaped_arg = current_arg.replace('"', '""')
+                                              escaped_arg = escaped_arg.replace('`', '``')
+                                              quoted_arg = f'"{escaped_arg}"'
                                               ps_cmd_parts.append(quoted_arg)
                                               i += 1
                                      break # Exit this inner while loop once reconstructed
@@ -537,8 +540,11 @@ class LaunchManager:
                                  pass # Continue with the original loop if this somehow occurs
 
                          else:
-                             # Standard quoting for other args
-                             quoted_arg = f'"{arg.replace('"', '""').replace("`", "``")}"'
+                             # Standard quoting for other args - fixed for KDE Konsole
+                             # Separate the string operations to avoid complex escaping
+                             escaped_arg = arg.replace('"', '""')
+                             escaped_arg = escaped_arg.replace('`', '``')
+                             quoted_arg = f'"{escaped_arg}"'
                              ps_cmd_parts.append(quoted_arg)
 
                     # After processing all args, write the final command string
