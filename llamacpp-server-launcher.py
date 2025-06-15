@@ -19,6 +19,9 @@ from env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariable
 # Import the about tab module
 from about_tab import create_about_tab
 
+# Import the ik_llama configuration tab module
+from ik_llama import IkLlamaTab
+
 # Import the launch functionality module
 from launch import LaunchManager
 
@@ -127,6 +130,9 @@ class LlamaCppLauncher:
         
         # --- Environmental Variables Manager ---
         self.env_vars_manager = EnvironmentalVariablesManager()
+        
+        # --- ik_llama Tab Manager ---
+        self.ik_llama_tab = IkLlamaTab(self)
 
         # --- Hardcoded Chat Templates ---
         # These templates are always available.
@@ -339,6 +345,9 @@ class LlamaCppLauncher:
 
         # Load environmental variables configuration
         self.env_vars_manager.load_from_config(self.app_settings)
+        
+        # Load ik_llama configuration
+        self.ik_llama_tab.load_from_config(self.app_settings)
 
         # --- Initialize launch manager ---
         self.launch_manager = LaunchManager(self)
@@ -445,12 +454,17 @@ class LlamaCppLauncher:
     def _create_widgets(self):
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Store notebook reference for tab visibility management
+        self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
         nb.add(chat_frame, text="Chat Template") # Add the new tab
         nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
+        # ik_llama tab will be added conditionally
+        self.ik_llama_frame = ik_llama_frame
         nb.add(cfg_frame,  text="Configurations")
         nb.add(about_frame, text="About") # Add the about tab
 
@@ -459,8 +473,12 @@ class LlamaCppLauncher:
         self._setup_advanced_tab(adv_frame)
         self._setup_chat_template_tab(chat_frame) # Setup the new tab
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
+        self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_config_tab(cfg_frame)
         self._setup_about_tab(about_frame) # Setup the about tab
+        
+        # Update ik_llama tab visibility based on current backend selection
+        self._update_ik_llama_tab_visibility()
 
         bar = ttk.Frame(self.root); bar.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bar, text="Launch Server",   command=self.launch_manager.launch_server).pack(side="left",  padx=5)
@@ -1395,6 +1413,11 @@ class LlamaCppLauncher:
         """Set up the Environmental Variables tab using the EnvironmentalVariablesTab class."""
         # Create the environmental variables tab using the dedicated class
         self.env_vars_tab = EnvironmentalVariablesTab(parent, self.env_vars_manager)
+
+    def _setup_ik_llama_tab(self, parent):
+        """Set up the ik_llama configuration tab using the IkLlamaTab class."""
+        # Create the ik_llama tab using the dedicated class
+        self.ik_llama_tab.create_tab(parent)
 
     def _setup_about_tab(self, parent):
         """Set up the About tab using the AboutTab class."""
@@ -2722,7 +2745,46 @@ class LlamaCppLauncher:
         selected_backend = self.backend_selection.get()
         self.app_settings["backend_selection"] = selected_backend
         self._update_root_directory_labels()  # Update the labels
+        self._update_ik_llama_tab_visibility()  # Update ik_llama tab visibility
         self._save_configs()
+    
+    def _update_ik_llama_tab_visibility(self):
+        """Show or hide the ik_llama tab based on backend selection."""
+        if not hasattr(self, 'notebook') or not hasattr(self, 'ik_llama_frame'):
+            return  # Not initialized yet
+            
+        backend = self.backend_selection.get()
+        
+        if backend == "ik_llama":
+            # Show the ik_llama tab if not already visible
+            try:
+                # Check if tab is already in notebook
+                tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
+                if "ik_llama Config" not in tab_ids:
+                    # Insert ik_llama tab after Environment Variables tab
+                    env_tab_index = None
+                    for i, tab_text in enumerate(tab_ids):
+                        if tab_text == "Environment Variables":
+                            env_tab_index = i
+                            break
+                    
+                    if env_tab_index is not None:
+                        self.notebook.insert(env_tab_index + 1, self.ik_llama_frame, text="ik_llama Config")
+                    else:
+                        # Fallback: add at the end before About tab
+                        self.notebook.insert(self.notebook.index("end") - 1, self.ik_llama_frame, text="ik_llama Config")
+            except Exception as e:
+                print(f"DEBUG: Error adding ik_llama tab: {e}", file=sys.stderr)
+        else:
+            # Hide the ik_llama tab if visible
+            try:
+                tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
+                for i, tab_text in enumerate(tab_ids):
+                    if tab_text == "ik_llama Config":
+                        self.notebook.forget(i)
+                        break
+            except Exception as e:
+                print(f"DEBUG: Error removing ik_llama tab: {e}", file=sys.stderr)
 
     def _on_backend_dir_changed(self):
         """Handler for when the current backend directory is manually changed."""

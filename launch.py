@@ -219,6 +219,15 @@ class LaunchManager:
                 print(f"WARNING: Could not parse custom parameter '{param_string}': {e}. Skipping.", file=sys.stderr)
                 messagebox.showwarning("Custom Parameter Warning", f"Could not parse custom parameter '{param_string}': {e}\nIt will be ignored.")
 
+        # --- NEW: Add ik_llama Specific Flags ---
+        if backend == "ik_llama":
+            ik_llama_flags = self.launcher.ik_llama_tab.get_ik_llama_flags()
+            if ik_llama_flags:
+                cmd.extend(ik_llama_flags)
+                print(f"DEBUG: Added ik_llama flags: {ik_llama_flags}", file=sys.stderr)
+            else:
+                print("DEBUG: No ik_llama flags enabled", file=sys.stderr)
+
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
         # but are NOT using --tensor-split (which explicitly lists devices/split).
         # This warning is helpful because llama.cpp might use all GPUs by default unless restricted by env var or tensor-split.

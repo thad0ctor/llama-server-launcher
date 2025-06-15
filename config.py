@@ -275,6 +275,9 @@ class ConfigManager:
 
         # Add environmental variables configuration
         cfg.update(self.launcher.env_vars_manager.save_to_config())
+        
+        # Add ik_llama specific configuration
+        cfg.update(self.launcher.ik_llama_tab.save_to_config())
 
         return cfg
 
@@ -332,6 +335,9 @@ class ConfigManager:
 
         # Load environmental variables configuration
         self.launcher.env_vars_manager.load_from_config(cfg)
+        
+        # Load ik_llama specific configuration
+        self.launcher.ik_llama_tab.load_from_config(cfg)
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Load template parameters
@@ -813,6 +819,10 @@ class ConfigManager:
         self.launcher.app_settings["manual_model_mode"] = self.launcher.manual_model_mode.get()
         self.launcher.app_settings["manual_model_layers"] = self.launcher.manual_model_layers.get()
         self.launcher.app_settings["manual_model_size_gb"] = self.launcher.manual_model_size_gb.get()
+        
+        # Save ik_llama settings to app_settings
+        ik_llama_settings = self.launcher.ik_llama_tab.save_to_config()
+        self.launcher.app_settings.update(ik_llama_settings)
 
         payload = {
             "configs":      self.launcher.saved_configs,
