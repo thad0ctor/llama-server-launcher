@@ -39,7 +39,7 @@ class LaunchManager:
              return None
 
         # This call now succeeds because _find_server_executable is added
-        exe_path = self.launcher._find_server_executable(llama_base_dir)
+        exe_path = self._find_server_executable(llama_base_dir)
         if not exe_path:
             search_locs_str = "\n - ".join([str(p) for p in [
                  Path("."), Path("build/bin/Release"), Path("build/bin"), Path("build"), Path("bin"), Path("server")
@@ -241,6 +241,56 @@ class LaunchManager:
         print("-------------------------\n", file=sys.stderr)
 
         return cmd
+
+    def _find_server_executable(self, llama_base_dir):
+        """Finds the llama-server executable within the llama.cpp directory."""
+        exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
+        simple_exe_name = "server.exe" if sys.platform == "win32" else "server" # Sometimes built as just 'server'
+
+        # Define common potential locations relative to the base directory
+        # Use Path objects directly for platform-independent path joining
+        search_paths_rel = [
+            Path("."), # Current directory (might be where user launched from, useful for local builds)
+            Path("build/bin/Release"),
+            Path("build/bin"),
+            Path("build"),
+            Path("bin"),
+            Path("server"), # Some build scripts might put it directly in 'server'
+        ]
+
+        # Search in common relative paths first
+        for rel_path in search_paths_rel:
+            # Check for the primary name
+            full_path = llama_base_dir / rel_path / exe_name
+            if full_path.is_file():
+                print(f"DEBUG: Found server executable at: {full_path}", file=sys.stderr)
+                return full_path.resolve() # Return the resolved path
+
+            # Check for the simple name if the primary wasn't found and names differ
+            if exe_name != simple_exe_name:
+                 full_path_simple = llama_base_dir / rel_path / simple_exe_name
+                 if full_path_simple.is_file():
+                     print(f"DEBUG: Found simple server executable at: {full_path_simple}", file=sys.stderr)
+                     return full_path_simple.resolve() # Return the resolved path
+
+
+        # As a last resort, check if the base directory *itself* is the bin directory
+        # and contains the executable directly. This handles cases where build puts it
+        # directly in the root, although less common.
+        direct_path = llama_base_dir / exe_name
+        if direct_path.is_file():
+             print(f"DEBUG: Found server executable directly in base dir: {direct_path}", file=sys.stderr)
+             return direct_path.resolve()
+
+        if exe_name != simple_exe_name:
+             direct_path_simple = llama_base_dir / simple_exe_name
+             if direct_path_simple.is_file():
+                  print(f"DEBUG: Found simple server executable directly in base dir: {direct_path_simple}", file=sys.stderr)
+                  return direct_path_simple.resolve()
+
+
+        print(f"DEBUG: Server executable '{exe_name}' or '{simple_exe_name}' not found in {llama_base_dir} or common subdirectories.", file=sys.stderr)
+        return None # Executable not found anywhere
 
     def add_arg(self, cmd_list, arg_name, value, default_value=None):
         """
