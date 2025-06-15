@@ -1,10 +1,10 @@
-# Llama.cpp Server Launcher
+# Llama.cpp (and ik_llama) Server Launcher
 
 ![Main Menu](images/main.png)
 
-**A user-friendly GUI (Tkinter) to easily configure and launch the `llama.cpp` server, manage model configurations, set environment variables, and generate launch scripts.**
+**A user-friendly GUI (Tkinter) to easily configure and launch the `llama.cpp and ik_llama` server, manage model configurations, set environment variables, and generate launch scripts.**
 
-This python script provides a comprehensive graphical interface for `llama.cpp`'s server, simplifying the managing of command-line arguments and models.
+This python script provides a comprehensive graphical interface for `llama.cpp and ik_llama`'s server, simplifying the managing of command-line arguments and models.
 
 ## ✨ Key Features
 
@@ -30,6 +30,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
     *   **Network:** Host IP and port configuration.
     *   **Generation:** Ignore EOS, n_predict (max tokens).
     *   **Custom Arguments:** Pass any additional `llama.cpp` server parameters.
+    *   **ik_llama Support:** Added support for ik_lamma with seperate parameters tab (6/15/2025)
 *   **System & GPU Insights:**
     *   Detects and displays CUDA GPU(s) (via PyTorch), system RAM, and CPU core information.
     *   Supports manual GPU configuration if automatic detection is unavailable.
@@ -81,7 +82,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp`'
 
 ### Required
 *   **Python 3.7+** with tkinter support (typically included with Python)
-*   **llama.cpp** built with server support (`llama-server` executable)
+*   **llama.cpp** built with server support (`llama-server and ik_llama` executable)
 
 ### Optional (Recommended)
 *   **PyTorch** (`torch`) - **Required if you want automatic GPU detection and selection**
@@ -119,13 +120,13 @@ Follow the [Dependencies](#-dependencies) section above to install Python depend
 
 ### 3. Build llama.cpp with CUDA Support
 
-You'll need to build `llama.cpp` separately and point the launcher to the build directory. Here's an example build configuration:
+You'll need to build `llama.cpp or ik_llama` separately and point the launcher to the build directory. Here's an example build configuration:
 
 > **⚠️ Example Environment Disclaimer:**  
 > The following build example was tested on **Ubuntu 24.04** with **CUDA 12.9** and **GCC 13**. Your build flags may need adjustment based on your system configuration, CUDA version, GCC version, and GPU architecture.
 
 ```bash
-# Navigate to your llama.cpp directory
+# Navigate to your llama.cpp (or ik_llama) directory
 cd /path/to/llama.cpp
 
 # Clean previous builds
