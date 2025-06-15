@@ -225,7 +225,7 @@ def get_cpu_info_static():
 
 
 def analyze_gguf_with_llamacpp_tools(model_path_str, llama_cpp_dir=None):
-    """Analyze GGUF model using llama.cpp tools instead of llama-cpp-python."""
+    """Analyze GGUF model using llama.cpp/ik_llama tools instead of llama-cpp-python."""
     import subprocess
     import json
     from pathlib import Path
@@ -250,20 +250,26 @@ def analyze_gguf_with_llamacpp_tools(model_path_str, llama_cpp_dir=None):
         "all_shards": [str(p) for p in all_shards]
     }
 
-    # Try to find llama-inspect or similar tools
+    # Try to find analysis tools from both llama.cpp and ik_llama
     tools_to_try = []
     
     if llama_cpp_dir:
-        llama_base_dir = Path(llama_cpp_dir)
-        # Common locations for llama.cpp tools
+        backend_base_dir = Path(llama_cpp_dir)
+        # Common locations for llama.cpp/ik_llama tools
         search_paths = [
-            llama_base_dir,
-            llama_base_dir / "build" / "bin",
-            llama_base_dir / "build",
-            llama_base_dir / "bin",
+            backend_base_dir,
+            backend_base_dir / "build" / "bin",
+            backend_base_dir / "build",
+            backend_base_dir / "bin",
         ]
         
-        tool_names = ["llama-inspect", "gguf-dump", "llama-server"]
+        # Tool names for both llama.cpp and ik_llama backends
+        tool_names = [
+            # Standard llama.cpp tools
+            "llama-inspect", "gguf-dump", "llama-server",
+            # Possible ik_llama specific tools
+            "ik-llama-inspect", "ik_llama_inspect", "ik-llama-server", "ik_llama_server"
+        ]
         if sys.platform == "win32":
             tool_names = [name + ".exe" for name in tool_names]
         

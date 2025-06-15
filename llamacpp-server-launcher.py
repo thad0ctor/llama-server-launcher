@@ -101,6 +101,7 @@ class LlamaCppLauncher:
         self.saved_configs = {}
         self.app_settings = {
             "last_llama_cpp_dir": "",
+            "last_ik_llama_dir":  "",
             "last_venv_dir":      "",
             "last_model_path":    "",
             "model_dirs":         [],
@@ -110,6 +111,8 @@ class LlamaCppLauncher:
             # Save/load network settings
             "host":              "127.0.0.1",
             "port":              "8080",
+            # Backend selection (llama.cpp or ik_llama)
+            "backend_selection":  "llama.cpp",
             # Manual GPU settings for when detection fails
             "manual_gpu_mode":    False,
             "manual_gpu_count":   "1",
@@ -177,12 +180,21 @@ class LlamaCppLauncher:
 
         # --- File and Directory Paths ---
         self.llama_cpp_dir   = tk.StringVar() # Path to the llama.cpp directory
+        self.ik_llama_dir    = tk.StringVar() # Path to the ik_llama directory
+        self.current_backend_dir = tk.StringVar() # Currently active directory based on backend selection
         self.venv_dir        = tk.StringVar() # Path to the Python virtual environment
         self.model_path      = tk.StringVar() # Path to the selected model file
         # List variable for model directories (used by Listbox)
         self.model_dirs_listvar = tk.StringVar()
         # Status variable for model scanning
         self.scan_status_var = tk.StringVar(value="Scan models to populate list.")
+
+        # --- Backend Selection ---
+        self.backend_selection = tk.StringVar(value=self.app_settings.get("backend_selection", "llama.cpp"))
+        
+        # --- Dynamic Labels for Backend-specific Text ---
+        self.root_dir_label_text = tk.StringVar(value="LLaMa.cpp Root Directory:")
+        self.root_dir_help_text = tk.StringVar(value="Select the main 'llama.cpp' folder. The app will search for the server executable.")
 
         # --- Basic Server Settings ---
         self.cache_type_k    = tk.StringVar(value="f16") # KV cache type (applies to k & v)
@@ -316,17 +328,23 @@ class LlamaCppLauncher:
         # load previous settings
         self._load_saved_configs()
         self.llama_cpp_dir.set(self.app_settings.get("last_llama_cpp_dir", ""))
+        self.ik_llama_dir.set(self.app_settings.get("last_ik_llama_dir", ""))
         self.venv_dir.set(self.app_settings.get("last_venv_dir", ""))
         # Ensure model_dirs is loaded as list of Paths
         self.model_dirs = [Path(d) for d in self.app_settings.get("model_dirs", []) if d]
         # Load custom parameters list
         self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
+        # Load backend selection
+        self.backend_selection.set(self.app_settings.get("backend_selection", "llama.cpp"))
 
         # Load environmental variables configuration
         self.env_vars_manager.load_from_config(self.app_settings)
 
         # --- Initialize launch manager ---
         self.launch_manager = LaunchManager(self)
+
+        # Update labels based on loaded backend selection and set current backend directory
+        self._update_root_directory_labels()
 
         # build GUI
         self._create_widgets()
@@ -371,6 +389,10 @@ class LlamaCppLauncher:
         self.port.trace_add("write", lambda *args: self._save_configs())
         # Add trace handler for host changes
         self.host.trace_add("write", lambda *args: self._save_configs())
+        # Add trace handler for backend selection changes
+        self.backend_selection.trace_add("write", lambda *args: self._on_backend_selection_changed())
+        # Add trace handler for current backend directory changes
+        self.current_backend_dir.trace_add("write", lambda *args: self._on_backend_dir_changed())
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Bind trace to the new template source variable
@@ -459,18 +481,35 @@ class LlamaCppLauncher:
         inner.columnconfigure(1, weight=1) # Make model path entry expand
 
         r = 0
+        
+        # --- Backend Selection ---
+        ttk.Label(inner, text="Backend Selection", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
+        
+        backend_frame = ttk.Frame(inner)
+        backend_frame.grid(column=0, row=r, columnspan=4, sticky="w", padx=10, pady=(0,10))
+        
+        ttk.Radiobutton(backend_frame, text="llama.cpp", variable=self.backend_selection, value="llama.cpp")\
+            .pack(side="left", padx=(0, 15))
+        ttk.Radiobutton(backend_frame, text="ik_llama", variable=self.backend_selection, value="ik_llama")\
+            .pack(side="left")
+        
+        r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=(0,15)); r += 1
+        
         ttk.Label(inner, text="Directories & Model", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
 
-        ttk.Label(inner, text="LLaMa.cpp Root Directory:")\
+        ttk.Label(inner, textvariable=self.root_dir_label_text)\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        ttk.Entry(inner, textvariable=self.llama_cpp_dir, width=50)\
+        ttk.Entry(inner, textvariable=self.current_backend_dir, width=50)\
             .grid(column=1, row=r, columnspan=2, sticky="ew", padx=5, pady=3)
-        ttk.Button(inner, text="Browse…", command=lambda: self._browse_dir(self.llama_cpp_dir))\
+        ttk.Button(inner, text="Browse…", command=lambda: self._browse_backend_dir())\
             .grid(column=3, row=r, padx=5, pady=3)
-        ttk.Label(inner, text="Select the main 'llama.cpp' folder. The app will search for the server executable.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, textvariable=self.root_dir_help_text, font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         ttk.Label(inner, text="Virtual Environment (optional):")\
@@ -1734,14 +1773,21 @@ class LlamaCppLauncher:
                  self.analysis_thread.start()
             else:
                  # Analysis not available - check what options we have
-                 llama_dir = self.llama_cpp_dir.get().strip()
-                 if llama_dir:
-                     self.gpu_layers_status_var.set("Analyzing model using llama.cpp tools...")
+                 backend = self.backend_selection.get()
+                 if backend == "ik_llama":
+                     backend_dir = self.ik_llama_dir.get().strip()
+                     backend_name = "ik_llama"
+                 else:
+                     backend_dir = self.llama_cpp_dir.get().strip()
+                     backend_name = "llama.cpp"
+                     
+                 if backend_dir:
+                     self.gpu_layers_status_var.set(f"Analyzing model using {backend_name} tools...")
                      # Try the analysis even without llama-cpp-python
                      self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
                      self.analysis_thread.start()
                  else:
-                     self.gpu_layers_status_var.set("Analysis available: Set llama.cpp directory or install llama-cpp-python")
+                     self.gpu_layers_status_var.set(f"Analysis available: Set {backend_name} directory or install llama-cpp-python")
                      self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if lib missing
                      self._reset_model_info_display()
                      self.model_architecture_var.set("Analysis Unavailable")
@@ -1772,20 +1818,26 @@ class LlamaCppLauncher:
         # Check if the currently selected model in the GUI still matches the one being analyzed
         # This prevents updating the UI with stale results if the user quickly selects another model
         if self.model_path.get() == model_path_str:
-             # Try llama.cpp tools first, fall back to llama-cpp-python if available
-             llama_dir = self.llama_cpp_dir.get().strip() if hasattr(self, 'llama_cpp_dir') else None
+             # Try backend-specific tools first, fall back to llama-cpp-python if available
+             backend = self.backend_selection.get()
+             if backend == "ik_llama":
+                 backend_dir = self.ik_llama_dir.get().strip()
+                 backend_name = "ik_llama"
+             else:
+                 backend_dir = self.llama_cpp_dir.get().strip()
+                 backend_name = "llama.cpp"
              
-             if llama_dir:
-                 print(f"DEBUG: Trying llama.cpp tools from: {llama_dir}", file=sys.stderr)
-                 analysis_result = analyze_gguf_with_llamacpp_tools(model_path_str, llama_dir)
+             if backend_dir:
+                 print(f"DEBUG: Trying {backend_name} tools from: {backend_dir}", file=sys.stderr)
+                 analysis_result = analyze_gguf_with_llamacpp_tools(model_path_str, backend_dir)
                  
-                 # If llama.cpp tools failed and we have llama-cpp-python available, try that as fallback
+                 # If backend tools failed and we have llama-cpp-python available, try that as fallback
                  if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
-                     print("DEBUG: llama.cpp tools failed, falling back to llama-cpp-python", file=sys.stderr)
+                     print(f"DEBUG: {backend_name} tools failed, falling back to llama-cpp-python", file=sys.stderr)
                      analysis_result = analyze_gguf_model_static(model_path_str)
              else:
-                 # No llama.cpp directory set, try simple GGUF parser first
-                 print("DEBUG: No llama.cpp directory set, trying simple GGUF parser", file=sys.stderr)
+                 # No backend directory set, try simple GGUF parser first
+                 print(f"DEBUG: No {backend_name} directory set, trying simple GGUF parser", file=sys.stderr)
                  analysis_result = parse_gguf_header_simple(model_path_str)
                  
                  # If simple parser failed and we have llama-cpp-python available, try that as fallback
@@ -2648,9 +2700,45 @@ class LlamaCppLauncher:
         """Delegates to config manager."""
         return self.config_manager.import_configurations()
 
+    # ═════════════════════════════════════════════════════════════════
+    #  Backend Selection Handler
+    # ═════════════════════════════════════════════════════════════════
+    def _update_root_directory_labels(self):
+        """Update the root directory labels based on the selected backend."""
+        backend = self.backend_selection.get()
+        if backend == "ik_llama":
+            self.root_dir_label_text.set("ik_llama Root Directory:")
+            self.root_dir_help_text.set("Select the main 'ik_llama' folder. The app will search for the server executable.")
+            # Switch to ik_llama directory variable
+            self.current_backend_dir.set(self.ik_llama_dir.get())
+        else:  # Default to llama.cpp
+            self.root_dir_label_text.set("LLaMa.cpp Root Directory:")
+            self.root_dir_help_text.set("Select the main 'llama.cpp' folder. The app will search for the server executable.")
+            # Switch to llama.cpp directory variable
+            self.current_backend_dir.set(self.llama_cpp_dir.get())
 
+    def _on_backend_selection_changed(self):
+        """Handler for backend selection changes."""
+        selected_backend = self.backend_selection.get()
+        self.app_settings["backend_selection"] = selected_backend
+        self._update_root_directory_labels()  # Update the labels
+        self._save_configs()
 
-
+    def _on_backend_dir_changed(self):
+        """Handler for when the current backend directory is manually changed."""
+        backend = self.backend_selection.get()
+        new_dir = self.current_backend_dir.get()
+        
+        # Update the appropriate backend-specific variable
+        if backend == "ik_llama":
+            self.ik_llama_dir.set(new_dir)
+            self.app_settings["last_ik_llama_dir"] = new_dir
+        else:  # llama.cpp
+            self.llama_cpp_dir.set(new_dir)
+            self.app_settings["last_llama_cpp_dir"] = new_dir
+        
+        # Save the settings
+        self._save_configs()
 
     # ═════════════════════════════════════════════════════════════════
     #  on_exit
@@ -2659,6 +2747,40 @@ class LlamaCppLauncher:
     def on_exit(self):
         self._save_configs()
         self.root.destroy()
+
+    def _browse_backend_dir(self):
+        """Opens a directory chooser for the currently selected backend directory."""
+        current_dir = self.current_backend_dir.get().strip()
+        initial_dir = current_dir if current_dir and Path(current_dir).is_dir() else str(Path.home())
+
+        directory = filedialog.askdirectory(title="Select Directory", initialdir=initial_dir)
+        if directory:
+            try:
+                # Resolve the path before setting to handle symlinks etc.
+                resolved_path = Path(directory).resolve()
+                resolved_path_str = str(resolved_path)
+                
+                # Update the current backend directory
+                self.current_backend_dir.set(resolved_path_str)
+                
+                # Save to the appropriate backend-specific variable
+                backend = self.backend_selection.get()
+                if backend == "ik_llama":
+                    self.ik_llama_dir.set(resolved_path_str)
+                    self.app_settings["last_ik_llama_dir"] = resolved_path_str
+                    print(f"DEBUG: Updated ik_llama directory to: {resolved_path_str}", file=sys.stderr)
+                else:  # llama.cpp
+                    self.llama_cpp_dir.set(resolved_path_str)
+                    self.app_settings["last_llama_cpp_dir"] = resolved_path_str
+                    print(f"DEBUG: Updated llama.cpp directory to: {resolved_path_str}", file=sys.stderr)
+                
+                # Save the settings
+                self._save_configs()
+                
+            except Exception as e:
+                print(f"Error resolving path '{directory}': {e}", file=sys.stderr)
+                # Fallback to setting the raw path if resolving fails
+                self.current_backend_dir.set(directory)
 
 # ═════════════════════════════════════════════════════════════════════
 #  main

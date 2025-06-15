@@ -26,30 +26,47 @@ class LaunchManager:
         self.launcher = launcher_instance
     
     def build_cmd(self):
-        """Builds the command list for llama-server."""
-        llama_dir_str = self.launcher.llama_cpp_dir.get().strip()
-        if not llama_dir_str:
-            messagebox.showerror("Error", "LLaMa.cpp root directory is not set.")
+        """Builds the command list for the server based on selected backend."""
+        # Get the backend selection and use appropriate directory
+        backend = self.launcher.backend_selection.get()
+        
+        if backend == "ik_llama":
+            backend_dir_str = self.launcher.ik_llama_dir.get().strip()
+            backend_name = "ik_llama"
+        else:  # Default to llama.cpp
+            backend_dir_str = self.launcher.llama_cpp_dir.get().strip()
+            backend_name = "llama.cpp"
+            
+        if not backend_dir_str:
+            messagebox.showerror("Error", f"{backend_name} root directory is not set.")
             return None
         try:
-            llama_base_dir = Path(llama_dir_str).resolve() # Resolve the base dir
-            if not llama_base_dir.is_dir(): raise NotADirectoryError()
+            backend_base_dir = Path(backend_dir_str).resolve() # Resolve the base dir
+            if not backend_base_dir.is_dir(): raise NotADirectoryError()
         except Exception:
-             messagebox.showerror("Error", f"Invalid LLaMa.cpp directory:\n{llama_dir_str}")
+             messagebox.showerror("Error", f"Invalid {backend_name} directory:\n{backend_dir_str}")
              return None
 
-        # This call now succeeds because _find_server_executable is added
-        exe_path = self._find_server_executable(llama_base_dir)
+        # Find server executable for the selected backend
+        exe_path = self._find_server_executable(backend_base_dir, backend)
         if not exe_path:
             search_locs_str = "\n - ".join([str(p) for p in [
                  Path("."), Path("build/bin/Release"), Path("build/bin"), Path("build"), Path("bin"), Path("server")
             ]])
-            exe_base_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
-            simple_exe_name = "server.exe" if sys.platform == "win32" else "server"
+            
+            # Get backend-specific executable names for error message
+            if backend == "ik_llama":
+                exe_names = self._get_ik_llama_executable_names()
+                backend_display = "ik_llama"
+            else:
+                exe_names = self._get_llama_cpp_executable_names()
+                backend_display = "llama.cpp"
+                
+            exe_names_str = "', '".join(exe_names)
             messagebox.showerror("Executable Not Found",
-                                 f"Could not find '{exe_base_name}' or '{simple_exe_name}' within:\n{llama_base_dir}\n\n"
+                                 f"Could not find '{exe_names_str}' within:\n{backend_base_dir}\n\n"
                                  f"Searched in common relative locations like:\n - {search_locs_str}\n\n"
-                                 "Please ensure llama.cpp is built and the directory is correct.")
+                                 f"Please ensure {backend_display} is built and the directory is correct.")
             return None
 
         cmd = [str(exe_path)]
@@ -242,10 +259,15 @@ class LaunchManager:
 
         return cmd
 
-    def _find_server_executable(self, llama_base_dir):
+    def _find_server_executable(self, llama_base_dir, backend):
         """Finds the llama-server executable within the llama.cpp directory."""
-        exe_name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
-        simple_exe_name = "server.exe" if sys.platform == "win32" else "server" # Sometimes built as just 'server'
+        # Get backend-specific executable names
+        if backend == "ik_llama":
+            exe_names = self._get_ik_llama_executable_names()
+            backend_display = "ik_llama"
+        else:
+            exe_names = self._get_llama_cpp_executable_names()
+            backend_display = "llama.cpp"
 
         # Define common potential locations relative to the base directory
         # Use Path objects directly for platform-independent path joining
@@ -261,36 +283,40 @@ class LaunchManager:
         # Search in common relative paths first
         for rel_path in search_paths_rel:
             # Check for the primary name
-            full_path = llama_base_dir / rel_path / exe_name
-            if full_path.is_file():
-                print(f"DEBUG: Found server executable at: {full_path}", file=sys.stderr)
-                return full_path.resolve() # Return the resolved path
-
-            # Check for the simple name if the primary wasn't found and names differ
-            if exe_name != simple_exe_name:
-                 full_path_simple = llama_base_dir / rel_path / simple_exe_name
-                 if full_path_simple.is_file():
-                     print(f"DEBUG: Found simple server executable at: {full_path_simple}", file=sys.stderr)
-                     return full_path_simple.resolve() # Return the resolved path
-
+            for exe_name in exe_names:
+                full_path = llama_base_dir / rel_path / exe_name
+                if full_path.is_file():
+                    print(f"DEBUG: Found server executable at: {full_path}", file=sys.stderr)
+                    return full_path.resolve() # Return the resolved path
 
         # As a last resort, check if the base directory *itself* is the bin directory
         # and contains the executable directly. This handles cases where build puts it
         # directly in the root, although less common.
-        direct_path = llama_base_dir / exe_name
-        if direct_path.is_file():
-             print(f"DEBUG: Found server executable directly in base dir: {direct_path}", file=sys.stderr)
-             return direct_path.resolve()
+        for exe_name in exe_names:
+            direct_path = llama_base_dir / exe_name
+            if direct_path.is_file():
+                 print(f"DEBUG: Found server executable directly in base dir: {direct_path}", file=sys.stderr)
+                 return direct_path.resolve()
 
-        if exe_name != simple_exe_name:
-             direct_path_simple = llama_base_dir / simple_exe_name
-             if direct_path_simple.is_file():
-                  print(f"DEBUG: Found simple server executable directly in base dir: {direct_path_simple}", file=sys.stderr)
-                  return direct_path_simple.resolve()
-
-
-        print(f"DEBUG: Server executable '{exe_name}' or '{simple_exe_name}' not found in {llama_base_dir} or common subdirectories.", file=sys.stderr)
+        print(f"DEBUG: Server executable '{', '.join(exe_names)}' not found in {llama_base_dir} or common subdirectories.", file=sys.stderr)
         return None # Executable not found anywhere
+
+    def _get_llama_cpp_executable_names(self):
+        """Get possible executable names for llama.cpp backend."""
+        if sys.platform == "win32":
+            # Prioritize llama-server over deprecated server binary
+            return ["llama-server.exe", "server.exe", "llama-cpp-python-server.exe"]
+        else:
+            return ["llama-server", "server", "llama-cpp-python-server"]
+
+    def _get_ik_llama_executable_names(self):
+        """Get possible executable names for ik_llama backend."""
+        # ik_llama.cpp should use llama-server (server is deprecated)
+        # Only search for llama-server and ik_llama specific variants
+        if sys.platform == "win32":
+            return ["llama-server.exe", "ik-llama-server.exe", "ik_llama_server.exe"]
+        else:
+            return ["llama-server", "ik-llama-server", "ik_llama_server"]
 
     def add_arg(self, cmd_list, arg_name, value, default_value=None):
         """
@@ -371,9 +397,18 @@ class LaunchManager:
 
                 # Use utf-8 encoding explicitly as templates can contain wide chars
                 with open(tmp_path, "w", encoding="utf-8") as f:
-                    f.write("# Automatically generated PowerShell script from LLaMa.cpp Server Launcher GUI\n\n")
+                    # Get backend information for script header
+                    backend = self.launcher.backend_selection.get()
+                    backend_display = "ik_llama" if backend == "ik_llama" else "LLaMa.cpp"
+                    
+                    f.write("<#\n")
+                    f.write(" .SYNOPSIS\n")
+                    f.write(f"    Launches the {backend_display} server with saved settings.\n\n")
+                    f.write(" .DESCRIPTION\n")
+                    f.write(f"    Autogenerated PowerShell script from {backend_display} Launcher GUI.\n")
+                    f.write(f"    Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server.\n")
+                    f.write("#>\n\n")
                     f.write("$ErrorActionPreference = 'Continue'\n\n")
-                    # Set console output encoding to UTF-8
                     f.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
 
                     # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
@@ -421,7 +456,7 @@ class LaunchManager:
                         # Use try/catch to report activation errors but continue
                         f.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Use global:LASTEXITCODE and pause on error
 
-                    f.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
+                    f.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
                     # --- Build the command string for PowerShell using appropriate quoting ---
                     # Join the cmd_list parts with spaces, and then quote each part individually for PowerShell
@@ -691,14 +726,18 @@ class LaunchManager:
 
         try:
             with open(path, "w", encoding="utf-8") as fh:
+                # Get backend information for script header
+                backend = self.launcher.backend_selection.get()
+                backend_display = "ik_llama" if backend == "ik_llama" else "LLaMa.cpp"
+                
                 fh.write("<#\n")
                 fh.write(" .SYNOPSIS\n")
-                fh.write("    Launches the LLaMa.cpp server with saved settings.\n\n")
+                fh.write(f"    Launches the {backend_display} server with saved settings.\n\n")
                 fh.write(" .DESCRIPTION\n")
-                fh.write("    Autogenerated PowerShell script from LLaMa.cpp Launcher GUI.\n")
-                fh.write("    Activates virtual environment (if configured) and starts llama-server.\n")
+                fh.write(f"    Autogenerated PowerShell script from {backend_display} Launcher GUI.\n")
+                fh.write(f"    Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server.\n")
                 fh.write("#>\n\n")
-                fh.write("$ErrorActionPreference = 'Continue'\n\n") # Use 'Continue' for better error reporting in script output
+                fh.write("$ErrorActionPreference = 'Continue'\n\n")
                 fh.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
 
                 # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
@@ -763,7 +802,7 @@ class LaunchManager:
                          warn_venv_path = venv.replace("'", "''")
                          fh.write(f'Write-Warning "Could not process venv path \'{warn_venv_path}\': {path_ex}"\n\n')
 
-                fh.write(f'Write-Host "Launching llama-server..." -ForegroundColor Green\n')
+                fh.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
                 # --- Build the command string for PowerShell using appropriate quoting ---
                 # Similar logic as launch_server for Windows
@@ -845,9 +884,13 @@ class LaunchManager:
 
         try:
             with open(path, "w", encoding="utf-8") as fh:
+                # Get backend information for script header
+                backend = self.launcher.backend_selection.get()
+                backend_display = "ik_llama" if backend == "ik_llama" else "LLaMa.cpp"
+                
                 fh.write("#!/bin/bash\n")
-                fh.write("# Autogenerated bash script from LLaMa.cpp Launcher GUI\n")
-                fh.write("# Activates virtual environment (if configured) and starts llama-server\n\n")
+                fh.write(f"# Autogenerated bash script from {backend_display} Launcher GUI\n")
+                fh.write(f"# Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server\n\n")
 
                 fh.write("set -e  # Exit on any error\n\n")
 
@@ -893,7 +936,10 @@ class LaunchManager:
                     except Exception as path_ex:
                          fh.write(f'echo "Warning: Could not process venv path \'{venv}\': {path_ex}"\n\n')
 
-                fh.write('echo "Launching llama-server..."\n')
+                # Get backend information for script header
+                backend = self.launcher.backend_selection.get()
+                
+                fh.write(f'echo "Launching {backend.replace("_", "-")}-server..."\n')
 
                 # --- Build the command string for bash using appropriate quoting ---
                 bash_cmd_parts = []

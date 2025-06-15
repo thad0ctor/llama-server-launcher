@@ -231,6 +231,7 @@ class ConfigManager:
         # Construct the configuration dictionary
         cfg = {
             "llama_cpp_dir": self.launcher.llama_cpp_dir.get(),
+            "ik_llama_dir":  self.launcher.ik_llama_dir.get(),
             "venv_dir":      self.launcher.venv_dir.get(),
             "model_path":    self.launcher.model_path.get(),
             "cache_type_k":  self.launcher.cache_type_k.get(),
@@ -254,6 +255,8 @@ class ConfigManager:
             "no_kv_offload": self.launcher.no_kv_offload.get(),
             "host":          self.launcher.host.get(),
             "port":          self.launcher.port.get(),
+            # --- Backend Selection ---
+            "backend_selection": self.launcher.backend_selection.get(),
             # --- NEW: Add new parameters to config ---
             "ignore_eos":    self.launcher.ignore_eos.get(),
             "n_predict":     self.launcher.n_predict.get(),
@@ -287,6 +290,7 @@ class ConfigManager:
 
         # Load simple variables first
         self.launcher.llama_cpp_dir.set(cfg.get("llama_cpp_dir",""))
+        self.launcher.ik_llama_dir.set(cfg.get("ik_llama_dir",""))
         self.launcher.venv_dir.set(cfg.get("venv_dir","")) # Setting this triggers the venv trace -> flash attn check
         self.launcher.cache_type_k.set(cfg.get("cache_type_k","f16"))
         self.launcher.cache_type_v.set(cfg.get("cache_type_v","f16"))
@@ -315,6 +319,8 @@ class ConfigManager:
         self.launcher.port.set(cfg.get("port", self.launcher.app_settings.get("port", "8080"))) # --port
         self.launcher.config_name.set(name) # Set the config name entry
 
+        # --- Backend Selection ---
+        self.launcher.backend_selection.set(cfg.get("backend_selection", "llama.cpp"))
 
         # --- NEW: Load new parameters ---
         self.launcher.ignore_eos.set(cfg.get("ignore_eos", False))
@@ -784,6 +790,7 @@ class ConfigManager:
         self.launcher.app_settings["model_dirs"] = [str(p) for p in self.launcher.model_dirs]
         self.launcher.app_settings["last_model_path"] = self.launcher.model_path.get()
         self.launcher.app_settings["last_llama_cpp_dir"] = self.launcher.llama_cpp_dir.get()
+        self.launcher.app_settings["last_ik_llama_dir"] = self.launcher.ik_llama_dir.get()
         self.launcher.app_settings["last_venv_dir"] = self.launcher.venv_dir.get()
         # Save selected GPU indices from the current state of the checkboxes
         self.launcher.app_settings["selected_gpus"] = [i for i, v in enumerate(self.launcher.gpu_vars) if v.get()]
@@ -793,6 +800,9 @@ class ConfigManager:
         self.launcher.app_settings["host"] = self.launcher.host.get()
         self.launcher.app_settings["port"] = self.launcher.port.get()
         print(f"DEBUG: Saving port as {self.launcher.port.get()}") # Add debug print
+        
+        # Save backend selection
+        self.launcher.app_settings["backend_selection"] = self.launcher.backend_selection.get()
         
         # Save manual GPU settings
         self.launcher.app_settings["manual_gpu_mode"] = self.launcher.manual_gpu_mode.get()
