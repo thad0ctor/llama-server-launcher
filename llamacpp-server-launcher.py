@@ -296,6 +296,10 @@ class LlamaCppLauncher:
         self.logical_cores = 4 # Fallback
         self.physical_cores = 2 # Fallback
 
+        # --- Debounce Timer for Recommendations ---
+        # Timer to prevent excessive calls to _update_recommendations when slider is moved
+        self._recommendations_update_timer = None
+
 
         # --- Fetch System Info ---
         self.system_info_manager.fetch_system_info()
@@ -1966,12 +1970,13 @@ class LlamaCppLauncher:
     #  GPU Layer Slider/Entry Synchronization & Validation
     # ═════════════════════════════════════════════════════════════════
 
-    def _set_gpu_layers(self, input_value):
+    def _set_gpu_layers(self, input_value, from_slider=False):
         """
         Helper to set the internal GPU layers state (int) based on user input.
         Handles clamping based on max_layers. Does NOT directly set the StringVar
         but updates the IntVar and triggers recommendations.
         input_value can be -1 or a non-negative integer.
+        from_slider: if True, uses debounced recommendations update to prevent excessive calls
         """
         max_layers = self.max_gpu_layers.get() # Get current max layer count
 
@@ -1999,7 +2004,11 @@ class LlamaCppLauncher:
             self.n_gpu_layers_int.set(int_val)
 
         # Trigger recommendations update (e.g., KV cache type display)
-        self._update_recommendations()
+        # Use debounced update if called from slider to prevent excessive calls
+        if from_slider:
+            self._schedule_recommendations_update()
+        else:
+            self._update_recommendations()
 
 
     def _sync_gpu_layers_from_slider(self, value_str):
@@ -2013,7 +2022,8 @@ class LlamaCppLauncher:
             max_layers = self.max_gpu_layers.get()
 
             # Update internal state using the slider's integer value
-            self._set_gpu_layers(value) # This sets n_gpu_layers_int and updates recommendations
+            # Use debounced update to prevent excessive calls when slider is moved rapidly
+            self._set_gpu_layers(value, from_slider=True)
 
             # Determine the canonical string representation for the entry based on the clamped value
             canonical_str = str(value) # Always show the actual integer value
@@ -2398,6 +2408,12 @@ class LlamaCppLauncher:
     def _update_recommendations(self):
         """Updates recommended values displayed in the UI."""
         print("DEBUG: Updating recommendations...", file=sys.stderr)
+        
+        # Clear any pending debounced update to prevent duplicate calls
+        if self._recommendations_update_timer is not None:
+            self.root.after_cancel(self._recommendations_update_timer)
+            self._recommendations_update_timer = None
+        
         # Update current KV Cache Type display (always reflects current selection)
         self.model_kv_cache_type_var.set(self.cache_type_k.get())
 
@@ -2491,6 +2507,22 @@ class LlamaCppLauncher:
         # without specific model layer sizes and precise VRAM usage estimations, which are not easily
         # available via llama-cpp-python metadata or simple system queries.
         # The existing status label next to the slider is sufficient to show the maximum.
+
+    # ═════════════════════════════════════════════════════════════════
+    #  Debounced Recommendations Update
+    # ═════════════════════════════════════════════════════════════════
+    def _schedule_recommendations_update(self, delay_ms=300):
+        """
+        Schedules a debounced update to recommendations.
+        Cancels any pending update and schedules a new one after delay_ms milliseconds.
+        This prevents excessive calls when the user is rapidly changing slider values.
+        """
+        # Cancel any existing timer
+        if self._recommendations_update_timer is not None:
+            self.root.after_cancel(self._recommendations_update_timer)
+        
+        # Schedule new update
+        self._recommendations_update_timer = self.root.after(delay_ms, self._update_recommendations)
 
     # ═════════════════════════════════════════════════════════════════
     #  Custom Parameter Logic (NEW)
