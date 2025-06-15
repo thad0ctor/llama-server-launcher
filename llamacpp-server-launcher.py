@@ -2830,11 +2830,11 @@ class LlamaCppLauncher:
             if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
                 self.gpu_layers_slider.config(to=n_layers, state=tk.NORMAL) # Enable slider
 
-            # If tensor split is not blank, set max layers to the maximum quantity instead of defaulting to -1
+            # If tensor split is not blank, set max layers to the maximum quantity instead of defaulting to 0
             tensor_split_val = self.tensor_split.get().strip()
             if tensor_split_val and self.n_gpu_layers.get().strip() in ["0", ""]:
-                # Set to max layers (represented as -1 in the StringVar)
-                self.n_gpu_layers.set("-1")
+                # Set to max layers (show actual number instead of -1)
+                self.n_gpu_layers.set(str(n_layers))
 
             # Sync the controls based on the *current* value in the n_gpu_layers StringVar
             # This will set the slider and potentially update the entry format (-1 vs number)
@@ -2940,14 +2940,7 @@ class LlamaCppLauncher:
             self._set_gpu_layers(value) # This sets n_gpu_layers_int and updates recommendations
 
             # Determine the canonical string representation for the entry based on the clamped value
-            canonical_str = str(value) # Default to the integer value
-            if max_layers > 0 and value == max_layers:
-                # Check if tensor split is configured - if so, show actual number instead of -1
-                tensor_split_val = self.tensor_split.get().strip()
-                if tensor_split_val:
-                    canonical_str = str(value) # Show actual number when tensor split is configured
-                else:
-                    canonical_str = "-1" # If slider is at max and max > 0, entry should show -1
+            canonical_str = str(value) # Always show the actual integer value
 
             # Update the entry's StringVar only if it's different
             if self.n_gpu_layers.get() != canonical_str:
@@ -2978,8 +2971,7 @@ class LlamaCppLauncher:
 
 
             # Now, determine what the entry StringVar *should* display for consistency
-            # If max_layers > 0, the entry should show -1 if the clamped value is max,
-            # or the clamped integer value otherwise.
+            # If max_layers > 0, the entry should show the clamped integer value.
             # If max_layers <= 0, the entry should retain the user's valid input string (current_str).
 
             canonical_str_for_entry = current_str # Assume user input is fine initially
@@ -2987,19 +2979,11 @@ class LlamaCppLauncher:
             if max_layers > 0:
                  # If max_layers > 0, the entry should represent the *clamped* value
                  clamped_int_from_set = self.n_gpu_layers_int.get() # Get the result of _set_gpu_layers
-                 if clamped_int_from_set == max_layers:
-                      # Check if tensor split is configured - if so, show actual number instead of -1
-                      tensor_split_val = self.tensor_split.get().strip()
-                      if tensor_split_val:
-                          canonical_str_for_entry = str(clamped_int_from_set) # Show actual number when tensor split is configured
-                      else:
-                          canonical_str_for_entry = "-1"
-                 else:
-                      canonical_str_for_entry = str(clamped_int_from_set)
+                 canonical_str_for_entry = str(clamped_int_from_set) # Always show the actual integer value
             # else: max_layers <= 0, keep current_str (user input)
 
             # Update the entry's StringVar only if it's different from the calculated canonical string
-            # This prevents loops and ensures the entry displays the correct format (-1 vs number)
+            # This prevents loops and ensures the entry displays the correct format (actual number)
             # when max_layers > 0, while preserving arbitrary valid input when max_layers <= 0.
             if self.n_gpu_layers.get() != canonical_str_for_entry:
                  self.n_gpu_layers.set(canonical_str_for_entry)
@@ -3012,16 +2996,8 @@ class LlamaCppLauncher:
             max_val = self.max_gpu_layers.get()
             current_int_value = self.n_gpu_layers_int.get()
             # Determine the correct string representation from the current IntVar/max_layers
-            if max_val > 0 and current_int_value == max_val:
-                 # Check if tensor split is configured - if so, show actual number instead of -1
-                 tensor_split_val = self.tensor_split.get().strip()
-                 if tensor_split_val:
-                     self.n_gpu_layers.set(str(current_int_value)) # Show actual number when tensor split is configured
-                 else:
-                     self.n_gpu_layers.set("-1") # If IntVar is at max and max > 0, the string should be "-1"
-            else:
-                # Otherwise, the string should be the integer value
-                 self.n_gpu_layers.set(str(current_int_value))
+            # Always show the actual integer value
+            self.n_gpu_layers.set(str(current_int_value))
             # No need to call _update_recommendations here, it was last called by _set_gpu_layers
 
 
