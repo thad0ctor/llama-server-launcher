@@ -29,7 +29,8 @@ from config import ConfigManager
 from system import (
     get_gpu_info_static, get_ram_info_static, get_cpu_info_static,
     analyze_gguf_with_llamacpp_tools, calculate_total_gguf_size,
-    parse_gguf_header_simple, analyze_gguf_model_static, SystemInfoManager
+    parse_gguf_header_simple, analyze_gguf_model_static, SystemInfoManager,
+    LLAMA_CPP_PYTHON_AVAILABLE
 )
 
 
