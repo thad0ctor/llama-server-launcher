@@ -4750,12 +4750,12 @@ class LlamaCppLauncher:
                              term_cmds.append(term_cmd_base + ['--', 'bash', '-c', full_script_content])
                         elif term == 'konsole':
                              # Konsole needs --noclose and -e followed by the command list or string
-                             term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash -c ' + quoted_full_command_for_bash]) # Requires bash -c inside quotes
+                             term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash', '-c', full_script_content])
                         elif term == 'xterm':
                              # xterm can often take the command directly after its own flags
-                             term_cmds.append(term_cmd_base + ['-e', 'bash -c ' + quoted_full_command_for_bash]) # Requires bash -c inside quotes
+                             term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', full_script_content])
                              # Another xterm pattern
-                             term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', quoted_full_command_for_bash])
+                             term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', full_script_content])
 
 
                         for term_cmd_parts in term_cmds:
@@ -4782,7 +4782,7 @@ class LlamaCppLauncher:
                     try:
                         # For direct launch with 'source' and other shell features, shell=True is needed.
                         # Use the fully quoted command string.
-                        subprocess.Popen(quoted_full_command_for_bash, shell=True)
+                        subprocess.Popen(full_script_content, shell=True)
                         launched = True # Mark as launched even if it's a fallback method
 
                     except Exception as direct_launch_err:
