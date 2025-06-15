@@ -119,16 +119,26 @@ class LaunchManager:
 
         # --- Other Arguments ---
         # --- KV Cache Type ---
-        # llama.cpp default is f16. Add args only if different.
-        kv_cache_type_val = self.launcher.cache_type_k.get().strip()
-        # Note: llama.cpp's --cache-type-v defaults to the value of --cache-type-k if not specified.
-        # So just setting --cache-type-k is usually sufficient.
-        if kv_cache_type_val and kv_cache_type_val != "f16":
-            cmd.extend(["--cache-type-k", kv_cache_type_val])
-            print(f"DEBUG: Adding --cache-type-k {kv_cache_type_val} (non-default)", file=sys.stderr)
-            # Always set V cache type to match K cache type to avoid unsupported combinations
-            cmd.extend(["--cache-type-v", kv_cache_type_val])
-            print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
+        # Check if ik_llama backend is using -ctk flag
+        ik_llama_uses_ctk = False
+        if backend == "ik_llama":
+            ik_llama_flags = self.launcher.ik_llama_tab.get_ik_llama_flags()
+            ik_llama_uses_ctk = "-ctk" in ik_llama_flags
+        
+        # Only add standard cache type flags if ik_llama is not using -ctk
+        if not ik_llama_uses_ctk:
+            # llama.cpp default is f16. Add args only if different.
+            kv_cache_type_val = self.launcher.cache_type_k.get().strip()
+            # Note: llama.cpp's --cache-type-v defaults to the value of --cache-type-k if not specified.
+            # So just setting --cache-type-k is usually sufficient.
+            if kv_cache_type_val and kv_cache_type_val != "f16":
+                cmd.extend(["--cache-type-k", kv_cache_type_val])
+                print(f"DEBUG: Adding --cache-type-k {kv_cache_type_val} (non-default)", file=sys.stderr)
+                # Always set V cache type to match K cache type to avoid unsupported combinations
+                cmd.extend(["--cache-type-v", kv_cache_type_val])
+                print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
+        else:
+            print("DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk is enabled", file=sys.stderr)
 
         # Remove the separate V cache type handling since we always want it to match K
         # v_cache_type_val = self.launcher.cache_type_v.get().strip()

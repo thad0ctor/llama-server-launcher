@@ -2,3 +2,5 @@ llama_cpp_configs.json
 llama_cpp_launcher_configs.json
 __pycache__
 .gitignore
+llama.log
+llama.log
