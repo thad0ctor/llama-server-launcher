@@ -31,6 +31,13 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   **Generation:** Ignore EOS, n_predict (max tokens).
     *   **Custom Arguments:** Pass any additional `llama.cpp` server parameters.
     *   **ik_llama Support:** Added support for ik_lamma with seperate parameters tab (6/15/2025)
+    <details>
+    <summary><h3>📸 View Chat Templates Screenshot</h3></summary>
+
+    ![ik_llama support](images/ik_llama.png)
+
+    </details>
+
 *   **System & GPU Insights:**
     *   Detects and displays CUDA GPU(s) (via PyTorch), system RAM, and CPU core information.
     *   Supports manual GPU configuration if automatic detection is unavailable.
