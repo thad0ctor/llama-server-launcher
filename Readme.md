@@ -32,7 +32,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   **Custom Arguments:** Pass any additional `llama.cpp` server parameters.
     *   **ik_llama Support:** Added support for ik_lamma with seperate parameters tab (6/15/2025)
     <details>
-    <summary><h3>📸 View Chat Templates Screenshot</h3></summary>
+    <summary><h3>📸 View ik_llama Screenshot</h3></summary>
 
     ![ik_llama support](images/ik_llama.png)
 
