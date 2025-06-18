@@ -310,6 +310,10 @@ class LlamaCppLauncher:
         # --- Status Variables ---
         self.gpu_detected_status_var = tk.StringVar(value="") # Updates with GPU detection message
         self.gpu_availability_var = tk.StringVar(value="Detecting...") # For GPU availability status
+        
+        # --- CPU Info Display Variables ---
+        self.cpu_logical_cores_display_var = tk.StringVar(value=str(self.cpu_info.get("logical_cores", "N/A")))
+        self.cpu_physical_cores_display_var = tk.StringVar(value=str(self.cpu_info.get("physical_cores", "N/A")))
 
 
         # Internal state
@@ -895,12 +899,12 @@ class LlamaCppLauncher:
         if self.cpu_info and "error" not in self.cpu_info:
             ttk.Label(inner, text="System CPU (Logical Cores):", font=("TkSmallCaptionFont", 8, ("bold",)))\
                 .grid(column=0, row=r, sticky="w", padx=10, pady=(5,0))
-            ttk.Label(inner, text=f"{self.cpu_info.get('logical_cores', 'N/A')}", font="TkSmallCaptionFont")\
+            ttk.Label(inner, textvariable=self.cpu_logical_cores_display_var, font="TkSmallCaptionFont")\
                 .grid(column=1, row=r, sticky="w", padx=5, pady=(5,0), columnspan=3)
             r += 1
             ttk.Label(inner, text="System CPU (Physical Cores):", font=("TkSmallCaptionFont", 8, ("bold",)))\
                 .grid(column=0, row=r, sticky="w", padx=10, pady=(0,10))
-            ttk.Label(inner, text=f"{self.cpu_info.get('physical_cores', 'N/A')}", font="TkSmallCaptionFont")\
+            ttk.Label(inner, textvariable=self.cpu_physical_cores_display_var, font="TkSmallCaptionFont")\
                 .grid(column=1, row=r, sticky="w", padx=5, pady=(0,10), columnspan=3)
             r += 1
         elif self.cpu_info.get("error"):
@@ -2875,6 +2879,9 @@ class LlamaCppLauncher:
                 self.gpu_availability_var.set("CUDA Devices (Detection failed):")
                 self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (detection failed)")
                 self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (detection failed)")
+                # Update CPU display variables to show fallback values  
+                self.cpu_logical_cores_display_var.set(f"{self.logical_cores} (detection failed)")
+                self.cpu_physical_cores_display_var.set(f"{self.physical_cores} (detection failed)")
             else:
                 print("DEBUG: System info detection completed successfully, updating UI...", file=sys.stderr)
                 # Update Tk vars with detected info (detected values are now in self attributes)
@@ -2883,6 +2890,13 @@ class LlamaCppLauncher:
                 # Update recommendation vars with actual detected info
                 self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
                 self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
+                # Update the cpu_info dictionary so the UI displays the correct values
+                if "error" not in self.cpu_info:
+                    self.cpu_info["logical_cores"] = self.logical_cores
+                    self.cpu_info["physical_cores"] = self.physical_cores
+                    # Update the display variables for the UI
+                    self.cpu_logical_cores_display_var.set(str(self.logical_cores))
+                    self.cpu_physical_cores_display_var.set(str(self.physical_cores))
                 # Update GPU detection status message
                 self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
                 
