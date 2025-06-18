@@ -750,6 +750,8 @@ class ConfigManager:
             self.launcher.manual_gpu_mode.set(self.launcher.app_settings.get("manual_gpu_mode", False))
             self.launcher.manual_gpu_count.set(self.launcher.app_settings.get("manual_gpu_count", "1"))
             self.launcher.manual_gpu_vram.set(self.launcher.app_settings.get("manual_gpu_vram", "8.0"))
+            # Load new manual GPU list format with fallback to legacy
+            self.launcher.manual_gpu_list = self.launcher.app_settings.get("manual_gpu_list", [])
 
             # Load manual model settings
             self.launcher.manual_model_mode.set(self.launcher.app_settings.get("manual_model_mode", False))
@@ -815,6 +817,8 @@ class ConfigManager:
         self.launcher.app_settings["manual_gpu_mode"] = self.launcher.manual_gpu_mode.get()
         self.launcher.app_settings["manual_gpu_count"] = self.launcher.manual_gpu_count.get()
         self.launcher.app_settings["manual_gpu_vram"] = self.launcher.manual_gpu_vram.get()
+        # Save new manual GPU list format
+        self.launcher.app_settings["manual_gpu_list"] = self.launcher.manual_gpu_list
         
         # Save manual model settings
         self.launcher.app_settings["manual_model_mode"] = self.launcher.manual_model_mode.get()

@@ -238,8 +238,15 @@ class LlamaCppLauncher:
         # --- Manual GPU Entry Variables ---
         # For when GPU detection fails but user wants to manually specify GPUs
         self.manual_gpu_mode = tk.BooleanVar(value=False)  # Whether we're in manual GPU mode
-        self.manual_gpu_count = tk.StringVar(value="1")    # User-specified number of GPUs
-        self.manual_gpu_vram = tk.StringVar(value="8.0")   # User-specified VRAM per GPU (GB)
+        # Changed: Now store individual GPUs as a list of dicts instead of count+vram
+        self.manual_gpu_list = []  # List of {"name": str, "vram_gb": float}
+        # UI variables for adding new manual GPUs
+        self.manual_gpu_name_var = tk.StringVar(value="")
+        self.manual_gpu_vram_var = tk.StringVar(value="8.0")
+        
+        # Legacy variables for config compatibility (will be migrated)
+        self.manual_gpu_count = tk.StringVar(value="1")    # Deprecated but kept for config loading
+        self.manual_gpu_vram = tk.StringVar(value="8.0")   # Deprecated but kept for config loading
 
         # --- Manual Model Entry Variables ---
         # For when model analysis fails but user wants to manually specify model info
@@ -302,6 +309,7 @@ class LlamaCppLauncher:
 
         # --- Status Variables ---
         self.gpu_detected_status_var = tk.StringVar(value="") # Updates with GPU detection message
+        self.gpu_availability_var = tk.StringVar(value="Detecting...") # For GPU availability status
 
 
         # Internal state
@@ -321,15 +329,22 @@ class LlamaCppLauncher:
 
 
         # --- Fetch System Info ---
-        self.system_info_manager.fetch_system_info()
-        # Update Tk vars based on detected info
+        # Start system info detection in background to avoid blocking UI initialization
+        self._start_system_info_detection()
+        # Set initial fallback values so UI can initialize immediately
         self.threads.set(str(self.physical_cores))
         self.threads_batch.set(str(self.logical_cores))
-        # Update recommendation vars based on detected info
-        self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
-        self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
+        # Set initial recommendation vars with fallback info
+        self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Detecting...)")
+        self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Detecting...)")
+        # Set initial GPU availability status
+        initial_gpu_count = self.gpu_info.get("device_count", 0)
+        if self.gpu_info.get('available', False) and initial_gpu_count > 0:
+            self.gpu_availability_var.set(f"CUDA Devices ({initial_gpu_count} available):")
+        else:
+            self.gpu_availability_var.set("CUDA Devices (Detecting...)")
         # Display initial GPU detection status message
-        self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
+        self.gpu_detected_status_var.set("Detecting GPUs...")
 
 
         # load previous settings
@@ -422,10 +437,13 @@ class LlamaCppLauncher:
 
 
         # Update initial GPU checkbox states and recommendations based on loaded config and detected GPUs
+        # Note: This will initially show fallback info, updated when system info detection completes
         self._update_gpu_checkboxes()
         
         # If manual GPU mode was loaded from config, apply it
         if self.manual_gpu_mode.get():
+            # Migrate legacy config format to new list format if needed
+            self._migrate_legacy_manual_gpu_config()
             self._setup_manual_gpus()
         
         # If manual model mode was loaded from config, apply it
@@ -897,8 +915,7 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
 
         # CUDA Devices Info & Checkboxes (Populated dynamically in _update_gpu_checkboxes)
-        gpu_avail_text = "Available" if self.gpu_info['available'] else "Not available"
-        ttk.Label(inner, text=f"CUDA Devices ({gpu_avail_text}):")\
+        ttk.Label(inner, textvariable=self.gpu_availability_var)\
             .grid(column=0, row=r, sticky="nw", padx=10, pady=3)
         ttk.Label(inner, textvariable=self.gpu_detected_status_var, font=("TkSmallCaptionFont"), foreground="orange")\
              .grid(column=1, row=r, sticky="nw", padx=5, pady=3, columnspan=3)
@@ -2280,71 +2297,7 @@ class LlamaCppLauncher:
         # Update manual model visibility after mode change
         self._update_manual_model_visibility()
 
-    # ═════════════════════════════════════════════════════════════════
-    #  Manual GPU Setup (when detection fails)
-    # ═════════════════════════════════════════════════════════════════
-    def _setup_manual_gpus(self):
-        """Set up manual GPU mode when detection fails."""
-        try:
-            gpu_count = int(self.manual_gpu_count.get())
-            vram_gb = float(self.manual_gpu_vram.get())
-            
-            if gpu_count <= 0:
-                gpu_count = 1
-                self.manual_gpu_count.set("1")
-            if vram_gb <= 0:
-                vram_gb = 8.0
-                self.manual_gpu_vram.set("8.0")
-                
-        except ValueError:
-            gpu_count = 1
-            vram_gb = 8.0
-            self.manual_gpu_count.set("1")
-            self.manual_gpu_vram.set("8.0")
-        
-        # Generate synthetic GPU info
-        self.gpu_info = {
-            "available": True,
-            "device_count": gpu_count,
-            "devices": [],
-            "manual_mode": True
-        }
-        
-        self.detected_gpu_devices = []
-        for i in range(gpu_count):
-            gpu_info = {
-                "id": i,
-                "name": f"Manual GPU {i}",
-                "total_memory_bytes": int(vram_gb * (1024**3)),
-                "total_memory_gb": vram_gb,
-                "compute_capability": "Unknown",
-                "multi_processor_count": 0,
-                "manual": True
-            }
-            self.detected_gpu_devices.append(gpu_info)
-            self.gpu_info["devices"].append(gpu_info)
-        
-        print(f"DEBUG: Set up {gpu_count} manual GPUs with {vram_gb} GB VRAM each", file=sys.stderr)
-        
-        # Update GPU checkboxes and save settings
-        self._update_gpu_checkboxes()
-        self._save_configs()
 
-    def _apply_manual_gpu_settings(self):
-        """Apply manual GPU settings without toggling the checkbox."""
-        self.manual_gpu_mode.set(True)
-        self._setup_manual_gpus()
-
-    def _toggle_manual_gpu_mode(self):
-        """Toggle between automatic and manual GPU detection."""
-        if self.manual_gpu_mode.get():
-            # Switching to manual mode
-            self._setup_manual_gpus()
-        else:
-            # Switching back to automatic detection
-            self.system_info_manager.fetch_system_info()  # Re-fetch to get actual detection results
-            self._update_gpu_checkboxes()
-            self._save_configs()
 
     # ═════════════════════════════════════════════════════════════════
     #  dynamic GPU checkboxes and info display
@@ -2361,66 +2314,107 @@ class LlamaCppLauncher:
         print(f"DEBUG: Detected GPUs: {self.detected_gpu_devices}", file=sys.stderr)
         print(f"DEBUG: Loaded selected GPUs indices: {loaded_selected_gpus}", file=sys.stderr)
 
-        # Check if we're in manual mode or if detection failed
-        is_manual_mode = self.manual_gpu_mode.get() or self.gpu_info.get("manual_mode", False)
+        # Check if we're in manual mode
+        is_manual_mode = self.manual_gpu_mode.get()
 
-        if count > 0:
-            # Show GPU checkboxes (either detected or manual)
-            mode_indicator = " (Manual)" if is_manual_mode else ""
-            
+        if count > 0 and not is_manual_mode:
+            # Show real detected GPU checkboxes
             for i in range(count):
-                # Get info for the detected GPU device
                 gpu_details = self.detected_gpu_devices[i] if i < len(self.detected_gpu_devices) else {}
 
-                v = tk.BooleanVar(value=(i in loaded_selected_gpus)) # Set initial state from loaded config
+                v = tk.BooleanVar(value=(i in loaded_selected_gpus))
                 gpu_name_display = f"GPU {i}"
                 if gpu_details and gpu_details.get("name"):
                      gpu_name_display += f": {gpu_details['name']}"
-                gpu_name_display += mode_indicator
 
                 cb = ttk.Checkbutton(self.gpu_checkbox_frame, text=gpu_name_display, variable=v)
                 cb.pack(side="left", padx=3, pady=2)
-                # Bind callback to checkbox changes
-                # Use lambda with default argument index=i to capture the current value of i
                 v.trace_add("write", lambda *args, index=i: self._on_gpu_selection_changed(index))
                 self.gpu_vars.append(v)
 
-        else:
-            # No GPUs detected - show manual entry option
+        elif is_manual_mode and self.manual_gpu_list:
+            # Show manual GPU checkboxes
+            for i, manual_gpu in enumerate(self.manual_gpu_list):
+                v = tk.BooleanVar(value=(i in loaded_selected_gpus))
+                gpu_name_display = f"{manual_gpu['name']} ({manual_gpu['vram_gb']:.1f} GB)"
+
+                cb = ttk.Checkbutton(self.gpu_checkbox_frame, text=gpu_name_display, variable=v)
+                cb.pack(side="left", padx=3, pady=2)
+                v.trace_add("write", lambda *args, index=i: self._on_gpu_selection_changed(index))
+                self.gpu_vars.append(v)
+
+        elif not is_manual_mode and count == 0:
+            # No GPUs detected - show message
             no_gpu_label = ttk.Label(self.gpu_checkbox_frame, text="No CUDA devices detected.", foreground="orange")
             no_gpu_label.pack(side="left", padx=5, pady=3)
+        
+        # Add separator before manual controls
+        if (count > 0 and not is_manual_mode) or (is_manual_mode and self.manual_gpu_list):
+            separator = ttk.Separator(self.gpu_checkbox_frame, orient="vertical")
+            separator.pack(side="left", fill="y", padx=(15, 15))
+        
+        # Manual mode controls
+        manual_controls_frame = ttk.Frame(self.gpu_checkbox_frame)
+        manual_controls_frame.pack(side="left", padx=5, pady=3)
+        
+        # Manual mode toggle
+        manual_cb = ttk.Checkbutton(manual_controls_frame, text="Manual GPU Mode", 
+                                   variable=self.manual_gpu_mode,
+                                   command=self._toggle_manual_gpu_mode)
+        manual_cb.pack(side="top", anchor="w", pady=(0, 5))
+        
+        if is_manual_mode:
+            # Manual GPU management interface
+            mgmt_frame = ttk.LabelFrame(manual_controls_frame, text="Manage Manual GPUs", padding=5)
+            mgmt_frame.pack(side="top", fill="both", expand=True)
             
-            # Manual GPU entry controls
-            manual_frame = ttk.Frame(self.gpu_checkbox_frame)
-            manual_frame.pack(side="left", padx=(10, 5), pady=3)
+            # Add new GPU section
+            add_frame = ttk.Frame(mgmt_frame)
+            add_frame.pack(side="top", fill="x", pady=(0, 5))
             
-            ttk.Label(manual_frame, text="Manual setup:").pack(side="left", padx=2)
+            ttk.Label(add_frame, text="Add GPU:").pack(side="left", padx=(0, 5))
             
-            # GPU count entry
-            ttk.Label(manual_frame, text="GPUs:").pack(side="left", padx=(5, 2))
-            gpu_count_entry = ttk.Entry(manual_frame, textvariable=self.manual_gpu_count, width=3)
-            gpu_count_entry.pack(side="left", padx=2)
+            ttk.Label(add_frame, text="Name:").pack(side="left", padx=(5, 2))
+            name_entry = ttk.Entry(add_frame, textvariable=self.manual_gpu_name_var, width=12)
+            name_entry.pack(side="left", padx=2)
             
-            # VRAM entry
-            ttk.Label(manual_frame, text="VRAM (GB):").pack(side="left", padx=(5, 2))
-            vram_entry = ttk.Entry(manual_frame, textvariable=self.manual_gpu_vram, width=5)
+            ttk.Label(add_frame, text="VRAM (GB):").pack(side="left", padx=(5, 2))
+            vram_entry = ttk.Entry(add_frame, textvariable=self.manual_gpu_vram_var, width=6)
             vram_entry.pack(side="left", padx=2)
             
-            # Apply button
-            apply_btn = ttk.Button(manual_frame, text="Apply", command=self._apply_manual_gpu_settings)
-            apply_btn.pack(side="left", padx=(5, 2))
+            ttk.Button(add_frame, text="Add GPU", command=self._add_manual_gpu).pack(side="left", padx=(5, 0))
             
-            # Toggle checkbox for manual mode
-            manual_cb = ttk.Checkbutton(manual_frame, text="Use manual settings", 
-                                       variable=self.manual_gpu_mode,
-                                       command=self._toggle_manual_gpu_mode)
-            manual_cb.pack(side="left", padx=(10, 0))
+            # Current manual GPUs list
+            if self.manual_gpu_list:
+                list_frame = ttk.Frame(mgmt_frame)
+                list_frame.pack(side="top", fill="both", expand=True, pady=(5, 0))
+                
+                ttk.Label(list_frame, text="Current Manual GPUs:").pack(side="top", anchor="w")
+                
+                # Create a scrollable listbox for manual GPUs
+                list_container = ttk.Frame(list_frame)
+                list_container.pack(side="top", fill="both", expand=True, pady=(2, 0))
+                
+                self.manual_gpu_listbox = tk.Listbox(list_container, height=3, width=40)
+                scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=self.manual_gpu_listbox.yview)
+                self.manual_gpu_listbox.config(yscrollcommand=scrollbar.set)
+                
+                self.manual_gpu_listbox.pack(side="left", fill="both", expand=True)
+                scrollbar.pack(side="right", fill="y")
+                
+                # Populate the listbox
+                for i, gpu in enumerate(self.manual_gpu_list):
+                    display_text = f"GPU {i}: {gpu['name']} ({gpu['vram_gb']:.1f} GB)"
+                    self.manual_gpu_listbox.insert(tk.END, display_text)
+                
+                # Remove button
+                remove_frame = ttk.Frame(list_frame)
+                remove_frame.pack(side="top", fill="x", pady=(5, 0))
+                ttk.Button(remove_frame, text="Remove Selected GPU", command=self._remove_manual_gpu).pack(side="left")
+                ttk.Button(remove_frame, text="Clear All", command=self._clear_manual_gpus).pack(side="left", padx=(5, 0))
 
         # Trigger update recommendations after setting initial checkbox states
-        # This ensures the recommendation is based on the *loaded* selection
-        # Using after ensures the checkboxes are visually updated first
         self.root.after(10, self._update_recommendations)
-
 
     def _display_gpu_vram_info(self, parent, row):
         """Displays VRAM information for detected GPUs."""
@@ -2844,6 +2838,378 @@ class LlamaCppLauncher:
                 print(f"Error resolving path '{directory}': {e}", file=sys.stderr)
                 # Fallback to setting the raw path if resolving fails
                 self.current_backend_dir.set(directory)
+
+    # ═════════════════════════════════════════════════════════════════
+    #  Asynchronous System Info Detection
+    # ═════════════════════════════════════════════════════════════════
+    
+    def _start_system_info_detection(self):
+        """Start system info detection in a background thread."""
+        def detect_system_info():
+            """Background thread function to detect system info."""
+            try:
+                print("DEBUG: Starting background system info detection...", file=sys.stderr)
+                # Perform the potentially slow system info detection
+                self.system_info_manager.fetch_system_info()
+                print("DEBUG: Background system info detection completed.", file=sys.stderr)
+                
+                # Schedule UI update on main thread
+                self.root.after(0, self._on_system_info_detection_complete)
+            except Exception as e:
+                print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                # Even on error, schedule completion handler to update UI
+                self.root.after(0, lambda: self._on_system_info_detection_complete(error=str(e)))
+        
+        # Start detection in background thread
+        detection_thread = Thread(target=detect_system_info, daemon=True)
+        detection_thread.start()
+    
+    def _on_system_info_detection_complete(self, error=None):
+        """Handle completion of system info detection (runs on main thread)."""
+        try:
+            if error:
+                print(f"DEBUG: System info detection completed with error: {error}", file=sys.stderr)
+                # Update UI to show error state
+                self.gpu_detected_status_var.set(f"GPU detection failed: {error}")
+                self.gpu_availability_var.set("CUDA Devices (Detection failed):")
+                self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (detection failed)")
+                self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (detection failed)")
+            else:
+                print("DEBUG: System info detection completed successfully, updating UI...", file=sys.stderr)
+                # Update Tk vars with detected info (detected values are now in self attributes)
+                self.threads.set(str(self.physical_cores))
+                self.threads_batch.set(str(self.logical_cores))
+                # Update recommendation vars with actual detected info
+                self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
+                self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
+                # Update GPU detection status message
+                self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
+                
+                # Update GPU availability display
+                gpu_count = len(self.detected_gpu_devices)
+                if self.gpu_info['available'] and gpu_count > 0:
+                    self.gpu_availability_var.set(f"CUDA Devices ({gpu_count} available):")
+                else:
+                    self.gpu_availability_var.set("CUDA Devices (Not available):")
+                
+                print(f"DEBUG: GPU detection result: {len(self.detected_gpu_devices)} devices detected", file=sys.stderr)
+                
+                # If real GPUs were detected and we were in manual mode, check if manual GPUs need updating
+                if self.gpu_info['available'] and len(self.detected_gpu_devices) > 0:
+                    if self.manual_gpu_mode.get():
+                        # Check if current manual GPUs match detected hardware
+                        detected_count = len(self.detected_gpu_devices)
+                        manual_count = len(self.manual_gpu_list)
+                        
+                        if manual_count != detected_count:
+                            print(f"DEBUG: Manual GPU count ({manual_count}) doesn't match detected count ({detected_count}). Updating manual GPUs.", file=sys.stderr)
+                            self._refresh_manual_gpus_from_detected()
+                        else:
+                            # Check if VRAM amounts match
+                            avg_detected_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices) / detected_count
+                            avg_manual_vram = sum(gpu.get("vram_gb", 0) for gpu in self.manual_gpu_list) / manual_count if manual_count > 0 else 0
+                            
+                            if abs(avg_detected_vram - avg_manual_vram) > 1.0:  # More than 1GB difference
+                                print(f"DEBUG: Manual GPU VRAM ({avg_manual_vram:.1f}GB avg) doesn't match detected VRAM ({avg_detected_vram:.1f}GB avg). Updating manual GPUs.", file=sys.stderr)
+                                self._refresh_manual_gpus_from_detected()
+                    else:
+                        # Real GPUs detected while in automatic mode - this is the normal case
+                        pass
+                else:
+                    # No GPUs detected or GPU detection failed
+                    if self.manual_gpu_mode.get():
+                        print("DEBUG: No real GPUs detected, keeping current manual GPU configuration", file=sys.stderr)
+            
+            # Update GPU checkboxes with the new detected info (or fallback for manual mode)
+            self._update_gpu_checkboxes()
+            
+            # Update recommendations based on new system info
+            self._update_recommendations()
+            
+            print("DEBUG: UI update after system info detection completed.", file=sys.stderr)
+            
+        except Exception as e:
+            print(f"ERROR: Failed to update UI after system info detection: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
+    # ═════════════════════════════════════════════════════════════════
+    #  Manual GPU Management (Redesigned)
+    # ═════════════════════════════════════════════════════════════════
+    
+    def _add_manual_gpu(self):
+        """Add a new manual GPU with specified name and VRAM."""
+        name = self.manual_gpu_name_var.get().strip()
+        vram_str = self.manual_gpu_vram_var.get().strip()
+        
+        if not name:
+            name = f"Manual GPU {len(self.manual_gpu_list)}"
+        
+        try:
+            vram_gb = float(vram_str)
+            if vram_gb <= 0:
+                messagebox.showwarning("Invalid VRAM", "VRAM must be greater than 0.")
+                return
+        except ValueError:
+            messagebox.showwarning("Invalid VRAM", "Please enter a valid number for VRAM.")
+            return
+        
+        # Add the new GPU
+        new_gpu = {"name": name, "vram_gb": vram_gb}
+        self.manual_gpu_list.append(new_gpu)
+        
+        # Clear input fields
+        self.manual_gpu_name_var.set("")
+        self.manual_gpu_vram_var.set("8.0")
+        
+        # Add to listbox if it exists
+        if hasattr(self, 'manual_gpu_listbox') and self.manual_gpu_listbox.winfo_exists():
+            new_index = len(self.manual_gpu_list) - 1
+            display_text = f"GPU {new_index}: {new_gpu['name']} ({new_gpu['vram_gb']:.1f} GB)"
+            self.manual_gpu_listbox.insert(tk.END, display_text)
+            # Select the newly added GPU
+            self.manual_gpu_listbox.selection_clear(0, tk.END)
+            self.manual_gpu_listbox.selection_set(new_index)
+            self.manual_gpu_listbox.activate(new_index)
+            self.manual_gpu_listbox.see(new_index)
+        
+        # Update the detected_gpu_devices to reflect the new list
+        self.detected_gpu_devices = []
+        for i, manual_gpu in enumerate(self.manual_gpu_list):
+            fake_gpu = {
+                "id": i,
+                "name": manual_gpu["name"],
+                "total_memory_bytes": int(manual_gpu["vram_gb"] * (1024**3)),
+                "total_memory_gb": manual_gpu["vram_gb"],
+                "compute_capability": "Unknown",
+                "multi_processor_count": 0,
+                "manual": True
+            }
+            self.detected_gpu_devices.append(fake_gpu)
+        
+        # Update gpu_info
+        self.gpu_info = {
+            "available": len(self.manual_gpu_list) > 0,
+            "device_count": len(self.manual_gpu_list),
+            "devices": self.detected_gpu_devices.copy(),
+            "manual_mode": True
+        }
+        
+        # Only update the main GPU checkboxes, not the entire manual interface
+        self._update_gpu_checkboxes()
+        self._save_configs()
+        print(f"DEBUG: Added manual GPU: {name} with {vram_gb:.1f} GB VRAM", file=sys.stderr)
+    
+    def _remove_manual_gpu(self):
+        """Remove the selected manual GPU."""
+        if not hasattr(self, 'manual_gpu_listbox'):
+            return
+            
+        selection = self.manual_gpu_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a GPU to remove.")
+            return
+        
+        index = selection[0]
+        if 0 <= index < len(self.manual_gpu_list):
+            removed_gpu = self.manual_gpu_list.pop(index)
+            print(f"DEBUG: Removed manual GPU: {removed_gpu['name']}", file=sys.stderr)
+            
+            # Update the listbox directly instead of rebuilding entire UI
+            self.manual_gpu_listbox.delete(index)
+            
+            # If there are still GPUs, select the next one (or previous if we removed the last)
+            if self.manual_gpu_list:
+                new_selection = min(index, len(self.manual_gpu_list) - 1)
+                self.manual_gpu_listbox.selection_set(new_selection)
+                self.manual_gpu_listbox.activate(new_selection)
+                self.manual_gpu_listbox.see(new_selection)
+                
+                # Update the detected_gpu_devices to reflect the new list
+                self.detected_gpu_devices = []
+                for i, manual_gpu in enumerate(self.manual_gpu_list):
+                    fake_gpu = {
+                        "id": i,
+                        "name": manual_gpu["name"],
+                        "total_memory_bytes": int(manual_gpu["vram_gb"] * (1024**3)),
+                        "total_memory_gb": manual_gpu["vram_gb"],
+                        "compute_capability": "Unknown",
+                        "multi_processor_count": 0,
+                        "manual": True
+                    }
+                    self.detected_gpu_devices.append(fake_gpu)
+                
+                # Update gpu_info
+                self.gpu_info["device_count"] = len(self.manual_gpu_list)
+                self.gpu_info["devices"] = self.detected_gpu_devices.copy()
+                
+                # Only update the main GPU checkboxes, not the entire manual interface
+                self._update_gpu_checkboxes()
+            else:
+                # No manual GPUs left - switch back to automatic mode
+                print("DEBUG: No manual GPUs left, switching to automatic mode", file=sys.stderr)
+                self.manual_gpu_mode.set(False)
+                self.app_settings["manual_gpu_mode"] = False
+                # Start fresh GPU detection
+                self.gpu_detected_status_var.set("Re-detecting GPUs...")
+                self._start_system_info_detection()
+            
+            # Save the changes
+            self._save_configs()
+            
+        else:
+            messagebox.showwarning("Invalid Selection", "Selected GPU index is out of range.")
+    
+    def _clear_manual_gpus(self):
+        """Clear all manual GPUs."""
+        if self.manual_gpu_list:
+            result = messagebox.askyesno("Clear All GPUs", 
+                                       f"Are you sure you want to remove all {len(self.manual_gpu_list)} manual GPUs?")
+            if result:
+                self.manual_gpu_list.clear()
+                print("DEBUG: Cleared all manual GPUs", file=sys.stderr)
+                
+                # Switch back to automatic mode
+                self.manual_gpu_mode.set(False)
+                self.app_settings["manual_gpu_mode"] = False
+                
+                # Start fresh GPU detection
+                self.gpu_detected_status_var.set("Re-detecting GPUs...")
+                self._start_system_info_detection()
+                
+                # Save the changes
+                self._save_configs()
+    
+    def _setup_manual_gpus(self):
+        """Setup manual GPUs based on the current manual_gpu_list."""
+        if not self.manual_gpu_mode.get():
+            return
+        
+        # Create fake GPU devices from the manual list
+        self.detected_gpu_devices = []
+        for i, manual_gpu in enumerate(self.manual_gpu_list):
+            fake_gpu = {
+                "id": i,
+                "name": manual_gpu["name"],
+                "total_memory_bytes": int(manual_gpu["vram_gb"] * (1024**3)),
+                "total_memory_gb": manual_gpu["vram_gb"],
+                "compute_capability": "Unknown",
+                "multi_processor_count": 0,
+                "manual": True
+            }
+            self.detected_gpu_devices.append(fake_gpu)
+        
+        # Update gpu_info to reflect manual GPUs
+        self.gpu_info = {
+            "available": len(self.manual_gpu_list) > 0,
+            "device_count": len(self.manual_gpu_list),
+            "devices": self.detected_gpu_devices.copy(),
+            "manual_mode": True
+        }
+        
+        print(f"DEBUG: Set up {len(self.manual_gpu_list)} manual GPUs", file=sys.stderr)
+        for i, gpu in enumerate(self.manual_gpu_list):
+            print(f"DEBUG:   GPU {i}: {gpu['name']} ({gpu['vram_gb']:.1f} GB)", file=sys.stderr)
+        
+        # Update the UI
+        self._update_gpu_checkboxes()
+        self._update_recommendations()
+    
+    def _migrate_legacy_manual_gpu_config(self):
+        """Migrate from old manual_gpu_count + manual_gpu_vram format to new list format."""
+        if self.manual_gpu_list:
+            return  # Already using new format
+        
+        try:
+            count = int(self.manual_gpu_count.get())
+            vram = float(self.manual_gpu_vram.get())
+            
+            if count > 0 and vram > 0:
+                # Check if we have detected GPUs and if they differ from legacy config
+                detected_count = len(self.detected_gpu_devices)
+                if detected_count > 0:
+                    # We have detected GPUs - check if legacy config matches
+                    avg_detected_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices) / detected_count
+                    
+                    # If the legacy config differs significantly from detected hardware, prefer detected hardware
+                    if (count != detected_count or 
+                        abs(vram - avg_detected_vram) > 1.0):  # More than 1GB difference
+                        print(f"DEBUG: Legacy config ({count} GPUs @ {vram}GB) differs from detected hardware ({detected_count} GPUs @ {avg_detected_vram:.1f}GB avg). Using detected hardware.", file=sys.stderr)
+                        # Don't migrate legacy config - let the caller create based on detected hardware
+                        return
+                
+                print(f"DEBUG: Migrating legacy manual GPU config: {count} GPUs with {vram} GB each", file=sys.stderr)
+                for i in range(count):
+                    gpu = {"name": f"Manual GPU {i}", "vram_gb": vram}
+                    self.manual_gpu_list.append(gpu)
+                
+                # Save migrated config
+                self._save_configs()
+                print("DEBUG: Legacy manual GPU config migrated successfully", file=sys.stderr)
+        except (ValueError, TypeError):
+            print("DEBUG: No valid legacy manual GPU config to migrate", file=sys.stderr)
+
+    def _apply_manual_gpu_settings(self):
+        """Legacy method for compatibility - now redirects to new system."""
+        print("DEBUG: Legacy _apply_manual_gpu_settings called - migrating to new system", file=sys.stderr)
+        self._migrate_legacy_manual_gpu_config()
+        self._setup_manual_gpus()
+
+    def _toggle_manual_gpu_mode(self):
+        """Toggle between automatic and manual GPU detection."""
+        if self.manual_gpu_mode.get():
+            # Switching to manual mode
+            print("DEBUG: Switching to manual GPU mode", file=sys.stderr)
+            # Migrate legacy config if needed
+            self._migrate_legacy_manual_gpu_config()
+            # If no manual GPUs exist after migration, create them based on detected hardware
+            if not self.manual_gpu_list:
+                # Use detected GPU information to create manual GPUs that match the hardware
+                if self.detected_gpu_devices:
+                    print(f"DEBUG: Creating manual GPUs based on {len(self.detected_gpu_devices)} detected GPUs", file=sys.stderr)
+                    for i, detected_gpu in enumerate(self.detected_gpu_devices):
+                        manual_gpu = {
+                            "name": f"Manual GPU {i}",
+                            "vram_gb": detected_gpu.get("total_memory_gb", 8.0)
+                        }
+                        self.manual_gpu_list.append(manual_gpu)
+                        print(f"DEBUG: Added manual GPU {i}: {manual_gpu['name']} ({manual_gpu['vram_gb']:.2f} GB)", file=sys.stderr)
+                else:
+                    # Fallback if no GPUs detected
+                    self.manual_gpu_list.append({"name": "Manual GPU 0", "vram_gb": 8.0})
+                    print("DEBUG: Added default manual GPU (no hardware detected)", file=sys.stderr)
+            self._setup_manual_gpus()
+        else:
+            # Switching back to automatic detection - use async detection to avoid UI blocking
+            print("DEBUG: Switching back to automatic GPU detection...", file=sys.stderr)
+            self.gpu_detected_status_var.set("Re-detecting GPUs...")
+            self._start_system_info_detection()
+        
+        self._save_configs()
+    
+    def _refresh_manual_gpus_from_detected(self):
+        """Refresh manual GPU list to match detected hardware."""
+        if not self.manual_gpu_mode.get() or not self.detected_gpu_devices:
+            return
+        
+        print(f"DEBUG: Refreshing manual GPUs to match {len(self.detected_gpu_devices)} detected GPUs", file=sys.stderr)
+        
+        # Clear current manual GPU list
+        self.manual_gpu_list.clear()
+        
+        # Create new manual GPUs based on detected hardware
+        for i, detected_gpu in enumerate(self.detected_gpu_devices):
+            if not detected_gpu.get("manual", False):  # Only use real detected GPUs
+                manual_gpu = {
+                    "name": f"Manual GPU {i}",
+                    "vram_gb": detected_gpu.get("total_memory_gb", 8.0)
+                }
+                self.manual_gpu_list.append(manual_gpu)
+                print(f"DEBUG: Refreshed manual GPU {i}: {manual_gpu['name']} ({manual_gpu['vram_gb']:.2f} GB)", file=sys.stderr)
+        
+        # Save the updated manual GPU list and re-setup
+        self._save_configs()
+        self._setup_manual_gpus()
 
 # ═════════════════════════════════════════════════════════════════════
 #  main
