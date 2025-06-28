@@ -96,6 +96,142 @@ if MISSING_DEPS:
 #  Helper Functions (These remain outside the class as they don't need 'self')
 # ═════════════════════════════════════════════════════════════════════
 
+def get_gpu_info_with_venv(venv_path=None):
+    """Get GPU information using PyTorch, optionally from a virtual environment."""
+    if venv_path and Path(venv_path).exists():
+        # Use the virtual environment to check for PyTorch/CUDA
+        return get_gpu_info_from_venv(venv_path)
+    else:
+        # Use the current process (original behavior)
+        return get_gpu_info_static()
+
+def get_gpu_info_from_venv(venv_path):
+    """Get GPU information by running PyTorch detection in a virtual environment."""
+    import subprocess
+    import json
+    from pathlib import Path
+    
+    venv_path = Path(venv_path)
+    
+    # Determine the Python executable in the venv
+    if sys.platform == "win32":
+        python_exe = venv_path / "Scripts" / "python.exe"
+        if not python_exe.exists():
+            python_exe = venv_path / "python.exe"  # Some venv structures
+    else:
+        python_exe = venv_path / "bin" / "python"
+        if not python_exe.exists():
+            python_exe = venv_path / "python"  # Some venv structures
+    
+    if not python_exe.exists():
+        print(f"DEBUG: Python executable not found in venv: {venv_path}", file=sys.stderr)
+        # Fall back to current process detection
+        return get_gpu_info_static()
+    
+    # Create a small Python script to check for PyTorch/CUDA in the venv
+    detection_script = '''
+import sys
+import json
+
+try:
+    import torch
+    torch_available = torch.cuda.is_available()
+    
+    if torch_available:
+        device_count = torch.cuda.device_count()
+        gpu_info = {
+            "available": True,
+            "device_count": device_count,
+            "devices": []
+        }
+        
+        for i in range(device_count):
+            props = torch.cuda.get_device_properties(i)
+            gpu_info["devices"].append({
+                "id": i,
+                "name": props.name,
+                "total_memory_bytes": props.total_memory,
+                "total_memory_gb": round(props.total_memory / (1024**3), 2),
+                "compute_capability": f"{props.major}.{props.minor}",
+                "multi_processor_count": props.multi_processor_count
+            })
+        
+        print(json.dumps(gpu_info))
+    else:
+        print(json.dumps({"available": False, "message": "CUDA not available via PyTorch in venv", "device_count": 0, "devices": []}))
+
+except ImportError:
+    print(json.dumps({"available": False, "message": "PyTorch not found in venv", "device_count": 0, "devices": []}))
+except Exception as e:
+    print(json.dumps({"available": False, "message": f"Error in venv GPU detection: {e}", "device_count": 0, "devices": []}))
+'''
+    
+    try:
+        print(f"DEBUG: Running GPU detection in venv: {venv_path}", file=sys.stderr)
+        # Run the detection script in the virtual environment
+        result = subprocess.run(
+            [str(python_exe), "-c", detection_script],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            try:
+                output = result.stdout.strip()
+                if not output:
+                    print("DEBUG: Venv GPU detection returned empty output", file=sys.stderr)
+                    return _create_fallback_gpu_info("Empty output from venv detection")
+                
+                gpu_info = json.loads(output)
+                print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
+                return gpu_info
+            except json.JSONDecodeError as e:
+                print(f"DEBUG: Failed to parse venv GPU detection output: {e}", file=sys.stderr)
+                print(f"DEBUG: Raw output: '{result.stdout}'", file=sys.stderr)
+                return _create_fallback_gpu_info(f"JSON parse error: {e}")
+        else:
+            error_msg = result.stderr.strip() if result.stderr else "Unknown error"
+            print(f"DEBUG: Venv GPU detection failed with return code {result.returncode}", file=sys.stderr)
+            print(f"DEBUG: Error output: {error_msg}", file=sys.stderr)
+            
+            # Check for specific error types
+            if "ModuleNotFoundError" in error_msg or "ImportError" in error_msg:
+                return _create_fallback_gpu_info("Required modules not found in venv")
+            elif "CUDA" in error_msg:
+                return _create_fallback_gpu_info("CUDA error in venv")
+            else:
+                return _create_fallback_gpu_info(f"Venv detection failed: {error_msg}")
+            
+    except subprocess.TimeoutExpired:
+        print("DEBUG: Venv GPU detection timed out after 30 seconds", file=sys.stderr)
+        return _create_fallback_gpu_info("Detection timeout")
+    except FileNotFoundError:
+        print(f"DEBUG: Python executable not found: {python_exe}", file=sys.stderr)
+        return _create_fallback_gpu_info("Python executable not found")
+    except PermissionError:
+        print(f"DEBUG: Permission denied accessing venv: {venv_path}", file=sys.stderr)
+        return _create_fallback_gpu_info("Permission denied")
+    except Exception as e:
+        print(f"DEBUG: Unexpected exception during venv GPU detection: {type(e).__name__}: {e}", file=sys.stderr)
+        return _create_fallback_gpu_info(f"Unexpected error: {type(e).__name__}")
+
+def _create_fallback_gpu_info(reason):
+    """Create fallback GPU info with specific reason, then try current process detection."""
+    print(f"DEBUG: Creating fallback GPU info due to: {reason}", file=sys.stderr)
+    print("DEBUG: Attempting current process GPU detection as fallback", file=sys.stderr)
+    
+    # Try current process detection as fallback
+    fallback_info = get_gpu_info_static()
+    
+    # If current process detection also fails, return a clear error message
+    if not fallback_info.get('available', False):
+        fallback_info['message'] = f"Venv detection failed ({reason}), current process also failed"
+    else:
+        fallback_info['message'] = f"Using current process (venv failed: {reason})"
+    
+    return fallback_info
+
 def get_gpu_info_static():
     """Get GPU information using PyTorch (static method)."""
     if not torch or not TORCH_AVAILABLE:
@@ -755,7 +891,18 @@ class SystemInfoManager:
     def fetch_system_info(self):
         """Fetches GPU, RAM, and CPU info and populates class attributes."""
         print("Fetching system info...", file=sys.stderr)
-        self.launcher.gpu_info = get_gpu_info_static()
+        
+        # Get the configured virtual environment path from the launcher
+        venv_path = None
+        if hasattr(self.launcher, 'venv_dir'):
+            venv_path_str = self.launcher.venv_dir.get().strip()
+            if venv_path_str:
+                venv_path = venv_path_str
+                print(f"DEBUG: Using configured venv for GPU detection: {venv_path}", file=sys.stderr)
+            else:
+                print("DEBUG: No venv configured, using current process for GPU detection", file=sys.stderr)
+        
+        self.launcher.gpu_info = get_gpu_info_with_venv(venv_path)
         self.launcher.ram_info = get_ram_info_static()
         self.launcher.cpu_info = get_cpu_info_static() # Fetch CPU info here
 

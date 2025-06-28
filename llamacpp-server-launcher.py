@@ -14,6 +14,14 @@ import shlex # <-- Import shlex for parameter splitting
 import math
 import time
 
+# Debug logging control
+DEBUG_VERBOSE = os.getenv('LLAMA_LAUNCHER_DEBUG', '').lower() in ('1', 'true', 'yes')
+
+def debug_print(message, force=False):
+    """Print debug message only if verbose debug is enabled or force=True."""
+    if force or DEBUG_VERBOSE:
+        print(f"DEBUG: {message}", file=sys.stderr)
+
 # Import the environmental variables module
 from env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariablesTab
 
@@ -331,10 +339,12 @@ class LlamaCppLauncher:
         # Timer to prevent excessive calls to _update_recommendations when slider is moved
         self._recommendations_update_timer = None
 
+        # --- Detection Progress Flag ---
+        # Flag to prevent multiple simultaneous GPU detection threads
+        self._detection_in_progress = False
 
-        # --- Fetch System Info ---
-        # Start system info detection in background to avoid blocking UI initialization
-        self._start_system_info_detection()
+
+        # --- System Info Initialization ---
         # Set initial fallback values so UI can initialize immediately
         self.threads.set(str(self.physical_cores))
         self.threads_batch.set(str(self.logical_cores))
@@ -422,6 +432,8 @@ class LlamaCppLauncher:
         self.backend_selection.trace_add("write", lambda *args: self._on_backend_selection_changed())
         # Add trace handler for current backend directory changes
         self.current_backend_dir.trace_add("write", lambda *args: self._on_backend_dir_changed())
+        # Add trace handler for virtual environment changes to re-trigger GPU detection
+        self.venv_dir.trace_add("write", lambda *args: self._on_venv_dir_changed())
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Bind trace to the new template source variable
@@ -440,15 +452,21 @@ class LlamaCppLauncher:
         self._update_custom_parameters_listbox() # <-- Update custom parameters listbox
 
 
-        # Update initial GPU checkbox states and recommendations based on loaded config and detected GPUs
-        # Note: This will initially show fallback info, updated when system info detection completes
-        self._update_gpu_checkboxes()
-        
-        # If manual GPU mode was loaded from config, apply it
+        # Initialize GPU system based on saved settings
         if self.manual_gpu_mode.get():
+            # Manual mode was loaded from config - setup immediately
+            debug_print("Manual GPU mode loaded from config, setting up immediately")
+            self.gpu_detected_status_var.set("Manual mode active")
             # Migrate legacy config format to new list format if needed
             self._migrate_legacy_manual_gpu_config()
             self._setup_manual_gpus()
+        else:
+            # Automatic mode - start background detection
+            debug_print("Automatic GPU mode, starting background detection")
+            self._start_system_info_detection()
+        
+        # Update initial GPU checkbox states and recommendations
+        self._update_gpu_checkboxes()
         
         # If manual model mode was loaded from config, apply it
         if self.manual_model_mode.get():
@@ -2417,8 +2435,21 @@ class LlamaCppLauncher:
                 ttk.Button(remove_frame, text="Remove Selected GPU", command=self._remove_manual_gpu).pack(side="left")
                 ttk.Button(remove_frame, text="Clear All", command=self._clear_manual_gpus).pack(side="left", padx=(5, 0))
 
-        # Trigger update recommendations after setting initial checkbox states
-        self.root.after(10, self._update_recommendations)
+        # Trigger immediate update of recommendations instead of delayed
+        self._update_recommendations()
+
+    def _refresh_vram_display(self):
+        """Helper method to refresh VRAM display if it exists."""
+        if hasattr(self, '_vram_info_frame'):
+            try:
+                # Get the parent and row from the existing frame's grid info
+                grid_info = self._vram_info_frame.grid_info()
+                if grid_info:
+                    parent = self._vram_info_frame.master
+                    row = grid_info.get('row', 0)
+                    self._display_gpu_vram_info(parent, row)
+            except Exception as e:
+                print(f"DEBUG: Could not refresh VRAM display: {e}", file=sys.stderr)
 
     def _display_gpu_vram_info(self, parent, row):
         """Displays VRAM information for detected GPUs."""
@@ -2849,6 +2880,13 @@ class LlamaCppLauncher:
     
     def _start_system_info_detection(self):
         """Start system info detection in a background thread."""
+        # Prevent multiple simultaneous detection threads
+        if hasattr(self, '_detection_in_progress') and self._detection_in_progress:
+            debug_print("GPU detection already in progress, skipping new request")
+            return
+        
+        self._detection_in_progress = True
+        
         def detect_system_info():
             """Background thread function to detect system info."""
             try:
@@ -2857,12 +2895,12 @@ class LlamaCppLauncher:
                 self.system_info_manager.fetch_system_info()
                 print("DEBUG: Background system info detection completed.", file=sys.stderr)
                 
-                # Schedule UI update on main thread
+                # Schedule UI update on main thread (flag will be cleared there)
                 self.root.after(0, self._on_system_info_detection_complete)
             except Exception as e:
                 print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-                # Even on error, schedule completion handler to update UI
+                # Even on error, schedule completion handler to update UI (flag will be cleared there)
                 self.root.after(0, lambda: self._on_system_info_detection_complete(error=str(e)))
         
         # Start detection in background thread
@@ -2872,73 +2910,17 @@ class LlamaCppLauncher:
     def _on_system_info_detection_complete(self, error=None):
         """Handle completion of system info detection (runs on main thread)."""
         try:
+            # Clear detection flag (single point of clearing)
+            self._detection_in_progress = False
+            
             if error:
-                print(f"DEBUG: System info detection completed with error: {error}", file=sys.stderr)
-                # Update UI to show error state
-                self.gpu_detected_status_var.set(f"GPU detection failed: {error}")
-                self.gpu_availability_var.set("CUDA Devices (Detection failed):")
-                self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (detection failed)")
-                self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (detection failed)")
-                # Update CPU display variables to show fallback values  
-                self.cpu_logical_cores_display_var.set(f"{self.logical_cores} (detection failed)")
-                self.cpu_physical_cores_display_var.set(f"{self.physical_cores} (detection failed)")
+                self._handle_detection_error(error)
             else:
-                print("DEBUG: System info detection completed successfully, updating UI...", file=sys.stderr)
-                # Update Tk vars with detected info (detected values are now in self attributes)
-                self.threads.set(str(self.physical_cores))
-                self.threads_batch.set(str(self.logical_cores))
-                # Update recommendation vars with actual detected info
-                self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
-                self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
-                # Update the cpu_info dictionary so the UI displays the correct values
-                if "error" not in self.cpu_info:
-                    self.cpu_info["logical_cores"] = self.logical_cores
-                    self.cpu_info["physical_cores"] = self.physical_cores
-                    # Update the display variables for the UI
-                    self.cpu_logical_cores_display_var.set(str(self.logical_cores))
-                    self.cpu_physical_cores_display_var.set(str(self.physical_cores))
-                # Update GPU detection status message
-                self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
-                
-                # Update GPU availability display
-                gpu_count = len(self.detected_gpu_devices)
-                if self.gpu_info['available'] and gpu_count > 0:
-                    self.gpu_availability_var.set(f"CUDA Devices ({gpu_count} available):")
-                else:
-                    self.gpu_availability_var.set("CUDA Devices (Not available):")
-                
-                print(f"DEBUG: GPU detection result: {len(self.detected_gpu_devices)} devices detected", file=sys.stderr)
-                
-                # If real GPUs were detected and we were in manual mode, check if manual GPUs need updating
-                if self.gpu_info['available'] and len(self.detected_gpu_devices) > 0:
-                    if self.manual_gpu_mode.get():
-                        # Check if current manual GPUs match detected hardware
-                        detected_count = len(self.detected_gpu_devices)
-                        manual_count = len(self.manual_gpu_list)
-                        
-                        if manual_count != detected_count:
-                            print(f"DEBUG: Manual GPU count ({manual_count}) doesn't match detected count ({detected_count}). Updating manual GPUs.", file=sys.stderr)
-                            self._refresh_manual_gpus_from_detected()
-                        else:
-                            # Check if VRAM amounts match
-                            avg_detected_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices) / detected_count
-                            avg_manual_vram = sum(gpu.get("vram_gb", 0) for gpu in self.manual_gpu_list) / manual_count if manual_count > 0 else 0
-                            
-                            if abs(avg_detected_vram - avg_manual_vram) > 1.0:  # More than 1GB difference
-                                print(f"DEBUG: Manual GPU VRAM ({avg_manual_vram:.1f}GB avg) doesn't match detected VRAM ({avg_detected_vram:.1f}GB avg). Updating manual GPUs.", file=sys.stderr)
-                                self._refresh_manual_gpus_from_detected()
-                    else:
-                        # Real GPUs detected while in automatic mode - this is the normal case
-                        pass
-                else:
-                    # No GPUs detected or GPU detection failed
-                    if self.manual_gpu_mode.get():
-                        print("DEBUG: No real GPUs detected, keeping current manual GPU configuration", file=sys.stderr)
+                self._handle_detection_success()
             
-            # Update GPU checkboxes with the new detected info (or fallback for manual mode)
+            # Update UI components
             self._update_gpu_checkboxes()
-            
-            # Update recommendations based on new system info
+            self._refresh_vram_display()
             self._update_recommendations()
             
             print("DEBUG: UI update after system info detection completed.", file=sys.stderr)
@@ -2946,6 +2928,96 @@ class LlamaCppLauncher:
         except Exception as e:
             print(f"ERROR: Failed to update UI after system info detection: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+    
+    def _handle_detection_error(self, error):
+        """Handle GPU detection error state."""
+        print(f"DEBUG: System info detection completed with error: {error}", file=sys.stderr)
+        self.gpu_detected_status_var.set(f"GPU detection failed: {error}")
+        self.gpu_availability_var.set("CUDA Devices (Detection failed):")
+        self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (detection failed)")
+        self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (detection failed)")
+        self.cpu_logical_cores_display_var.set(f"{self.logical_cores} (detection failed)")
+        self.cpu_physical_cores_display_var.set(f"{self.physical_cores} (detection failed)")
+    
+    def _handle_detection_success(self):
+        """Handle successful GPU detection."""
+        print("DEBUG: System info detection completed successfully, updating UI...", file=sys.stderr)
+        
+        # Update CPU information
+        self._update_cpu_info()
+        
+        # Update GPU information
+        self._update_gpu_info()
+        
+        # Log GPU detection results
+        self._log_gpu_detection_results()
+    
+    def _update_cpu_info(self):
+        """Update CPU-related UI components after detection."""
+        self.threads.set(str(self.physical_cores))
+        self.threads_batch.set(str(self.logical_cores))
+        self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
+        self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
+        
+        if "error" not in self.cpu_info:
+            self.cpu_info["logical_cores"] = self.logical_cores
+            self.cpu_info["physical_cores"] = self.physical_cores
+            self.cpu_logical_cores_display_var.set(str(self.logical_cores))
+            self.cpu_physical_cores_display_var.set(str(self.physical_cores))
+    
+    def _update_gpu_info(self):
+        """Update GPU-related UI components after detection."""
+        # Update GPU detection status message
+        self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
+        
+        # Update GPU availability display
+        gpu_count = len(self.detected_gpu_devices)
+        if self.gpu_info['available'] and gpu_count > 0:
+            self.gpu_availability_var.set(f"CUDA Devices ({gpu_count} available):")
+        else:
+            self.gpu_availability_var.set("CUDA Devices (Not available):")
+    
+    def _log_gpu_detection_results(self):
+        """Log GPU detection results for debugging."""
+        gpu_count = len(self.detected_gpu_devices)
+        print(f"DEBUG: GPU detection result: {gpu_count} devices detected", file=sys.stderr)
+        
+        if self.gpu_info['available'] and gpu_count > 0:
+            if self.manual_gpu_mode.get():
+                self._log_manual_mode_results()
+            else:
+                self._log_automatic_mode_results()
+        else:
+            self._log_no_gpu_results()
+    
+    def _log_manual_mode_results(self):
+        """Log results when in manual GPU mode."""
+        detected_count = len(self.detected_gpu_devices)
+        manual_count = len(self.manual_gpu_list)
+        
+        print(f"DEBUG: Manual mode active. Detected {detected_count} real GPUs, {manual_count} manual GPUs configured", file=sys.stderr)
+        
+        if detected_count > 0:
+            avg_detected_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices) / detected_count
+            if manual_count > 0:
+                avg_manual_vram = sum(gpu.get("vram_gb", 0) for gpu in self.manual_gpu_list) / manual_count
+                debug_print(f"Hardware VRAM: {avg_detected_vram:.1f}GB avg, Manual VRAM: {avg_manual_vram:.1f}GB avg")
+    
+    def _log_automatic_mode_results(self):
+        """Log results when in automatic GPU mode."""
+        print("DEBUG: Real GPUs detected in automatic mode - updating UI", file=sys.stderr)
+        total_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices)
+        debug_print(f"Total detected VRAM: {total_vram:.1f}GB across {len(self.detected_gpu_devices)} GPUs")
+    
+    def _log_no_gpu_results(self):
+        """Log results when no GPUs are detected."""
+        if self.manual_gpu_mode.get():
+            print("DEBUG: No real GPUs detected, keeping current manual GPU configuration", file=sys.stderr)
+            if self.manual_gpu_list:
+                total_manual_vram = sum(gpu.get("vram_gb", 0) for gpu in self.manual_gpu_list)
+                debug_print(f"Total manual VRAM: {total_manual_vram:.1f}GB across {len(self.manual_gpu_list)} manual GPUs")
+        else:
+            print("DEBUG: No GPUs detected in automatic mode", file=sys.stderr)
 
     # ═════════════════════════════════════════════════════════════════
     #  Manual GPU Management (Redesigned)
@@ -3013,6 +3085,9 @@ class LlamaCppLauncher:
         self._update_gpu_checkboxes()
         self._save_configs()
         print(f"DEBUG: Added manual GPU: {name} with {vram_gb:.1f} GB VRAM", file=sys.stderr)
+        
+        # Update VRAM display to show the new manual GPU
+        self._refresh_vram_display()
     
     def _remove_manual_gpu(self):
         """Remove the selected manual GPU."""
@@ -3060,13 +3135,17 @@ class LlamaCppLauncher:
                 # Only update the main GPU checkboxes, not the entire manual interface
                 self._update_gpu_checkboxes()
             else:
-                # No manual GPUs left - switch back to automatic mode
+                # No manual GPUs left - switch back to automatic mode immediately
                 print("DEBUG: No manual GPUs left, switching to automatic mode", file=sys.stderr)
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
-                # Start fresh GPU detection
+                # Clear status message and start detection
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
+                # Don't wait for UI - start detection immediately  
                 self._start_system_info_detection()
+            
+            # Update VRAM display to reflect GPU removal
+            self._refresh_vram_display()
             
             # Save the changes
             self._save_configs()
@@ -3083,11 +3162,11 @@ class LlamaCppLauncher:
                 self.manual_gpu_list.clear()
                 print("DEBUG: Cleared all manual GPUs", file=sys.stderr)
                 
-                # Switch back to automatic mode
+                # Switch back to automatic mode immediately
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
                 
-                # Start fresh GPU detection
+                # Update status and start detection without delay
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
                 self._start_system_info_detection()
                 
@@ -3128,6 +3207,9 @@ class LlamaCppLauncher:
         # Update the UI
         self._update_gpu_checkboxes()
         self._update_recommendations()
+        
+        # Update VRAM display to show manual GPU information
+        self._refresh_vram_display()
     
     def _migrate_legacy_manual_gpu_config(self):
         """Migrate from old manual_gpu_count + manual_gpu_vram format to new list format."""
@@ -3172,10 +3254,19 @@ class LlamaCppLauncher:
     def _toggle_manual_gpu_mode(self):
         """Toggle between automatic and manual GPU detection."""
         if self.manual_gpu_mode.get():
-            # Switching to manual mode
+            # Switching to manual mode - do this immediately without waiting for detection
             print("DEBUG: Switching to manual GPU mode", file=sys.stderr)
+            
+            # Clear any ongoing detection
+            if hasattr(self, '_detection_in_progress'):
+                self._detection_in_progress = False
+            
+            # Update status immediately
+            self.gpu_detected_status_var.set("Manual mode active")
+            
             # Migrate legacy config if needed
             self._migrate_legacy_manual_gpu_config()
+            
             # If no manual GPUs exist after migration, create them based on detected hardware
             if not self.manual_gpu_list:
                 # Use detected GPU information to create manual GPUs that match the hardware
@@ -3192,11 +3283,18 @@ class LlamaCppLauncher:
                     # Fallback if no GPUs detected
                     self.manual_gpu_list.append({"name": "Manual GPU 0", "vram_gb": 8.0})
                     print("DEBUG: Added default manual GPU (no hardware detected)", file=sys.stderr)
+            
+            # Setup manual GPUs immediately
             self._setup_manual_gpus()
         else:
-            # Switching back to automatic detection - use async detection to avoid UI blocking
+            # Switching back to automatic detection - only now trigger background detection
             print("DEBUG: Switching back to automatic GPU detection...", file=sys.stderr)
             self.gpu_detected_status_var.set("Re-detecting GPUs...")
+            
+            # Reset manual GPU info
+            self.manual_gpu_list.clear()
+            
+            # Start background detection (this will update the UI when complete)
             self._start_system_info_detection()
         
         self._save_configs()
@@ -3224,6 +3322,30 @@ class LlamaCppLauncher:
         # Save the updated manual GPU list and re-setup
         self._save_configs()
         self._setup_manual_gpus()
+
+    def _on_venv_dir_changed(self):
+        """Handler for when the virtual environment directory is manually changed."""
+        new_dir = self.venv_dir.get()
+        if new_dir:
+            self.app_settings["last_venv_dir"] = new_dir
+            self._save_configs()
+            print(f"DEBUG: Updated virtual environment directory to: {new_dir}", file=sys.stderr)
+            
+            # Re-trigger GPU detection if we're in automatic mode and not already detecting
+            if not self.manual_gpu_mode.get():
+                print("DEBUG: Re-triggering GPU detection due to venv change", file=sys.stderr)
+                self.gpu_detected_status_var.set("Re-detecting GPUs with new venv...")
+                self._start_system_info_detection()
+        else:
+            print("DEBUG: Virtual environment directory cleared", file=sys.stderr)
+            self.app_settings["last_venv_dir"] = ""
+            self._save_configs()
+            
+            # Re-trigger GPU detection if we're in automatic mode (fallback to no venv)
+            if not self.manual_gpu_mode.get():
+                print("DEBUG: Re-triggering GPU detection due to venv removal", file=sys.stderr)
+                self.gpu_detected_status_var.set("Re-detecting GPUs without venv...")
+                self._start_system_info_detection()
 
 # ═════════════════════════════════════════════════════════════════════
 #  main
