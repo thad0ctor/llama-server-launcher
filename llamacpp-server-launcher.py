@@ -367,7 +367,19 @@ class LlamaCppLauncher:
         self.ik_llama_dir.set(self.app_settings.get("last_ik_llama_dir", ""))
         self.venv_dir.set(self.app_settings.get("last_venv_dir", ""))
         # Ensure model_dirs is loaded as list of Paths
-        self.model_dirs = [Path(d) for d in self.app_settings.get("model_dirs", []) if d]
+        raw_model_dirs = self.app_settings.get("model_dirs", [])
+        self.model_dirs = []
+        for d in raw_model_dirs:
+            if d:
+                try:
+                    path_obj = Path(d).resolve()
+                    if path_obj.exists() and path_obj.is_dir():
+                        self.model_dirs.append(path_obj)
+                        print(f"DEBUG: Loaded valid model directory: {path_obj}", file=sys.stderr)
+                    else:
+                        print(f"WARNING: Skipping invalid model directory from config: {d} (resolved to {path_obj})", file=sys.stderr)
+                except Exception as e:
+                    print(f"ERROR: Failed to process model directory from config '{d}': {e}", file=sys.stderr)
         # Load custom parameters list
         self.custom_parameters_list = self.app_settings.get("custom_parameters", [])
         # Load backend selection
@@ -1506,16 +1518,30 @@ class LlamaCppLauncher:
         initial_dir = self.model_dirs[-1] if self.model_dirs and self.model_dirs[-1].is_dir() else str(Path.home())
         directory = filedialog.askdirectory(title="Select Model Directory", initialdir=initial_dir)
         if directory:
-            p = Path(directory).resolve() # Resolve path to handle symlinks etc.
-            # Add the resolved path string to avoid issues with comparison later
-            p_str = str(p)
-            if p_str not in [str(x) for x in self.model_dirs]: # Compare resolved paths
-                self.model_dirs.append(p) # Store as Path object
-                self._update_model_dirs_listbox()
-                self._save_configs()
-                self._trigger_scan()
-            else:
-                messagebox.showinfo("Info", "Directory already in list.")
+            try:
+                p = Path(directory).resolve() # Resolve path to handle symlinks etc.
+                # Validate that the resolved path actually exists and is a directory
+                if not p.exists():
+                    messagebox.showerror("Error", f"Selected directory does not exist:\n{p}")
+                    return
+                if not p.is_dir():
+                    messagebox.showerror("Error", f"Selected path is not a directory:\n{p}")
+                    return
+                    
+                # Add the resolved path string to avoid issues with comparison later
+                p_str = str(p)
+                print(f"DEBUG: Adding model directory - Original: '{directory}', Resolved: '{p_str}'", file=sys.stderr)
+                
+                if p_str not in [str(x) for x in self.model_dirs]: # Compare resolved paths
+                    self.model_dirs.append(p) # Store as Path object
+                    self._update_model_dirs_listbox()
+                    self._save_configs()
+                    self._trigger_scan()
+                else:
+                    messagebox.showinfo("Info", "Directory already in list.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error processing directory path:\n{directory}\n\nError: {e}")
+                print(f"ERROR: Failed to process directory '{directory}': {e}", file=sys.stderr)
 
     def _remove_model_dir(self):
         selection = self.model_dirs_listbox.curselection()
@@ -1624,64 +1650,62 @@ class LlamaCppLauncher:
         multipart_pattern = re.compile(r"^(.*?)(?:-\d{5}-of-\d{5}|-F\d+)\.gguf$", re.IGNORECASE)
         # Pattern to match the FIRST part of a multi-part file (e.g., model-00001-of-00005.gguf or model-F1.gguf)
         first_part_pattern = re.compile(r"^(.*?)-(?:00001-of-\d{5}|F1)\.gguf$", re.IGNORECASE)
-        processed_multipart_bases = set()
-
+        
+        # Two-pass approach to handle multi-part files correctly
+        all_gguf_files = []
         for model_dir in self.model_dirs:
             # Skip invalid or non-existent directories silently during scan
             if not isinstance(model_dir, Path) or not model_dir.is_dir(): continue
             print(f"DEBUG: Scanning directory: {model_dir}", file=sys.stderr)
             try:
-                # Use rglob for recursive search
+                # Collect all GGUF files first
                 for gguf_path in model_dir.rglob('*.gguf'):
                     if not gguf_path.is_file(): continue
                     filename = gguf_path.name
                     # Skip non-model GGUF files often found with models
                     if "mmproj" in filename.lower() or filename.lower().endswith(".bin.gguf"):
                          continue
-
-                    # Handle multi-part files: only list the base name, pointing to the first part
-                    first_part_match = first_part_pattern.match(filename)
-                    if first_part_match:
-                        base_name = first_part_match.group(1)
-                        # Ensure the base name corresponds to the *first* part before adding
-                        # Check if the resolved path points to this specific file
-                        try: # <-- This try block starts a new indentation level
-                             resolved_gguf_path = gguf_path.resolve()
-                             if base_name not in processed_multipart_bases:
-                                 # Store the path to the first part
-                                 found[base_name] = resolved_gguf_path
-                                 processed_multipart_bases.add(base_name)
-                        # The 'except' needs to match the 'try' it belongs to
-                        except Exception as resolve_exc: # <-- Corrected indentation
-                             print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr) # Log resolve errors
-                        # The 'continue' needs to align with the 'if first_part_match:' block
-                        continue # <-- Corrected indentation
-
-                    # Handle subsequent parts of multi-part files: mark base as processed but don't add
-                    multi_match = multipart_pattern.match(filename)
-                    if multi_match:
-                        base_name = multi_match.group(1)
-                        processed_multipart_bases.add(base_name)
-                        # The 'continue' needs to align with the 'if multi_match:' block
-                        continue # <-- Corrected indentation
-
-                    # Handle single-part files (not matching the multi-part patterns)
-                    if filename.lower().endswith(".gguf") and gguf_path.stem not in processed_multipart_bases:
-                         display_name = gguf_path.stem
-                         try: # <-- This try block starts a new indentation level
-                             resolved_gguf_path = gguf_path.resolve()
-                             # Only add if we haven't already added a multi-part version with the same base name
-                             if display_name not in found:
-                                found[display_name] = resolved_gguf_path
-                         # The 'except' needs to match the 'try' it belongs to
-                         except Exception as resolve_exc: # <-- Corrected indentation
-                             print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr) # Log resolve errors
-
-
+                    all_gguf_files.append(gguf_path)
             except Exception as e:
                 print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
+        
+        # First pass: find all first parts of multi-part files
+        processed_multipart_bases = set()
+        for gguf_path in all_gguf_files:
+            filename = gguf_path.name
+            first_part_match = first_part_pattern.match(filename)
+            if first_part_match:
+                base_name = first_part_match.group(1)
+                if base_name not in processed_multipart_bases:
+                    try:
+                        resolved_gguf_path = gguf_path.resolve()
+                        found[base_name] = resolved_gguf_path
+                        processed_multipart_bases.add(base_name)
+                        print(f"DEBUG: Found multi-part model: {base_name}", file=sys.stderr)
+                    except Exception as resolve_exc:
+                        print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+        
+        # Second pass: find single-part files that aren't part of multi-part sets
+        for gguf_path in all_gguf_files:
+            filename = gguf_path.name
+            
+            # Skip if this is any part of a multi-part file
+            if multipart_pattern.match(filename):
+                continue
+                
+            # Handle single-part files
+            if filename.lower().endswith(".gguf"):
+                display_name = gguf_path.stem
+                if display_name not in processed_multipart_bases and display_name not in found:
+                    try:
+                        resolved_gguf_path = gguf_path.resolve()
+                        found[display_name] = resolved_gguf_path
+                        print(f"DEBUG: Found single-part model: {display_name}", file=sys.stderr)
+                    except Exception as resolve_exc:
+                        print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
 
+        print(f"DEBUG: Scan completed, found {len(found)} models", file=sys.stderr)
         self.root.after(0, self._update_model_listbox_after_scan, found)
         
     # ═════════════════════════════════════════════════════════════════

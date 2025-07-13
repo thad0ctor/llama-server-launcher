@@ -790,13 +790,29 @@ class ConfigManager:
             self.launcher.custom_parameters_list = [] # Reset internal list
 
     def save_configs(self):
-        """Save current configurations to file."""
+        """Saves the app settings and configurations to file."""
         if self.launcher.config_path.name in ("null", "NUL"):
              print("Config saving is disabled.", file=sys.stderr)
              return
 
+        # Validate and clean up model_dirs paths before saving
+        valid_model_dirs = []
+        for p in self.launcher.model_dirs:
+            try:
+                resolved_path = Path(p).resolve()
+                if resolved_path.exists() and resolved_path.is_dir():
+                    valid_model_dirs.append(resolved_path)
+                    print(f"DEBUG: Saving valid model directory: {resolved_path}", file=sys.stderr)
+                else:
+                    print(f"WARNING: Skipping invalid model directory during save: {p} (resolved to {resolved_path})", file=sys.stderr)
+            except Exception as e:
+                print(f"ERROR: Failed to process model directory during save '{p}': {e}", file=sys.stderr)
+        
+        # Update the launcher's model_dirs with only valid paths
+        self.launcher.model_dirs = valid_model_dirs
+
         # Save current values to app_settings
-        self.launcher.app_settings["model_dirs"] = [str(p) for p in self.launcher.model_dirs]
+        self.launcher.app_settings["model_dirs"] = [str(p) for p in valid_model_dirs]
         self.launcher.app_settings["last_model_path"] = self.launcher.model_path.get()
         self.launcher.app_settings["last_llama_cpp_dir"] = self.launcher.llama_cpp_dir.get()
         self.launcher.app_settings["last_ik_llama_dir"] = self.launcher.ik_llama_dir.get()
