@@ -27,9 +27,13 @@ class ConfigManager:
                 # Use the selected model name from the listbox if available,
                 # otherwise fall back to the path stem.
                 selected_name = ""
-                sel = self.launcher.model_listbox.curselection()
-                if sel:
-                    selected_name = self.launcher.model_listbox.get(sel[0])
+                try:
+                    if hasattr(self.launcher, 'model_listbox'):
+                        sel = self.launcher.model_listbox.curselection()
+                        if sel:
+                            selected_name = self.launcher.model_listbox.get(sel[0])
+                except Exception:
+                    pass  # UI might not be fully initialized
 
                 if selected_name:
                     raw_name = selected_name
@@ -211,6 +215,8 @@ class ConfigManager:
              print("DEBUG: Preserved custom config name.", file=sys.stderr)
         else:
              print("DEBUG: Generated name same as current, no update needed.", file=sys.stderr)
+        
+        return generated_name
 
 
     def update_default_config_name_if_needed(self, *args):
@@ -484,7 +490,8 @@ class ConfigManager:
         if current_selection:
             selected_name = self.launcher.config_listbox.get(current_selection[0])
         self.launcher.config_listbox.delete(0, "end")
-        sorted_names = sorted(self.launcher.saved_configs.keys())
+        # Filter out None keys and convert to strings before sorting
+        sorted_names = sorted([str(name) for name in self.launcher.saved_configs.keys() if name is not None])
         for cfg_name in sorted_names:
             self.launcher.config_listbox.insert("end", cfg_name)
         if selected_name in sorted_names:
@@ -726,7 +733,9 @@ class ConfigManager:
         print(f"DEBUG: Loading config from FULL PATH: {self.launcher.config_path.resolve()}", file=sys.stderr)
         try:
             data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
-            self.launcher.saved_configs = data.get("configs", {})
+            # Load configs and filter out any None keys
+            raw_configs = data.get("configs", {})
+            self.launcher.saved_configs = {k: v for k, v in raw_configs.items() if k is not None}
             loaded_app_settings = data.get("app_settings", {})
             print(f"DEBUG: Found {len(self.launcher.saved_configs)} saved configurations in config file", file=sys.stderr)
             print(f"DEBUG: Loaded saved config names: {list(self.launcher.saved_configs.keys())}", file=sys.stderr)
@@ -885,6 +894,11 @@ class ConfigManager:
             suggested_name = self.generate_default_config_name()
             self.launcher.config_name.set(suggested_name)
             name = suggested_name
+        
+        # Ensure name is not None
+        if name is None:
+            name = "default_config"
+            self.launcher.config_name.set(name)
 
         current_cfg = self.current_cfg()
         self.launcher.saved_configs[name] = current_cfg
