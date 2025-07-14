@@ -2037,11 +2037,14 @@ class LlamaCppLauncher:
         if error or n_layers is None or n_layers <= 0:
              # Analysis failed or layer count invalid/zero
              status_msg = error if error else (message if message else "Layer count not found or invalid")
-             self.gpu_layers_status_var.set(f"Analysis Error: {status_msg}" if error else status_msg)
+             # Show that manual entry is still available
+             full_status = f"Analysis Error: {status_msg}" if error else status_msg
+             full_status += " (Manual entry available)"
+             self.gpu_layers_status_var.set(full_status)
              # Resetting controls sets max_layers to 0 and disables the slider
-             self._reset_gpu_layer_controls()
-             # Now, sync the entry/slider based on the existing value in the entry and max_layers=0
-             self._sync_gpu_layers_from_entry()
+             self._reset_gpu_layer_controls(keep_entry_enabled=True)
+             # IMPORTANT: Don't sync from entry when analysis fails to preserve user's value
+             # The entry remains enabled and the user can still manually set GPU layers
 
         else: # Analysis succeeded, layers found (n_layers > 0)
             self.max_gpu_layers.set(n_layers)
@@ -2133,7 +2136,9 @@ class LlamaCppLauncher:
                 # Clamp positive input value to max_layers if max > 0
                 int_val = min(input_value, max_layers)
             else:
-                int_val = 0 # If max_layers <= 0, any positive input still means 0 layers offloaded internally
+                # If max_layers <= 0 (analysis failed), preserve the user's input value
+                # This allows users to manually set GPU layers when analysis fails
+                int_val = input_value
         # else: input_value < -1 (should be prevented by validation) -> default to 0
 
         # Update the Tk integer variable (linked to slider)
@@ -2205,7 +2210,10 @@ class LlamaCppLauncher:
                  # If max_layers > 0, the entry should represent the *clamped* value
                  clamped_int_from_set = self.n_gpu_layers_int.get() # Get the result of _set_gpu_layers
                  canonical_str_for_entry = str(clamped_int_from_set) # Always show the actual integer value
-            # else: max_layers <= 0, keep current_str (user input)
+            else:
+                 # max_layers <= 0 (analysis failed), preserve user input
+                 # The internal int value was set to the user's input by _set_gpu_layers
+                 canonical_str_for_entry = current_str
 
             # Update the entry's StringVar only if it's different from the calculated canonical string
             # This prevents loops and ensures the entry displays the correct format (actual number)
