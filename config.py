@@ -182,32 +182,35 @@ class ConfigManager:
 
         print(f"DEBUG: Generated config name: {generated_name}", file=sys.stderr)
 
-        # Decide whether to set the config_name variable
-        # Rule: If the current name is 'default_config' OR if the current name is empty,
-        # OR if it starts with the model name part (and the model name part exists),
-        # then replace it with the generated name, but *only* if the generated name is different.
+        # Always update the config name field with the generated name in real-time
+        # This provides immediate feedback about what the config represents
         current_config_name = self.launcher.config_name.get().strip()
-        # Use the *actual* model name part used in the generated name
-        model_name_prefix_in_gen = parts[0] if parts and parts[0] != "default" else ""
+        print(f"DEBUG: Current config name: '{current_config_name}'", file=sys.stderr)
+        
+        # Always update except for very specific custom names that don't look auto-generated
+        should_update = True
+        
+        # Only preserve if it's a very obviously custom name:
+        # - Not empty, not "default_config", not "default", not "model"
+        # - Doesn't contain any auto-gen patterns like _gpu=, _ctx=, _th=, etc.
+        # - Doesn't start with any model name patterns
+        # - Must be at least 3 characters and contain letters (to avoid preserving junk)
+        if (current_config_name and 
+            len(current_config_name) >= 3 and
+            any(c.isalpha() for c in current_config_name) and
+            current_config_name not in ["default_config", "default", "model"] and
+            not any(pattern in current_config_name for pattern in ["_gpu=", "_ctx=", "_temp=", "_batch=", "_threads=", "_th=", "_tb=", "_min_p=", "_seed=", "_n_predict="]) and
+            not current_config_name.startswith(("default", "model", parts[0] if parts else ""))):
+            should_update = False
+            print(f"DEBUG: Detected truly custom name '{current_config_name}', will preserve", file=sys.stderr)
 
-
-        update_variable = False
-        if current_config_name == "default_config":
-             update_variable = True
-        elif not current_config_name: # If currently empty
-             update_variable = True
-        elif model_name_prefix_in_gen and current_config_name.startswith(model_name_prefix_in_gen):
-            # Check if the current name is *only* the model name prefix, or starts with it followed by '_'
-            # This heuristic avoids overwriting names like "modelname_manualedit" if they start with the model name
-            if current_config_name == model_name_prefix_in_gen or current_config_name.startswith(model_name_prefix_in_gen + "_"):
-                 update_variable = True
-
-
-        if update_variable and generated_name != current_config_name:
+        if should_update and generated_name != current_config_name:
             self.launcher.config_name.set(generated_name)
-            print("DEBUG: Updated config_name variable.", file=sys.stderr)
-        elif not update_variable:
-             print("DEBUG: Did not update config_name variable as it seems manually set.", file=sys.stderr)
+            print("DEBUG: Updated config_name variable in real-time.", file=sys.stderr)
+        elif not should_update:
+             print("DEBUG: Preserved custom config name.", file=sys.stderr)
+        else:
+             print("DEBUG: Generated name same as current, no update needed.", file=sys.stderr)
 
 
     def update_default_config_name_if_needed(self, *args):
@@ -878,8 +881,10 @@ class ConfigManager:
         """Saves the current UI settings as a named configuration."""
         name = self.launcher.config_name.get().strip()
         if not name:
-            messagebox.showerror("Error", "Please enter a name for the configuration.")
-            return
+            # Auto-generate a name based on current settings
+            suggested_name = self.generate_default_config_name()
+            self.launcher.config_name.set(suggested_name)
+            name = suggested_name
 
         current_cfg = self.current_cfg()
         self.launcher.saved_configs[name] = current_cfg
