@@ -5,3 +5,4 @@ __pycache__
 llama.log
 llama.log
 /tensor_overrides
+*.txt

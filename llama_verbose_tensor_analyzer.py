@@ -96,13 +96,14 @@ class LlamaVerboseTensorAnalyzer:
         if self.verbose:
             print(f"DEBUG: {message}", file=sys.stderr)
     
-    def analyze_model_tensors(self, model_path: str, timeout: int = 300) -> Dict[str, TensorInfo]:
+    def analyze_model_tensors(self, model_path: str, timeout: int = 300, gpu_count: int = 4) -> Dict[str, TensorInfo]:
         """
         Analyze model tensors using llama.cpp --verbose mode.
         
         Args:
             model_path: Path to the GGUF model file
             timeout: Timeout in seconds for the analysis process
+            gpu_count: Number of GPUs to use for tensor-split analysis
             
         Returns:
             Dictionary mapping tensor names to TensorInfo objects
@@ -130,6 +131,13 @@ class LlamaVerboseTensorAnalyzer:
                 "--port", "0",  # Use port 0 for automatic assignment
                 "--verbose"
             ]
+            
+            # Add split-mode and tensor-split parameters for proper KV cache analysis
+            # This ensures we get accurate KV cache allocation information
+            cmd.extend(["--split-mode", "row"])
+            tensor_split_ratio = ",".join(["1"] * gpu_count)
+            cmd.extend(["--tensor-split", tensor_split_ratio])
+            self._debug_print(f"Using tensor-split: {tensor_split_ratio} for {gpu_count} GPUs")
             
             # Add -ot parameters to force all tensors to CPU initially
             # This ensures we get all tensor information without GPU allocation
@@ -464,6 +472,112 @@ class LlamaVerboseTensorAnalyzer:
         
         return allocation_params
     
+    def generate_optimal_allocation_with_configs(self, tensors: Dict[str, TensorInfo], 
+                                               gpu_configs: List[Dict],
+                                               safety_margin: float = 0.90) -> List[str]:
+        """
+        Generate optimal tensor allocation with detailed per-GPU configurations.
+        
+        Args:
+            tensors: Dictionary of tensor name to TensorInfo
+            gpu_configs: List of GPU configuration dictionaries
+            safety_margin: Percentage of available VRAM to use (default 0.90 = 90%)
+            
+        Returns:
+            List of tensor override parameter strings (-ot format)
+        """
+        categories = self.categorize_tensors(tensors)
+        allocation_params = []
+        
+        # Track VRAM usage per GPU using actual available memory
+        gpu_usage_bytes = [0] * len(gpu_configs)
+        gpu_limits_bytes = []
+        
+        # Calculate limits for each GPU based on available memory
+        for i, gpu_config in enumerate(gpu_configs):
+            available_gb = gpu_config['available_gb']
+            # Use configurable safety margin (default 90%)
+            # We've already accounted for buffers, KV cache, and compute buffers
+            limit_bytes = int(available_gb * 1024 * 1024 * 1024 * safety_margin)
+            gpu_limits_bytes.append(limit_bytes)
+            
+            self._debug_print(f"GPU {i}: Available {available_gb:.1f}GB, Limit {limit_bytes / (1024**3):.1f}GB (safety margin: {safety_margin:.0%})")
+            self._debug_print(f"GPU {i}: Buffer {gpu_config['buffer_mb']}MB, KV Cache {gpu_config['kv_cache_mb']:.1f}MB")
+            self._debug_print(f"GPU {i}: Compute Buffer {gpu_config.get('compute_buffer_mb', 0):.0f}MB")
+        
+        def find_best_gpu_with_config(tensor_size_bytes: int) -> int:
+            """Find GPU with most available space that can fit this tensor."""
+            best_gpu = -1
+            max_available = 0
+            
+            for i in range(len(gpu_configs)):
+                available = gpu_limits_bytes[i] - gpu_usage_bytes[i]
+                if available >= tensor_size_bytes and available > max_available:
+                    max_available = available
+                    best_gpu = i
+            
+            return best_gpu
+        
+        def allocate_tensor_with_config(tensor_info: TensorInfo, preferred_device: str = None) -> str:
+            """Allocate a single tensor to the best available device."""
+            if preferred_device == "CPU":
+                return f"-ot {tensor_info.name}=CPU"
+            
+            gpu_id = find_best_gpu_with_config(tensor_info.size_bytes)
+            if gpu_id >= 0:
+                gpu_usage_bytes[gpu_id] += tensor_info.size_bytes
+                return f"-ot {tensor_info.name}=CUDA{gpu_id}"
+            else:
+                # No GPU has space, put on CPU
+                return f"-ot {tensor_info.name}=CPU"
+        
+        # PRIORITY 1: Critical large tensors (embedding, output) - always try GPU
+        for tensor_info in categories['embedding'] + categories['output']:
+            param = allocate_tensor_with_config(tensor_info)
+            allocation_params.append(param)
+            self._debug_print(f"Critical tensor: {param}")
+        
+        # PRIORITY 2: Attention tensors (performance critical)
+        for tensor_info in categories['attention']:
+            param = allocate_tensor_with_config(tensor_info)
+            allocation_params.append(param)
+            self._debug_print(f"Attention tensor: {param}")
+        
+        # PRIORITY 3: Expert FFN tensors (fill remaining VRAM)
+        for tensor_info in categories['expert_ffn']:
+            param = allocate_tensor_with_config(tensor_info)
+            allocation_params.append(param)
+            self._debug_print(f"Expert tensor: {param}")
+        
+        # PRIORITY 4: Small tensors (CPU to save VRAM)
+        for tensor_info in categories['norm']:
+            param = allocate_tensor_with_config(tensor_info, preferred_device="CPU")
+            allocation_params.append(param)
+            self._debug_print(f"Norm tensor: {param}")
+        
+        # PRIORITY 5: Other tensors
+        for tensor_info in categories['other']:
+            param = allocate_tensor_with_config(tensor_info)
+            allocation_params.append(param)
+            self._debug_print(f"Other tensor: {param}")
+        
+        # Print detailed allocation summary
+        if self.verbose:
+            print("Enhanced Allocation Summary:", file=sys.stderr)
+            for i, gpu_config in enumerate(gpu_configs):
+                usage_gb = gpu_usage_bytes[i] / (1024**3)
+                limit_gb = gpu_limits_bytes[i] / (1024**3)
+                usage_pct = (gpu_usage_bytes[i] / gpu_limits_bytes[i]) * 100 if gpu_limits_bytes[i] > 0 else 0
+                total_gb = gpu_config['total_memory_gb']
+                buffer_mb = gpu_config['buffer_mb']
+                kv_cache_mb = gpu_config['kv_cache_mb']
+                compute_buffer_mb = gpu_config.get('compute_buffer_mb', 0)
+                
+                print(f"  CUDA{i}: {usage_gb:.1f}GB used / {limit_gb:.1f}GB limit ({usage_pct:.1f}%)", file=sys.stderr)
+                print(f"    Total: {total_gb:.1f}GB, Buffer: {buffer_mb}MB, KV Cache: {kv_cache_mb:.1f}MB, Compute: {compute_buffer_mb:.0f}MB", file=sys.stderr)
+        
+        return allocation_params
+    
     def analyze_and_generate_params(self, model_path: str, 
                                   gpu_count: int,
                                   vram_per_gpu_gb: float,
@@ -481,7 +595,7 @@ class LlamaVerboseTensorAnalyzer:
             Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info)
         """
         # Extract tensor information and KV cache info
-        tensors, kv_cache_info = self.analyze_model_tensors(model_path, timeout)
+        tensors, kv_cache_info = self.analyze_model_tensors(model_path, timeout, gpu_count)
         
         if not tensors:
             raise RuntimeError("No tensors found in model analysis")
@@ -489,6 +603,42 @@ class LlamaVerboseTensorAnalyzer:
         # Generate optimal allocation
         allocation_params = self.generate_optimal_allocation(
             tensors, gpu_count, vram_per_gpu_gb
+        )
+        
+        return allocation_params, tensors, kv_cache_info
+    
+    def analyze_and_generate_params_with_gpu_configs(self, model_path: str, 
+                                                    gpu_configs: List[Dict],
+                                                    timeout: int = 300,
+                                                    safety_margin: float = 0.90) -> Tuple[List[str], Dict[str, TensorInfo], Dict[str, any]]:
+        """
+        Enhanced analysis and parameter generation with detailed GPU configurations.
+        
+        Args:
+            model_path: Path to the GGUF model file
+            gpu_configs: List of GPU configuration dictionaries with keys:
+                        - gpu_id: GPU index
+                        - total_memory_gb: Total GPU memory in GB
+                        - buffer_mb: Reserved buffer in MB
+                        - kv_cache_mb: KV cache allocation in MB
+                        - available_gb: Available VRAM for tensors in GB
+            timeout: Timeout in seconds for the analysis process
+            safety_margin: Percentage of available VRAM to use (default 0.90 = 90%)
+            
+        Returns:
+            Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info)
+        """
+        gpu_count = len(gpu_configs)
+        
+        # Extract tensor information and KV cache info
+        tensors, kv_cache_info = self.analyze_model_tensors(model_path, timeout, gpu_count)
+        
+        if not tensors:
+            raise RuntimeError("No tensors found in model analysis")
+        
+        # Generate optimal allocation with detailed GPU configs
+        allocation_params = self.generate_optimal_allocation_with_configs(
+            tensors, gpu_configs, safety_margin
         )
         
         return allocation_params, tensors, kv_cache_info

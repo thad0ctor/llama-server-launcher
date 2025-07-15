@@ -45,6 +45,13 @@ class TensorOverrideTab:
         self.kv_cache_on_gpu = tk.BooleanVar(value=True)  # Default: KV cache on GPU
         self.kv_cache_size_mb = 0  # Calculated KV cache size in MB
         
+        # Safety margin for tensor allocation (default 90%)
+        self.safety_margin = tk.DoubleVar(value=0.90)
+        
+        # Custom tensor split override for non-identical GPUs
+        self.enable_custom_tensor_split = tk.BooleanVar(value=False)
+        self.custom_tensor_split = tk.StringVar(value="")  # e.g., "1,1,2,2" for different GPU configs
+        
         # Create tensor override subdirectory if it doesn't exist
         self.tensor_override_dir = Path("tensor_overrides")
         self.tensor_override_dir.mkdir(exist_ok=True)
@@ -65,7 +72,7 @@ class TensorOverrideTab:
         title_label.pack(anchor="w")
         
         desc_label = ttk.Label(title_frame, 
-                              text="Automatically analyze models and generate optimal tensor placement parameters for multi-GPU setups.\nWhen enabled, GPU Layers and Tensor Split controls will be disabled to prevent conflicts.",
+                              text="Automatically analyze models and generate optimal tensor placement parameters for multi-GPU setups.\nIncludes proper KV cache distribution with --split-mode row and --tensor-split for even GPU usage.\nWhen enabled, GPU Layers and Tensor Split controls will be disabled to prevent conflicts.",
                               foreground="gray")
         desc_label.pack(anchor="w", pady=(2, 0))
         
@@ -139,6 +146,72 @@ class TensorOverrideTab:
         
         # Initialize GPU buffer controls
         self._setup_gpu_buffer_controls()
+        
+        # Advanced settings section
+        advanced_frame = ttk.LabelFrame(main_container, text="Advanced Settings", padding=10)
+        advanced_frame.pack(fill="x", pady=(0, 10))
+        
+        # Safety margin setting
+        safety_margin_frame = ttk.Frame(advanced_frame)
+        safety_margin_frame.pack(fill="x", pady=(0, 10))
+        
+        ttk.Label(safety_margin_frame, text="VRAM Safety Margin:").pack(side="left")
+        
+        self.safety_margin_scale = ttk.Scale(
+            safety_margin_frame,
+            from_=0.75,
+            to=0.98,
+            orient="horizontal",
+            variable=self.safety_margin,
+            length=200,
+            command=self._on_safety_margin_changed
+        )
+        self.safety_margin_scale.pack(side="left", padx=(10, 5))
+        
+        self.safety_margin_label = ttk.Label(safety_margin_frame, text="90%")
+        self.safety_margin_label.pack(side="left", padx=(5, 10))
+        
+        safety_margin_desc = ttk.Label(
+            safety_margin_frame,
+            text="Percentage of available VRAM to use for tensors (lower = more conservative)",
+            foreground="gray",
+            font=("TkDefaultFont", 8)
+        )
+        safety_margin_desc.pack(side="left")
+        
+        # Custom tensor split setting
+        tensor_split_frame = ttk.Frame(advanced_frame)
+        tensor_split_frame.pack(fill="x", pady=(0, 5))
+        
+        self.custom_tensor_split_checkbox = ttk.Checkbutton(
+            tensor_split_frame,
+            text="Override tensor split ratios for non-identical GPUs",
+            variable=self.enable_custom_tensor_split,
+            command=self._on_custom_tensor_split_changed
+        )
+        self.custom_tensor_split_checkbox.pack(anchor="w")
+        
+        # Custom tensor split entry
+        self.tensor_split_entry_frame = ttk.Frame(advanced_frame)
+        self.tensor_split_entry_frame.pack(fill="x", pady=(5, 0))
+        
+        ttk.Label(self.tensor_split_entry_frame, text="Custom tensor split:").pack(side="left")
+        
+        self.custom_tensor_split_entry = ttk.Entry(
+            self.tensor_split_entry_frame,
+            textvariable=self.custom_tensor_split,
+            width=20,
+            state="disabled"
+        )
+        self.custom_tensor_split_entry.pack(side="left", padx=(10, 5))
+        
+        tensor_split_example = ttk.Label(
+            self.tensor_split_entry_frame,
+            text="(e.g., '1,1,2,2' for 4 GPUs where last 2 are twice as powerful)",
+            foreground="gray",
+            font=("TkDefaultFont", 8)
+        )
+        tensor_split_example.pack(side="left", padx=(5, 0))
         
         # Analysis section (no expand to reduce blank space)
         analysis_frame = ttk.LabelFrame(main_container, text="Model Analysis", padding=8)
@@ -239,6 +312,9 @@ class TensorOverrideTab:
         
         # Initial KV cache display update
         self._update_kv_cache_display()
+        
+        # Initialize safety margin label
+        self._on_safety_margin_changed(str(self.safety_margin.get()))
     
     def _setup_gpu_buffer_controls(self):
         """Setup per-GPU VRAM buffer controls based on detected GPUs."""
@@ -348,6 +424,19 @@ class TensorOverrideTab:
         self._update_kv_cache_display()
         self._update_ui_state()
     
+    def _on_safety_margin_changed(self, value):
+        """Handle safety margin slider change."""
+        margin_pct = int(float(value) * 100)
+        self.safety_margin_label.config(text=f"{margin_pct}%")
+    
+    def _on_custom_tensor_split_changed(self):
+        """Handle custom tensor split checkbox change."""
+        if self.enable_custom_tensor_split.get():
+            self.custom_tensor_split_entry.config(state="normal")
+        else:
+            self.custom_tensor_split_entry.config(state="disabled")
+        self._update_ui_state()
+    
     def _update_kv_cache_display(self):
         """Update the KV cache size display."""
         try:
@@ -367,7 +456,10 @@ class TensorOverrideTab:
                 source_text = " (estimated)"
             
             if self.kv_cache_on_gpu.get():
-                status_text = f"KV cache size: {kv_cache_mb:.1f}MB total ({kv_cache_per_gpu_mb:.1f}MB per GPU) - ON GPU{source_text}"
+                if gpu_count > 1:
+                    status_text = f"KV cache size: {kv_cache_mb:.1f}MB total ({kv_cache_per_gpu_mb:.1f}MB per GPU) - ON GPU with row split{source_text}"
+                else:
+                    status_text = f"KV cache size: {kv_cache_mb:.1f}MB total - ON GPU{source_text}"
                 self.kv_cache_size_label.config(text=status_text, foreground="green")
             else:
                 status_text = f"KV cache size: {kv_cache_mb:.1f}MB total - ON CPU (--no-kv-offload){source_text}"
@@ -545,16 +637,10 @@ class TensorOverrideTab:
     
     def _update_model_info(self):
         """Update model and config info display."""
-        if self.current_model_path:
-            model_name = Path(self.current_model_path).name
-            self.model_info_label.config(text=model_name, foreground="black")
-        else:
-            self.model_info_label.config(text="No model selected", foreground="gray")
-        
-        if self.current_config_name:
-            self.config_info_label.config(text=self.current_config_name, foreground="black")
-        else:
-            self.config_info_label.config(text="No configuration", foreground="gray")
+        # Note: Model and config info is now displayed in the settings display
+        # This method is kept for compatibility but doesn't need to do anything
+        # since the current model/config info is shown in _update_settings_display()
+        pass
     
     def _check_existing_analysis(self):
         """Check if analysis already exists for current model/config."""
@@ -970,20 +1056,47 @@ class TensorOverrideTab:
         """
         Get KV cache parameters for launch command.
         
+        KV cache distribution parameters are needed for multi-GPU setups regardless of tensor override status.
+        This ensures proper KV cache distribution across GPUs using --split-mode row and --tensor-split.
+        
         Returns:
             list: List of KV cache parameter strings for llama.cpp command
         """
-        if not self.tensor_override_enabled.get():
-            return []
+        enabled = self.tensor_override_enabled.get()
+        gpu_count = self._detect_gpu_count()
+        
+        print(f"DEBUG: get_kv_cache_parameters() called - tensor_override_enabled: {enabled}, gpu_count: {gpu_count}", file=sys.stderr)
+        
+        # KV cache distribution is needed for multi-GPU setups even when tensor override is disabled
+        # This is because KV cache allocation is independent of individual tensor placement
         
         parameters = []
         
-        # Add --no-kv-offload if KV cache should be on CPU
-        if not self.kv_cache_on_gpu.get():
+        # Check if KV cache should be forced to CPU (only if tensor override is enabled)
+        if enabled and not self.kv_cache_on_gpu.get():
             parameters.append("--no-kv-offload")
             print(f"DEBUG: Adding --no-kv-offload to keep KV cache on CPU", file=sys.stderr)
         else:
-            print(f"DEBUG: KV cache will be on GPU (default llama.cpp behavior)", file=sys.stderr)
+            # For multi-GPU setups, we need split-mode and tensor-split for proper KV cache distribution
+            # This applies regardless of tensor override status
+            if gpu_count > 1:
+                # Add --split-mode row for row-wise splitting (required for KV cache distribution)
+                parameters.extend(["--split-mode", "row"])
+                print(f"DEBUG: Adding --split-mode row for KV cache distribution", file=sys.stderr)
+                
+                # Use custom tensor split if tensor override is enabled and custom split is configured
+                if enabled and self.enable_custom_tensor_split.get() and self.custom_tensor_split.get().strip():
+                    tensor_split_ratio = self.custom_tensor_split.get().strip()
+                    print(f"DEBUG: Using custom tensor split: {tensor_split_ratio}", file=sys.stderr)
+                else:
+                    # Add --tensor-split with equal ratios for all GPUs
+                    tensor_split_ratio = ",".join(["1"] * gpu_count)
+                    print(f"DEBUG: Using equal tensor split for {gpu_count} GPUs", file=sys.stderr)
+                
+                parameters.extend(["--tensor-split", tensor_split_ratio])
+                print(f"DEBUG: Adding --tensor-split {tensor_split_ratio} for KV cache distribution across {gpu_count} GPUs", file=sys.stderr)
+            else:
+                print(f"DEBUG: Single GPU detected, no additional split parameters needed for KV cache", file=sys.stderr)
         
         return parameters
     
@@ -1001,7 +1114,25 @@ class TensorOverrideTab:
     
     def update_gpu_buffer_controls(self):
         """Update GPU buffer controls when GPU info changes."""
+        # Save current buffer values before recreating controls
+        saved_buffers = {}
+        for gpu_id, buffer_var in self.gpu_vram_buffers.items():
+            try:
+                saved_buffers[gpu_id] = buffer_var.get().strip()
+            except (AttributeError, tk.TclError):
+                saved_buffers[gpu_id] = "512"  # Default
+        
+        # Recreate the controls
         self._setup_gpu_buffer_controls()
+        
+        # Restore saved values
+        for gpu_id, saved_value in saved_buffers.items():
+            if gpu_id in self.gpu_vram_buffers:
+                try:
+                    self.gpu_vram_buffers[gpu_id].set(saved_value)
+                except (AttributeError, tk.TclError):
+                    self.gpu_vram_buffers[gpu_id].set("512")
+        
         self._update_kv_cache_display()
     
     def get_gpu_buffer_config(self):
@@ -1036,7 +1167,10 @@ class TensorOverrideTab:
         config = {
             "tensor_override_enabled": self.tensor_override_enabled.get(),
             "tensor_override_gpu_buffers": self.get_gpu_buffer_config(),
-            "tensor_override_kv_cache_on_gpu": self.kv_cache_on_gpu.get()
+            "tensor_override_kv_cache_on_gpu": self.kv_cache_on_gpu.get(),
+            "tensor_override_safety_margin": self.safety_margin.get(),
+            "tensor_override_enable_custom_tensor_split": self.enable_custom_tensor_split.get(),
+            "tensor_override_custom_tensor_split": self.custom_tensor_split.get()
         }
         return config
     
@@ -1051,10 +1185,25 @@ class TensorOverrideTab:
         if "tensor_override_kv_cache_on_gpu" in config:
             self.kv_cache_on_gpu.set(config["tensor_override_kv_cache_on_gpu"])
         
+        if "tensor_override_safety_margin" in config:
+            self.safety_margin.set(config["tensor_override_safety_margin"])
+        
+        if "tensor_override_enable_custom_tensor_split" in config:
+            self.enable_custom_tensor_split.set(config["tensor_override_enable_custom_tensor_split"])
+        
+        if "tensor_override_custom_tensor_split" in config:
+            self.custom_tensor_split.set(config["tensor_override_custom_tensor_split"])
+        
         # Update UI state after loading config
         self._update_ui_state()
         self._update_gpu_controls_state()
         self._update_kv_cache_display()
+        
+        # Update safety margin label
+        self._on_safety_margin_changed(str(self.safety_margin.get()))
+        
+        # Update custom tensor split entry state
+        self._on_custom_tensor_split_changed()
     
     def _run_vram_optimization(self):
         """Run automated VRAM optimization using llama.cpp verbose analysis."""
@@ -1106,12 +1255,67 @@ class TensorOverrideTab:
             # Run analysis and generate parameters
             self.root.after(0, lambda: self.analysis_progress.set("Extracting tensor information from model..."))
             
-            optimized_params, tensor_info, kv_cache_info = analyzer.analyze_and_generate_params(
-                self.current_model_path,
-                gpu_count,
-                vram_per_gpu_gb,
-                timeout=300
-            )
+            # Create detailed GPU configuration for more accurate allocation
+            gpu_configs = []
+            for gpu_id in range(gpu_count):
+                if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
+                    devices = self.parent.gpu_info.get("devices", [])
+                    if gpu_id < len(devices):
+                        gpu_device = devices[gpu_id]
+                        total_memory_bytes = gpu_device.get("total_memory_bytes", 0)
+                        
+                        # Calculate available VRAM for this GPU
+                        buffer_mb = self._get_gpu_buffer_mb(gpu_id)
+                        buffer_bytes = buffer_mb * 1024 * 1024
+                        
+                        # Reserve KV cache space if on GPU
+                        kv_cache_bytes = 0
+                        if self.kv_cache_on_gpu.get():
+                            kv_cache_mb = self._calculate_kv_cache_size_mb()
+                            kv_cache_per_gpu_mb = kv_cache_mb / gpu_count
+                            kv_cache_bytes = kv_cache_per_gpu_mb * 1024 * 1024
+                        
+                        # Reserve compute buffer space (critical for preventing OOM)
+                        # Estimate based on context size and model complexity
+                        context_size = self.parent.ctx_size.get()
+                        # Compute buffer scales with context size and model size
+                        # Base estimate: ~512MB for large context, more for complex models
+                        compute_buffer_mb = max(512, context_size / 256)  # Scale with context
+                        compute_buffer_bytes = compute_buffer_mb * 1024 * 1024
+                        
+                        # Calculate available VRAM
+                        reserved_bytes = buffer_bytes + kv_cache_bytes + compute_buffer_bytes
+                        available_bytes = max(0, total_memory_bytes - reserved_bytes)
+                        available_gb = available_bytes / (1024**3)
+                        
+                        gpu_configs.append({
+                            'gpu_id': gpu_id,
+                            'total_memory_gb': total_memory_bytes / (1024**3),
+                            'buffer_mb': buffer_mb,
+                            'kv_cache_mb': kv_cache_per_gpu_mb if self.kv_cache_on_gpu.get() else 0,
+                            'compute_buffer_mb': compute_buffer_mb,
+                            'available_gb': available_gb
+                        })
+                        
+                        print(f"DEBUG: GPU {gpu_id} config: {available_gb:.1f}GB available ({buffer_mb}MB buffer, {kv_cache_per_gpu_mb:.1f}MB KV cache, {compute_buffer_mb:.0f}MB compute)", file=sys.stderr)
+            
+            # Use the enhanced allocation method with detailed GPU configs if available
+            if gpu_configs:
+                optimized_params, tensor_info, kv_cache_info = analyzer.analyze_and_generate_params_with_gpu_configs(
+                    self.current_model_path,
+                    gpu_configs,
+                    timeout=300,
+                    safety_margin=self.safety_margin.get()
+                )
+            else:
+                # Fallback to basic allocation if no detailed GPU configs available
+                print("DEBUG: No detailed GPU configs available, using basic allocation", file=sys.stderr)
+                optimized_params, tensor_info, kv_cache_info = analyzer.analyze_and_generate_params(
+                    self.current_model_path,
+                    gpu_count,
+                    vram_per_gpu_gb,
+                    timeout=300
+                )
             
             if optimized_params:
                 # Save optimized parameters with clean config name
@@ -1220,12 +1424,17 @@ class TensorOverrideTab:
                     if self.kv_cache_on_gpu.get():
                         kv_cache_bytes = kv_cache_per_gpu_mb * 1024 * 1024  # Convert MB to bytes
                     
-                    # Subtract buffer and KV cache from available VRAM
-                    reserved_bytes = buffer_bytes + kv_cache_bytes
+                    # Reserve compute buffer space
+                    context_size = self.parent.ctx_size.get()
+                    compute_buffer_mb = max(512, context_size / 256)
+                    compute_buffer_bytes = compute_buffer_mb * 1024 * 1024
+                    
+                    # Subtract buffer, KV cache, and compute buffer from available VRAM
+                    reserved_bytes = buffer_bytes + kv_cache_bytes + compute_buffer_bytes
                     available_memory = max(0, memory_total - reserved_bytes)
                     total_vram += available_memory
                     
-                    print(f"DEBUG: GPU {gpu_id} has {memory_total} bytes memory, buffer {buffer_mb}MB, KV cache {kv_cache_per_gpu_mb:.1f}MB, available {available_memory} bytes", file=sys.stderr)
+                    print(f"DEBUG: GPU {gpu_id} has {memory_total} bytes memory, buffer {buffer_mb}MB, KV cache {kv_cache_per_gpu_mb:.1f}MB, compute {compute_buffer_mb:.0f}MB, available {available_memory} bytes", file=sys.stderr)
                 
                 if total_vram > 0:
                     total_vram_gb = total_vram / (1024**3)  # Convert to GB
@@ -1401,7 +1610,18 @@ class TensorOverrideTab:
             self.results_text.insert(tk.END, f"- Total KV cache: {kv_cache_mb:.1f}MB (estimated)\n")
         
         if self.kv_cache_on_gpu.get():
-            self.results_text.insert(tk.END, f"- KV cache location: GPU ({kv_cache_per_gpu_mb:.1f}MB per GPU)\n")
+            if gpu_count > 1:
+                self.results_text.insert(tk.END, f"- KV cache location: GPU ({kv_cache_per_gpu_mb:.1f}MB per GPU, row split)\n")
+                
+                # Show actual tensor split being used
+                if self.enable_custom_tensor_split.get() and self.custom_tensor_split.get().strip():
+                    tensor_split_ratio = self.custom_tensor_split.get().strip()
+                    self.results_text.insert(tk.END, f"- KV cache distribution: --split-mode row --tensor-split {tensor_split_ratio} (custom)\n")
+                else:
+                    tensor_split_ratio = ",".join(["1"] * gpu_count)
+                    self.results_text.insert(tk.END, f"- KV cache distribution: --split-mode row --tensor-split {tensor_split_ratio} (equal)\n")
+            else:
+                self.results_text.insert(tk.END, f"- KV cache location: GPU ({kv_cache_mb:.1f}MB total)\n")
         else:
             self.results_text.insert(tk.END, f"- KV cache location: CPU (--no-kv-offload)\n")
         self.results_text.insert(tk.END, f"\n")
@@ -1453,11 +1673,17 @@ class TensorOverrideTab:
             size_text = f" ({size_mb:.1f} MiB)" if size_mb > 0 else ""
             self.results_text.insert(tk.END, f"{device}: {count} tensors{size_text}\n")
         
+        safety_margin_pct = int(self.safety_margin.get() * 100)
+        
         self.results_text.insert(tk.END, "\nOptimization Features:\n")
         self.results_text.insert(tk.END, "- Uses actual tensor names and sizes from llama.cpp\n")
+        self.results_text.insert(tk.END, "- Accounts for per-GPU VRAM buffers and KV cache allocation\n")
+        self.results_text.insert(tk.END, "- Reserves compute buffer space to prevent OOM during inference\n")
         self.results_text.insert(tk.END, "- Prioritizes critical tensors for GPU placement\n")
         self.results_text.insert(tk.END, "- Balances VRAM usage across available GPUs\n")
         self.results_text.insert(tk.END, "- Keeps small tensors on CPU to maximize VRAM\n")
+        self.results_text.insert(tk.END, "- Includes --split-mode row and --tensor-split for proper KV cache distribution\n")
+        self.results_text.insert(tk.END, f"- Uses {safety_margin_pct}% of available VRAM (configurable safety margin)\n")
         self.results_text.insert(tk.END, "- Works with all model architectures\n")
         
         self.results_text.config(state="disabled")
