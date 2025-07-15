@@ -38,6 +38,9 @@ class TensorOverrideTab:
         self.tensor_params_file = None
         self.analysis_thread = None
         
+        # Per-GPU VRAM buffer settings (in MB)
+        self.gpu_vram_buffers = {}  # Dictionary of GPU ID -> StringVar for buffer amount
+        
         # Create tensor override subdirectory if it doesn't exist
         self.tensor_override_dir = Path("tensor_overrides")
         self.tensor_override_dir.mkdir(exist_ok=True)
@@ -81,6 +84,25 @@ class TensorOverrideTab:
             foreground="blue"
         )
         self.enable_info_label.pack(anchor="w", pady=(5, 0))
+        
+        # GPU VRAM Buffer configuration section
+        self.buffer_frame = ttk.LabelFrame(main_container, text="GPU VRAM Buffer Configuration", padding=10)
+        self.buffer_frame.pack(fill="x", pady=(0, 10))
+        
+        # Buffer description
+        buffer_desc_label = ttk.Label(
+            self.buffer_frame,
+            text="Configure per-GPU VRAM buffer (in MB) to prevent out-of-memory errors.\nBuffers are subtracted from available VRAM during tensor optimization.",
+            foreground="gray"
+        )
+        buffer_desc_label.pack(anchor="w", pady=(0, 10))
+        
+        # GPU buffer controls container
+        self.gpu_buffer_controls_frame = ttk.Frame(self.buffer_frame)
+        self.gpu_buffer_controls_frame.pack(fill="x")
+        
+        # Initialize GPU buffer controls
+        self._setup_gpu_buffer_controls()
         
         # Analysis section
         analysis_frame = ttk.LabelFrame(main_container, text="Model Analysis", padding=10)
@@ -184,6 +206,104 @@ class TensorOverrideTab:
         # Initial state update
         self._update_ui_state()
         self._update_gpu_controls_state()
+    
+    def _setup_gpu_buffer_controls(self):
+        """Setup per-GPU VRAM buffer controls based on detected GPUs."""
+        # Clear existing controls
+        for widget in self.gpu_buffer_controls_frame.winfo_children():
+            widget.destroy()
+        
+        # Clear existing buffer variables
+        self.gpu_vram_buffers.clear()
+        
+        # Get GPU count and create controls
+        gpu_count = self._detect_gpu_count()
+        
+        if gpu_count <= 0:
+            # No GPUs detected, show message
+            no_gpu_label = ttk.Label(
+                self.gpu_buffer_controls_frame,
+                text="No GPUs detected. Buffer configuration will be available once GPUs are detected.",
+                foreground="orange"
+            )
+            no_gpu_label.pack(anchor="w")
+            return
+        
+        # Create a grid of GPU buffer controls
+        for gpu_id in range(gpu_count):
+            # Create StringVar for this GPU's buffer
+            buffer_var = tk.StringVar(value="512")  # Default 512MB buffer
+            self.gpu_vram_buffers[gpu_id] = buffer_var
+            
+            # Create frame for this GPU's controls
+            gpu_frame = ttk.Frame(self.gpu_buffer_controls_frame)
+            gpu_frame.pack(fill="x", pady=2)
+            
+            # GPU label
+            gpu_label = ttk.Label(gpu_frame, text=f"GPU {gpu_id}:")
+            gpu_label.pack(side="left")
+            
+            # Buffer entry
+            buffer_entry = ttk.Entry(gpu_frame, textvariable=buffer_var, width=8)
+            buffer_entry.pack(side="left", padx=(5, 2))
+            
+            # MB label
+            mb_label = ttk.Label(gpu_frame, text="MB")
+            mb_label.pack(side="left")
+            
+            # GPU info if available
+            if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
+                devices = self.parent.gpu_info.get("devices", [])
+                if gpu_id < len(devices):
+                    gpu_info = devices[gpu_id]
+                    gpu_name = gpu_info.get("name", "Unknown")
+                    total_vram_gb = gpu_info.get("total_memory_bytes", 0) / (1024**3)
+                    
+                    info_label = ttk.Label(
+                        gpu_frame,
+                        text=f"({gpu_name}, {total_vram_gb:.1f}GB)",
+                        foreground="gray",
+                        font=("TkDefaultFont", 8)
+                    )
+                    info_label.pack(side="left", padx=(10, 0))
+        
+        # Add preset buttons
+        preset_frame = ttk.Frame(self.gpu_buffer_controls_frame)
+        preset_frame.pack(fill="x", pady=(10, 0))
+        
+        ttk.Label(preset_frame, text="Presets:").pack(side="left")
+        
+        # Conservative preset (1GB per GPU)
+        conservative_btn = ttk.Button(
+            preset_frame,
+            text="Conservative (1GB)",
+            command=lambda: self._set_buffer_preset(1024),
+            width=15
+        )
+        conservative_btn.pack(side="left", padx=(5, 2))
+        
+        # Moderate preset (512MB per GPU)
+        moderate_btn = ttk.Button(
+            preset_frame,
+            text="Moderate (512MB)",
+            command=lambda: self._set_buffer_preset(512),
+            width=15
+        )
+        moderate_btn.pack(side="left", padx=(2, 2))
+        
+        # Aggressive preset (256MB per GPU)
+        aggressive_btn = ttk.Button(
+            preset_frame,
+            text="Aggressive (256MB)",
+            command=lambda: self._set_buffer_preset(256),
+            width=15
+        )
+        aggressive_btn.pack(side="left", padx=(2, 2))
+    
+    def _set_buffer_preset(self, buffer_mb):
+        """Set all GPU buffers to the specified preset value."""
+        for buffer_var in self.gpu_vram_buffers.values():
+            buffer_var.set(str(buffer_mb))
     
     def _on_enable_changed(self):
         """Handle enable checkbox change."""
@@ -785,6 +905,56 @@ class TensorOverrideTab:
         self._update_gpu_controls_state()
         # Settings display is updated by _update_ui_state() -> _update_settings_display()
     
+    def update_gpu_buffer_controls(self):
+        """Update GPU buffer controls when GPU info changes."""
+        self._setup_gpu_buffer_controls()
+    
+    def get_gpu_buffer_config(self):
+        """Get current GPU buffer configuration for saving to config file."""
+        config = {}
+        for gpu_id, buffer_var in self.gpu_vram_buffers.items():
+            try:
+                buffer_mb = int(buffer_var.get().strip())
+                config[f"gpu_{gpu_id}_buffer_mb"] = buffer_mb
+            except (ValueError, AttributeError):
+                config[f"gpu_{gpu_id}_buffer_mb"] = 512  # Default
+        return config
+    
+    def load_gpu_buffer_config(self, config):
+        """Load GPU buffer configuration from config file."""
+        # First setup the controls to create the buffer variables
+        self._setup_gpu_buffer_controls()
+        
+        # Then load the values
+        for gpu_id, buffer_var in self.gpu_vram_buffers.items():
+            config_key = f"gpu_{gpu_id}_buffer_mb"
+            if config_key in config:
+                try:
+                    buffer_mb = int(config[config_key])
+                    buffer_var.set(str(buffer_mb))
+                except (ValueError, TypeError):
+                    buffer_var.set("512")  # Default if invalid value
+    
+    def get_tensor_override_config(self):
+        """Get complete tensor override configuration for saving."""
+        config = {
+            "tensor_override_enabled": self.tensor_override_enabled.get(),
+            "tensor_override_gpu_buffers": self.get_gpu_buffer_config()
+        }
+        return config
+    
+    def load_tensor_override_config(self, config):
+        """Load complete tensor override configuration."""
+        if "tensor_override_enabled" in config:
+            self.tensor_override_enabled.set(config["tensor_override_enabled"])
+        
+        if "tensor_override_gpu_buffers" in config:
+            self.load_gpu_buffer_config(config["tensor_override_gpu_buffers"])
+        
+        # Update UI state after loading config
+        self._update_ui_state()
+        self._update_gpu_controls_state()
+    
     def _run_vram_optimization(self):
         """Run automated VRAM optimization using llama.cpp verbose analysis."""
         try:
@@ -914,7 +1084,7 @@ class TensorOverrideTab:
         return 4  # Default assumption for this model
     
     def _estimate_total_vram(self):
-        """Estimate total available VRAM across all GPUs."""
+        """Estimate total available VRAM across all GPUs, accounting for per-GPU buffers."""
         try:
             if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
                 total_vram = 0
@@ -923,14 +1093,22 @@ class TensorOverrideTab:
                 # Debug GPU info
                 print(f"DEBUG: GPU info available, found {len(devices)} devices", file=sys.stderr)
                 
-                for gpu in devices:
+                for gpu_id, gpu in enumerate(devices):
                     memory_total = gpu.get("total_memory_bytes", 0)
-                    total_vram += memory_total
-                    print(f"DEBUG: GPU {gpu.get('id', 'unknown')} has {memory_total} bytes memory", file=sys.stderr)
+                    
+                    # Get buffer for this GPU
+                    buffer_mb = self._get_gpu_buffer_mb(gpu_id)
+                    buffer_bytes = buffer_mb * 1024 * 1024  # Convert MB to bytes
+                    
+                    # Subtract buffer from available VRAM
+                    available_memory = max(0, memory_total - buffer_bytes)
+                    total_vram += available_memory
+                    
+                    print(f"DEBUG: GPU {gpu_id} has {memory_total} bytes memory, buffer {buffer_mb}MB, available {available_memory} bytes", file=sys.stderr)
                 
                 if total_vram > 0:
                     total_vram_gb = total_vram / (1024**3)  # Convert to GB
-                    print(f"DEBUG: Total VRAM calculated: {total_vram_gb:.1f}GB", file=sys.stderr)
+                    print(f"DEBUG: Total VRAM calculated (after buffers): {total_vram_gb:.1f}GB", file=sys.stderr)
                     return total_vram_gb
                 else:
                     print(f"DEBUG: Total VRAM is 0, using default", file=sys.stderr)
@@ -940,6 +1118,19 @@ class TensorOverrideTab:
         # Default assumption if detection fails
         print(f"DEBUG: Using default VRAM assumption: 96GB", file=sys.stderr)
         return 96  # Default assumption (4x24GB)
+    
+    def _get_gpu_buffer_mb(self, gpu_id):
+        """Get the buffer amount in MB for a specific GPU."""
+        if gpu_id in self.gpu_vram_buffers:
+            try:
+                buffer_str = self.gpu_vram_buffers[gpu_id].get().strip()
+                if buffer_str and buffer_str.isdigit():
+                    return int(buffer_str)
+                else:
+                    return 512
+            except (ValueError, AttributeError):
+                return 512
+        return 512  # Default 512MB buffer
     
     
     
@@ -957,9 +1148,16 @@ class TensorOverrideTab:
         self.results_text.insert(tk.END, f"{'='*45}\n\n")
         self.results_text.insert(tk.END, f"Generated {len(param_lines)} tensor override parameters\n")
         self.results_text.insert(tk.END, f"Target GPUs: {gpu_count} devices\n")
-        self.results_text.insert(tk.END, f"Total VRAM: ~{total_vram_gb:.1f}GB\n")
+        self.results_text.insert(tk.END, f"Total VRAM: ~{total_vram_gb:.1f}GB (after buffers)\n")
         self.results_text.insert(tk.END, f"Model: {Path(self.current_model_path).name}\n")
         self.results_text.insert(tk.END, f"Configuration: {self.current_config_name}\n\n")
+        
+        # Show buffer information
+        self.results_text.insert(tk.END, f"VRAM Buffer Settings:\n")
+        for gpu_id in range(gpu_count):
+            buffer_mb = self._get_gpu_buffer_mb(gpu_id)
+            self.results_text.insert(tk.END, f"- GPU {gpu_id}: {buffer_mb}MB buffer\n")
+        self.results_text.insert(tk.END, f"\n")
         
         # Show tensor analysis details if available
         if hasattr(self, 'tensor_analysis_results'):

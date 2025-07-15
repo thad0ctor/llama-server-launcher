@@ -3014,6 +3014,10 @@ class LlamaCppLauncher:
             self._refresh_vram_display()
             self._update_recommendations()
             
+            # Update tensor override tab GPU buffer controls
+            if hasattr(self, 'tensor_override_tab'):
+                self.tensor_override_tab.update_gpu_buffer_controls()
+            
             print("DEBUG: UI update after system info detection completed.", file=sys.stderr)
             
         except Exception as e:

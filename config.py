@@ -292,7 +292,7 @@ class ConfigManager:
         
         # Add tensor override configuration
         if hasattr(self.launcher, 'tensor_override_tab'):
-            cfg["tensor_override_enabled"] = self.launcher.tensor_override_tab.tensor_override_enabled.get()
+            cfg.update(self.launcher.tensor_override_tab.get_tensor_override_config())
         else:
             cfg["tensor_override_enabled"] = False
 
@@ -358,11 +358,7 @@ class ConfigManager:
         
         # Load tensor override configuration
         if hasattr(self.launcher, 'tensor_override_tab'):
-            tensor_override_enabled = cfg.get("tensor_override_enabled", False)
-            self.launcher.tensor_override_tab.tensor_override_enabled.set(tensor_override_enabled)
-            # Update UI state and check for existing analysis
-            self.launcher.tensor_override_tab._update_ui_state()
-            self.launcher.tensor_override_tab._check_current_model()
+            self.launcher.tensor_override_tab.load_tensor_override_config(cfg)
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Load template parameters
