@@ -266,6 +266,19 @@ class LaunchManager:
             except Exception as e:
                 print(f"WARNING: Error loading tensor override parameters: {e}", file=sys.stderr)
 
+        # --- NEW: Add KV Cache Parameters ---
+        if hasattr(self.launcher, 'tensor_override_tab'):
+            try:
+                # Get KV cache parameters if enabled
+                kv_cache_params = self.launcher.tensor_override_tab.get_kv_cache_parameters()
+                if kv_cache_params:
+                    cmd.extend(kv_cache_params)
+                    print(f"DEBUG: Added KV cache parameters: {kv_cache_params}", file=sys.stderr)
+                else:
+                    print("DEBUG: No KV cache parameters to add (KV cache on GPU by default)", file=sys.stderr)
+            except Exception as e:
+                print(f"WARNING: Error loading KV cache parameters: {e}", file=sys.stderr)
+
         # --- NEW: Add ik_llama Specific Flags ---
         if backend == "ik_llama":
             ik_llama_flags = self.launcher.ik_llama_tab.get_ik_llama_flags()

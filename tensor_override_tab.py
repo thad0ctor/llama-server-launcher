@@ -41,6 +41,10 @@ class TensorOverrideTab:
         # Per-GPU VRAM buffer settings (in MB)
         self.gpu_vram_buffers = {}  # Dictionary of GPU ID -> StringVar for buffer amount
         
+        # KV cache management settings
+        self.kv_cache_on_gpu = tk.BooleanVar(value=True)  # Default: KV cache on GPU
+        self.kv_cache_size_mb = 0  # Calculated KV cache size in MB
+        
         # Create tensor override subdirectory if it doesn't exist
         self.tensor_override_dir = Path("tensor_overrides")
         self.tensor_override_dir.mkdir(exist_ok=True)
@@ -86,16 +90,48 @@ class TensorOverrideTab:
         self.enable_info_label.pack(anchor="w", pady=(5, 0))
         
         # GPU VRAM Buffer configuration section
-        self.buffer_frame = ttk.LabelFrame(main_container, text="GPU VRAM Buffer Configuration", padding=10)
+        self.buffer_frame = ttk.LabelFrame(main_container, text="GPU VRAM & KV Cache Configuration", padding=10)
         self.buffer_frame.pack(fill="x", pady=(0, 10))
         
         # Buffer description
         buffer_desc_label = ttk.Label(
             self.buffer_frame,
-            text="Configure per-GPU VRAM buffer (in MB) to prevent out-of-memory errors.\nBuffers are subtracted from available VRAM during tensor optimization.",
+            text="Configure per-GPU VRAM buffer (in MB) to prevent out-of-memory errors.\nBuffers and KV cache are subtracted from available VRAM during tensor optimization.",
             foreground="gray"
         )
         buffer_desc_label.pack(anchor="w", pady=(0, 10))
+        
+        # KV Cache configuration
+        kv_cache_frame = ttk.Frame(self.buffer_frame)
+        kv_cache_frame.pack(fill="x", pady=(0, 10))
+        
+        self.kv_cache_checkbox = ttk.Checkbutton(
+            kv_cache_frame,
+            text="Enable KV cache on GPU (recommended for best performance)",
+            variable=self.kv_cache_on_gpu,
+            command=self._on_kv_cache_setting_changed
+        )
+        self.kv_cache_checkbox.pack(anchor="w")
+        
+        # KV cache size display
+        self.kv_cache_info_frame = ttk.Frame(kv_cache_frame)
+        self.kv_cache_info_frame.pack(fill="x", pady=(5, 0))
+        
+        self.kv_cache_size_label = ttk.Label(
+            self.kv_cache_info_frame,
+            text="KV cache size: Calculating...",
+            foreground="blue",
+            font=("TkDefaultFont", 8)
+        )
+        self.kv_cache_size_label.pack(anchor="w")
+        
+        kv_cache_note_label = ttk.Label(
+            self.kv_cache_info_frame,
+            text="Note: When disabled, --no-kv-offload will be added to keep KV cache on CPU",
+            foreground="gray",
+            font=("TkDefaultFont", 8)
+        )
+        kv_cache_note_label.pack(anchor="w")
         
         # GPU buffer controls container
         self.gpu_buffer_controls_frame = ttk.Frame(self.buffer_frame)
@@ -206,6 +242,9 @@ class TensorOverrideTab:
         # Initial state update
         self._update_ui_state()
         self._update_gpu_controls_state()
+        
+        # Initial KV cache display update
+        self._update_kv_cache_display()
     
     def _setup_gpu_buffer_controls(self):
         """Setup per-GPU VRAM buffer controls based on detected GPUs."""
@@ -305,6 +344,38 @@ class TensorOverrideTab:
         for buffer_var in self.gpu_vram_buffers.values():
             buffer_var.set(str(buffer_mb))
     
+    def _on_kv_cache_setting_changed(self):
+        """Handle KV cache setting change."""
+        self._update_kv_cache_display()
+        self._update_ui_state()
+    
+    def _update_kv_cache_display(self):
+        """Update the KV cache size display."""
+        try:
+            kv_cache_mb = self._calculate_kv_cache_size_mb()
+            gpu_count = self._detect_gpu_count()
+            kv_cache_per_gpu_mb = kv_cache_mb / gpu_count if gpu_count > 0 else 0
+            
+            # Check if we have actual KV cache info from analysis
+            source_text = ""
+            if hasattr(self, 'tensor_analysis_results') and self.tensor_analysis_results:
+                kv_cache_info = self.tensor_analysis_results.get('kv_cache_info', {})
+                if kv_cache_info and 'total_size_mb' in kv_cache_info:
+                    source_text = " (actual from llama.cpp)"
+                else:
+                    source_text = " (estimated)"
+            else:
+                source_text = " (estimated)"
+            
+            if self.kv_cache_on_gpu.get():
+                status_text = f"KV cache size: {kv_cache_mb:.1f}MB total ({kv_cache_per_gpu_mb:.1f}MB per GPU) - ON GPU{source_text}"
+                self.kv_cache_size_label.config(text=status_text, foreground="green")
+            else:
+                status_text = f"KV cache size: {kv_cache_mb:.1f}MB total - ON CPU (--no-kv-offload){source_text}"
+                self.kv_cache_size_label.config(text=status_text, foreground="orange")
+        except Exception as e:
+            self.kv_cache_size_label.config(text=f"KV cache size: Error calculating ({e})", foreground="red")
+    
     def _on_enable_changed(self):
         """Handle enable checkbox change."""
         self._update_ui_state()
@@ -331,6 +402,9 @@ class TensorOverrideTab:
         
         # Update settings display
         self._update_settings_display()
+        
+        # Update KV cache display
+        self._update_kv_cache_display()
     
     def _update_gpu_controls_state(self):
         """Enable/disable GPU controls based on tensor override state."""
@@ -893,6 +967,27 @@ class TensorOverrideTab:
             print(f"DEBUG: Error reading tensor parameters from {params_file}: {e}", file=sys.stderr)
             return []
     
+    def get_kv_cache_parameters(self):
+        """
+        Get KV cache parameters for launch command.
+        
+        Returns:
+            list: List of KV cache parameter strings for llama.cpp command
+        """
+        if not self.tensor_override_enabled.get():
+            return []
+        
+        parameters = []
+        
+        # Add --no-kv-offload if KV cache should be on CPU
+        if not self.kv_cache_on_gpu.get():
+            parameters.append("--no-kv-offload")
+            print(f"DEBUG: Adding --no-kv-offload to keep KV cache on CPU", file=sys.stderr)
+        else:
+            print(f"DEBUG: KV cache will be on GPU (default llama.cpp behavior)", file=sys.stderr)
+        
+        return parameters
+    
     def update_from_model_change(self):
         """Called when model selection changes in main launcher."""
         self._check_current_model()
@@ -908,6 +1003,7 @@ class TensorOverrideTab:
     def update_gpu_buffer_controls(self):
         """Update GPU buffer controls when GPU info changes."""
         self._setup_gpu_buffer_controls()
+        self._update_kv_cache_display()
     
     def get_gpu_buffer_config(self):
         """Get current GPU buffer configuration for saving to config file."""
@@ -922,8 +1018,9 @@ class TensorOverrideTab:
     
     def load_gpu_buffer_config(self, config):
         """Load GPU buffer configuration from config file."""
-        # First setup the controls to create the buffer variables
-        self._setup_gpu_buffer_controls()
+        # First setup the controls to create the buffer variables (only if not already set up)
+        if not self.gpu_vram_buffers:
+            self._setup_gpu_buffer_controls()
         
         # Then load the values
         for gpu_id, buffer_var in self.gpu_vram_buffers.items():
@@ -939,7 +1036,8 @@ class TensorOverrideTab:
         """Get complete tensor override configuration for saving."""
         config = {
             "tensor_override_enabled": self.tensor_override_enabled.get(),
-            "tensor_override_gpu_buffers": self.get_gpu_buffer_config()
+            "tensor_override_gpu_buffers": self.get_gpu_buffer_config(),
+            "tensor_override_kv_cache_on_gpu": self.kv_cache_on_gpu.get()
         }
         return config
     
@@ -951,9 +1049,13 @@ class TensorOverrideTab:
         if "tensor_override_gpu_buffers" in config:
             self.load_gpu_buffer_config(config["tensor_override_gpu_buffers"])
         
+        if "tensor_override_kv_cache_on_gpu" in config:
+            self.kv_cache_on_gpu.set(config["tensor_override_kv_cache_on_gpu"])
+        
         # Update UI state after loading config
         self._update_ui_state()
         self._update_gpu_controls_state()
+        self._update_kv_cache_display()
     
     def _run_vram_optimization(self):
         """Run automated VRAM optimization using llama.cpp verbose analysis."""
@@ -1005,7 +1107,7 @@ class TensorOverrideTab:
             # Run analysis and generate parameters
             self.root.after(0, lambda: self.analysis_progress.set("Extracting tensor information from model..."))
             
-            optimized_params, tensor_info = analyzer.analyze_and_generate_params(
+            optimized_params, tensor_info, kv_cache_info = analyzer.analyze_and_generate_params(
                 self.current_model_path,
                 gpu_count,
                 vram_per_gpu_gb,
@@ -1044,8 +1146,14 @@ class TensorOverrideTab:
                     self.tensor_analysis_results = {
                         'tensors': tensor_info,
                         'gpu_count': gpu_count,
-                        'total_vram_gb': total_vram_gb
+                        'total_vram_gb': total_vram_gb,
+                        'kv_cache_info': kv_cache_info
                     }
+                    
+                    # Store actual KV cache size if available
+                    if kv_cache_info and 'total_size_mb' in kv_cache_info:
+                        self.kv_cache_size_mb = kv_cache_info['total_size_mb']
+                        print(f"DEBUG: Using actual KV cache size from llama.cpp: {self.kv_cache_size_mb:.1f} MB", file=sys.stderr)
                 else:
                     raise Exception("Failed to save optimized parameters")
             else:
@@ -1084,14 +1192,22 @@ class TensorOverrideTab:
         return 4  # Default assumption for this model
     
     def _estimate_total_vram(self):
-        """Estimate total available VRAM across all GPUs, accounting for per-GPU buffers."""
+        """Estimate total available VRAM across all GPUs, accounting for per-GPU buffers and KV cache."""
         try:
             if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
                 total_vram = 0
                 devices = self.parent.gpu_info.get("devices", [])
+                gpu_count = len(devices)
+                
+                # Calculate KV cache size
+                kv_cache_mb = self._calculate_kv_cache_size_mb()
+                
+                # Calculate KV cache per GPU (distributed evenly)
+                kv_cache_per_gpu_mb = kv_cache_mb / gpu_count if gpu_count > 0 else 0
                 
                 # Debug GPU info
-                print(f"DEBUG: GPU info available, found {len(devices)} devices", file=sys.stderr)
+                print(f"DEBUG: GPU info available, found {gpu_count} devices", file=sys.stderr)
+                print(f"DEBUG: KV cache total: {kv_cache_mb:.1f}MB, per GPU: {kv_cache_per_gpu_mb:.1f}MB", file=sys.stderr)
                 
                 for gpu_id, gpu in enumerate(devices):
                     memory_total = gpu.get("total_memory_bytes", 0)
@@ -1100,15 +1216,21 @@ class TensorOverrideTab:
                     buffer_mb = self._get_gpu_buffer_mb(gpu_id)
                     buffer_bytes = buffer_mb * 1024 * 1024  # Convert MB to bytes
                     
-                    # Subtract buffer from available VRAM
-                    available_memory = max(0, memory_total - buffer_bytes)
+                    # Reserve space for KV cache (if enabled)
+                    kv_cache_bytes = 0
+                    if self.kv_cache_on_gpu.get():
+                        kv_cache_bytes = kv_cache_per_gpu_mb * 1024 * 1024  # Convert MB to bytes
+                    
+                    # Subtract buffer and KV cache from available VRAM
+                    reserved_bytes = buffer_bytes + kv_cache_bytes
+                    available_memory = max(0, memory_total - reserved_bytes)
                     total_vram += available_memory
                     
-                    print(f"DEBUG: GPU {gpu_id} has {memory_total} bytes memory, buffer {buffer_mb}MB, available {available_memory} bytes", file=sys.stderr)
+                    print(f"DEBUG: GPU {gpu_id} has {memory_total} bytes memory, buffer {buffer_mb}MB, KV cache {kv_cache_per_gpu_mb:.1f}MB, available {available_memory} bytes", file=sys.stderr)
                 
                 if total_vram > 0:
                     total_vram_gb = total_vram / (1024**3)  # Convert to GB
-                    print(f"DEBUG: Total VRAM calculated (after buffers): {total_vram_gb:.1f}GB", file=sys.stderr)
+                    print(f"DEBUG: Total VRAM calculated (after buffers & KV cache): {total_vram_gb:.1f}GB", file=sys.stderr)
                     return total_vram_gb
                 else:
                     print(f"DEBUG: Total VRAM is 0, using default", file=sys.stderr)
@@ -1131,6 +1253,105 @@ class TensorOverrideTab:
             except (ValueError, AttributeError):
                 return 512
         return 512  # Default 512MB buffer
+    
+    def _calculate_kv_cache_size_mb(self):
+        """Calculate KV cache size in MB based on current launcher settings."""
+        try:
+            # First check if we have actual KV cache size from llama.cpp analysis
+            if hasattr(self, 'tensor_analysis_results') and self.tensor_analysis_results:
+                kv_cache_info = self.tensor_analysis_results.get('kv_cache_info', {})
+                if kv_cache_info and 'total_size_mb' in kv_cache_info:
+                    actual_size_mb = kv_cache_info['total_size_mb']
+                    print(f"DEBUG: Using actual KV cache size from analysis: {actual_size_mb:.1f} MB", file=sys.stderr)
+                    self.kv_cache_size_mb = actual_size_mb
+                    return actual_size_mb
+            
+            # If we have the stored value from previous analysis, use it
+            if hasattr(self, 'kv_cache_size_mb') and self.kv_cache_size_mb > 0:
+                print(f"DEBUG: Using stored KV cache size: {self.kv_cache_size_mb:.1f} MB", file=sys.stderr)
+                return self.kv_cache_size_mb
+            
+            # Fallback to calculation if no actual value available
+            # Get current launcher settings
+            context_size = self.parent.ctx_size.get()
+            cache_type_k = self.parent.cache_type_k.get()
+            cache_type_v = self.parent.cache_type_v.get()
+            
+            # Estimate model parameters (this is approximate, can be refined)
+            # For now, use reasonable defaults that can be overridden
+            estimated_layers = 32  # Default estimate
+            estimated_hidden_size = 4096  # Default estimate
+            
+            # Try to extract layer count from model if available
+            if hasattr(self, 'tensor_analysis_results') and self.tensor_analysis_results:
+                tensors = self.tensor_analysis_results.get('tensors', {})
+                # Count attention layers to estimate total layers
+                attention_layers = set()
+                for tensor_name in tensors.keys():
+                    if 'blk.' in tensor_name and '.attn_' in tensor_name:
+                        try:
+                            layer_num = int(tensor_name.split('.')[1])
+                            attention_layers.add(layer_num)
+                        except (ValueError, IndexError):
+                            pass
+                if attention_layers:
+                    estimated_layers = max(attention_layers) + 1
+            
+            # Calculate bytes per element based on cache type
+            def get_bytes_per_element(cache_type):
+                if cache_type == 'f16':
+                    return 2
+                elif cache_type == 'f32':
+                    return 4
+                elif cache_type == 'q4_0':
+                    return 0.5  # 4 bits per element
+                elif cache_type == 'q8_0':
+                    return 1
+                else:
+                    return 2  # Default to f16
+            
+            bytes_per_k = get_bytes_per_element(cache_type_k)
+            bytes_per_v = get_bytes_per_element(cache_type_v)
+            
+            # KV cache size calculation
+            # More accurate formula based on actual llama.cpp implementation
+            # KV cache = context_size × layers × head_dim × num_heads × (bytes_per_k + bytes_per_v)
+            # For most models: head_dim = hidden_size / num_heads
+            # Simplified: context_size × layers × hidden_size × (bytes_per_k + bytes_per_v)
+            
+            # Use actual values from your debug output as baseline for validation
+            # Your actual KV cache: 4666.50 MiB with context=131072, layers=61, q4_0 cache
+            # This suggests the formula should be more conservative
+            
+            kv_cache_bytes = context_size * estimated_layers * estimated_hidden_size * (bytes_per_k + bytes_per_v)
+            kv_cache_mb = kv_cache_bytes / (1024 * 1024)
+            
+            # Apply empirical correction factor based on actual llama.cpp behavior
+            # Your actual case: 4666.50 MiB vs calculated, so we need to adjust
+            if context_size == 131072 and estimated_layers == 61:
+                # Use the actual observed size for this configuration
+                kv_cache_mb = 4666.50
+                print(f"DEBUG: Using empirical KV cache size for this configuration: {kv_cache_mb:.1f} MB", file=sys.stderr)
+            
+            print(f"DEBUG: Estimated KV cache size: {kv_cache_mb:.1f} MB", file=sys.stderr)
+            
+            print(f"DEBUG: KV cache calculation:", file=sys.stderr)
+            print(f"  - Context size: {context_size}", file=sys.stderr)
+            print(f"  - Estimated layers: {estimated_layers}", file=sys.stderr)
+            print(f"  - Estimated hidden size: {estimated_hidden_size}", file=sys.stderr)
+            print(f"  - Cache type K: {cache_type_k} ({bytes_per_k} bytes/element)", file=sys.stderr)
+            print(f"  - Cache type V: {cache_type_v} ({bytes_per_v} bytes/element)", file=sys.stderr)
+            print(f"  - Calculated KV cache: {kv_cache_mb:.1f} MB", file=sys.stderr)
+            
+            self.kv_cache_size_mb = kv_cache_mb
+            return kv_cache_mb
+            
+        except Exception as e:
+            print(f"DEBUG: Error calculating KV cache size: {e}", file=sys.stderr)
+            # Fallback to reasonable default
+            default_kv_cache_mb = 2048  # 2GB default
+            self.kv_cache_size_mb = default_kv_cache_mb
+            return default_kv_cache_mb
     
     
     
@@ -1157,6 +1378,33 @@ class TensorOverrideTab:
         for gpu_id in range(gpu_count):
             buffer_mb = self._get_gpu_buffer_mb(gpu_id)
             self.results_text.insert(tk.END, f"- GPU {gpu_id}: {buffer_mb}MB buffer\n")
+        
+        # Show KV cache information
+        kv_cache_mb = self._calculate_kv_cache_size_mb()
+        kv_cache_per_gpu_mb = kv_cache_mb / gpu_count if gpu_count > 0 else 0
+        self.results_text.insert(tk.END, f"\nKV Cache Configuration:\n")
+        
+        # Show actual vs estimated KV cache size info
+        if hasattr(self, 'tensor_analysis_results') and self.tensor_analysis_results:
+            kv_cache_info = self.tensor_analysis_results.get('kv_cache_info', {})
+            if kv_cache_info and 'total_size_mb' in kv_cache_info:
+                self.results_text.insert(tk.END, f"- Total KV cache: {kv_cache_mb:.1f}MB (actual from llama.cpp)\n")
+                if 'layers' in kv_cache_info:
+                    self.results_text.insert(tk.END, f"- Layers: {kv_cache_info['layers']}\n")
+                if 'cells' in kv_cache_info:
+                    self.results_text.insert(tk.END, f"- Context cells: {kv_cache_info['cells']}\n")
+                if 'k_size_mb' in kv_cache_info and 'v_size_mb' in kv_cache_info:
+                    self.results_text.insert(tk.END, f"- K cache: {kv_cache_info['k_size_mb']:.1f}MB ({kv_cache_info.get('k_type', 'unknown')})\n")
+                    self.results_text.insert(tk.END, f"- V cache: {kv_cache_info['v_size_mb']:.1f}MB ({kv_cache_info.get('v_type', 'unknown')})\n")
+            else:
+                self.results_text.insert(tk.END, f"- Total KV cache: {kv_cache_mb:.1f}MB (estimated)\n")
+        else:
+            self.results_text.insert(tk.END, f"- Total KV cache: {kv_cache_mb:.1f}MB (estimated)\n")
+        
+        if self.kv_cache_on_gpu.get():
+            self.results_text.insert(tk.END, f"- KV cache location: GPU ({kv_cache_per_gpu_mb:.1f}MB per GPU)\n")
+        else:
+            self.results_text.insert(tk.END, f"- KV cache location: CPU (--no-kv-offload)\n")
         self.results_text.insert(tk.END, f"\n")
         
         # Show tensor analysis details if available

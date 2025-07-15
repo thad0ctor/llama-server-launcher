@@ -153,6 +153,7 @@ class LlamaVerboseTensorAnalyzer:
                 loading_complete = False
                 
                 # Read output line by line with timeout
+                kv_cache_found = False
                 while True:
                     if time.time() - start_time > timeout:
                         process.terminate()
@@ -177,16 +178,31 @@ class LlamaVerboseTensorAnalyzer:
                                 quantization = tensor_match.group(3)
                                 tensors_found[tensor_name] = TensorInfo(tensor_name, size_mb, quantization)
                         
-                        # Check for completion markers
+                        # Check for KV cache information
+                        if "llama_kv_cache_unified:" in line_stripped:
+                            if "size =" in line_stripped:
+                                kv_cache_found = True
+                                self._debug_print("Found KV cache size information")
+                        
+                        # Check for completion markers - but only terminate after we have KV cache info
                         if any(marker in line_stripped.lower() for marker in [
                             "model loaded",
-                            "server listening",
+                            "server listening", 
                             "http server listening",
                             "all slots are idle",
                             "waiting for requests"
                         ]):
                             loading_complete = True
-                            self._debug_print("Detected model loading completion - terminating process")
+                            # Only break if we have KV cache info or we've been waiting too long
+                            if kv_cache_found or (time.time() - start_time > 120):  # Wait up to 2 minutes for KV cache
+                                self._debug_print("Detected model loading completion and KV cache info - terminating process")
+                                break
+                            else:
+                                self._debug_print("Model loading complete, waiting for KV cache information...")
+                        
+                        # Alternative termination condition - if we see compute buffer allocation, we can stop
+                        if "compute buffer size" in line_stripped:
+                            self._debug_print("Detected compute buffer allocation - analysis complete")
                             break
                 
                 # Terminate the process if it's still running
@@ -209,13 +225,18 @@ class LlamaVerboseTensorAnalyzer:
                     # Fallback to parsing full output if real-time parsing didn't work
                     tensors = self._parse_tensor_output(output_lines)
                 
+                # Parse KV cache information from the output
+                kv_cache_info = self._parse_kv_cache_info(output_lines)
+                
                 if not tensors:
                     # If no tensors found, this might be an error
                     output_text = '\n'.join(output_lines[-20:])  # Show last 20 lines for debugging
                     raise RuntimeError(f"No tensors found in output. Return code: {return_code}\nLast output:\n{output_text}")
                 
                 self._debug_print(f"Successfully extracted {len(tensors)} tensors (return code: {return_code})")
-                return tensors
+                if kv_cache_info:
+                    self._debug_print(f"KV cache info: {kv_cache_info.get('total_size_mb', 'unknown')} MiB")
+                return tensors, kv_cache_info
                 
             except subprocess.TimeoutExpired:
                 process.kill()
@@ -255,6 +276,59 @@ class LlamaVerboseTensorAnalyzer:
                 self._debug_print(f"Found tensor: {tensor_name} ({size_mb} MiB {quantization})")
         
         return tensors
+    
+    def _parse_kv_cache_info(self, output_lines: List[str]) -> Dict[str, any]:
+        """
+        Parse KV cache information from llama.cpp verbose output.
+        
+        Args:
+            output_lines: Lines of output from llama.cpp
+            
+        Returns:
+            Dictionary containing KV cache information
+        """
+        kv_cache_info = {}
+        
+        # Pattern to match KV cache size line
+        # Example: "llama_kv_cache_unified: size = 4666.50 MiB (131072 cells, 61 layers, 1 seqs), K (q4_0): 2470.50 MiB, V (q4_0): 2196.00 MiB"
+        kv_size_pattern = re.compile(
+            r'llama_kv_cache_unified:\s+size\s+=\s+([0-9\.]+)\s+MiB\s+\(([0-9]+)\s+cells,\s+([0-9]+)\s+layers,\s+([0-9]+)\s+seqs\),\s+K\s+\(([^)]+)\):\s+([0-9\.]+)\s+MiB,\s+V\s+\(([^)]+)\):\s+([0-9\.]+)\s+MiB'
+        )
+        
+        # Pattern to match individual KV cache buffer size
+        # Example: "llama_kv_cache_unified:        CPU KV buffer size =  4666.50 MiB"
+        kv_buffer_pattern = re.compile(
+            r'llama_kv_cache_unified:\s+(\w+)\s+KV\s+buffer\s+size\s+=\s+([0-9\.]+)\s+MiB'
+        )
+        
+        for line in output_lines:
+            # Check for detailed KV cache size information
+            match = kv_size_pattern.search(line)
+            if match:
+                kv_cache_info['total_size_mb'] = float(match.group(1))
+                kv_cache_info['cells'] = int(match.group(2))
+                kv_cache_info['layers'] = int(match.group(3))
+                kv_cache_info['seqs'] = int(match.group(4))
+                kv_cache_info['k_type'] = match.group(5)
+                kv_cache_info['k_size_mb'] = float(match.group(6))
+                kv_cache_info['v_type'] = match.group(7)
+                kv_cache_info['v_size_mb'] = float(match.group(8))
+                
+                self._debug_print(f"Found KV cache info: {kv_cache_info['total_size_mb']} MiB total, {kv_cache_info['layers']} layers")
+            
+            # Check for KV buffer location information
+            buffer_match = kv_buffer_pattern.search(line)
+            if buffer_match:
+                device = buffer_match.group(1)
+                size_mb = float(buffer_match.group(2))
+                
+                if 'buffer_locations' not in kv_cache_info:
+                    kv_cache_info['buffer_locations'] = {}
+                kv_cache_info['buffer_locations'][device] = size_mb
+                
+                self._debug_print(f"Found KV buffer: {device} = {size_mb} MiB")
+        
+        return kv_cache_info
     
     def categorize_tensors(self, tensors: Dict[str, TensorInfo]) -> Dict[str, List[TensorInfo]]:
         """
@@ -393,7 +467,7 @@ class LlamaVerboseTensorAnalyzer:
     def analyze_and_generate_params(self, model_path: str, 
                                   gpu_count: int,
                                   vram_per_gpu_gb: float,
-                                  timeout: int = 300) -> Tuple[List[str], Dict[str, TensorInfo]]:
+                                  timeout: int = 300) -> Tuple[List[str], Dict[str, TensorInfo], Dict[str, any]]:
         """
         Complete analysis and parameter generation pipeline.
         
@@ -404,10 +478,10 @@ class LlamaVerboseTensorAnalyzer:
             timeout: Timeout in seconds for the analysis process
             
         Returns:
-            Tuple of (allocation_parameters, tensor_info_dict)
+            Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info)
         """
-        # Extract tensor information
-        tensors = self.analyze_model_tensors(model_path, timeout)
+        # Extract tensor information and KV cache info
+        tensors, kv_cache_info = self.analyze_model_tensors(model_path, timeout)
         
         if not tensors:
             raise RuntimeError("No tensors found in model analysis")
@@ -417,7 +491,7 @@ class LlamaVerboseTensorAnalyzer:
             tensors, gpu_count, vram_per_gpu_gb
         )
         
-        return allocation_params, tensors
+        return allocation_params, tensors, kv_cache_info
 
 
 def main():
