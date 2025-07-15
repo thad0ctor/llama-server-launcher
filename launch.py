@@ -166,23 +166,38 @@ class LaunchManager:
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
 
-        # --- Handle GPU arguments: Now ADDING BOTH if set ---
+        # --- Handle GPU arguments: Skip if tensor override is active ---
+        # Check if tensor override is enabled and has parameters
+        tensor_override_active = False
+        if hasattr(self.launcher, 'tensor_override_tab'):
+            try:
+                tensor_override_enabled = self.launcher.tensor_override_tab.tensor_override_enabled.get()
+                tensor_params = self.launcher.tensor_override_tab.get_tensor_override_parameters()
+                tensor_override_active = tensor_override_enabled
+            except Exception as e:
+                print(f"WARNING: Error checking tensor override status: {e}", file=sys.stderr)
+        
+        # Always get these values for later use
         tensor_split_val = self.launcher.tensor_split.get().strip()
         n_gpu_layers_val = self.launcher.n_gpu_layers.get().strip()
-
-        # Add --tensor-split if the value is non-empty
-        # Use add_arg which handles the non-empty check
-        self.add_arg(cmd, "--tensor-split", tensor_split_val, "") # Add if non-empty string is provided by user
-
-        # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
-        # This argument will now be added regardless of the --tensor-split value
-        self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "0")
-
-        # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)
-        # It specifies which GPU is considered the "primary" one, often GPU 0.
-        # Llama.cpp default is 0. Include --main-gpu if the user set a non-default value.
         main_gpu_val = self.launcher.main_gpu.get().strip()
-        self.add_arg(cmd, "--main-gpu", main_gpu_val, "0")
+        
+        if tensor_override_active:
+            print("DEBUG: Skipping --tensor-split, --n-gpu-layers, and --main-gpu (tensor override is active)", file=sys.stderr)
+        else:
+            # Original GPU argument handling when tensor override is not active
+            # Add --tensor-split if the value is non-empty
+            # Use add_arg which handles the non-empty check
+            self.add_arg(cmd, "--tensor-split", tensor_split_val, "") # Add if non-empty string is provided by user
+
+            # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
+            # This argument will now be added regardless of the --tensor-split value
+            self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "0")
+
+            # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)
+            # It specifies which GPU is considered the "primary" one, often GPU 0.
+            # Llama.cpp default is 0. Include --main-gpu if the user set a non-default value.
+            self.add_arg(cmd, "--main-gpu", main_gpu_val, "0")
 
         # Add --flash-attn flag if checked
         self.add_arg(cmd, "--flash-attn", self.launcher.flash_attn.get())
@@ -229,6 +244,27 @@ class LaunchManager:
             except Exception as e:
                 print(f"WARNING: Could not parse custom parameter '{param_string}': {e}. Skipping.", file=sys.stderr)
                 messagebox.showwarning("Custom Parameter Warning", f"Could not parse custom parameter '{param_string}': {e}\nIt will be ignored.")
+
+        # --- NEW: Add Tensor Override Parameters ---
+        if hasattr(self.launcher, 'tensor_override_tab') and hasattr(self.launcher, 'tensor_override_manager'):
+            try:
+                # Get tensor override parameters if enabled
+                tensor_params = self.launcher.tensor_override_tab.get_tensor_override_parameters()
+                if tensor_params:
+                    # Validate parameters before adding
+                    is_valid, issues = self.launcher.tensor_override_manager.validate_tensor_override_params(tensor_params)
+                    if is_valid:
+                        formatted_params = self.launcher.tensor_override_manager.format_params_for_command_line(tensor_params)
+                        cmd.extend(formatted_params)
+                        print(f"DEBUG: Added {len(tensor_params)} tensor override parameters", file=sys.stderr)
+                        print(f"DEBUG: Tensor override devices: {[p.split()[2] for p in tensor_params if len(p.split()) >= 3]}", file=sys.stderr)
+                    else:
+                        print(f"WARNING: Invalid tensor override parameters: {issues}", file=sys.stderr)
+                        messagebox.showwarning("Tensor Override Warning", f"Invalid tensor override parameters detected:\n{'; '.join(issues[:3])}\nThey will be ignored.")
+                else:
+                    print("DEBUG: No tensor override parameters enabled or available", file=sys.stderr)
+            except Exception as e:
+                print(f"WARNING: Error loading tensor override parameters: {e}", file=sys.stderr)
 
         # --- NEW: Add ik_llama Specific Flags ---
         if backend == "ik_llama":

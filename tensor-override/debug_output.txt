@@ -1,0 +1,39 @@
+LLAMA-SERVER OUTPUT DEBUG:
+==================================================
+STDOUT:
+
+==================================================
+STDERR:
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    yes
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 4 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+  Device 1: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+load_backend: loaded CUDA backend from /home/rgilbreth/Desktop/AI-Software/llama.cpp/build/bin/libggml-cuda.so
+load_backend: loaded CPU backend from /home/rgilbreth/Desktop/AI-Software/llama.cpp/build/bin/libggml-cpu-icelake.so
+build: 5894 (b023e530) with gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0 for x86_64-linux-gnu
+system info: n_threads = 24, n_threads_batch = 24, total_threads = 48
+
+system_info: n_threads = 24 (n_threads_batch = 24) / 48 | CUDA : ARCHS = 1200 | FORCE_MMQ = 1 | F16 = 1 | USE_GRAPHS = 1 | PEER_MAX_BATCH_SIZE = 128 | FA_ALL_QUANTS = 1 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: binding port with default address family
+main: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
+srv    operator(): operator(): cleaning up before exit...
+
+==================================================
+COMBINED OUTPUT:
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    yes
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 4 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+  Device 1: NVIDIA GeForce RTX 5090, compute capability 12.0, VMM: yes
+load_backend: loaded CUDA backend from /home/rgilbreth/Desktop/AI-Software/llama.cpp/build/bin/libggml-cuda.so
+load_backend: loaded CPU backend from /home/rgilbreth/Desktop/AI-Software/llama.cpp/build/bin/libggml-cpu-icelake.so
+build: 5894 (b023e530) with gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0 for x86_64-linux-gnu
+system info: n_threads = 24, n_threads_batch = 24, total_threads = 48
+
+system_info: n_threads = 24 (n_threads_batch = 24) / 48 | CUDA : ARCHS = 1200 | FORCE_MMQ = 1 | F16 = 1 | USE_GRAPHS = 1 | PEER_MAX_BATCH_SIZE = 128 | FA_ALL_QUANTS = 1 | CPU : SSE3 = 1 | SSSE3 = 1 | AVX = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | BMI2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | LLAMAFILE = 1 | OPENMP = 1 | REPACK = 1 | 
+
+main: binding port with default address family
+main: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080
+srv    operator(): operator(): cleaning up before exit...

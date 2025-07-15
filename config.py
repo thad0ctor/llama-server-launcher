@@ -17,6 +17,8 @@ class ConfigManager:
     
     def generate_default_config_name(self):
         """Generates a default configuration name based on current settings."""
+        # Only print debug message if we might actually update something
+        current_config_name = self.launcher.config_name.get().strip()
         print("DEBUG: Generating default config name...", file=sys.stderr)
         parts = []
 
@@ -188,7 +190,6 @@ class ConfigManager:
 
         # Always update the config name field with the generated name in real-time
         # This provides immediate feedback about what the config represents
-        current_config_name = self.launcher.config_name.get().strip()
         print(f"DEBUG: Current config name: '{current_config_name}'", file=sys.stderr)
         
         # Always update except for very specific custom names that don't look auto-generated
@@ -288,6 +289,12 @@ class ConfigManager:
         
         # Add ik_llama specific configuration
         cfg.update(self.launcher.ik_llama_tab.save_to_config())
+        
+        # Add tensor override configuration
+        if hasattr(self.launcher, 'tensor_override_tab'):
+            cfg["tensor_override_enabled"] = self.launcher.tensor_override_tab.tensor_override_enabled.get()
+        else:
+            cfg["tensor_override_enabled"] = False
 
         return cfg
 
@@ -348,6 +355,14 @@ class ConfigManager:
         
         # Load ik_llama specific configuration
         self.launcher.ik_llama_tab.load_from_config(cfg)
+        
+        # Load tensor override configuration
+        if hasattr(self.launcher, 'tensor_override_tab'):
+            tensor_override_enabled = cfg.get("tensor_override_enabled", False)
+            self.launcher.tensor_override_tab.tensor_override_enabled.set(tensor_override_enabled)
+            # Update UI state and check for existing analysis
+            self.launcher.tensor_override_tab._update_ui_state()
+            self.launcher.tensor_override_tab._check_current_model()
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Load template parameters
@@ -425,6 +440,9 @@ class ConfigManager:
              if loaded_model_path_str:
                   messagebox.showwarning("Model Not Found", f"The model from the config ('{Path(loaded_model_path_str).name if loaded_model_path_str else 'N/A'}') was not found in the current list.\nPlease ensure its directory is added and scanned, then select a model manually.")
 
+        # Notify tensor override tab that configuration has been loaded
+        if hasattr(self.launcher, 'tensor_override_tab'):
+            self.launcher.tensor_override_tab.update_from_config_change()
 
         messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
 
@@ -834,9 +852,12 @@ class ConfigManager:
         # Save custom parameters list
         self.launcher.app_settings["custom_parameters"] = self.launcher.custom_parameters_list
         # Save network settings - ensure these are saved
+        old_port = self.launcher.app_settings.get("port", "")
+        new_port = self.launcher.port.get()
         self.launcher.app_settings["host"] = self.launcher.host.get()
-        self.launcher.app_settings["port"] = self.launcher.port.get()
-        print(f"DEBUG: Saving port as {self.launcher.port.get()}") # Add debug print
+        self.launcher.app_settings["port"] = new_port
+        if old_port != new_port:
+            print(f"DEBUG: Saving port as {new_port}") # Add debug print
         
         # Save backend selection
         self.launcher.app_settings["backend_selection"] = self.launcher.backend_selection.get()

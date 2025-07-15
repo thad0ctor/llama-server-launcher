@@ -1,0 +1,21 @@
+{
+  "llama_cpp_path": "/home/rgilbreth/Desktop/AI-Software/llama.cpp",
+  "virtual_env_path": "/home/rgilbreth/pytorch-venv",
+  "context_size": 131072,
+  "kv_cache": {
+    "type": "f16",
+    "type_k": null,
+    "type_v": null
+  },
+  "tensor_analysis": {
+    "prioritize_experts_on_cpu": true,
+    "maximize_gpu_layers": true,
+    "reserve_context_memory": true,
+    "memory_safety_margin_mb": 512
+  },
+  "output": {
+    "save_analysis_json": true,
+    "save_override_params": true,
+    "verbose": true
+  }
+}

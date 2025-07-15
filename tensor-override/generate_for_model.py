@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+Generate tensor override parameters for your specific model
+"""
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from cuda_detector import CUDADetector
+from tensor_optimizer import TensorOptimizer
+from parameter_generator import ParameterGenerator
+
+def create_kimi_tensor_analysis():
+    """Create tensor analysis based on your Kimi model output"""
+    # Based on your example output showing tensor overrides to CPU
+    expert_tensors = []
+    layer_tensors = {}
+    
+    # From your example: tensor blk.15.ffn_gate_exps.weight (1050 MiB iq1_s) buffer type overridden to CPU
+    # Generate expert tensors for layers 15-60 (common for large models)
+    for layer in range(15, 61):
+        expert_tensors.extend([
+            {'name': f'blk.{layer}.ffn_gate_exps.weight', 'size_mb': 1050.0, 'type': 'iq1_s'},
+            {'name': f'blk.{layer}.ffn_down_exps.weight', 'size_mb': 2000.0, 'type': 'iq4_xs'},
+            {'name': f'blk.{layer}.ffn_up_exps.weight', 'size_mb': 1050.0, 'type': 'iq1_s'},
+        ])
+    
+    # Generate layer tensors for all 61 layers
+    for layer in range(61):
+        layer_tensors[layer] = {
+            'tensors': [
+                {'name': f'blk.{layer}.attn_q.weight', 'size_mb': 200.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.attn_k.weight', 'size_mb': 200.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.attn_v.weight', 'size_mb': 200.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.attn_output.weight', 'size_mb': 200.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.ffn_gate.weight', 'size_mb': 400.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.ffn_up.weight', 'size_mb': 400.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.ffn_down.weight', 'size_mb': 400.0, 'type': 'iq1_s'},
+                {'name': f'blk.{layer}.attn_norm.weight', 'size_mb': 0.03, 'type': 'f32'},
+                {'name': f'blk.{layer}.ffn_norm.weight', 'size_mb': 0.03, 'type': 'f32'},
+            ],
+            'total_size_mb': 2000.0
+        }
+    
+    return {
+        'total_tensors': len(expert_tensors) + sum(len(layer['tensors']) for layer in layer_tensors.values()) + 4,
+        'total_size_mb': sum(t['size_mb'] for t in expert_tensors) + sum(layer['total_size_mb'] for layer in layer_tensors.values()) + 3000.0,
+        'expert_tensors': {
+            'count': len(expert_tensors),
+            'size_mb': sum(t['size_mb'] for t in expert_tensors),
+            'tensors': expert_tensors
+        },
+        'layer_tensors': {
+            'count': sum(len(layer['tensors']) for layer in layer_tensors.values()),
+            'size_mb': sum(layer['total_size_mb'] for layer in layer_tensors.values()),
+            'layers': layer_tensors
+        },
+        'embedding_tensors': {
+            'count': 2,
+            'size_mb': 3000.0,
+            'tensors': [
+                {'name': 'token_embd.weight', 'size_mb': 1500.0, 'type': 'q4_K'},
+                {'name': 'output.weight', 'size_mb': 1500.0, 'type': 'q4_K'},
+            ]
+        },
+        'other_tensors': {
+            'count': 2,
+            'size_mb': 0.1,
+            'tensors': [
+                {'name': 'norm.weight', 'size_mb': 0.03, 'type': 'f32'},
+                {'name': 'output_norm.weight', 'size_mb': 0.03, 'type': 'f32'},
+            ]
+        }
+    }
+
+def main():
+    print("Generating Tensor Override Parameters for Kimi Model")
+    print("=" * 60)
+    
+    # Detect CUDA devices
+    detector = CUDADetector()
+    devices = detector.detect_devices()
+    print(f"Detected {len(devices)} CUDA devices with {detector.total_vram:,} MB total VRAM")
+    
+    # Create tensor analysis
+    tensor_analysis = create_kimi_tensor_analysis()
+    print(f"Model analysis: {tensor_analysis['expert_tensors']['count']} expert tensors, {tensor_analysis['layer_tensors']['count']} layer tensors")
+    
+    # Configure optimization
+    config = {
+        'llama_cpp_path': '/home/rgilbreth/Desktop/AI-Software/llama.cpp',
+        'context_size': 8192,
+        'tensor_analysis': {
+            'prioritize_experts_on_cpu': True,
+            'maximize_gpu_layers': True,
+            'reserve_context_memory': True,
+            'memory_safety_margin_mb': 512
+        }
+    }
+    
+    # Optimize tensor placement
+    device_info = detector.get_device_info()
+    optimizer = TensorOptimizer(device_info['devices'], tensor_analysis, config)
+    assignments = optimizer.optimize_tensor_placement()
+    
+    # Generate parameters
+    param_generator = ParameterGenerator(assignments, config)
+    parameters = param_generator.format_llama_cpp_parameters()
+    
+    # Save to file
+    output_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'kimi_tensor_params.txt')
+    with open(output_file, 'w') as f:
+        f.write("# Tensor Override Parameters for Kimi K2 Model\n")
+        f.write("# Generated by tensor-override optimizer\n")
+        f.write("# Use with llama.cpp server:\n\n")
+        
+        for param in parameters:
+            f.write(f"{param} \\\n")
+    
+    print(f"\nGenerated {len(parameters)} tensor override parameters")
+    print(f"Parameters saved to: {output_file}")
+    
+    # Show usage example
+    print(f"\nUsage example:")
+    print(f"cd {config['llama_cpp_path']}")
+    print(f"./build/bin/llama-server \\")
+    print(f"  --model /media/rgilbreth/AI-M2-2TB/Models/Kimi-Quants/UD-IQ1_S/Kimi-K2-Instruct-UD-IQ1_S-00001-of-00006.gguf \\")
+    print(f"  --ctx-size 8192 \\")
+    print(f"  --port 5001 \\")
+    print(f"  $(cat {output_file} | grep -v '^#' | tr -d '\\n' | sed 's/\\\\$//')")
+    
+    print(f"\nOr manually add the parameters from {output_file}")
+
+if __name__ == "__main__":
+    main()

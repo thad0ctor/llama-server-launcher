@@ -37,6 +37,9 @@ from launch import LaunchManager
 # Import the configuration management module
 from config import ConfigManager
 
+# Import the tensor override logic module
+from tensor_override_logic import TensorOverrideManager
+
 # Import system helper functions
 from system import (
     get_gpu_info_static, get_ram_info_static, get_cpu_info_static,
@@ -162,6 +165,9 @@ class LlamaCppLauncher:
 
         # --- Initialize system info manager ---
         self.system_info_manager = SystemInfoManager(self)
+
+        # --- Initialize tensor override manager ---
+        self.tensor_override_manager = TensorOverrideManager()
 
         # --- Template Loading & Processing ---
         # Load external chat templates and combine them with hardcoded ones.
@@ -418,12 +424,13 @@ class LlamaCppLauncher:
         # Bind trace to ignore_eos to update default config name if needed
         self.ignore_eos.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
-        self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.cache_type_k.trace_add("write", lambda *args: (self._update_default_config_name_if_needed(), self._notify_tensor_override_config_change()))
+        self.cache_type_v.trace_add("write", lambda *args: self._notify_tensor_override_config_change())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads_batch.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.batch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.ubatch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
-        self.ctx_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.ctx_size.trace_add("write", lambda *args: (self._update_default_config_name_if_needed(), self._notify_tensor_override_config_change()))
         self.seed.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.temperature.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.min_p.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -511,10 +518,11 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); tensor_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
         nb.add(chat_frame, text="Chat Template") # Add the new tab
+        nb.add(tensor_frame, text="Tensor Override") # Add tensor override tab
         nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
         # ik_llama tab will be added conditionally
         self.ik_llama_frame = ik_llama_frame
@@ -525,6 +533,7 @@ class LlamaCppLauncher:
         self._setup_main_tab(main_frame)
         self._setup_advanced_tab(adv_frame)
         self._setup_chat_template_tab(chat_frame) # Setup the new tab
+        self._setup_tensor_override_tab(tensor_frame) # Setup tensor override tab
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_config_tab(cfg_frame)
@@ -1413,6 +1422,12 @@ class LlamaCppLauncher:
         else:
             messagebox.showinfo("Copy Info", "No template string to copy.")
 
+    # ░░░░░ TENSOR OVERRIDE TAB ░░░░░
+    def _setup_tensor_override_tab(self, parent):
+        """Set up the Tensor Override tab using the TensorOverrideTab class."""
+        from tensor_override_tab import TensorOverrideTab
+        self.tensor_override_tab = TensorOverrideTab(self)
+        self.tensor_override_tab.setup_tab(parent)
 
     # ░░░░░ CONFIG TAB ░░░░░
     def _setup_config_tab(self, parent):
@@ -1897,6 +1912,10 @@ class LlamaCppLauncher:
             self._update_recommendations() # Update based on no model
             self._generate_default_config_name() # Generate default name for no model state
             self._update_manual_model_visibility() # Update manual model section visibility
+            
+            # Notify tensor override tab of model change
+            if hasattr(self, 'tensor_override_tab'):
+                self.tensor_override_tab.update_from_model_change()
 
 
     def _run_gguf_analysis(self, model_path_str):
@@ -2072,6 +2091,11 @@ class LlamaCppLauncher:
         # --- Update Manual Model Visibility ---
         # Hide/show manual model section based on analysis success
         self._update_manual_model_visibility()
+        
+        # --- Notify Tensor Override Tab ---
+        # Update tensor override tab with successful model analysis results
+        if hasattr(self, 'tensor_override_tab'):
+            self.tensor_override_tab.update_from_model_change()
 
     def _reset_gpu_layer_controls(self, keep_entry_enabled=False):
          """Resets GPU layer slider state and max layers (but *not* entry StringVar).
@@ -2153,6 +2177,9 @@ class LlamaCppLauncher:
             self._schedule_recommendations_update()
         else:
             self._update_recommendations()
+        
+        # Notify tensor override tab of configuration change
+        self._notify_tensor_override_config_change()
 
 
     def _sync_gpu_layers_from_slider(self, value_str):
@@ -2532,11 +2559,29 @@ class LlamaCppLauncher:
          # This callback doesn't need to do much itself, as the state is held by the BooleanVar.
          # Its primary purpose is to trigger recalculation/update of things that depend on selected GPUs.
          print(f"DEBUG: GPU {index} selection changed. Recalculating recommendations...", file=sys.stderr)
-         # Update the selected_gpus list in app_settings immediately
-         self.app_settings["selected_gpus"] = [i for i, v in enumerate(self.gpu_vars) if v.get()]
-         self._update_recommendations()
-         self._generate_default_config_name() # Update default config name as it depends on selected GPUs
-         self._save_configs() # Save selection change
+         
+         # Get current and new GPU selections
+         old_selected_gpus = self.app_settings.get("selected_gpus", [])
+         new_selected_gpus = [i for i, v in enumerate(self.gpu_vars) if v.get()]
+         
+         # Only update if the selection actually changed
+         if old_selected_gpus != new_selected_gpus:
+             # Update the selected_gpus list in app_settings immediately
+             self.app_settings["selected_gpus"] = new_selected_gpus
+             
+             # Store current config name to detect changes
+             old_config_name = self.config_name.get()
+             
+             self._update_recommendations()
+             new_config_name = self._generate_default_config_name() # Update default config name as it depends on selected GPUs
+             
+             # Only save if the config name actually changed or we have a significant change
+             if old_config_name != new_config_name or len(old_selected_gpus) != len(new_selected_gpus):
+                 self._save_configs() # Save selection change
+             else:
+                 print("DEBUG: GPU selection change didn't affect config, skipping save", file=sys.stderr)
+         else:
+             print("DEBUG: GPU selection didn't actually change, skipping update", file=sys.stderr)
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -2784,6 +2829,20 @@ class LlamaCppLauncher:
     def _import_configurations(self):
         """Delegates to config manager."""
         return self.config_manager.import_configurations()
+    
+    def _notify_tensor_override_config_change(self):
+        """Notify tensor override tab that configuration has changed."""
+        if hasattr(self, 'tensor_override_tab'):
+            # Debounce rapid calls to prevent infinite loops
+            if not hasattr(self, '_tensor_override_update_pending'):
+                self._tensor_override_update_pending = True
+                self.root.after_idle(self._do_tensor_override_config_change)
+    
+    def _do_tensor_override_config_change(self):
+        """Actually perform the tensor override config change notification."""
+        if hasattr(self, 'tensor_override_tab'):
+            self.tensor_override_tab.update_from_config_change()
+        self._tensor_override_update_pending = False
 
     # ═════════════════════════════════════════════════════════════════
     #  Backend Selection Handler
