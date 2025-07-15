@@ -804,10 +804,22 @@ class TensorOverrideTab:
             if not llama_cpp_dir:
                 raise Exception("LLaMa.cpp directory not configured in launcher")
             
-            # Detect GPU configuration
+            # Detect GPU configuration with validation
             gpu_count = self._detect_gpu_count()
             total_vram_gb = self._estimate_total_vram()
-            vram_per_gpu_gb = total_vram_gb / gpu_count if gpu_count > 0 else 24.0
+            
+            # Validate GPU configuration to prevent division by zero
+            if gpu_count <= 0:
+                raise Exception(f"Invalid GPU count detected: {gpu_count}. Please ensure GPUs are properly detected.")
+            
+            if total_vram_gb <= 0:
+                raise Exception(f"Invalid VRAM amount detected: {total_vram_gb}GB. Please ensure GPU memory is properly detected.")
+            
+            vram_per_gpu_gb = total_vram_gb / gpu_count
+            
+            # Validate resulting VRAM per GPU
+            if vram_per_gpu_gb <= 0:
+                raise Exception(f"Invalid VRAM per GPU calculated: {vram_per_gpu_gb}GB. Check GPU detection.")
             
             self.root.after(0, lambda: self.analysis_progress.set(f"Initializing analyzer for {gpu_count} GPUs..."))
             
@@ -879,15 +891,26 @@ class TensorOverrideTab:
         """Detect number of available GPUs."""
         try:
             if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
-                return self.parent.gpu_info.get("device_count", 1)
-            else:
-                # Fallback detection
-                import subprocess
-                result = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    return len([line for line in result.stdout.split('\n') if 'GPU' in line])
-        except:
-            pass
+                device_count = self.parent.gpu_info.get("device_count", 0)
+                print(f"DEBUG: GPU device count from parent: {device_count}", file=sys.stderr)
+                if device_count > 0:
+                    return device_count
+            
+            # Fallback detection
+            import subprocess
+            print(f"DEBUG: Attempting nvidia-smi fallback detection", file=sys.stderr)
+            result = subprocess.run(['nvidia-smi', '-L'], capture_output=True, text=True)
+            if result.returncode == 0:
+                gpu_lines = [line for line in result.stdout.split('\n') if 'GPU' in line]
+                gpu_count = len(gpu_lines)
+                print(f"DEBUG: nvidia-smi detected {gpu_count} GPUs", file=sys.stderr)
+                if gpu_count > 0:
+                    return gpu_count
+        except Exception as e:
+            print(f"DEBUG: Error in GPU detection: {e}", file=sys.stderr)
+        
+        # Default assumption if detection fails
+        print(f"DEBUG: Using default GPU count assumption: 4", file=sys.stderr)
         return 4  # Default assumption for this model
     
     def _estimate_total_vram(self):
@@ -895,11 +918,27 @@ class TensorOverrideTab:
         try:
             if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
                 total_vram = 0
-                for gpu in self.parent.gpu_info.get("devices", []):
-                    total_vram += gpu.get("memory_total", 0)
-                return total_vram / (1024**3)  # Convert to GB
-        except:
-            pass
+                devices = self.parent.gpu_info.get("devices", [])
+                
+                # Debug GPU info
+                print(f"DEBUG: GPU info available, found {len(devices)} devices", file=sys.stderr)
+                
+                for gpu in devices:
+                    memory_total = gpu.get("total_memory_bytes", 0)
+                    total_vram += memory_total
+                    print(f"DEBUG: GPU {gpu.get('id', 'unknown')} has {memory_total} bytes memory", file=sys.stderr)
+                
+                if total_vram > 0:
+                    total_vram_gb = total_vram / (1024**3)  # Convert to GB
+                    print(f"DEBUG: Total VRAM calculated: {total_vram_gb:.1f}GB", file=sys.stderr)
+                    return total_vram_gb
+                else:
+                    print(f"DEBUG: Total VRAM is 0, using default", file=sys.stderr)
+        except Exception as e:
+            print(f"DEBUG: Error in _estimate_total_vram: {e}", file=sys.stderr)
+        
+        # Default assumption if detection fails
+        print(f"DEBUG: Using default VRAM assumption: 96GB", file=sys.stderr)
         return 96  # Default assumption (4x24GB)
     
     
