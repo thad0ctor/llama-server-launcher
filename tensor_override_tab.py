@@ -84,7 +84,7 @@ class TensorOverrideTab:
         # Info label for when enabled
         self.enable_info_label = ttk.Label(
             enable_frame,
-            text="When enabled, tensor override parameters will be automatically included in launch commands.\nGPU Layers and Tensor Split controls will be disabled to prevent conflicts.",
+            text="When enabled, tensor override parameters will be automatically included in launch commands.",
             foreground="blue"
         )
         self.enable_info_label.pack(anchor="w", pady=(5, 0))
@@ -140,37 +140,27 @@ class TensorOverrideTab:
         # Initialize GPU buffer controls
         self._setup_gpu_buffer_controls()
         
-        # Analysis section
-        analysis_frame = ttk.LabelFrame(main_container, text="Model Analysis", padding=10)
-        analysis_frame.pack(fill="both", expand=True, pady=(0, 10))
+        # Analysis section (no expand to reduce blank space)
+        analysis_frame = ttk.LabelFrame(main_container, text="Model Analysis", padding=8)
+        analysis_frame.pack(fill="x", pady=(0, 5))
         
-        # Model info section
-        model_info_frame = ttk.Frame(analysis_frame)
-        model_info_frame.pack(fill="x", pady=(0, 10))
+        # Combined settings and controls section
+        settings_controls_frame = ttk.Frame(analysis_frame)
+        settings_controls_frame.pack(fill="x", pady=(0, 5))
         
-        ttk.Label(model_info_frame, text="Current model:").pack(anchor="w")
-        self.model_info_label = ttk.Label(model_info_frame, text="No model selected", 
-                                         foreground="gray")
-        self.model_info_label.pack(anchor="w", padx=(20, 0))
+        # Settings info on the left
+        settings_left_frame = ttk.Frame(settings_controls_frame)
+        settings_left_frame.pack(side="left", fill="x", expand=True)
         
-        ttk.Label(model_info_frame, text="Configuration:").pack(anchor="w", pady=(5, 0))
-        self.config_info_label = ttk.Label(model_info_frame, text="No configuration", 
-                                          foreground="gray")
-        self.config_info_label.pack(anchor="w", padx=(20, 0))
-        
-        # Current launcher settings section
-        settings_frame = ttk.Frame(analysis_frame)
-        settings_frame.pack(fill="x", pady=(10, 0))
-        
-        ttk.Label(settings_frame, text="Analysis will use current launcher settings:", 
+        ttk.Label(settings_left_frame, text="Analysis will use current launcher settings:", 
                  font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
         
-        self.settings_display_frame = ttk.Frame(settings_frame)
+        self.settings_display_frame = ttk.Frame(settings_left_frame)
         self.settings_display_frame.pack(fill="x", padx=(20, 0), pady=(2, 0))
         
-        # Analysis controls
-        controls_frame = ttk.Frame(analysis_frame)
-        controls_frame.pack(fill="x", pady=(10, 0))
+        # Analysis controls on the right
+        controls_frame = ttk.Frame(settings_controls_frame)
+        controls_frame.pack(side="right", padx=(20, 0))
         
         self.analyze_button = ttk.Button(
             controls_frame,
@@ -189,32 +179,36 @@ class TensorOverrideTab:
         
         # Status section
         status_frame = ttk.Frame(analysis_frame)
-        status_frame.pack(fill="x", pady=(10, 0))
+        status_frame.pack(fill="x", pady=(5, 0))
         
         ttk.Label(status_frame, text="Analysis status:").pack(anchor="w")
         self.status_label = ttk.Label(status_frame, textvariable=self.tensor_analysis_status)
         self.status_label.pack(anchor="w", padx=(20, 0))
         
-        ttk.Label(status_frame, text="Generated parameters:").pack(anchor="w", pady=(5, 0))
-        self.params_label = ttk.Label(status_frame, textvariable=self.tensor_params_count)
-        self.params_label.pack(anchor="w", padx=(20, 0))
+        # Combined parameters status and count
+        params_frame = ttk.Frame(status_frame)
+        params_frame.pack(fill="x", pady=(5, 0))
         
-        # Progress section
+        ttk.Label(params_frame, text="Generated parameters:").pack(side="left")
+        self.params_label = ttk.Label(params_frame, textvariable=self.tensor_params_count)
+        self.params_label.pack(side="left", padx=(10, 0))
+        
+        # Progress section (minimal padding)
         progress_frame = ttk.Frame(analysis_frame)
-        progress_frame.pack(fill="x", pady=(10, 0))
+        progress_frame.pack(fill="x", pady=(3, 0))
         
         self.progress_label = ttk.Label(progress_frame, textvariable=self.analysis_progress, 
                                        foreground="blue")
         self.progress_label.pack(anchor="w")
         
-        # Results section
-        results_frame = ttk.LabelFrame(main_container, text="Analysis Results", padding=10)
+        # Results section (no expand to reduce blank space)
+        results_frame = ttk.LabelFrame(main_container, text="Analysis Results", padding=6)
         results_frame.pack(fill="both", expand=True)
         
-        # Results text area with scrollbar
+        # Results text area with scrollbar (reduced height by 2 rows)
         self.results_text = scrolledtext.ScrolledText(
             results_frame,
-            height=8,
+            height=6,
             wrap=tk.WORD,
             state="disabled"
         )
@@ -268,15 +262,21 @@ class TensorOverrideTab:
             no_gpu_label.pack(anchor="w")
             return
         
-        # Create a grid of GPU buffer controls
+        # Create a grid of GPU buffer controls (2 per row)
+        gpu_row_frame = None
         for gpu_id in range(gpu_count):
             # Create StringVar for this GPU's buffer
             buffer_var = tk.StringVar(value="512")  # Default 512MB buffer
             self.gpu_vram_buffers[gpu_id] = buffer_var
             
+            # Create new row frame for every 2 GPUs
+            if gpu_id % 2 == 0:
+                gpu_row_frame = ttk.Frame(self.gpu_buffer_controls_frame)
+                gpu_row_frame.pack(fill="x", pady=2)
+            
             # Create frame for this GPU's controls
-            gpu_frame = ttk.Frame(self.gpu_buffer_controls_frame)
-            gpu_frame.pack(fill="x", pady=2)
+            gpu_frame = ttk.Frame(gpu_row_frame)
+            gpu_frame.pack(side="left", padx=(0, 20) if gpu_id % 2 == 0 else (0, 0))
             
             # GPU label
             gpu_label = ttk.Label(gpu_frame, text=f"GPU {gpu_id}:")
@@ -290,21 +290,20 @@ class TensorOverrideTab:
             mb_label = ttk.Label(gpu_frame, text="MB")
             mb_label.pack(side="left")
             
-            # GPU info if available
+            # GPU info if available (compact format)
             if hasattr(self.parent, 'gpu_info') and self.parent.gpu_info:
                 devices = self.parent.gpu_info.get("devices", [])
                 if gpu_id < len(devices):
                     gpu_info = devices[gpu_id]
-                    gpu_name = gpu_info.get("name", "Unknown")
                     total_vram_gb = gpu_info.get("total_memory_bytes", 0) / (1024**3)
                     
                     info_label = ttk.Label(
                         gpu_frame,
-                        text=f"({gpu_name}, {total_vram_gb:.1f}GB)",
+                        text=f"({total_vram_gb:.1f}GB)",
                         foreground="gray",
                         font=("TkDefaultFont", 8)
                     )
-                    info_label.pack(side="left", padx=(10, 0))
+                    info_label.pack(side="left", padx=(5, 0))
         
         # Add preset buttons
         preset_frame = ttk.Frame(self.gpu_buffer_controls_frame)
