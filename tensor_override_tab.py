@@ -97,7 +97,7 @@ class TensorOverrideTab:
         self.enable_info_label.pack(anchor="w", pady=(5, 0))
         
         # GPU VRAM Buffer configuration section
-        self.buffer_frame = ttk.LabelFrame(main_container, text="GPU VRAM & KV Cache Configuration", padding=10)
+        self.buffer_frame = ttk.LabelFrame(main_container, text="GPU Memory Buffer & KV Cache Configuration", padding=10)
         self.buffer_frame.pack(fill="x", pady=(0, 10))
         
         # Buffer description
@@ -106,14 +106,11 @@ class TensorOverrideTab:
             text="Configure per-GPU VRAM buffer (in MB) to prevent out-of-memory errors.\nBuffers and KV cache are subtracted from available VRAM during tensor optimization.",
             foreground="gray"
         )
-        buffer_desc_label.pack(anchor="w", pady=(0, 10))
+        buffer_desc_label.pack(anchor="w", pady=(0, 2))
         
         # KV Cache configuration
-        kv_cache_frame = ttk.Frame(self.buffer_frame)
-        kv_cache_frame.pack(fill="x", pady=(0, 10))
-        
         self.kv_cache_checkbox = ttk.Checkbutton(
-            kv_cache_frame,
+            self.buffer_frame,
             text="Enable KV cache on GPU (recommended for best performance)",
             variable=self.kv_cache_on_gpu,
             command=self._on_kv_cache_setting_changed
@@ -121,8 +118,8 @@ class TensorOverrideTab:
         self.kv_cache_checkbox.pack(anchor="w")
         
         # KV cache size display
-        self.kv_cache_info_frame = ttk.Frame(kv_cache_frame)
-        self.kv_cache_info_frame.pack(fill="x", pady=(5, 0))
+        self.kv_cache_info_frame = ttk.Frame(self.buffer_frame)
+        self.kv_cache_info_frame.pack(fill="x", pady=(2, 0))
         
         self.kv_cache_size_label = ttk.Label(
             self.kv_cache_info_frame,
@@ -140,7 +137,7 @@ class TensorOverrideTab:
         )
         kv_cache_note_label.pack(anchor="w")
         
-        # GPU buffer controls container
+        # GPU buffer controls
         self.gpu_buffer_controls_frame = ttk.Frame(self.buffer_frame)
         self.gpu_buffer_controls_frame.pack(fill="x")
         
@@ -213,6 +210,94 @@ class TensorOverrideTab:
         )
         tensor_split_example.pack(side="left", padx=(5, 0))
         
+        # KV Cache Allocation Override section
+        kv_override_frame = ttk.LabelFrame(main_container, text="KV Cache Allocation Overrides", padding=10)
+        kv_override_frame.pack(fill="x", pady=(0, 10))
+        
+        # KV override description
+        kv_override_desc = ttk.Label(
+            kv_override_frame,
+            text="Override KV cache allocation parameters (-ngl, -ts, -sm). Enable overrides to customize defaults.",
+            foreground="gray"
+        )
+        kv_override_desc.pack(anchor="w", pady=(0, 10))
+        
+        # Initialize KV override variables
+        self.kv_override_ngl_enabled = tk.BooleanVar(value=False)
+        self.kv_override_ngl_value = tk.StringVar(value="")
+        self.kv_override_ts_enabled = tk.BooleanVar(value=False)  
+        self.kv_override_ts_value = tk.StringVar(value="")
+        self.kv_override_sm_enabled = tk.BooleanVar(value=False)
+        self.kv_override_sm_value = tk.StringVar(value="layer")
+        
+        # Create main row container for all three overrides
+        kv_override_row = ttk.Frame(kv_override_frame)
+        kv_override_row.pack(fill="x")
+        
+        # -ngl override (GPU layers)
+        ngl_frame = ttk.Frame(kv_override_row)
+        ngl_frame.pack(side="left", padx=(0, 20))
+        
+        self.ngl_override_checkbox = ttk.Checkbutton(
+            ngl_frame,
+            text="-ngl",
+            variable=self.kv_override_ngl_enabled,
+            command=self._on_kv_override_changed
+        )
+        self.ngl_override_checkbox.pack(side="top", anchor="w")
+        
+        self.ngl_override_entry = ttk.Entry(
+            ngl_frame,
+            textvariable=self.kv_override_ngl_value,
+            width=8,
+            state="disabled"
+        )
+        self.ngl_override_entry.pack(side="top", pady=(2, 0))
+        
+        
+        # -ts override (tensor split)  
+        ts_frame = ttk.Frame(kv_override_row)
+        ts_frame.pack(side="left", padx=(0, 20))
+        
+        self.ts_override_checkbox = ttk.Checkbutton(
+            ts_frame,
+            text="-ts",
+            variable=self.kv_override_ts_enabled,
+            command=self._on_kv_override_changed
+        )
+        self.ts_override_checkbox.pack(side="top", anchor="w")
+        
+        self.ts_override_entry = ttk.Entry(
+            ts_frame,
+            textvariable=self.kv_override_ts_value,
+            width=12,
+            state="disabled"
+        )
+        self.ts_override_entry.pack(side="top", pady=(2, 0))
+        
+        
+        # -sm override (split mode)
+        sm_frame = ttk.Frame(kv_override_row)
+        sm_frame.pack(side="left")
+        
+        self.sm_override_checkbox = ttk.Checkbutton(
+            sm_frame,
+            text="-sm",
+            variable=self.kv_override_sm_enabled,
+            command=self._on_kv_override_changed
+        )
+        self.sm_override_checkbox.pack(side="top", anchor="w")
+        
+        self.sm_override_combobox = ttk.Combobox(
+            sm_frame,
+            textvariable=self.kv_override_sm_value,
+            values=["layer", "none", "row"],
+            width=8,
+            state="disabled"
+        )
+        self.sm_override_combobox.pack(side="top", pady=(2, 0))
+        
+        
         # Analysis section (no expand to reduce blank space)
         analysis_frame = ttk.LabelFrame(main_container, text="Model Analysis", padding=8)
         analysis_frame.pack(fill="x", pady=(0, 5))
@@ -260,7 +345,7 @@ class TensorOverrideTab:
         
         # Combined parameters status and count
         params_frame = ttk.Frame(status_frame)
-        params_frame.pack(fill="x", pady=(5, 0))
+        params_frame.pack(fill="x", pady=(2, 0))
         
         ttk.Label(params_frame, text="Generated parameters:").pack(side="left")
         self.params_label = ttk.Label(params_frame, textvariable=self.tensor_params_count)
@@ -268,7 +353,7 @@ class TensorOverrideTab:
         
         # Progress section (minimal padding)
         progress_frame = ttk.Frame(analysis_frame)
-        progress_frame.pack(fill="x", pady=(3, 0))
+        progress_frame.pack(fill="x", pady=(0, 0))
         
         self.progress_label = ttk.Label(progress_frame, textvariable=self.analysis_progress, 
                                        foreground="blue")
@@ -281,7 +366,7 @@ class TensorOverrideTab:
         # Results text area with scrollbar (reduced height by 2 rows)
         self.results_text = scrolledtext.ScrolledText(
             results_frame,
-            height=6,
+            height=4,
             wrap=tk.WORD,
             state="disabled"
         )
@@ -315,6 +400,10 @@ class TensorOverrideTab:
         
         # Initialize safety margin label
         self._on_safety_margin_changed(str(self.safety_margin.get()))
+        
+        # Initialize KV override controls state
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            self._on_kv_override_changed()
     
     def _setup_gpu_buffer_controls(self):
         """Setup per-GPU VRAM buffer controls based on detected GPUs."""
@@ -381,38 +470,6 @@ class TensorOverrideTab:
                     )
                     info_label.pack(side="left", padx=(5, 0))
         
-        # Add preset buttons
-        preset_frame = ttk.Frame(self.gpu_buffer_controls_frame)
-        preset_frame.pack(fill="x", pady=(10, 0))
-        
-        ttk.Label(preset_frame, text="Presets:").pack(side="left")
-        
-        # Conservative preset (1GB per GPU)
-        conservative_btn = ttk.Button(
-            preset_frame,
-            text="Conservative (1GB)",
-            command=lambda: self._set_buffer_preset(1024),
-            width=15
-        )
-        conservative_btn.pack(side="left", padx=(5, 2))
-        
-        # Moderate preset (512MB per GPU)
-        moderate_btn = ttk.Button(
-            preset_frame,
-            text="Moderate (512MB)",
-            command=lambda: self._set_buffer_preset(512),
-            width=15
-        )
-        moderate_btn.pack(side="left", padx=(2, 2))
-        
-        # Aggressive preset (256MB per GPU)
-        aggressive_btn = ttk.Button(
-            preset_frame,
-            text="Aggressive (256MB)",
-            command=lambda: self._set_buffer_preset(256),
-            width=15
-        )
-        aggressive_btn.pack(side="left", padx=(2, 2))
     
     def _set_buffer_preset(self, buffer_mb):
         """Set all GPU buffers to the specified preset value."""
@@ -436,6 +493,93 @@ class TensorOverrideTab:
         else:
             self.custom_tensor_split_entry.config(state="disabled")
         self._update_ui_state()
+    
+    def _on_kv_override_changed(self):
+        """Handle KV override checkbox changes."""
+        # Update -ngl override controls
+        if self.kv_override_ngl_enabled.get():
+            self.ngl_override_entry.config(state="normal")
+            self._update_ngl_max_value()
+        else:
+            self.ngl_override_entry.config(state="disabled")
+            # Populate with analyzed value when disabled
+            self._populate_disabled_ngl_value()
+        
+        # Update -ts override controls
+        if self.kv_override_ts_enabled.get():
+            self.ts_override_entry.config(state="normal")
+            self._update_ts_default_value()
+        else:
+            self.ts_override_entry.config(state="disabled")
+            # Populate with recommended value when disabled
+            self._populate_disabled_ts_value()
+        
+        # Update -sm override controls
+        if self.kv_override_sm_enabled.get():
+            self.sm_override_combobox.config(state="readonly")
+        else:
+            self.sm_override_combobox.config(state="disabled")
+    
+    def _update_ngl_max_value(self):
+        """Update the -ngl max value and set default."""
+        max_layers = 0
+        if hasattr(self.parent, 'max_gpu_layers') and self.parent.max_gpu_layers:
+            max_layers = self.parent.max_gpu_layers.get()
+        
+        if max_layers > 0:
+            # Set default to max if empty
+            if not self.kv_override_ngl_value.get().strip():
+                self.kv_override_ngl_value.set(str(max_layers))
+    
+    def _update_ts_default_value(self):
+        """Update the -ts default value based on recommended split from advanced tab."""
+        gpu_count = self._detect_gpu_count()
+        if gpu_count > 1:
+            # Check if there's an existing tensor split from advanced tab
+            if hasattr(self.parent, 'tensor_split') and self.parent.tensor_split.get().strip():
+                existing_split = self.parent.tensor_split.get().strip()
+                if not self.kv_override_ts_value.get().strip():
+                    self.kv_override_ts_value.set(existing_split)
+            else:
+                # Use recommended equal split for multi-GPU
+                recommended_split = ",".join(["1"] * gpu_count)
+                if not self.kv_override_ts_value.get().strip():
+                    self.kv_override_ts_value.set(recommended_split)
+    
+    def _populate_disabled_ngl_value(self):
+        """Populate -ngl input with analyzed value when disabled."""
+        current_ngl = ""
+        if hasattr(self.parent, 'max_gpu_layers') and self.parent.max_gpu_layers:
+            max_layers = self.parent.max_gpu_layers.get()
+            if max_layers and max_layers > 0:
+                current_ngl = str(max_layers)
+        
+        # Temporarily enable to set value, then disable
+        self.ngl_override_entry.config(state="normal")
+        self.kv_override_ngl_value.set(current_ngl)
+        self.ngl_override_entry.config(state="disabled")
+    
+    def _populate_disabled_ts_value(self):
+        """Populate -ts input with recommended value when disabled."""
+        current_ts = ""
+        gpu_count = self._detect_gpu_count()
+        
+        # Check if there's a configured tensor split in advanced tab
+        if hasattr(self.parent, 'tensor_split') and self.parent.tensor_split:
+            ts_val = self.parent.tensor_split.get().strip()
+            if ts_val:
+                current_ts = ts_val
+            elif gpu_count > 1:
+                # Show recommended equal split for multi-GPU if no split configured
+                current_ts = ",".join(["1"] * gpu_count)
+        elif gpu_count > 1:
+            # Default recommended split for multi-GPU
+            current_ts = ",".join(["1"] * gpu_count)
+        
+        # Temporarily enable to set value, then disable
+        self.ts_override_entry.config(state="normal")
+        self.kv_override_ts_value.set(current_ts)
+        self.ts_override_entry.config(state="disabled")
     
     def _update_kv_cache_display(self):
         """Update the KV cache size display."""
@@ -496,6 +640,13 @@ class TensorOverrideTab:
         
         # Update KV cache display
         self._update_kv_cache_display()
+        
+        # Update KV override values if disabled (to show current analyzed/recommended values)
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            if not self.kv_override_ngl_enabled.get():
+                self._populate_disabled_ngl_value()
+            if not self.kv_override_ts_enabled.get():
+                self._populate_disabled_ts_value()
     
     def _update_gpu_controls_state(self):
         """Enable/disable GPU controls based on tensor override state."""
@@ -1100,10 +1251,89 @@ class TensorOverrideTab:
         
         return parameters
     
+    def get_kv_override_parameters(self):
+        """
+        Get KV cache override parameters for launch command.
+        
+        When tensor override is enabled, these parameters are passed by default with 
+        analyzed/recommended values, unless user has checked the override checkbox to customize.
+        
+        Returns:
+            list: List of KV override parameter strings for llama.cpp command
+        """
+        if not self.tensor_override_enabled.get():
+            return []
+        
+        parameters = []
+        
+        # Add -ngl parameter (default: max analyzed layers, or override if checkbox enabled)
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            if self.kv_override_ngl_enabled.get():
+                # User wants to override - use their custom value
+                ngl_value = self.kv_override_ngl_value.get().strip()
+                if ngl_value:
+                    parameters.extend(["-ngl", ngl_value])
+                    print(f"DEBUG: Adding KV override -ngl {ngl_value} (user override)", file=sys.stderr)
+            else:
+                # Use default analyzed max layers
+                if hasattr(self.parent, 'max_gpu_layers') and self.parent.max_gpu_layers:
+                    max_layers = self.parent.max_gpu_layers.get()
+                    if max_layers and max_layers > 0:
+                        parameters.extend(["-ngl", str(max_layers)])
+                        print(f"DEBUG: Adding KV override -ngl {max_layers} (analyzed default)", file=sys.stderr)
+        
+        # Add -ts parameter (default: recommended split, or override if checkbox enabled)
+        if hasattr(self, 'kv_override_ts_enabled'):
+            if self.kv_override_ts_enabled.get():
+                # User wants to override - use their custom value
+                ts_value = self.kv_override_ts_value.get().strip()
+                if ts_value:
+                    parameters.extend(["-ts", ts_value])
+                    print(f"DEBUG: Adding KV override -ts {ts_value} (user override)", file=sys.stderr)
+            else:
+                # Use default recommended split
+                gpu_count = self._detect_gpu_count()
+                if gpu_count > 1:
+                    # Check if there's a configured tensor split from advanced tab
+                    if hasattr(self.parent, 'tensor_split') and self.parent.tensor_split.get().strip():
+                        recommended_ts = self.parent.tensor_split.get().strip()
+                    else:
+                        # Default recommended equal split
+                        recommended_ts = ",".join(["1"] * gpu_count)
+                    
+                    parameters.extend(["-ts", recommended_ts])
+                    print(f"DEBUG: Adding KV override -ts {recommended_ts} (recommended default)", file=sys.stderr)
+        
+        # Add -sm parameter (default: layer, or override if checkbox enabled)
+        if hasattr(self, 'kv_override_sm_enabled'):
+            if self.kv_override_sm_enabled.get():
+                # User wants to override - use their custom value
+                sm_value = self.kv_override_sm_value.get().strip()
+                if sm_value:
+                    parameters.extend(["-sm", sm_value])
+                    print(f"DEBUG: Adding KV override -sm {sm_value} (user override)", file=sys.stderr)
+            else:
+                # Use default: layer
+                parameters.extend(["-sm", "layer"])
+                print(f"DEBUG: Adding KV override -sm layer (default)", file=sys.stderr)
+        
+        return parameters
+    
     def update_from_model_change(self):
         """Called when model selection changes in main launcher."""
         self._check_current_model()
         self._update_ui_state()
+        # Update KV override values
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            if self.kv_override_ngl_enabled.get():
+                self._update_ngl_max_value()
+            else:
+                self._populate_disabled_ngl_value()
+        if hasattr(self, 'kv_override_ts_enabled'):
+            if self.kv_override_ts_enabled.get():
+                self._update_ts_default_value()
+            else:
+                self._populate_disabled_ts_value()
     
     def update_from_config_change(self):
         """Called when configuration changes in main launcher."""
@@ -1172,6 +1402,18 @@ class TensorOverrideTab:
             "tensor_override_enable_custom_tensor_split": self.enable_custom_tensor_split.get(),
             "tensor_override_custom_tensor_split": self.custom_tensor_split.get()
         }
+        
+        # Add KV override settings if they exist
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            config.update({
+                "kv_override_ngl_enabled": self.kv_override_ngl_enabled.get(),
+                "kv_override_ngl_value": self.kv_override_ngl_value.get(),
+                "kv_override_ts_enabled": self.kv_override_ts_enabled.get(),
+                "kv_override_ts_value": self.kv_override_ts_value.get(),
+                "kv_override_sm_enabled": self.kv_override_sm_enabled.get(),
+                "kv_override_sm_value": self.kv_override_sm_value.get()
+            })
+        
         return config
     
     def load_tensor_override_config(self, config):
@@ -1194,6 +1436,21 @@ class TensorOverrideTab:
         if "tensor_override_custom_tensor_split" in config:
             self.custom_tensor_split.set(config["tensor_override_custom_tensor_split"])
         
+        # Load KV override settings if they exist
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            if "kv_override_ngl_enabled" in config:
+                self.kv_override_ngl_enabled.set(config["kv_override_ngl_enabled"])
+            if "kv_override_ngl_value" in config:
+                self.kv_override_ngl_value.set(config["kv_override_ngl_value"])
+            if "kv_override_ts_enabled" in config:
+                self.kv_override_ts_enabled.set(config["kv_override_ts_enabled"])
+            if "kv_override_ts_value" in config:
+                self.kv_override_ts_value.set(config["kv_override_ts_value"])
+            if "kv_override_sm_enabled" in config:
+                self.kv_override_sm_enabled.set(config["kv_override_sm_enabled"])
+            if "kv_override_sm_value" in config:
+                self.kv_override_sm_value.set(config["kv_override_sm_value"])
+        
         # Update UI state after loading config
         self._update_ui_state()
         self._update_gpu_controls_state()
@@ -1204,6 +1461,10 @@ class TensorOverrideTab:
         
         # Update custom tensor split entry state
         self._on_custom_tensor_split_changed()
+        
+        # Update KV override controls state if they exist
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            self._on_kv_override_changed()
     
     def _run_vram_optimization(self):
         """Run automated VRAM optimization using llama.cpp verbose analysis."""
