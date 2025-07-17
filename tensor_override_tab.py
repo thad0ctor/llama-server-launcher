@@ -29,6 +29,8 @@ class TensorOverrideTab:
         
         # Tensor override variables
         self.tensor_override_enabled = tk.BooleanVar(value=False)
+        # Add trace to detect checkbox changes
+        self.tensor_override_enabled.trace_add("write", self._on_tensor_override_enabled_changed)
         self.tensor_analysis_status = tk.StringVar(value="Ready to analyze")
         self.tensor_params_count = tk.StringVar(value="0 parameters")
         self.analysis_progress = tk.StringVar(value="")
@@ -288,10 +290,35 @@ class TensorOverrideTab:
             self.kv_override_sm_enabled = tk.BooleanVar(value=False)
             self.kv_override_sm_value = tk.StringVar(value="layer")
             self.kv_override_sm_value.trace_add("write", self._on_sm_value_changed)
+            # Add the new disable GPU parameters checkbox
+            self.disable_gpu_params = tk.BooleanVar(value=False)
         else:
             print(f"DEBUG: KV override variables already exist, preserving values", file=sys.stderr)
             print(f"DEBUG: Preserving NGL checkbox state: {self.kv_override_ngl_enabled.get()}", file=sys.stderr)
             print(f"DEBUG: Preserving NGL value: '{self.kv_override_ngl_value.get()}'", file=sys.stderr)
+            # Add the new disable GPU parameters checkbox if it doesn't exist
+            if not hasattr(self, 'disable_gpu_params'):
+                self.disable_gpu_params = tk.BooleanVar(value=False)
+        
+        # Disable GPU Parameters checkbox - prominently placed at the top
+        disable_gpu_frame = ttk.Frame(kv_override_frame)
+        disable_gpu_frame.pack(fill="x", pady=(0, 15))
+        
+        self.disable_gpu_checkbox = ttk.Checkbutton(
+            disable_gpu_frame,
+            text="Disable all GPU-related parameters (-ngl, -n-gpu-layers, -tensor-split, -ts, -sm)",
+            variable=self.disable_gpu_params,
+            command=self._on_disable_gpu_changed
+        )
+        self.disable_gpu_checkbox.pack(anchor="w")
+        
+        disable_gpu_info = ttk.Label(
+            disable_gpu_frame,
+            text="When checked, no GPU allocation parameters will be passed to the launcher (forces CPU-only mode)",
+            foreground="orange",
+            font=("TkDefaultFont", 8)
+        )
+        disable_gpu_info.pack(anchor="w", padx=(25, 0), pady=(2, 0))
         
         # Create main row container for all three overrides
         kv_override_row = ttk.Frame(kv_override_frame)
@@ -468,6 +495,40 @@ class TensorOverrideTab:
         )
         self.clear_results_button.pack(side="left")
     
+    def _on_tensor_override_enabled_changed(self, *args):
+        """Handle tensor override checkbox state changes via variable trace."""
+        enabled = self.tensor_override_enabled.get()
+        print(f"DEBUG: Tensor override checkbox changed to: {enabled}", file=sys.stderr)
+        
+        # CRITICAL FIX: When tensor override is disabled, reset KV override checkboxes
+        # This prevents KV overrides from blocking normal GPU parameters
+        if not enabled:
+            print(f"DEBUG: Tensor override disabled - resetting KV override checkboxes to prevent conflicts", file=sys.stderr)
+            if hasattr(self, 'kv_override_ngl_enabled'):
+                old_ngl_state = self.kv_override_ngl_enabled.get()
+                self.kv_override_ngl_enabled.set(False)
+                print(f"DEBUG: Reset KV NGL override from {old_ngl_state} to False", file=sys.stderr)
+            
+            if hasattr(self, 'kv_override_ts_enabled'):
+                old_ts_state = self.kv_override_ts_enabled.get()
+                self.kv_override_ts_enabled.set(False)
+                print(f"DEBUG: Reset KV TS override from {old_ts_state} to False", file=sys.stderr)
+            
+            if hasattr(self, 'kv_override_sm_enabled'):
+                old_sm_state = self.kv_override_sm_enabled.get()
+                self.kv_override_sm_enabled.set(False)
+                print(f"DEBUG: Reset KV SM override from {old_sm_state} to False", file=sys.stderr)
+            
+            # Also update the KV override controls state
+            if hasattr(self, '_on_kv_override_changed'):
+                self._on_kv_override_changed()
+        
+        # Force update of GPU controls state immediately
+        self._update_gpu_controls_state()
+        
+        # Also trigger the regular enable changed handler
+        self._on_enable_changed()
+    
     def _on_enable_changed_with_notebook(self):
         """Handle tensor override enable/disable with notebook management."""
         # Call the original enable changed handler
@@ -553,7 +614,7 @@ class TensorOverrideTab:
             self.root.after(0, lambda: self.analysis_progress.set("Extracting tensor information from model..."))
             
             # Analyze tensors without generating allocation parameters yet
-            tensor_info, kv_cache_info = analyzer.analyze_model_tensors(self.current_model_path, timeout=300)
+            tensor_info, kv_cache_info, compute_buffer_info = analyzer.analyze_model_tensors(self.current_model_path, timeout=300)
             
             if tensor_info:
                 # Store tensor info for mapping phase
@@ -698,6 +759,120 @@ class TensorOverrideTab:
         self.map_tensors_button = ttk.Button(button_frame, text="Generate Tensor Mapping", 
                                            command=self._map_tensors_phase2)
         self.map_tensors_button.pack(side="right")
+        
+        # Add debug test button for testing checkbox functionality
+        self.test_selections_button = ttk.Button(button_frame, text="Test Selections", 
+                                                command=self._test_checkbox_selections)
+        self.test_selections_button.pack(side="right", padx=(0, 10))
+        
+        # Add launch command test button
+        self.test_launch_cmd_button = ttk.Button(button_frame, text="Test Launch Command", 
+                                               command=self._test_launch_command)
+        self.test_launch_cmd_button.pack(side="right", padx=(0, 10))
+    
+    def _test_checkbox_selections(self):
+        """Test function to validate checkbox selections are working correctly."""
+        print("=" * 80, file=sys.stderr)
+        print("CHECKBOX SELECTION TEST", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        
+        # Test 1: Count total checkboxes
+        total_checkboxes = len(self.tensor_mapping_vars)
+        print(f"Total checkboxes created: {total_checkboxes}", file=sys.stderr)
+        
+        # Test 2: Count checked checkboxes
+        checked_count = sum(1 for var in self.tensor_mapping_vars.values() if var.get())
+        print(f"Currently checked: {checked_count}", file=sys.stderr)
+        
+        # Test 3: Show state of each checkbox
+        print("\nDetailed checkbox states:", file=sys.stderr)
+        for pattern, var in sorted(self.tensor_mapping_vars.items()):
+            state = "CHECKED" if var.get() else "unchecked"
+            if pattern in self.analyzed_tensors:
+                size_mb = self.analyzed_tensors[pattern].size_mb
+                print(f"  {state:10s} - {pattern} ({size_mb:.1f} MB)", file=sys.stderr)
+            else:
+                print(f"  {state:10s} - {pattern} (NOT IN ANALYZED_TENSORS)", file=sys.stderr)
+        
+        # Test 4: Test the selection retrieval method
+        selected_patterns = [pattern for pattern, var in self.tensor_mapping_vars.items() if var.get()]
+        print(f"\nSelected patterns via list comprehension: {len(selected_patterns)}", file=sys.stderr)
+        
+        # Test 5: Show what would be passed to tensor allocation
+        if selected_patterns:
+            total_size = sum(
+                self.analyzed_tensors[p].size_mb for p in selected_patterns 
+                if p in self.analyzed_tensors
+            )
+            print(f"Total size of selected tensors: {total_size:.1f} MB ({total_size/1024:.2f} GB)", file=sys.stderr)
+        else:
+            print("No patterns selected - this would trigger the warning dialog.", file=sys.stderr)
+        
+        print("=" * 80, file=sys.stderr)
+    
+    def _test_launch_command(self):
+        """Test function to validate launch command generation with current tensor override state."""
+        print("=" * 80, file=sys.stderr)
+        print("LAUNCH COMMAND TEST", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        
+        # Test current tensor override state
+        tensor_override_enabled = self.tensor_override_enabled.get()
+        print(f"Tensor override enabled: {tensor_override_enabled}", file=sys.stderr)
+        
+        # Test KV override states (these might block normal GPU parameters)
+        if hasattr(self, 'kv_override_ngl_enabled'):
+            kv_ngl_enabled = self.kv_override_ngl_enabled.get()
+            kv_ngl_value = self.kv_override_ngl_value.get().strip()
+            print(f"KV NGL override enabled: {kv_ngl_enabled}, value: '{kv_ngl_value}'", file=sys.stderr)
+        
+        if hasattr(self, 'kv_override_ts_enabled'):
+            kv_ts_enabled = self.kv_override_ts_enabled.get()
+            kv_ts_value = self.kv_override_ts_value.get().strip()
+            print(f"KV TS override enabled: {kv_ts_enabled}, value: '{kv_ts_value}'", file=sys.stderr)
+        
+        if hasattr(self, 'disable_gpu_params'):
+            disable_gpu = self.disable_gpu_params.get()
+            print(f"Disable GPU params: {disable_gpu}", file=sys.stderr)
+        
+        # Test main tab GPU parameters
+        if hasattr(self.parent, 'n_gpu_layers'):
+            n_gpu_layers = self.parent.n_gpu_layers.get().strip()
+            print(f"Main tab N-GPU-Layers: '{n_gpu_layers}'", file=sys.stderr)
+        
+        if hasattr(self.parent, 'tensor_split'):
+            tensor_split = self.parent.tensor_split.get().strip()
+            print(f"Main tab Tensor Split: '{tensor_split}'", file=sys.stderr)
+        
+        # Determine what should happen based on current state
+        print("\nPredicted behavior:", file=sys.stderr)
+        
+        if hasattr(self, 'disable_gpu_params') and self.disable_gpu_params.get():
+            print("  - All GPU parameters should be SKIPPED (disable GPU params checked)", file=sys.stderr)
+        elif tensor_override_enabled:
+            print("  - Main tab GPU parameters should be SKIPPED (tensor override active)", file=sys.stderr)
+            print("  - Tensor override parameters should be ADDED", file=sys.stderr)
+            print("  - KV override parameters should be ADDED", file=sys.stderr)
+        else:
+            print("  - Main tab GPU parameters should be INCLUDED if:", file=sys.stderr)
+            print("    * n-gpu-layers is not '0' AND KV NGL override is False", file=sys.stderr)
+            print("    * tensor-split is not empty AND KV TS override is False", file=sys.stderr)
+            
+            # Check each condition
+            kv_ngl_blocks = hasattr(self, 'kv_override_ngl_enabled') and self.kv_override_ngl_enabled.get()
+            kv_ts_blocks = hasattr(self, 'kv_override_ts_enabled') and self.kv_override_ts_enabled.get()
+            
+            if kv_ngl_blocks:
+                print("    ❌ N-GPU-Layers will be BLOCKED by KV NGL override", file=sys.stderr)
+            else:
+                print("    ✅ N-GPU-Layers should be INCLUDED", file=sys.stderr)
+            
+            if kv_ts_blocks:
+                print("    ❌ Tensor Split will be BLOCKED by KV TS override", file=sys.stderr)
+            else:
+                print("    ✅ Tensor Split should be INCLUDED", file=sys.stderr)
+        
+        print("=" * 80, file=sys.stderr)
     
     def _update_results_text(self, text):
         """Update the results text area."""
@@ -788,6 +963,33 @@ class TensorOverrideTab:
         """Phase 2: Generate tensor mapping parameters based on selected tensors."""
         # Get selected tensors
         selected_patterns = [pattern for pattern, var in self.tensor_mapping_vars.items() if var.get()]
+        
+        # ===== DEBUG: Comprehensive tensor selection validation =====
+        print("=" * 80, file=sys.stderr)
+        print("TENSOR MAPPING PHASE 2 - SELECTION VALIDATION", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"Total tensor mapping variables: {len(self.tensor_mapping_vars)}", file=sys.stderr)
+        print(f"Selected patterns count: {len(selected_patterns)}", file=sys.stderr)
+        
+        # Show all checkboxes and their states
+        for pattern, var in self.tensor_mapping_vars.items():
+            checked = var.get()
+            size_mb = self.analyzed_tensors[pattern].size_mb if pattern in self.analyzed_tensors else 0
+            print(f"  {'✓' if checked else '✗'} {pattern} ({size_mb:.1f} MB)", file=sys.stderr)
+        
+        print(f"\nSelected tensors for GPU mapping:", file=sys.stderr)
+        total_selected_size = 0
+        for pattern in selected_patterns:
+            if pattern in self.analyzed_tensors:
+                size_mb = self.analyzed_tensors[pattern].size_mb
+                total_selected_size += size_mb
+                print(f"  • {pattern} ({size_mb:.1f} MB)", file=sys.stderr)
+            else:
+                print(f"  • {pattern} (SIZE UNKNOWN - NOT IN ANALYZED TENSORS!)", file=sys.stderr)
+        
+        print(f"\nTotal selected tensor size: {total_selected_size:.1f} MB ({total_selected_size/1024:.2f} GB)", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        # ===== END DEBUG =====
         
         if not selected_patterns:
             messagebox.showwarning("Warning", "No tensors selected for GPU mapping. Please select at least one tensor.")
@@ -953,6 +1155,25 @@ class TensorOverrideTab:
         """Generate prioritized tensor allocation considering VRAM constraints."""
         optimized_params = []
         
+        # ===== DEBUG: Show input parameters =====
+        print("=" * 80, file=sys.stderr)
+        print("GENERATE PRIORITIZED TENSOR ALLOCATION", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"Input selected_patterns: {len(selected_patterns)} tensors", file=sys.stderr)
+        print(f"GPU count: {gpu_count}", file=sys.stderr)
+        print(f"Available VRAM per GPU: {available_vram_per_gpu:.2f} GB", file=sys.stderr)
+        print(f"Current NGL: {current_ngl}", file=sys.stderr)
+        print(f"Safety margin: {self.safety_margin.get():.0%}", file=sys.stderr)
+        
+        for i, pattern in enumerate(selected_patterns):
+            if pattern in self.analyzed_tensors:
+                size_mb = self.analyzed_tensors[pattern].size_mb
+                print(f"  {i+1:2d}. {pattern} ({size_mb:.1f} MB)", file=sys.stderr)
+            else:
+                print(f"  {i+1:2d}. {pattern} (NOT FOUND IN ANALYZED_TENSORS!)", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        # ===== END DEBUG =====
+        
         # Filter out very small tensors (< 10MB) that aren't worth GPU allocation overhead
         MIN_TENSOR_SIZE_MB = 10
         filtered_patterns = [
@@ -961,6 +1182,7 @@ class TensorOverrideTab:
         ]
         
         print(f"DEBUG: Filtered {len(selected_patterns) - len(filtered_patterns)} small tensors (< {MIN_TENSOR_SIZE_MB}MB)", file=sys.stderr)
+        print(f"DEBUG: Remaining patterns for allocation: {len(filtered_patterns)}", file=sys.stderr)
         
         # Sort selected tensors by priority (critical first)
         prioritized_patterns = self._sort_tensors_by_priority(filtered_patterns)
@@ -1046,6 +1268,16 @@ class TensorOverrideTab:
         for gpu_id in range(gpu_count):
             utilization = (gpu_allocated[gpu_id] / available_vram_per_gpu) * 100 if available_vram_per_gpu > 0 else 0
             print(f"DEBUG: GPU {gpu_id} allocated: {gpu_allocated[gpu_id]:.2f}GB / {available_vram_per_gpu:.2f}GB ({utilization:.1f}%)", file=sys.stderr)
+        
+        # ===== DEBUG: Show final results =====
+        print("=" * 80, file=sys.stderr)
+        print("FINAL TENSOR ALLOCATION RESULTS", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(f"Generated {len(optimized_params)} tensor override parameters:", file=sys.stderr)
+        for i, param in enumerate(optimized_params):
+            print(f"  {i+1:2d}. {param}", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        # ===== END DEBUG =====
         
         return optimized_params
     
@@ -1239,6 +1471,34 @@ class TensorOverrideTab:
         else:
             self.sm_override_combobox.config(state="disabled")
     
+    def _on_disable_gpu_changed(self):
+        """Handle disable GPU parameters checkbox change."""
+        print(f"DEBUG: _on_disable_gpu_changed() called", file=sys.stderr)
+        disable_gpu = self.disable_gpu_params.get()
+        print(f"DEBUG: Disable GPU parameters: {disable_gpu}", file=sys.stderr)
+        
+        # When disable GPU is checked, disable all GPU override controls
+        state = "disabled" if disable_gpu else "normal"
+        
+        # Disable individual override checkboxes
+        self.ngl_override_checkbox.config(state=state)
+        self.ts_override_checkbox.config(state=state)
+        self.sm_override_checkbox.config(state=state)
+        
+        # If disabling GPU, also disable all the entry controls and reset checkboxes
+        if disable_gpu:
+            self.ngl_override_entry.config(state="disabled")
+            self.ts_override_entry.config(state="disabled")
+            self.sm_override_combobox.config(state="disabled")
+            
+            # Reset all checkboxes to unchecked when disabling GPU
+            self.kv_override_ngl_enabled.set(False)
+            self.kv_override_ts_enabled.set(False)
+            self.kv_override_sm_enabled.set(False)
+        else:
+            # Re-enable controls based on their individual checkbox states
+            self._on_kv_override_changed()
+    
     def _update_ngl_max_value(self):
         """Update the -ngl max value and set default."""
         print(f"DEBUG: _update_ngl_max_value() called", file=sys.stderr)
@@ -1332,8 +1592,13 @@ class TensorOverrideTab:
         self.kv_override_ts_enabled.set(False)
         self.kv_override_sm_enabled.set(False)
         
+        # Reset the disable GPU parameters checkbox
+        if hasattr(self, 'disable_gpu_params'):
+            self.disable_gpu_params.set(False)
+        
         # Update UI states
         self._on_kv_override_changed()
+        self._on_disable_gpu_changed()
         
         # Force refresh with defaults
         self._force_refresh_disabled_values()
@@ -1440,6 +1705,8 @@ class TensorOverrideTab:
         """Enable/disable GPU controls based on tensor override state."""
         enabled = self.tensor_override_enabled.get()
         
+        print(f"DEBUG: _update_gpu_controls_state() called - tensor_override_enabled: {enabled}", file=sys.stderr)
+        
         # When tensor override is enabled, disable conflicting GPU controls
         # When disabled, re-enable the controls
         control_state = tk.DISABLED if enabled else tk.NORMAL
@@ -1448,6 +1715,7 @@ class TensorOverrideTab:
             # Disable/enable n-gpu-layers entry field
             if hasattr(self.parent, 'n_gpu_layers_entry') and self.parent.n_gpu_layers_entry.winfo_exists():
                 self.parent.n_gpu_layers_entry.config(state=control_state)
+                print(f"DEBUG: Set n_gpu_layers_entry state to: {control_state}", file=sys.stderr)
             
             # Disable/enable GPU layers slider (only if it's not already disabled for other reasons)
             if hasattr(self.parent, 'gpu_layers_slider') and self.parent.gpu_layers_slider.winfo_exists():
@@ -1456,14 +1724,24 @@ class TensorOverrideTab:
                 if enabled:
                     # Tensor override enabled - always disable
                     self.parent.gpu_layers_slider.config(state=tk.DISABLED)
+                    print(f"DEBUG: Disabled gpu_layers_slider (tensor override enabled)", file=sys.stderr)
                 elif max_layers and max_layers.get() > 0:
                     # Tensor override disabled and we have layers - enable
                     self.parent.gpu_layers_slider.config(state=tk.NORMAL)
-                # If max_layers <= 0, leave disabled (normal launcher behavior)
+                    print(f"DEBUG: Enabled gpu_layers_slider (tensor override disabled, max_layers: {max_layers.get()})", file=sys.stderr)
+                else:
+                    # No max layers set - keep disabled (normal launcher behavior)
+                    print(f"DEBUG: Keeping gpu_layers_slider disabled (no max layers)", file=sys.stderr)
             
             # Disable/enable tensor-split entry field
             if hasattr(self.parent, 'tensor_split_entry') and self.parent.tensor_split_entry.winfo_exists():
                 self.parent.tensor_split_entry.config(state=control_state)
+                print(f"DEBUG: Set tensor_split_entry state to: {control_state}", file=sys.stderr)
+            
+            # IMPORTANT: Update the parent's launch manager to reflect the state change
+            if hasattr(self.parent, 'launch_manager'):
+                # Force the launch manager to rebuild command with current state
+                print(f"DEBUG: Notifying launch manager of tensor override state change", file=sys.stderr)
             
             # Show visual feedback about why controls are disabled
             if enabled:
@@ -1528,10 +1806,12 @@ class TensorOverrideTab:
             # Remove GPU layers info label
             if hasattr(self, 'gpu_layers_info_label') and self.gpu_layers_info_label.winfo_exists():
                 self.gpu_layers_info_label.destroy()
+                delattr(self, 'gpu_layers_info_label')
             
-            # Remove tensor split info label
+            # Remove tensor split info label  
             if hasattr(self, 'tensor_split_info_label') and self.tensor_split_info_label.winfo_exists():
                 self.tensor_split_info_label.destroy()
+                delattr(self, 'tensor_split_info_label')
                 
         except Exception as e:
             print(f"WARNING: Error removing GPU control info labels: {e}", file=sys.stderr)
@@ -2042,6 +2322,12 @@ class TensorOverrideTab:
             list: List of KV override parameter strings for llama.cpp command
         """
         print(f"DEBUG: get_kv_override_parameters() called", file=sys.stderr)
+        
+        # Check if all GPU parameters are disabled
+        if hasattr(self, 'disable_gpu_params') and self.disable_gpu_params.get():
+            print(f"DEBUG: All GPU parameters disabled, returning empty KV override parameters", file=sys.stderr)
+            return []
+        
         tensor_override_enabled = self.tensor_override_enabled.get()
         print(f"DEBUG: tensor_override_enabled = {tensor_override_enabled}", file=sys.stderr)
         
@@ -2223,6 +2509,10 @@ class TensorOverrideTab:
                 "kv_override_sm_value": self.kv_override_sm_value.get()
             })
         
+        # Add disable GPU parameters setting if it exists
+        if hasattr(self, 'disable_gpu_params'):
+            config["disable_gpu_params"] = self.disable_gpu_params.get()
+        
         return config
     
     def load_tensor_override_config(self, config):
@@ -2260,6 +2550,10 @@ class TensorOverrideTab:
             if "kv_override_sm_value" in config:
                 self.kv_override_sm_value.set(config["kv_override_sm_value"])
         
+        # Load disable GPU parameters setting if it exists
+        if hasattr(self, 'disable_gpu_params') and "disable_gpu_params" in config:
+            self.disable_gpu_params.set(config["disable_gpu_params"])
+        
         # Update UI state after loading config
         self._update_ui_state()
         self._update_gpu_controls_state()
@@ -2274,6 +2568,10 @@ class TensorOverrideTab:
         # Update KV override controls state if they exist
         if hasattr(self, 'kv_override_ngl_enabled'):
             self._on_kv_override_changed()
+        
+        # Update disable GPU controls state if it exists
+        if hasattr(self, 'disable_gpu_params'):
+            self._on_disable_gpu_changed()
     
     def _run_vram_optimization(self):
         """Run automated VRAM optimization using llama.cpp verbose analysis."""

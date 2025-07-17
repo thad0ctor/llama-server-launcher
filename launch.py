@@ -166,18 +166,23 @@ class LaunchManager:
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
 
-        # --- Handle GPU arguments: Skip if tensor override is active or KV overrides are enabled ---
+        # --- Handle GPU arguments: Skip if tensor override is active or KV overrides are enabled or all GPU params disabled ---
         # Check if tensor override is enabled and has parameters
         tensor_override_active = False
         kv_ngl_override_active = False
         kv_ts_override_active = False
         kv_sm_override_active = False
+        disable_gpu_params = False
         
         if hasattr(self.launcher, 'tensor_override_tab'):
             try:
                 tensor_override_enabled = self.launcher.tensor_override_tab.tensor_override_enabled.get()
                 tensor_params = self.launcher.tensor_override_tab.get_tensor_override_parameters()
                 tensor_override_active = tensor_override_enabled
+                
+                # Check if all GPU parameters are disabled
+                if hasattr(self.launcher.tensor_override_tab, 'disable_gpu_params'):
+                    disable_gpu_params = self.launcher.tensor_override_tab.disable_gpu_params.get()
                 
                 # Check if KV overrides are enabled (these take precedence over Advanced tab parameters)
                 if hasattr(self.launcher.tensor_override_tab, 'kv_override_ngl_enabled'):
@@ -195,10 +200,12 @@ class LaunchManager:
         n_gpu_layers_val = self.launcher.n_gpu_layers.get().strip()
         main_gpu_val = self.launcher.main_gpu.get().strip()
         
-        if tensor_override_active:
+        if disable_gpu_params:
+            print("DEBUG: Skipping all GPU parameters (disable GPU params is checked)", file=sys.stderr)
+        elif tensor_override_active:
             print("DEBUG: Skipping --tensor-split, --n-gpu-layers, and --main-gpu (tensor override is active)", file=sys.stderr)
         else:
-            # Original GPU argument handling when tensor override is not active
+            # Original GPU argument handling when tensor override is not active and GPU params not disabled
             # Add --tensor-split if the value is non-empty AND KV tensor split override is not active
             if not kv_ts_override_active:
                 self.add_arg(cmd, "--tensor-split", tensor_split_val, "") # Add if non-empty string is provided by user
