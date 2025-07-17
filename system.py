@@ -248,18 +248,36 @@ def get_gpu_info_static():
 
         for i in range(device_count):
             props = torch.cuda.get_device_properties(i)
-            # Getting free memory can be slow/problematic in some envs, skip for basic info
-            # free_mem, total_mem = torch.cuda.mem_get_info(i)
-            gpu_info["devices"].append({
-                "id": i,
-                "name": props.name,
-                "total_memory_bytes": props.total_memory,
-                "total_memory_gb": round(props.total_memory / (1024**3), 2),
-                # "free_memory_bytes": free_mem,
-                # "free_memory_gb": round(free_mem / (1024**3), 2),
-                "compute_capability": f"{props.major}.{props.minor}",
-                "multi_processor_count": props.multi_processor_count
-            })
+            # Get actual available memory - critical for tensor allocation
+            try:
+                free_mem, total_mem = torch.cuda.mem_get_info(i)
+                gpu_info["devices"].append({
+                    "id": i,
+                    "name": props.name,
+                    "total_memory_bytes": props.total_memory,
+                    "total_memory_gb": round(props.total_memory / (1024**3), 2),
+                    "free_memory_bytes": free_mem,
+                    "free_memory_gb": round(free_mem / (1024**3), 2),
+                    "available_memory_bytes": free_mem,  # Use free memory for allocation
+                    "available_memory_gb": round(free_mem / (1024**3), 2),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "multi_processor_count": props.multi_processor_count
+                })
+            except Exception as e:
+                # Fallback to total memory if free memory query fails
+                print(f"Warning: Could not get free memory for GPU {i}, using total memory: {e}", file=sys.stderr)
+                gpu_info["devices"].append({
+                    "id": i,
+                    "name": props.name,
+                    "total_memory_bytes": props.total_memory,
+                    "total_memory_gb": round(props.total_memory / (1024**3), 2),
+                    "free_memory_bytes": props.total_memory,  # Fallback to total
+                    "free_memory_gb": round(props.total_memory / (1024**3), 2),
+                    "available_memory_bytes": props.total_memory,  # Fallback to total
+                    "available_memory_gb": round(props.total_memory / (1024**3), 2),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "multi_processor_count": props.multi_processor_count
+                })
         return gpu_info
     except Exception as e:
         # Catch potential torch errors during device query

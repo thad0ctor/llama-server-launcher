@@ -6,3 +6,5 @@ llama.log
 llama.log
 /tensor_overrides
 *.txt
+/tensor_overrides
+/tensor_overrides

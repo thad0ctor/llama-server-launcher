@@ -96,7 +96,7 @@ class LlamaVerboseTensorAnalyzer:
         if self.verbose:
             print(f"DEBUG: {message}", file=sys.stderr)
     
-    def analyze_model_tensors(self, model_path: str, timeout: int = 300, gpu_count: int = 4) -> Dict[str, TensorInfo]:
+    def analyze_model_tensors(self, model_path: str, timeout: int = 300, gpu_count: int = 4) -> Tuple[Dict[str, TensorInfo], Dict[str, any], Dict[str, any]]:
         """
         Analyze model tensors using llama.cpp --verbose mode.
         
@@ -106,7 +106,7 @@ class LlamaVerboseTensorAnalyzer:
             gpu_count: Number of GPUs to use for tensor-split analysis
             
         Returns:
-            Dictionary mapping tensor names to TensorInfo objects
+            Tuple of (tensors_dict, kv_cache_info_dict, compute_buffer_info_dict)
             
         Raises:
             FileNotFoundError: If model file doesn't exist
@@ -236,6 +236,9 @@ class LlamaVerboseTensorAnalyzer:
                 # Parse KV cache information from the output
                 kv_cache_info = self._parse_kv_cache_info(output_lines)
                 
+                # Parse compute buffer information
+                compute_buffer_info = self._parse_compute_buffer_info(output_lines)
+                
                 if not tensors:
                     # If no tensors found, this might be an error
                     output_text = '\n'.join(output_lines[-20:])  # Show last 20 lines for debugging
@@ -244,7 +247,10 @@ class LlamaVerboseTensorAnalyzer:
                 self._debug_print(f"Successfully extracted {len(tensors)} tensors (return code: {return_code})")
                 if kv_cache_info:
                     self._debug_print(f"KV cache info: {kv_cache_info.get('total_size_mb', 'unknown')} MiB")
-                return tensors, kv_cache_info
+                if compute_buffer_info:
+                    self._debug_print(f"Compute buffer info: {compute_buffer_info.get('total_size_mb', 'unknown')} MiB")
+                    
+                return tensors, kv_cache_info, compute_buffer_info
                 
             except subprocess.TimeoutExpired:
                 process.kill()
@@ -337,6 +343,26 @@ class LlamaVerboseTensorAnalyzer:
                 self._debug_print(f"Found KV buffer: {device} = {size_mb} MiB")
         
         return kv_cache_info
+
+    def _parse_compute_buffer_info(self, output_lines: List[str]) -> Dict[str, any]:
+        """Parses compute buffer allocation from llama.cpp verbose output."""
+        compute_info = {'total_size_mb': 0, 'buffer_count': 0}
+        
+        # Pattern for compute buffer size
+        # Example: "ggml_backend_cuda_buffer_type_alloc_buffer: compute buffer size =   384.00 MiB"
+        compute_pattern = re.compile(
+            r'compute buffer size\s+=\s+([0-9\.]+)\s+MiB'
+        )
+        
+        for line in output_lines:
+            match = compute_pattern.search(line)
+            if match:
+                size_mb = float(match.group(1))
+                compute_info['total_size_mb'] += size_mb
+                compute_info['buffer_count'] += 1
+                self._debug_print(f"Found compute buffer: {size_mb:.2f} MiB")
+        
+        return compute_info
     
     def categorize_tensors(self, tensors: Dict[str, TensorInfo]) -> Dict[str, List[TensorInfo]]:
         """
@@ -407,15 +433,29 @@ class LlamaVerboseTensorAnalyzer:
         vram_limit_per_gpu = vram_per_gpu_bytes * safety_margin
         
         def find_best_gpu(tensor_size_bytes: int) -> int:
-            """Find GPU with most available space that can fit this tensor."""
+            """Find GPU with best balance of available space and current usage that can fit this tensor."""
             best_gpu = -1
-            max_available = 0
+            best_score = -1
             
             for i in range(gpu_count):
                 available = vram_limit_per_gpu - gpu_usage_bytes[i]
-                if available >= tensor_size_bytes and available > max_available:
-                    max_available = available
-                    best_gpu = i
+                if available >= tensor_size_bytes:
+                    # Calculate a score that balances available space and current usage
+                    # Lower usage percentage gets higher score (better balance)
+                    usage_ratio = gpu_usage_bytes[i] / vram_limit_per_gpu if vram_limit_per_gpu > 0 else 1.0
+                    available_ratio = available / vram_limit_per_gpu if vram_limit_per_gpu > 0 else 0.0
+                    
+                    # Score favors GPUs with lower usage and sufficient available space
+                    # Weight available space more heavily for very large tensors
+                    tensor_size_ratio = tensor_size_bytes / vram_limit_per_gpu if vram_limit_per_gpu > 0 else 1.0
+                    if tensor_size_ratio > 0.1:  # Large tensor (>10% of GPU memory)
+                        score = available_ratio * 0.7 + (1.0 - usage_ratio) * 0.3
+                    else:  # Small tensor
+                        score = available_ratio * 0.4 + (1.0 - usage_ratio) * 0.6
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_gpu = i
             
             return best_gpu
         
@@ -433,19 +473,26 @@ class LlamaVerboseTensorAnalyzer:
                 return f"-ot {tensor_info.name}=CPU"
         
         # PRIORITY 1: Critical large tensors (embedding, output) - always try GPU
-        for tensor_info in categories['embedding'] + categories['output']:
+        # Sort by size (largest first) for better load balancing
+        critical_tensors = sorted(categories['embedding'] + categories['output'], 
+                                key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in critical_tensors:
             param = allocate_tensor(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Critical tensor: {param}")
         
         # PRIORITY 2: Attention tensors (performance critical)
-        for tensor_info in categories['attention']:
+        # Sort by size (largest first) for better load balancing
+        attention_tensors = sorted(categories['attention'], key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in attention_tensors:
             param = allocate_tensor(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Attention tensor: {param}")
         
         # PRIORITY 3: Expert FFN tensors (fill remaining VRAM)
-        for tensor_info in categories['expert_ffn']:
+        # Sort by size (largest first) for better load balancing
+        expert_tensors = sorted(categories['expert_ffn'], key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in expert_tensors:
             param = allocate_tensor(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Expert tensor: {param}")
@@ -457,7 +504,9 @@ class LlamaVerboseTensorAnalyzer:
             self._debug_print(f"Norm tensor: {param}")
         
         # PRIORITY 5: Other tensors
-        for tensor_info in categories['other']:
+        # Sort by size (largest first) for better load balancing
+        other_tensors = sorted(categories['other'], key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in other_tensors:
             param = allocate_tensor(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Other tensor: {param}")
@@ -501,20 +550,57 @@ class LlamaVerboseTensorAnalyzer:
             limit_bytes = int(available_gb * 1024 * 1024 * 1024 * safety_margin)
             gpu_limits_bytes.append(limit_bytes)
             
+            total_gb = gpu_config.get('total_memory_gb', 0)
+            base_gb = gpu_config.get('base_memory_gb', total_gb)
             self._debug_print(f"GPU {i}: Available {available_gb:.1f}GB, Limit {limit_bytes / (1024**3):.1f}GB (safety margin: {safety_margin:.0%})")
+            self._debug_print(f"GPU {i}: Base memory {base_gb:.1f}GB (from {total_gb:.1f}GB total)")
             self._debug_print(f"GPU {i}: Buffer {gpu_config['buffer_mb']}MB, KV Cache {gpu_config['kv_cache_mb']:.1f}MB")
             self._debug_print(f"GPU {i}: Compute Buffer {gpu_config.get('compute_buffer_mb', 0):.0f}MB")
         
         def find_best_gpu_with_config(tensor_size_bytes: int) -> int:
-            """Find GPU with most available space that can fit this tensor."""
+            """Find GPU with best balance of available space and current usage that can fit this tensor."""
             best_gpu = -1
-            max_available = 0
+            best_score = -1
+            
+            # Debug logging for allocation decisions
+            tensor_size_mb = tensor_size_bytes / (1024 * 1024)
+            self._debug_print(f"Finding GPU for tensor: {tensor_size_mb:.1f} MB")
             
             for i in range(len(gpu_configs)):
                 available = gpu_limits_bytes[i] - gpu_usage_bytes[i]
-                if available >= tensor_size_bytes and available > max_available:
-                    max_available = available
-                    best_gpu = i
+                if available >= tensor_size_bytes:
+                    # Calculate a score that balances available space and current usage
+                    # Lower usage percentage gets higher score (better balance)
+                    usage_ratio = gpu_usage_bytes[i] / gpu_limits_bytes[i] if gpu_limits_bytes[i] > 0 else 1.0
+                    available_ratio = available / gpu_limits_bytes[i] if gpu_limits_bytes[i] > 0 else 0.0
+                    
+                    # Score favors GPUs with lower usage and sufficient available space
+                    # Weight available space more heavily for very large tensors
+                    tensor_size_ratio = tensor_size_bytes / gpu_limits_bytes[i] if gpu_limits_bytes[i] > 0 else 1.0
+                    if tensor_size_ratio > 0.1:  # Large tensor (>10% of GPU memory)
+                        score = available_ratio * 0.7 + (1.0 - usage_ratio) * 0.3
+                    else:  # Small tensor
+                        score = available_ratio * 0.4 + (1.0 - usage_ratio) * 0.6
+                    
+                    # Debug logging
+                    usage_gb = gpu_usage_bytes[i] / (1024**3)
+                    available_gb = available / (1024**3)
+                    limit_gb = gpu_limits_bytes[i] / (1024**3)
+                    self._debug_print(f"  GPU {i}: usage={usage_gb:.1f}GB ({usage_ratio:.3f}), available={available_gb:.1f}GB ({available_ratio:.3f}), score={score:.3f}")
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_gpu = i
+                else:
+                    # Debug logging for GPUs that can't fit the tensor
+                    usage_gb = gpu_usage_bytes[i] / (1024**3)
+                    available_gb = available / (1024**3)
+                    self._debug_print(f"  GPU {i}: usage={usage_gb:.1f}GB, available={available_gb:.1f}GB - CANNOT FIT")
+            
+            if best_gpu >= 0:
+                self._debug_print(f"  Selected GPU {best_gpu} with score {best_score:.3f}")
+            else:
+                self._debug_print(f"  No GPU can fit tensor, will use CPU")
             
             return best_gpu
         
@@ -532,19 +618,26 @@ class LlamaVerboseTensorAnalyzer:
                 return f"-ot {tensor_info.name}=CPU"
         
         # PRIORITY 1: Critical large tensors (embedding, output) - always try GPU
-        for tensor_info in categories['embedding'] + categories['output']:
+        # Sort by size (largest first) for better load balancing
+        critical_tensors = sorted(categories['embedding'] + categories['output'], 
+                                key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in critical_tensors:
             param = allocate_tensor_with_config(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Critical tensor: {param}")
         
         # PRIORITY 2: Attention tensors (performance critical)
-        for tensor_info in categories['attention']:
+        # Sort by size (largest first) for better load balancing
+        attention_tensors = sorted(categories['attention'], key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in attention_tensors:
             param = allocate_tensor_with_config(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Attention tensor: {param}")
         
         # PRIORITY 3: Expert FFN tensors (fill remaining VRAM)
-        for tensor_info in categories['expert_ffn']:
+        # Sort by size (largest first) for better load balancing
+        expert_tensors = sorted(categories['expert_ffn'], key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in expert_tensors:
             param = allocate_tensor_with_config(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Expert tensor: {param}")
@@ -556,7 +649,9 @@ class LlamaVerboseTensorAnalyzer:
             self._debug_print(f"Norm tensor: {param}")
         
         # PRIORITY 5: Other tensors
-        for tensor_info in categories['other']:
+        # Sort by size (largest first) for better load balancing
+        other_tensors = sorted(categories['other'], key=lambda t: t.size_mb, reverse=True)
+        for tensor_info in other_tensors:
             param = allocate_tensor_with_config(tensor_info)
             allocation_params.append(param)
             self._debug_print(f"Other tensor: {param}")
@@ -581,7 +676,7 @@ class LlamaVerboseTensorAnalyzer:
     def analyze_and_generate_params(self, model_path: str, 
                                   gpu_count: int,
                                   vram_per_gpu_gb: float,
-                                  timeout: int = 300) -> Tuple[List[str], Dict[str, TensorInfo], Dict[str, any]]:
+                                  timeout: int = 300) -> Tuple[List[str], Dict[str, TensorInfo], Dict[str, any], Dict[str, any]]:
         """
         Complete analysis and parameter generation pipeline.
         
@@ -592,10 +687,10 @@ class LlamaVerboseTensorAnalyzer:
             timeout: Timeout in seconds for the analysis process
             
         Returns:
-            Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info)
+            Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info, compute_buffer_info)
         """
-        # Extract tensor information and KV cache info
-        tensors, kv_cache_info = self.analyze_model_tensors(model_path, timeout, gpu_count)
+        # Extract tensor information, KV cache info, and compute buffer info
+        tensors, kv_cache_info, compute_buffer_info = self.analyze_model_tensors(model_path, timeout, gpu_count)
         
         if not tensors:
             raise RuntimeError("No tensors found in model analysis")
@@ -605,12 +700,12 @@ class LlamaVerboseTensorAnalyzer:
             tensors, gpu_count, vram_per_gpu_gb
         )
         
-        return allocation_params, tensors, kv_cache_info
+        return allocation_params, tensors, kv_cache_info, compute_buffer_info
     
     def analyze_and_generate_params_with_gpu_configs(self, model_path: str, 
                                                     gpu_configs: List[Dict],
                                                     timeout: int = 300,
-                                                    safety_margin: float = 0.90) -> Tuple[List[str], Dict[str, TensorInfo], Dict[str, any]]:
+                                                    safety_margin: float = 0.90) -> Tuple[List[str], Dict[str, TensorInfo], Dict[str, any], Dict[str, any]]:
         """
         Enhanced analysis and parameter generation with detailed GPU configurations.
         
@@ -626,12 +721,12 @@ class LlamaVerboseTensorAnalyzer:
             safety_margin: Percentage of available VRAM to use (default 0.90 = 90%)
             
         Returns:
-            Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info)
+            Tuple of (allocation_parameters, tensor_info_dict, kv_cache_info, compute_buffer_info)
         """
         gpu_count = len(gpu_configs)
         
-        # Extract tensor information and KV cache info
-        tensors, kv_cache_info = self.analyze_model_tensors(model_path, timeout, gpu_count)
+        # Extract tensor information, KV cache info, and compute buffer info
+        tensors, kv_cache_info, compute_buffer_info = self.analyze_model_tensors(model_path, timeout, gpu_count)
         
         if not tensors:
             raise RuntimeError("No tensors found in model analysis")
@@ -641,7 +736,7 @@ class LlamaVerboseTensorAnalyzer:
             tensors, gpu_configs, safety_margin
         )
         
-        return allocation_params, tensors, kv_cache_info
+        return allocation_params, tensors, kv_cache_info, compute_buffer_info
 
 
 def main():
@@ -662,11 +757,15 @@ def main():
         analyzer = LlamaVerboseTensorAnalyzer(args.llama_cpp_dir, verbose=args.verbose)
         
         print(f"Analyzing {args.model_path}...")
-        allocation_params, tensors = analyzer.analyze_and_generate_params(
+        allocation_params, tensors, kv_cache_info, compute_buffer_info = analyzer.analyze_and_generate_params(
             args.model_path, args.gpu_count, args.vram_per_gpu, args.timeout
         )
         
         print(f"\nFound {len(tensors)} tensors")
+        if kv_cache_info:
+            print(f"KV Cache: {kv_cache_info.get('total_size_mb', 'unknown')} MiB")
+        if compute_buffer_info:
+            print(f"Compute Buffer: {compute_buffer_info.get('total_size_mb', 'unknown')} MiB")
         print(f"Generated {len(allocation_params)} allocation parameters")
         
         print("\nTensor Override Parameters:")

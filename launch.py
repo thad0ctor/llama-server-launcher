@@ -166,14 +166,27 @@ class LaunchManager:
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
 
-        # --- Handle GPU arguments: Skip if tensor override is active ---
+        # --- Handle GPU arguments: Skip if tensor override is active or KV overrides are enabled ---
         # Check if tensor override is enabled and has parameters
         tensor_override_active = False
+        kv_ngl_override_active = False
+        kv_ts_override_active = False
+        kv_sm_override_active = False
+        
         if hasattr(self.launcher, 'tensor_override_tab'):
             try:
                 tensor_override_enabled = self.launcher.tensor_override_tab.tensor_override_enabled.get()
                 tensor_params = self.launcher.tensor_override_tab.get_tensor_override_parameters()
                 tensor_override_active = tensor_override_enabled
+                
+                # Check if KV overrides are enabled (these take precedence over Advanced tab parameters)
+                if hasattr(self.launcher.tensor_override_tab, 'kv_override_ngl_enabled'):
+                    kv_ngl_override_active = self.launcher.tensor_override_tab.kv_override_ngl_enabled.get()
+                if hasattr(self.launcher.tensor_override_tab, 'kv_override_ts_enabled'):
+                    kv_ts_override_active = self.launcher.tensor_override_tab.kv_override_ts_enabled.get()
+                if hasattr(self.launcher.tensor_override_tab, 'kv_override_sm_enabled'):
+                    kv_sm_override_active = self.launcher.tensor_override_tab.kv_override_sm_enabled.get()
+                    
             except Exception as e:
                 print(f"WARNING: Error checking tensor override status: {e}", file=sys.stderr)
         
@@ -186,13 +199,17 @@ class LaunchManager:
             print("DEBUG: Skipping --tensor-split, --n-gpu-layers, and --main-gpu (tensor override is active)", file=sys.stderr)
         else:
             # Original GPU argument handling when tensor override is not active
-            # Add --tensor-split if the value is non-empty
-            # Use add_arg which handles the non-empty check
-            self.add_arg(cmd, "--tensor-split", tensor_split_val, "") # Add if non-empty string is provided by user
+            # Add --tensor-split if the value is non-empty AND KV tensor split override is not active
+            if not kv_ts_override_active:
+                self.add_arg(cmd, "--tensor-split", tensor_split_val, "") # Add if non-empty string is provided by user
+            else:
+                print("DEBUG: Skipping --tensor-split from Advanced tab (KV tensor split override is active)", file=sys.stderr)
 
-            # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
-            # This argument will now be added regardless of the --tensor-split value
-            self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "0")
+            # Add --n-gpu-layers if the value is non-empty AND not the default "0" string AND KV ngl override is not active
+            if not kv_ngl_override_active:
+                self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "0")
+            else:
+                print("DEBUG: Skipping --n-gpu-layers from Advanced tab (KV ngl override is active)", file=sys.stderr)
 
             # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)
             # It specifies which GPU is considered the "primary" one, often GPU 0.
@@ -267,7 +284,9 @@ class LaunchManager:
                 print(f"WARNING: Error loading tensor override parameters: {e}", file=sys.stderr)
 
         # --- NEW: Add KV Cache Parameters ---
+        print(f"DEBUG: Checking for tensor_override_tab attribute", file=sys.stderr)
         if hasattr(self.launcher, 'tensor_override_tab'):
+            print(f"DEBUG: tensor_override_tab exists", file=sys.stderr)
             try:
                 # Get KV cache parameters if enabled
                 kv_cache_params = self.launcher.tensor_override_tab.get_kv_cache_parameters()
@@ -278,7 +297,9 @@ class LaunchManager:
                     print("DEBUG: No KV cache parameters to add (KV cache on GPU by default)", file=sys.stderr)
                 
                 # Get KV override parameters if enabled
+                print(f"DEBUG: About to call get_kv_override_parameters()", file=sys.stderr)
                 kv_override_params = self.launcher.tensor_override_tab.get_kv_override_parameters()
+                print(f"DEBUG: get_kv_override_parameters() returned: {kv_override_params}", file=sys.stderr)
                 if kv_override_params:
                     cmd.extend(kv_override_params)
                     print(f"DEBUG: Added KV override parameters: {kv_override_params}", file=sys.stderr)
