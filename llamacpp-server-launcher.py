@@ -1063,7 +1063,7 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="KV Cache Type (--cache-type-k):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         # Combobox state is "readonly" for selection, but not disabled
-        self.cache_type_k_combo = ttk.Combobox(inner, textvariable=self.cache_type_k, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1"), state="readonly")
+        self.cache_type_k_combo = ttk.Combobox(inner, textvariable=self.cache_type_k, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_k_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Quantization for KV cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
@@ -1071,7 +1071,7 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="V Cache Type (--cache-type-v):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         # Combobox state is "readonly" for selection, but not disabled
-        self.cache_type_v_combo = ttk.Combobox(inner, textvariable=self.cache_type_v, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1"), state="readonly")
+        self.cache_type_v_combo = ttk.Combobox(inner, textvariable=self.cache_type_v, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_v_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Quantization for V cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);

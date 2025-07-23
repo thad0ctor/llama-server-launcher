@@ -4,3 +4,7 @@ __pycache__
 .gitignore
 llama.log
 llama.log
+log.txt
+tensor_overrides/Kimi-K2-Instruct-UD-IQ1_S-00001-of-00006_Kimi-K2-Instruct-UD-IQ1_S_kv=q4_0_vv=q4_0_th=24_tb=48_ctx=131072_fa_tensor_params.txt
+tensor_overrides/Kimi-K2-Instruct-UD-IQ1_S-00001-of-00006_Kimi-K2-Instruct-UD-IQ1_S_kv=q4_0_vv=q4_0_th=24_tb=48_ctx=131072_fa_tensor_params_balanced.txt
+tensor_overrides/Kimi-K2-Instruct-UD-IQ1_S-00001-of-00006_Kimi-K2-Instruct-UD-IQ1_S_kv=q4_0_vv=q4_0_th=24_tb=48_ctx=131072_fa_tensor_params_original.txt
