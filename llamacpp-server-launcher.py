@@ -668,14 +668,9 @@ class LlamaCppLauncher:
         r += 1
 
         # --- Multi-modal Projection (mmproj) ---
-        ttk.Label(inner, text="Multi-modal Projection:")\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
-        self.mmproj_enabled_check = ttk.Checkbutton(inner, variable=self.mmproj_enabled, state=tk.NORMAL)
-        self.mmproj_enabled_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Enable automatic mmproj file detection", font=("TkSmallCaptionFont"))\
-            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="When enabled, automatically scans for and loads mmproj files for multi-modal models", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,10)); r += 1
+        self.mmproj_enabled_check = ttk.Checkbutton(inner, variable=self.mmproj_enabled, 
+                                                   text="Enable automatic mmproj file detection", state=tk.NORMAL)
+        self.mmproj_enabled_check.grid(column=0, row=r, columnspan=4, sticky="w", padx=10, pady=(3,10)); r += 1
 
         ttk.Label(inner, text="Basic Settings", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
