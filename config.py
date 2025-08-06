@@ -10,11 +10,11 @@ from datetime import datetime
 
 class ConfigManager:
     """Configuration management for LLaMa.cpp Server Launcher."""
-    
+
     def __init__(self, launcher_instance):
         """Initialize with reference to the main launcher instance."""
         self.launcher = launcher_instance
-    
+
     def generate_default_config_name(self):
         """Generates a default configuration name based on current settings."""
         print("DEBUG: Generating default config name...", file=sys.stderr)
@@ -84,7 +84,7 @@ class ConfigManager:
             "no_kv_offload": False, # Default for --no-kv-offload flag
             "cpu_moe":       False, # Default for --cpu-moe flag
             "n_cpu_moe":     "",    # Default for --n-cpu-moe (empty)
-    
+
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
@@ -144,7 +144,7 @@ class ConfigManager:
                          "no_mmap": "no-mmap",
                          "mlock": "mlock",
                          "no_kv_offload": "no-kv-offload",
-             
+
                          "ignore_eos": "no-eos",
                          "cpu_moe": "cpu-moe",
                       }
@@ -195,16 +195,16 @@ class ConfigManager:
         # This provides immediate feedback about what the config represents
         current_config_name = self.launcher.config_name.get().strip()
         print(f"DEBUG: Current config name: '{current_config_name}'", file=sys.stderr)
-        
+
         # Always update except for very specific custom names that don't look auto-generated
         should_update = True
-        
+
         # Only preserve if it's a very obviously custom name:
         # - Not empty, not "default_config", not "default", not "model"
         # - Doesn't contain any auto-gen patterns like _gpu=, _ctx=, _th=, etc.
         # - Doesn't start with any model name patterns
         # - Must be at least 3 characters and contain letters (to avoid preserving junk)
-        if (current_config_name and 
+        if (current_config_name and
             len(current_config_name) >= 3 and
             any(c.isalpha() for c in current_config_name) and
             current_config_name not in ["default_config", "default", "model"] and
@@ -220,7 +220,7 @@ class ConfigManager:
              print("DEBUG: Preserved custom config name.", file=sys.stderr)
         else:
              print("DEBUG: Generated name same as current, no update needed.", file=sys.stderr)
-        
+
         return generated_name
 
 
@@ -293,7 +293,7 @@ class ConfigManager:
 
         # Add environmental variables configuration
         cfg.update(self.launcher.env_vars_manager.save_to_config())
-        
+
         # Add ik_llama specific configuration
         cfg.update(self.launcher.ik_llama_tab.save_to_config())
 
@@ -356,7 +356,7 @@ class ConfigManager:
 
         # Load environmental variables configuration
         self.launcher.env_vars_manager.load_from_config(cfg)
-        
+
         # Load ik_llama specific configuration
         self.launcher.ik_llama_tab.load_from_config(cfg)
 
@@ -444,16 +444,16 @@ class ConfigManager:
         selected_indices = self.launcher.config_listbox.curselection()
         if not selected_indices:
             return messagebox.showerror("Error","Select one or more configurations to delete.")
-        
+
         # Get the names of selected configurations
         selected_names = []
         for index in selected_indices:
             name = self.launcher.config_listbox.get(index)
             selected_names.append(name)
-        
+
         if not selected_names:
             return messagebox.showerror("Error", "No valid configurations selected for deletion.")
-        
+
         # Create confirmation message
         if len(selected_names) == 1:
             confirm_msg = f"Are you sure you want to delete the configuration '{selected_names[0]}'?"
@@ -462,7 +462,7 @@ class ConfigManager:
             config_list = "\n".join(f"  • {name}" for name in selected_names)
             confirm_msg = f"Are you sure you want to delete {len(selected_names)} configurations?\n\n{config_list}"
             result_msg = f"Successfully deleted {len(selected_names)} configurations."
-        
+
         # Ask for confirmation
         if messagebox.askyesno("Confirm Deletion", confirm_msg):
             # Delete the configurations
@@ -471,7 +471,7 @@ class ConfigManager:
                 if name in self.launcher.saved_configs:
                     self.launcher.saved_configs.pop(name, None)
                     deleted_count += 1
-            
+
             if deleted_count > 0:
                 self.launcher._save_configs()
                 self.launcher._update_config_listbox()
@@ -484,7 +484,7 @@ class ConfigManager:
         selection = self.launcher.config_listbox.curselection()
         if not selection:
             return
-        
+
         # For single selection, update the config name field
         # For multiple selections, show count in the config name field
         if len(selection) == 1:
@@ -515,24 +515,24 @@ class ConfigManager:
 
     def export_configurations(self):
         """Export selected configurations to a JSON file."""
-        
+
         # Get selected configurations
         selected_indices = self.launcher.config_listbox.curselection()
         if not selected_indices:
             messagebox.showerror("Error", "Please select at least one configuration to export.")
             return
-        
+
         # Get the names of selected configurations
         selected_configs = {}
         for index in selected_indices:
             config_name = self.launcher.config_listbox.get(index)
             if config_name in self.launcher.saved_configs:
                 selected_configs[config_name] = self.launcher.saved_configs[config_name]
-        
+
         if not selected_configs:
             messagebox.showerror("Error", "No valid configurations selected for export.")
             return
-        
+
         # Ask user for export file location
         default_filename = f"llama_configs_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         export_path = filedialog.asksaveasfilename(
@@ -541,10 +541,10 @@ class ConfigManager:
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
             initialfile=default_filename
         )
-        
+
         if not export_path:
             return  # User cancelled
-        
+
         try:
             # Create export data structure
             export_data = {
@@ -556,85 +556,85 @@ class ConfigManager:
                 },
                 "configs": selected_configs
             }
-            
+
             # Write to file
             with open(export_path, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, indent=2, ensure_ascii=False)
-            
-            messagebox.showinfo("Export Successful", 
+
+            messagebox.showinfo("Export Successful",
                               f"Successfully exported {len(selected_configs)} configuration(s) to:\n{export_path}")
-            
+
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export configurations:\n{str(e)}")
 
     def import_configurations(self):
         """Import configurations from a JSON file."""
-        
+
         # Ask user for import file
         import_path = filedialog.askopenfilename(
             title="Import Configurations",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
-        
+
         if not import_path:
             return  # User cancelled
-        
+
         try:
             # Read and parse the JSON file
             with open(import_path, 'r', encoding='utf-8') as f:
                 import_data = json.load(f)
-            
+
             # Handle different import formats
             configs_to_import = {}
-            
+
             if isinstance(import_data, dict):
                 # Check if it's our export format
                 if "configs" in import_data and isinstance(import_data["configs"], dict):
                     configs_to_import = import_data["configs"]
-                    
+
                     # Show import info if available
                     if "export_info" in import_data:
                         info = import_data["export_info"]
                         config_count = info.get("config_count", len(configs_to_import))
                         exported_at = info.get("exported_at", "Unknown")
                         print(f"DEBUG: Importing {config_count} configs exported at {exported_at}", file=sys.stderr)
-                
+
                 # Check if it's a direct configs format (like our main config file)
                 elif "configs" in import_data and isinstance(import_data["configs"], dict):
                     configs_to_import = import_data["configs"]
-                    
+
                 # Check if the entire file is just configs (legacy format)
                 else:
                     # Assume each top-level key is a config name
                     # Validate that values look like config objects
                     valid_configs = {}
                     for key, value in import_data.items():
-                        if isinstance(value, dict) and any(setting in value for setting in 
+                        if isinstance(value, dict) and any(setting in value for setting in
                                                          ["model_path", "llama_cpp_dir", "n_gpu_layers", "ctx_size"]):
                             valid_configs[key] = value
-                    
+
                     if valid_configs:
                         configs_to_import = valid_configs
-            
+
             if not configs_to_import:
-                messagebox.showerror("Import Error", 
+                messagebox.showerror("Import Error",
                                    "No valid configurations found in the selected file.\n\n"
                                    "Expected format: JSON file with configuration objects.")
                 return
-            
+
             # Check for conflicts and get user preferences
             conflicts = []
             new_configs = []
-            
+
             for config_name in configs_to_import.keys():
                 if config_name in self.launcher.saved_configs:
                     conflicts.append(config_name)
                 else:
                     new_configs.append(config_name)
-            
+
             # Show preview dialog
             import_summary = f"Found {len(configs_to_import)} configuration(s) to import:\n\n"
-            
+
             if new_configs:
                 import_summary += f"New configurations ({len(new_configs)}):\n"
                 for name in new_configs[:5]:  # Show first 5
@@ -642,7 +642,7 @@ class ConfigManager:
                 if len(new_configs) > 5:
                     import_summary += f"  ... and {len(new_configs) - 5} more\n"
                 import_summary += "\n"
-            
+
             if conflicts:
                 import_summary += f"Configurations that will be overwritten ({len(conflicts)}):\n"
                 for name in conflicts[:5]:  # Show first 5
@@ -650,12 +650,12 @@ class ConfigManager:
                 if len(conflicts) > 5:
                     import_summary += f"  ... and {len(conflicts) - 5} more\n"
                 import_summary += "\n"
-            
+
             import_summary += "Do you want to proceed with the import?"
-            
+
             if not messagebox.askyesno("Confirm Import", import_summary):
                 return
-            
+
             # Perform the import
             imported_count = 0
             for config_name, config_data in configs_to_import.items():
@@ -664,25 +664,25 @@ class ConfigManager:
                     if not isinstance(config_data, dict):
                         print(f"WARNING: Skipping invalid config '{config_name}' - not a dictionary", file=sys.stderr)
                         continue
-                    
+
                     # Import the configuration
                     self.launcher.saved_configs[config_name] = config_data
                     imported_count += 1
-                    
+
                 except Exception as e:
                     print(f"WARNING: Failed to import config '{config_name}': {e}", file=sys.stderr)
-            
+
             if imported_count > 0:
                 # Save the updated configurations
                 self.launcher._save_configs()
                 # Update the listbox
                 self.update_config_listbox()
-                
-                messagebox.showinfo("Import Successful", 
+
+                messagebox.showinfo("Import Successful",
                                   f"Successfully imported {imported_count} configuration(s).")
             else:
                 messagebox.showerror("Import Error", "No configurations were successfully imported.")
-                
+
         except json.JSONDecodeError as e:
             messagebox.showerror("Import Error", f"Invalid JSON file:\n{str(e)}")
         except FileNotFoundError:
@@ -692,7 +692,7 @@ class ConfigManager:
 
     def get_config_path(self):
         """Get the configuration file path, with fallback handling."""
-        local_path = Path("llama_cpp_launcher_configs.json") # Renamed slightly to avoid potential clashes
+        local_path = Path(Path(__file__).parent, "llama_cpp_launcher_configs.json") # Renamed slightly to avoid potential clashes
         print(f"DEBUG: Checking local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
         print(f"DEBUG: Current working directory: {Path.cwd()}", file=sys.stderr)
         try:
@@ -742,6 +742,7 @@ class ConfigManager:
              return
 
         print(f"DEBUG: Loading config from FULL PATH: {self.launcher.config_path.resolve()}", file=sys.stderr)
+        exception = None
         try:
             data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
             # Load configs and filter out any None keys
@@ -791,18 +792,12 @@ class ConfigManager:
 
         except json.JSONDecodeError as e:
              print(f"Config Load Error: Failed to parse JSON from {self.launcher.config_path}\nError: {e}", file=sys.stderr)
-             messagebox.showerror("Config Load Error", f"Failed to parse config file:\n{self.launcher.config_path}\n\nError: {e}\n\nUsing default settings.")
-             # Reset to defaults on parse error
-             self.launcher.app_settings = {
-                 "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
-                 "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": [],
-                 "host": "127.0.0.1", "port": "8080"  # Add default network settings
-             }
-             self.launcher.saved_configs = {}
-             self.launcher.custom_parameters_list = [] # Reset internal list
-        except Exception as exc:
+             exception = e
+        except Exception as e:
             print(f"Config Load Error: Could not load config from {self.launcher.config_path}\nError: {exc}", file=sys.stderr)
-            messagebox.showerror("Config Load Error", f"Could not load config from:\n{self.launcher.config_path}\n\nError: {exc}\n\nUsing default settings.")
+            exception = e
+        if exception:
+            messagebox.showerror("Config Load Error", f"Could not load config from:\n{self.launcher.config_path}\n\nError: {exception}\n\nUsing default settings.")
             # Reset to defaults on other load errors
             self.launcher.app_settings = {
                 "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
@@ -830,7 +825,7 @@ class ConfigManager:
                     print(f"WARNING: Skipping invalid model directory during save: {p} (resolved to {resolved_path})", file=sys.stderr)
             except Exception as e:
                 print(f"ERROR: Failed to process model directory during save '{p}': {e}", file=sys.stderr)
-        
+
         # Update the launcher's model_dirs with only valid paths
         self.launcher.model_dirs = valid_model_dirs
 
@@ -848,22 +843,22 @@ class ConfigManager:
         self.launcher.app_settings["host"] = self.launcher.host.get()
         self.launcher.app_settings["port"] = self.launcher.port.get()
         print(f"DEBUG: Saving port as {self.launcher.port.get()}") # Add debug print
-        
+
         # Save backend selection
         self.launcher.app_settings["backend_selection"] = self.launcher.backend_selection.get()
-        
+
         # Save manual GPU settings
         self.launcher.app_settings["manual_gpu_mode"] = self.launcher.manual_gpu_mode.get()
         self.launcher.app_settings["manual_gpu_count"] = self.launcher.manual_gpu_count.get()
         self.launcher.app_settings["manual_gpu_vram"] = self.launcher.manual_gpu_vram.get()
         # Save new manual GPU list format
         self.launcher.app_settings["manual_gpu_list"] = self.launcher.manual_gpu_list
-        
+
         # Save manual model settings
         self.launcher.app_settings["manual_model_mode"] = self.launcher.manual_model_mode.get()
         self.launcher.app_settings["manual_model_layers"] = self.launcher.manual_model_layers.get()
         self.launcher.app_settings["manual_model_size_gb"] = self.launcher.manual_model_size_gb.get()
-        
+
         # Save ik_llama settings to app_settings
         ik_llama_settings = self.launcher.ik_llama_tab.save_to_config()
         self.launcher.app_settings.update(ik_llama_settings)
@@ -905,7 +900,7 @@ class ConfigManager:
             suggested_name = self.generate_default_config_name()
             self.launcher.config_name.set(suggested_name)
             name = suggested_name
-        
+
         # Ensure name is not None
         if name is None:
             name = "default_config"
@@ -915,4 +910,4 @@ class ConfigManager:
         self.launcher.saved_configs[name] = current_cfg
         self.save_configs()
         self.update_config_listbox()
-        messagebox.showinfo("Saved", f"Current settings saved as '{name}'.") 
+        messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")

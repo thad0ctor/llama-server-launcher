@@ -21,23 +21,23 @@ from threading import Thread
 
 class LaunchManager:
     """Manages command building and server launching functionality."""
-    
+
     def __init__(self, launcher_instance):
         """Initialize with a reference to the main launcher instance."""
         self.launcher = launcher_instance
-    
+
     def build_cmd(self):
         """Builds the command list for the server based on selected backend."""
         # Get the backend selection and use appropriate directory
         backend = self.launcher.backend_selection.get()
-        
+
         if backend == "ik_llama":
             backend_dir_str = self.launcher.ik_llama_dir.get().strip()
             backend_name = "ik_llama"
         else:  # Default to llama.cpp
             backend_dir_str = self.launcher.llama_cpp_dir.get().strip()
             backend_name = "llama.cpp"
-            
+
         if not backend_dir_str:
             messagebox.showerror("Error", f"{backend_name} root directory is not set.")
             return None
@@ -54,7 +54,7 @@ class LaunchManager:
             search_locs_str = "\n - ".join([str(p) for p in [
                  Path("."), Path("build/bin/Release"), Path("build/bin"), Path("build"), Path("bin"), Path("server")
             ]])
-            
+
             # Get backend-specific executable names for error message
             if backend == "ik_llama":
                 exe_names = self._get_ik_llama_executable_names()
@@ -62,7 +62,7 @@ class LaunchManager:
             else:
                 exe_names = self._get_llama_cpp_executable_names()
                 backend_display = "llama.cpp"
-                
+
             exe_names_str = "', '".join(exe_names)
             messagebox.showerror("Executable Not Found",
                                  f"Could not find '{exe_names_str}' within:\n{backend_base_dir}\n\n"
@@ -118,6 +118,20 @@ class LaunchManager:
 
         cmd.extend(["-m", final_model_path])
 
+        # --- Append mmproj if exists ---
+        mmproj_file = None
+        # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
+        # model_name.Q6_K.gguf.part2of2 from mradermacher
+        re_model = re.compile(r"^(.*?)[-.]\w+(?:-\d{5}-of-\d{5})?\.gguf(?:\.part\d+of\d+)?$", re.I)
+        model_name = re_model.match(Path(model_full_path_str).name).group(1)
+
+        for mmproj in Path(model_full_path_str).parent.iterdir():
+            if "mmproj" in mmproj.name:
+                mmproj_file = mmproj
+                if model_name in mmproj.name: break
+        if mmproj_file:
+            cmd.extend(["--mmproj", str(mmproj_file.resolve())])
+
         # --- Other Arguments ---
         # --- KV Cache Type ---
         # Check if ik_llama backend is using -ctk or -ctv flags
@@ -125,7 +139,7 @@ class LaunchManager:
         if backend == "ik_llama":
             ik_llama_flags = self.launcher.ik_llama_tab.get_ik_llama_flags()
             ik_llama_uses_cache_flags = "-ctk" in ik_llama_flags or "-ctv" in ik_llama_flags
-        
+
         # Only add standard cache type flags if ik_llama is not using -ctk/-ctv
         if not ik_llama_uses_cache_flags:
             # llama.cpp default is f16. Add args only if different.
@@ -194,7 +208,7 @@ class LaunchManager:
 
         # Performance options
         self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0") # Omit if 0 (default)
-        
+
         # --- MoE CPU options (only for llama.cpp backend) ---
         if backend != "ik_llama":
             self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
@@ -425,7 +439,7 @@ class LaunchManager:
                     # Get backend information for script header
                     backend = self.launcher.backend_selection.get()
                     backend_display = "ik_llama" if backend == "ik_llama" else "LLaMa.cpp"
-                    
+
                     f.write("<#\n")
                     f.write(" .SYNOPSIS\n")
                     f.write(f"    Launches the {backend_display} server with saved settings.\n\n")
@@ -619,24 +633,24 @@ class LaunchManager:
                 # Add export statements *before* the main command in the bash script
                 # This should happen *after* venv activation if used.
                 env_commands = []
-                
+
                 # Add CUDA_VISIBLE_DEVICES
                 if cuda_devices_value:
                     env_commands.append(f'export CUDA_VISIBLE_DEVICES={cuda_devices_value}')
                     env_commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
-                
+
                 # Add environmental variables
                 env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
                 if env_vars:
                     env_commands.append('echo "Setting environmental variables..."')
                     for var_name, var_value in env_vars.items():
                         env_commands.append(f'export {var_name}="{var_value}"')
-                
+
                 # Combine environment commands into a single string
                 env_line = ""
                 if env_commands:
                     env_line = " && ".join(env_commands) + " && "
-                    
+
                 # Insert the environment line after venv activation if used
                 if use_venv and env_line:
                     full_script_content = full_script_content.replace('echo "Virtual environment activated." && ', 'echo "Virtual environment activated." && ' + env_line)
@@ -760,7 +774,7 @@ class LaunchManager:
                 # Get backend information for script header
                 backend = self.launcher.backend_selection.get()
                 backend_display = "ik_llama" if backend == "ik_llama" else "LLaMa.cpp"
-                
+
                 fh.write("<#\n")
                 fh.write(" .SYNOPSIS\n")
                 fh.write(f"    Launches the {backend_display} server with saved settings.\n\n")
@@ -795,7 +809,7 @@ class LaunchManager:
                 if venv:
                     try:
                         venv_path = Path(venv).resolve() # Resolve venv path for script
-                        
+
                         # Check for multiple activation script locations (cross-platform support)
                         possible_scripts = [
                             venv_path / "Scripts" / "Activate.ps1",     # Windows
@@ -803,13 +817,13 @@ class LaunchManager:
                             venv_path / "Scripts" / "activate.ps1",    # Alternative naming
                             venv_path / "bin" / "activate.ps1"         # Alternative naming
                         ]
-                        
+
                         act_script = None
                         for script_path in possible_scripts:
                             if script_path.exists():
                                 act_script = script_path
                                 break
-                        
+
                         if act_script:
                             # Use literal path syntax for PowerShell activation script source
                             # Ensure path is correctly formatted for PowerShell ('/' separators often work better)
@@ -897,7 +911,7 @@ class LaunchManager:
              selected_model_name = self.launcher.model_listbox.get(selection[0])
 
         default_name = "launch_llama_server.sh"
-        if selected_model_name: 
+        if selected_model_name:
             # Sanitize model name for filename
             model_name_part = re.sub(r'[\\/*?:"<>| ]', '_', selected_model_name)
             model_name_part = model_name_part[:50].strip('_') # Ensure no trailing underscore
@@ -918,7 +932,7 @@ class LaunchManager:
                 # Get backend information for script header
                 backend = self.launcher.backend_selection.get()
                 backend_display = "ik_llama" if backend == "ik_llama" else "LLaMa.cpp"
-                
+
                 fh.write("#!/bin/bash\n")
                 fh.write(f"# Autogenerated bash script from {backend_display} Launcher GUI\n")
                 fh.write(f"# Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server\n\n")
@@ -955,7 +969,7 @@ class LaunchManager:
                         activate_script = venv_path / "bin" / "activate"
                         if not activate_script.exists():
                             activate_script = venv_path / "Scripts" / "activate"
-                        
+
                         if activate_script.exists():
                             fh.write(f'echo "Activating virtual environment: {venv}"\n')
                             # Quote the path to handle spaces
@@ -969,12 +983,12 @@ class LaunchManager:
 
                 # Get backend information for script header
                 backend = self.launcher.backend_selection.get()
-                
+
                 fh.write(f'echo "Launching {backend.replace("_", "-")}-server..."\n')
 
                 # --- Build the command string for bash using appropriate quoting ---
                 bash_cmd_parts = []
-                
+
                 # Process all arguments from cmd_list
                 i = 0
                 while i < len(cmd_list):
@@ -1009,4 +1023,4 @@ class LaunchManager:
         except Exception as exc:
             messagebox.showerror("Script Save Error", f"Could not save script:\n{exc}")
             print(f"Script Save Error: {exc}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr) 
+            traceback.print_exc(file=sys.stderr)

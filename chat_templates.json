@@ -22,4 +22,4 @@
     "DeepSeek 3": "### System:\n{{system_message}}\n\n### User:\n{{prompt}}\n\n### Assistant:\n",
     "Qwen3": "<|im_start|>system\n{{system_message}}<|im_end|>\n<|im_start|>user\n{{prompt}}<|im_end|>\n<|im_start|>assistant\n",
     "Jinja2": "{% if system_message %}{{ system_message }}\n{% endif %}{% for message in messages %}{% if message.role == 'user' %}User: {{ message.content }}\n{% elif message.role == 'assistant' %}Assistant: {{ message.content }}\n{% endif %}{% endfor %}"
-  }  
+}

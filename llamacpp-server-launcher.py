@@ -136,10 +136,10 @@ class LlamaCppLauncher:
         }
         # List to store custom parameters entered by the user (strings)
         self.custom_parameters_list = [] # <-- New attribute for custom parameters
-        
+
         # --- Environmental Variables Manager ---
         self.env_vars_manager = EnvironmentalVariablesManager()
-        
+
         # --- ik_llama Tab Manager ---
         self.ik_llama_tab = IkLlamaTab(self)
 
@@ -206,7 +206,7 @@ class LlamaCppLauncher:
 
         # --- Backend Selection ---
         self.backend_selection = tk.StringVar(value=self.app_settings.get("backend_selection", "llama.cpp"))
-        
+
         # --- Dynamic Labels for Backend-specific Text ---
         self.root_dir_label_text = tk.StringVar(value="LLaMa.cpp Root Directory:")
         self.root_dir_help_text = tk.StringVar(value="Select the main 'llama.cpp' folder. The app will search for the server executable.")
@@ -251,7 +251,7 @@ class LlamaCppLauncher:
         # UI variables for adding new manual GPUs
         self.manual_gpu_name_var = tk.StringVar(value="")
         self.manual_gpu_vram_var = tk.StringVar(value="8.0")
-        
+
         # Legacy variables for config compatibility (will be migrated)
         self.manual_gpu_count = tk.StringVar(value="1")    # Deprecated but kept for config loading
         self.manual_gpu_vram = tk.StringVar(value="8.0")   # Deprecated but kept for config loading
@@ -277,7 +277,7 @@ class LlamaCppLauncher:
         # --- New Parameters ---
         self.ignore_eos      = tk.BooleanVar(value=False) # --ignore-eos
         self.n_predict       = tk.StringVar(value="-1")   # --n-predict
-        
+
         # --- MoE CPU Parameters ---
         self.cpu_moe         = tk.BooleanVar(value=False) # --cpu-moe
         self.n_cpu_moe       = tk.StringVar(value="")     # --n-cpu-moe
@@ -322,7 +322,7 @@ class LlamaCppLauncher:
         # --- Status Variables ---
         self.gpu_detected_status_var = tk.StringVar(value="") # Updates with GPU detection message
         self.gpu_availability_var = tk.StringVar(value="Detecting...") # For GPU availability status
-        
+
         # --- CPU Info Display Variables ---
         self.cpu_logical_cores_display_var = tk.StringVar(value=str(self.cpu_info.get("logical_cores", "N/A")))
         self.cpu_physical_cores_display_var = tk.StringVar(value=str(self.cpu_info.get("physical_cores", "N/A")))
@@ -391,7 +391,7 @@ class LlamaCppLauncher:
 
         # Load environmental variables configuration
         self.env_vars_manager.load_from_config(self.app_settings)
-        
+
         # Load ik_llama configuration
         self.ik_llama_tab.load_from_config(self.app_settings)
 
@@ -483,14 +483,14 @@ class LlamaCppLauncher:
             # Automatic mode - start background detection
             debug_print("Automatic GPU mode, starting background detection")
             self._start_system_info_detection()
-        
+
         # Update initial GPU checkbox states and recommendations
         self._update_gpu_checkboxes()
-        
+
         # If manual model mode was loaded from config, apply it
         if self.manual_model_mode.get():
             self._setup_manual_model()
-        
+
         self._update_recommendations() # Call initially to set all initial recommendations
 
         # Perform initial scan (in background) if dirs exist
@@ -514,7 +514,7 @@ class LlamaCppLauncher:
     def _create_widgets(self):
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=10)
-        
+
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
@@ -536,15 +536,16 @@ class LlamaCppLauncher:
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_config_tab(cfg_frame)
         self._setup_about_tab(about_frame) # Setup the about tab
-        
+
         # Update ik_llama tab visibility based on current backend selection
         self._update_ik_llama_tab_visibility()
 
         bar = ttk.Frame(self.root); bar.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bar, text="Launch Server",   command=self.launch_manager.launch_server).pack(side="left",  padx=5)
         ttk.Button(bar, text="Save PS1 Script", command=self.launch_manager.save_ps1_script).pack(side="left", padx=5)
-        ttk.Button(bar, text="Save SH Script", command=self.launch_manager.save_sh_script).pack(side="left", padx=5)
+        ttk.Button(bar, text="Save SH Script",  command=self.launch_manager.save_sh_script).pack(side="left", padx=5)
         ttk.Button(bar, text="Exit",            command=self.on_exit).pack(side="right", padx=5)
+        ttk.Button(bar, text="Save Config",     command=self._save_configuration).pack(side="right", padx=5)
 
     # ░░░░░ MAIN TAB ░░░░░
     def _setup_main_tab(self, parent):
@@ -559,23 +560,23 @@ class LlamaCppLauncher:
         inner.columnconfigure(1, weight=1) # Make model path entry expand
 
         r = 0
-        
+
         # --- Backend Selection ---
         ttk.Label(inner, text="Backend Selection", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
-        
+
         backend_frame = ttk.Frame(inner)
         backend_frame.grid(column=0, row=r, columnspan=4, sticky="w", padx=10, pady=(0,10))
-        
+
         ttk.Radiobutton(backend_frame, text="llama.cpp", variable=self.backend_selection, value="llama.cpp")\
             .pack(side="left", padx=(0, 15))
         ttk.Radiobutton(backend_frame, text="ik_llama", variable=self.backend_selection, value="ik_llama")\
             .pack(side="left")
-        
+
         r += 1
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=(0,15)); r += 1
-        
+
         ttk.Label(inner, text="Directories & Model", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(10,5)); r += 1
         ttk.Separator(inner, orient="horizontal")\
@@ -902,7 +903,7 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Label(inner, textvariable=self.model_kv_cache_type_var)\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=2)
-        
+
         # Add Analyze Model button
         self.analyze_model_button = ttk.Button(inner, text="Analyze Model", command=self._force_analyze_model)
         self.analyze_model_button.grid(column=3, row=r, sticky="w", padx=5, pady=3)
@@ -997,34 +998,34 @@ class LlamaCppLauncher:
         # --- Manual Model Entry (when analysis fails) ---
         self.manual_model_frame = ttk.Frame(inner)
         self.manual_model_frame.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5)
-        
+
         # Create manual model widgets (always create them, but control visibility)
         self.manual_model_label = ttk.Label(self.manual_model_frame, text="Model analysis unavailable. Manual entry:", foreground="orange")
         self.manual_model_label.pack(side="left", padx=5)
-        
+
         # Layers entry
         ttk.Label(self.manual_model_frame, text="Layers:").pack(side="left", padx=(10, 2))
         self.manual_layers_entry = ttk.Entry(self.manual_model_frame, textvariable=self.manual_model_layers, width=5)
         self.manual_layers_entry.pack(side="left", padx=2)
-        
+
         # Size entry
         ttk.Label(self.manual_model_frame, text="Size (GB):").pack(side="left", padx=(5, 2))
         self.manual_size_entry = ttk.Entry(self.manual_model_frame, textvariable=self.manual_model_size_gb, width=6)
         self.manual_size_entry.pack(side="left", padx=2)
-        
+
         # Apply button
         self.manual_apply_btn = ttk.Button(self.manual_model_frame, text="Apply", command=self._apply_manual_model_settings)
         self.manual_apply_btn.pack(side="left", padx=(5, 2))
-        
+
         # Toggle checkbox for manual mode
-        self.manual_model_cb = ttk.Checkbutton(self.manual_model_frame, text="Use manual model info", 
+        self.manual_model_cb = ttk.Checkbutton(self.manual_model_frame, text="Use manual model info",
                                          variable=self.manual_model_mode,
                                          command=self._toggle_manual_model_mode)
         self.manual_model_cb.pack(side="left", padx=(10, 0))
-        
+
         # Initially hide the manual model frame (will be shown/hidden dynamically)
         self._update_manual_model_visibility()
-        
+
         r += 1
 
         # --- Tensor Split ---
@@ -1154,16 +1155,16 @@ class LlamaCppLauncher:
         self.prio_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="0=Normal, 1=Medium, 2=High, 3=Realtime (OS dependent)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
-        
+
         # --- MoE CPU Settings --- (same row)
         ttk.Label(inner, text="MoE CPU Settings:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         moe_frame = ttk.Frame(inner)
         moe_frame.grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=3)
-        
+
         self.cpu_moe_check = ttk.Checkbutton(moe_frame, text="Keep all MoE in CPU (--cpu-moe)", variable=self.cpu_moe, state=tk.NORMAL)
         self.cpu_moe_check.pack(side="left", padx=(0, 10))
-        
+
         ttk.Label(moe_frame, text="First N layers in CPU (--n-cpu-moe):")\
             .pack(side="left", padx=(0, 5))
         self.n_cpu_moe_entry = ttk.Entry(moe_frame, textvariable=self.n_cpu_moe, width=8, state=tk.NORMAL)
@@ -1237,7 +1238,7 @@ class LlamaCppLauncher:
         inner.columnconfigure(1, weight=1)
         inner.columnconfigure(2, weight=1)
 
-        
+
     # ░░░░░ CHAT TEMPLATE TAB ░░░░░ (NEW)
     def _setup_chat_template_tab(self, parent):
         frame = ttk.Frame(parent, padding=10); frame.pack(fill="both", expand=True)
@@ -1460,15 +1461,15 @@ class LlamaCppLauncher:
         ttk.Button(btn_frame, text="Save Configuration", command=self._save_configuration).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Load Configuration", command=self._load_configuration).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="Delete Configuration", command=self._delete_configuration).pack(side="left", padx=5)
-        
+
         # Import/Export buttons
         import_export_frame = ttk.Frame(inner); import_export_frame.pack(fill="x", padx=10, pady=5)
         ttk.Button(import_export_frame, text="Export Selected", command=self._export_configurations).pack(side="left", padx=5)
         ttk.Button(import_export_frame, text="Import from File", command=self._import_configurations).pack(side="left", padx=5)
-        
+
         # Instructions for multi-select
         instructions_frame = ttk.Frame(inner); instructions_frame.pack(fill="x", padx=10, pady=5)
-        ttk.Label(instructions_frame, text="Tip: Hold Ctrl to select multiple configurations for export", 
+        ttk.Label(instructions_frame, text="Tip: Hold Ctrl to select multiple configurations for export",
                  font=("TkSmallCaptionFont", 8), foreground="gray").pack(side="left")
 
         # Config list
@@ -1549,11 +1550,11 @@ class LlamaCppLauncher:
                 if not p.is_dir():
                     messagebox.showerror("Error", f"Selected path is not a directory:\n{p}")
                     return
-                    
+
                 # Add the resolved path string to avoid issues with comparison later
                 p_str = str(p)
                 print(f"DEBUG: Adding model directory - Original: '{directory}', Resolved: '{p_str}'", file=sys.stderr)
-                
+
                 if p_str not in [str(x) for x in self.model_dirs]: # Compare resolved paths
                     self.model_dirs.append(p) # Store as Path object
                     self._update_model_dirs_listbox()
@@ -1668,12 +1669,15 @@ class LlamaCppLauncher:
         """Scans configured directories for GGUF models (runs in background thread)."""
         print("DEBUG: _scan_model_dirs thread started", file=sys.stderr)
         found = {} # {display_name: full_path_obj}
-        # Pattern to match multi-part files like model-00001-of-00005.gguf or model-F1.gguf
-        # Note: -F[1-9] only matches single-digit F parts to avoid matching precision indicators like F16, F32
-        multipart_pattern = re.compile(r"^(.*?)(?:-\d{5}-of-\d{5}|-F[1-9])\.gguf$", re.IGNORECASE)
-        # Pattern to match the FIRST part of a multi-part file (e.g., model-00001-of-00005.gguf or model-F1.gguf)
-        first_part_pattern = re.compile(r"^(.*?)-(?:00001-of-\d{5}|F1)\.gguf$", re.IGNORECASE)
-        
+        # Pattern to match multi-part files
+        # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
+        # model_name.Q6_K.gguf.part01of12 from mradermacher
+        re_multi1 = re.compile(r"^(.*?)-\d{5}-of-\d{5}\.gguf$", re.I)
+        re_multi2 = re.compile(r"^(.*?)\.gguf\.part\d+of\d+$", re.I)
+        # Pattern to match the FIRST part of a multi-part files
+        re_first1 = re.compile(r"^(.*?)-00001-of-\d{5}\.gguf$", re.I)
+        re_first2 = re.compile(r"^(.*?)\.gguf\.part0*1of\d+$", re.I)
+
         # Two-pass approach to handle multi-part files correctly
         all_gguf_files = []
         for model_dir in self.model_dirs:
@@ -1692,12 +1696,12 @@ class LlamaCppLauncher:
             except Exception as e:
                 print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-        
+
         # First pass: find all first parts of multi-part files
         processed_multipart_bases = set()
         for gguf_path in all_gguf_files:
             filename = gguf_path.name
-            first_part_match = first_part_pattern.match(filename)
+            first_part_match = re_first1.match(filename) or re_first2.match(filename)
             if first_part_match:
                 base_name = first_part_match.group(1)
                 if base_name not in processed_multipart_bases:
@@ -1708,15 +1712,15 @@ class LlamaCppLauncher:
                         print(f"DEBUG: Found multi-part model: {base_name}", file=sys.stderr)
                     except Exception as resolve_exc:
                         print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
-        
+
         # Second pass: find single-part files that aren't part of multi-part sets
         for gguf_path in all_gguf_files:
             filename = gguf_path.name
-            
+
             # Skip if this is any part of a multi-part file
-            if multipart_pattern.match(filename):
+            if re_multi1.match(filename) or re_multi2.match(filename):
                 continue
-                
+
             # Handle single-part files
             if filename.lower().endswith(".gguf"):
                 display_name = gguf_path.stem
@@ -1730,7 +1734,7 @@ class LlamaCppLauncher:
 
         print(f"DEBUG: Scan completed, found {len(found)} models", file=sys.stderr)
         self.root.after(0, self._update_model_listbox_after_scan, found)
-        
+
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis
     # ═════════════════════════════════════════════════════════════════
@@ -1890,7 +1894,7 @@ class LlamaCppLauncher:
                  else:
                      backend_dir = self.llama_cpp_dir.get().strip()
                      backend_name = "llama.cpp"
-                     
+
                  if backend_dir:
                      self.gpu_layers_status_var.set(f"Analyzing model using {backend_name} tools...")
                      # Try the analysis even without llama-cpp-python
@@ -1936,11 +1940,11 @@ class LlamaCppLauncher:
              else:
                  backend_dir = self.llama_cpp_dir.get().strip()
                  backend_name = "llama.cpp"
-             
+
              if backend_dir:
                  print(f"DEBUG: Trying {backend_name} tools from: {backend_dir}", file=sys.stderr)
                  analysis_result = analyze_gguf_with_llamacpp_tools(model_path_str, backend_dir)
-                 
+
                  # If backend tools failed and we have llama-cpp-python available, try that as fallback
                  if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
                      print(f"DEBUG: {backend_name} tools failed, falling back to llama-cpp-python", file=sys.stderr)
@@ -1949,12 +1953,12 @@ class LlamaCppLauncher:
                  # No backend directory set, try simple GGUF parser first
                  print(f"DEBUG: No {backend_name} directory set, trying simple GGUF parser", file=sys.stderr)
                  analysis_result = parse_gguf_header_simple(model_path_str)
-                 
+
                  # If simple parser failed and we have llama-cpp-python available, try that as fallback
                  if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
                      print("DEBUG: Simple GGUF parser failed, falling back to llama-cpp-python", file=sys.stderr)
                      analysis_result = analyze_gguf_model_static(model_path_str)
-             
+
              # Only update UI if the model path hasn't changed while analyzing
              if self.model_path.get() == model_path_str:
                 self.root.after(0, self._update_ui_after_analysis, analysis_result)
@@ -1970,14 +1974,14 @@ class LlamaCppLauncher:
     def _update_manual_model_visibility(self):
         """Show or hide the manual model entry section based on analysis availability."""
         # Check if model analysis failed or no model loaded
-        analysis_failed = (not self.current_model_analysis or 
-                          self.current_model_analysis.get("error") or 
+        analysis_failed = (not self.current_model_analysis or
+                          self.current_model_analysis.get("error") or
                           self.current_model_analysis.get("n_layers") is None or
                           not self.model_path.get())
-        
+
         # Also check if we're in manual mode (should always show in manual mode)
         show_manual = analysis_failed or self.manual_model_mode.get()
-        
+
         if hasattr(self, 'manual_model_frame') and self.manual_model_frame.winfo_exists():
             if show_manual:
                 self.manual_model_frame.grid()  # Show the frame
@@ -1990,23 +1994,23 @@ class LlamaCppLauncher:
         if not model_path_str:
             print("DEBUG: No model selected for analysis", file=sys.stderr)
             return
-            
+
         print(f"DEBUG: Force analyzing model: {model_path_str}", file=sys.stderr)
-        
+
         # Update button to show analysis is in progress
         if hasattr(self, 'analyze_model_button') and self.analyze_model_button.winfo_exists():
             self.analyze_model_button.config(text="Analyzing...", state=tk.DISABLED)
-        
+
         # Update status
         self.gpu_layers_status_var.set("Force analyzing model...")
         self._reset_model_info_display()
         self.current_model_analysis = {}
         self._update_recommendations()
-        
+
         # Cancel any existing analysis
         if self.analysis_thread and self.analysis_thread.is_alive():
             print("DEBUG: Cancelling previous analysis thread for force analysis.", file=sys.stderr)
-        
+
         # Start new analysis thread
         self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(model_path_str,), daemon=True)
         self.analysis_thread.start()
@@ -2014,11 +2018,11 @@ class LlamaCppLauncher:
     def _update_ui_after_analysis(self, analysis_result):
         """Updates controls based on GGUF analysis results (runs in main thread)."""
         print("DEBUG: _update_ui_after_analysis running", file=sys.stderr)
-        
+
         # Re-enable the analyze button
         if hasattr(self, 'analyze_model_button') and self.analyze_model_button.winfo_exists():
             self.analyze_model_button.config(text="Analyze Model", state=tk.NORMAL)
-        
+
         # Crucially, check if the analysis result is for the *currently selected* model
         if self.model_path.get() != analysis_result.get("path"):
              print("DEBUG: _update_ui_after_analysis received result for a different model. Ignoring.", file=sys.stderr)
@@ -2038,9 +2042,9 @@ class LlamaCppLauncher:
         arch = analysis_result.get("architecture", "unknown")
         file_size_gb = analysis_result.get("file_size_gb")
         shard_count = analysis_result.get("shard_count", 1)
-        
+
         self.model_architecture_var.set(arch.capitalize() if arch and arch != "unknown" else "Unknown")
-        
+
         # Show file size with shard info if applicable
         if file_size_gb is not None and file_size_gb > 0:
             if shard_count > 1:
@@ -2049,7 +2053,7 @@ class LlamaCppLauncher:
                 self.model_filesize_var.set(f"{file_size_gb:.2f} GB")
         else:
             self.model_filesize_var.set("Unknown Size")
-            
+
         self.model_total_layers_var.set(str(n_layers) if n_layers is not None else "Unknown")
 
         # --- Update GPU Layer Controls ---
@@ -2091,14 +2095,14 @@ class LlamaCppLauncher:
         # --- Generate Default Config Name ---
         # Call this after analysis completes, as n_layers is needed for the name
         self._generate_default_config_name()
-        
+
         # --- Update Manual Model Visibility ---
         # Hide/show manual model section based on analysis success
         self._update_manual_model_visibility()
 
     def _reset_gpu_layer_controls(self, keep_entry_enabled=False):
          """Resets GPU layer slider state and max layers (but *not* entry StringVar).
-         
+
          Args:
              keep_entry_enabled (bool): If True, keeps the entry widget enabled even when resetting controls.
          """
@@ -2295,20 +2299,20 @@ class LlamaCppLauncher:
         try:
             layers = int(self.manual_model_layers.get())
             size_gb = float(self.manual_model_size_gb.get())
-            
+
             if layers <= 0:
                 layers = 32
                 self.manual_model_layers.set("32")
             if size_gb <= 0:
                 size_gb = 7.0
                 self.manual_model_size_gb.set("7.0")
-                
+
         except ValueError:
             layers = 32
             size_gb = 7.0
             self.manual_model_layers.set("32")
             self.manual_model_size_gb.set("7.0")
-        
+
         # Generate synthetic model analysis result
         self.current_model_analysis = {
             "path": self.model_path.get() or "Manual Model",
@@ -2321,27 +2325,27 @@ class LlamaCppLauncher:
             "message": None,
             "manual_mode": True
         }
-        
+
         # Update model info display
         self.model_architecture_var.set("Manual Entry")
         self.model_filesize_var.set(f"{size_gb:.2f} GB (Manual)")
         self.model_total_layers_var.set(f"{layers} (Manual)")
-        
+
         # Update GPU layer controls
         self.max_gpu_layers.set(layers)
         self.gpu_layers_status_var.set(f"Max Layers: {layers} (Manual)")
-        
+
         if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
             self.gpu_layers_slider.config(to=layers, state=tk.NORMAL)
-        
+
         if hasattr(self, 'n_gpu_layers_entry') and self.n_gpu_layers_entry.winfo_exists():
             self.n_gpu_layers_entry.config(state=tk.NORMAL)
-        
+
         # Sync the controls based on current entry value
         self._sync_gpu_layers_from_entry()
-        
+
         print(f"DEBUG: Set up manual model with {layers} layers and {size_gb} GB size", file=sys.stderr)
-        
+
         # Update recommendations and save settings
         self._update_recommendations()
         self._generate_default_config_name()
@@ -2370,7 +2374,7 @@ class LlamaCppLauncher:
                 self._update_recommendations()
                 self._generate_default_config_name()
             self._save_configs()
-        
+
         # Update manual model visibility after mode change
         self._update_manual_model_visibility()
 
@@ -2424,66 +2428,66 @@ class LlamaCppLauncher:
             # No GPUs detected - show message
             no_gpu_label = ttk.Label(self.gpu_checkbox_frame, text="No CUDA devices detected.", foreground="orange")
             no_gpu_label.pack(side="left", padx=5, pady=3)
-        
+
         # Add separator before manual controls
         if (count > 0 and not is_manual_mode) or (is_manual_mode and self.manual_gpu_list):
             separator = ttk.Separator(self.gpu_checkbox_frame, orient="vertical")
             separator.pack(side="left", fill="y", padx=(15, 15))
-        
+
         # Manual mode controls
         manual_controls_frame = ttk.Frame(self.gpu_checkbox_frame)
         manual_controls_frame.pack(side="left", padx=5, pady=3)
-        
+
         # Manual mode toggle
-        manual_cb = ttk.Checkbutton(manual_controls_frame, text="Manual GPU Mode", 
+        manual_cb = ttk.Checkbutton(manual_controls_frame, text="Manual GPU Mode",
                                    variable=self.manual_gpu_mode,
                                    command=self._toggle_manual_gpu_mode)
         manual_cb.pack(side="top", anchor="w", pady=(0, 5))
-        
+
         if is_manual_mode:
             # Manual GPU management interface
             mgmt_frame = ttk.LabelFrame(manual_controls_frame, text="Manage Manual GPUs", padding=5)
             mgmt_frame.pack(side="top", fill="both", expand=True)
-            
+
             # Add new GPU section
             add_frame = ttk.Frame(mgmt_frame)
             add_frame.pack(side="top", fill="x", pady=(0, 5))
-            
+
             ttk.Label(add_frame, text="Add GPU:").pack(side="left", padx=(0, 5))
-            
+
             ttk.Label(add_frame, text="Name:").pack(side="left", padx=(5, 2))
             name_entry = ttk.Entry(add_frame, textvariable=self.manual_gpu_name_var, width=12)
             name_entry.pack(side="left", padx=2)
-            
+
             ttk.Label(add_frame, text="VRAM (GB):").pack(side="left", padx=(5, 2))
             vram_entry = ttk.Entry(add_frame, textvariable=self.manual_gpu_vram_var, width=6)
             vram_entry.pack(side="left", padx=2)
-            
+
             ttk.Button(add_frame, text="Add GPU", command=self._add_manual_gpu).pack(side="left", padx=(5, 0))
-            
+
             # Current manual GPUs list
             if self.manual_gpu_list:
                 list_frame = ttk.Frame(mgmt_frame)
                 list_frame.pack(side="top", fill="both", expand=True, pady=(5, 0))
-                
+
                 ttk.Label(list_frame, text="Current Manual GPUs:").pack(side="top", anchor="w")
-                
+
                 # Create a scrollable listbox for manual GPUs
                 list_container = ttk.Frame(list_frame)
                 list_container.pack(side="top", fill="both", expand=True, pady=(2, 0))
-                
+
                 self.manual_gpu_listbox = tk.Listbox(list_container, height=3, width=40)
                 scrollbar = ttk.Scrollbar(list_container, orient="vertical", command=self.manual_gpu_listbox.yview)
                 self.manual_gpu_listbox.config(yscrollcommand=scrollbar.set)
-                
+
                 self.manual_gpu_listbox.pack(side="left", fill="both", expand=True)
                 scrollbar.pack(side="right", fill="y")
-                
+
                 # Populate the listbox
                 for i, gpu in enumerate(self.manual_gpu_list):
                     display_text = f"GPU {i}: {gpu['name']} ({gpu['vram_gb']:.1f} GB)"
                     self.manual_gpu_listbox.insert(tk.END, display_text)
-                
+
                 # Remove button
                 remove_frame = ttk.Frame(list_frame)
                 remove_frame.pack(side="top", fill="x", pady=(5, 0))
@@ -2527,7 +2531,7 @@ class LlamaCppLauncher:
         if self.gpu_info['available'] and self.gpu_info['device_count'] > 0:
             is_manual_mode = self.gpu_info.get("manual_mode", False)
             vram_label_text = "VRAM (Total GB):" if not is_manual_mode else "VRAM (Manual Setup):"
-            
+
             ttk.Label(self._vram_info_frame, text=vram_label_text, font=("TkSmallCaptionFont", 8, ("bold",)))\
                 .pack(side="left", padx=(0, 5))
 
@@ -2568,12 +2572,12 @@ class LlamaCppLauncher:
     def _update_recommendations(self):
         """Updates recommended values displayed in the UI."""
         print("DEBUG: Updating recommendations...", file=sys.stderr)
-        
+
         # Clear any pending debounced update to prevent duplicate calls
         if self._recommendations_update_timer is not None:
             self.root.after_cancel(self._recommendations_update_timer)
             self._recommendations_update_timer = None
-        
+
         # Update current KV Cache Type display (always reflects current selection)
         self.model_kv_cache_type_var.set(self.cache_type_k.get())
 
@@ -2680,7 +2684,7 @@ class LlamaCppLauncher:
         # Cancel any existing timer
         if self._recommendations_update_timer is not None:
             self.root.after_cancel(self._recommendations_update_timer)
-        
+
         # Schedule new update
         self._recommendations_update_timer = self.root.after(delay_ms, self._update_recommendations)
 
@@ -2832,14 +2836,14 @@ class LlamaCppLauncher:
         self._update_root_directory_labels()  # Update the labels
         self._update_ik_llama_tab_visibility()  # Update ik_llama tab visibility
         self._save_configs()
-    
+
     def _update_ik_llama_tab_visibility(self):
         """Show or hide the ik_llama tab based on backend selection."""
         if not hasattr(self, 'notebook') or not hasattr(self, 'ik_llama_frame'):
             return  # Not initialized yet
-            
+
         backend = self.backend_selection.get()
-        
+
         if backend == "ik_llama":
             # Show the ik_llama tab if not already visible
             try:
@@ -2852,7 +2856,7 @@ class LlamaCppLauncher:
                         if tab_text == "Environment Variables":
                             env_tab_index = i
                             break
-                    
+
                     if env_tab_index is not None:
                         self.notebook.insert(env_tab_index + 1, self.ik_llama_frame, text="ik_llama Config")
                     else:
@@ -2875,7 +2879,7 @@ class LlamaCppLauncher:
         """Handler for when the current backend directory is manually changed."""
         backend = self.backend_selection.get()
         new_dir = self.current_backend_dir.get()
-        
+
         # Update the appropriate backend-specific variable
         if backend == "ik_llama":
             self.ik_llama_dir.set(new_dir)
@@ -2883,7 +2887,7 @@ class LlamaCppLauncher:
         else:  # llama.cpp
             self.llama_cpp_dir.set(new_dir)
             self.app_settings["last_llama_cpp_dir"] = new_dir
-        
+
         # Save the settings
         self._save_configs()
 
@@ -2906,10 +2910,10 @@ class LlamaCppLauncher:
                 # Resolve the path before setting to handle symlinks etc.
                 resolved_path = Path(directory).resolve()
                 resolved_path_str = str(resolved_path)
-                
+
                 # Update the current backend directory
                 self.current_backend_dir.set(resolved_path_str)
-                
+
                 # Save to the appropriate backend-specific variable
                 backend = self.backend_selection.get()
                 if backend == "ik_llama":
@@ -2920,10 +2924,10 @@ class LlamaCppLauncher:
                     self.llama_cpp_dir.set(resolved_path_str)
                     self.app_settings["last_llama_cpp_dir"] = resolved_path_str
                     print(f"DEBUG: Updated llama.cpp directory to: {resolved_path_str}", file=sys.stderr)
-                
+
                 # Save the settings
                 self._save_configs()
-                
+
             except Exception as e:
                 print(f"Error resolving path '{directory}': {e}", file=sys.stderr)
                 # Fallback to setting the raw path if resolving fails
@@ -2932,16 +2936,16 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     #  Asynchronous System Info Detection
     # ═════════════════════════════════════════════════════════════════
-    
+
     def _start_system_info_detection(self):
         """Start system info detection in a background thread."""
         # Prevent multiple simultaneous detection threads
         if hasattr(self, '_detection_in_progress') and self._detection_in_progress:
             debug_print("GPU detection already in progress, skipping new request")
             return
-        
+
         self._detection_in_progress = True
-        
+
         def detect_system_info():
             """Background thread function to detect system info."""
             try:
@@ -2949,7 +2953,7 @@ class LlamaCppLauncher:
                 # Perform the potentially slow system info detection
                 self.system_info_manager.fetch_system_info()
                 print("DEBUG: Background system info detection completed.", file=sys.stderr)
-                
+
                 # Schedule UI update on main thread (flag will be cleared there)
                 self.root.after(0, self._on_system_info_detection_complete)
             except Exception as e:
@@ -2957,33 +2961,33 @@ class LlamaCppLauncher:
                 traceback.print_exc(file=sys.stderr)
                 # Even on error, schedule completion handler to update UI (flag will be cleared there)
                 self.root.after(0, lambda: self._on_system_info_detection_complete(error=str(e)))
-        
+
         # Start detection in background thread
         detection_thread = Thread(target=detect_system_info, daemon=True)
         detection_thread.start()
-    
+
     def _on_system_info_detection_complete(self, error=None):
         """Handle completion of system info detection (runs on main thread)."""
         try:
             # Clear detection flag (single point of clearing)
             self._detection_in_progress = False
-            
+
             if error:
                 self._handle_detection_error(error)
             else:
                 self._handle_detection_success()
-            
+
             # Update UI components
             self._update_gpu_checkboxes()
             self._refresh_vram_display()
             self._update_recommendations()
-            
+
             print("DEBUG: UI update after system info detection completed.", file=sys.stderr)
-            
+
         except Exception as e:
             print(f"ERROR: Failed to update UI after system info detection: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-    
+
     def _handle_detection_error(self, error):
         """Handle GPU detection error state."""
         print(f"DEBUG: System info detection completed with error: {error}", file=sys.stderr)
@@ -2993,50 +2997,50 @@ class LlamaCppLauncher:
         self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (detection failed)")
         self.cpu_logical_cores_display_var.set(f"{self.logical_cores} (detection failed)")
         self.cpu_physical_cores_display_var.set(f"{self.physical_cores} (detection failed)")
-    
+
     def _handle_detection_success(self):
         """Handle successful GPU detection."""
         print("DEBUG: System info detection completed successfully, updating UI...", file=sys.stderr)
-        
+
         # Update CPU information
         self._update_cpu_info()
-        
+
         # Update GPU information
         self._update_gpu_info()
-        
+
         # Log GPU detection results
         self._log_gpu_detection_results()
-    
+
     def _update_cpu_info(self):
         """Update CPU-related UI components after detection."""
         self.threads.set(str(self.physical_cores))
         self.threads_batch.set(str(self.logical_cores))
         self.recommended_threads_var.set(f"Recommended: {self.physical_cores} (Your CPU physical cores)")
         self.recommended_threads_batch_var.set(f"Recommended: {self.logical_cores} (Your CPU logical cores)")
-        
+
         if "error" not in self.cpu_info:
             self.cpu_info["logical_cores"] = self.logical_cores
             self.cpu_info["physical_cores"] = self.physical_cores
             self.cpu_logical_cores_display_var.set(str(self.logical_cores))
             self.cpu_physical_cores_display_var.set(str(self.physical_cores))
-    
+
     def _update_gpu_info(self):
         """Update GPU-related UI components after detection."""
         # Update GPU detection status message
         self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
-        
+
         # Update GPU availability display
         gpu_count = len(self.detected_gpu_devices)
         if self.gpu_info['available'] and gpu_count > 0:
             self.gpu_availability_var.set(f"CUDA Devices ({gpu_count} available):")
         else:
             self.gpu_availability_var.set("CUDA Devices (Not available):")
-    
+
     def _log_gpu_detection_results(self):
         """Log GPU detection results for debugging."""
         gpu_count = len(self.detected_gpu_devices)
         print(f"DEBUG: GPU detection result: {gpu_count} devices detected", file=sys.stderr)
-        
+
         if self.gpu_info['available'] and gpu_count > 0:
             if self.manual_gpu_mode.get():
                 self._log_manual_mode_results()
@@ -3044,26 +3048,26 @@ class LlamaCppLauncher:
                 self._log_automatic_mode_results()
         else:
             self._log_no_gpu_results()
-    
+
     def _log_manual_mode_results(self):
         """Log results when in manual GPU mode."""
         detected_count = len(self.detected_gpu_devices)
         manual_count = len(self.manual_gpu_list)
-        
+
         print(f"DEBUG: Manual mode active. Detected {detected_count} real GPUs, {manual_count} manual GPUs configured", file=sys.stderr)
-        
+
         if detected_count > 0:
             avg_detected_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices) / detected_count
             if manual_count > 0:
                 avg_manual_vram = sum(gpu.get("vram_gb", 0) for gpu in self.manual_gpu_list) / manual_count
                 debug_print(f"Hardware VRAM: {avg_detected_vram:.1f}GB avg, Manual VRAM: {avg_manual_vram:.1f}GB avg")
-    
+
     def _log_automatic_mode_results(self):
         """Log results when in automatic GPU mode."""
         print("DEBUG: Real GPUs detected in automatic mode - updating UI", file=sys.stderr)
         total_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices)
         debug_print(f"Total detected VRAM: {total_vram:.1f}GB across {len(self.detected_gpu_devices)} GPUs")
-    
+
     def _log_no_gpu_results(self):
         """Log results when no GPUs are detected."""
         if self.manual_gpu_mode.get():
@@ -3077,15 +3081,15 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     #  Manual GPU Management (Redesigned)
     # ═════════════════════════════════════════════════════════════════
-    
+
     def _add_manual_gpu(self):
         """Add a new manual GPU with specified name and VRAM."""
         name = self.manual_gpu_name_var.get().strip()
         vram_str = self.manual_gpu_vram_var.get().strip()
-        
+
         if not name:
             name = f"Manual GPU {len(self.manual_gpu_list)}"
-        
+
         try:
             vram_gb = float(vram_str)
             if vram_gb <= 0:
@@ -3094,15 +3098,15 @@ class LlamaCppLauncher:
         except ValueError:
             messagebox.showwarning("Invalid VRAM", "Please enter a valid number for VRAM.")
             return
-        
+
         # Add the new GPU
         new_gpu = {"name": name, "vram_gb": vram_gb}
         self.manual_gpu_list.append(new_gpu)
-        
+
         # Clear input fields
         self.manual_gpu_name_var.set("")
         self.manual_gpu_vram_var.set("8.0")
-        
+
         # Add to listbox if it exists
         if hasattr(self, 'manual_gpu_listbox') and self.manual_gpu_listbox.winfo_exists():
             new_index = len(self.manual_gpu_list) - 1
@@ -3113,7 +3117,7 @@ class LlamaCppLauncher:
             self.manual_gpu_listbox.selection_set(new_index)
             self.manual_gpu_listbox.activate(new_index)
             self.manual_gpu_listbox.see(new_index)
-        
+
         # Update the detected_gpu_devices to reflect the new list
         self.detected_gpu_devices = []
         for i, manual_gpu in enumerate(self.manual_gpu_list):
@@ -3127,7 +3131,7 @@ class LlamaCppLauncher:
                 "manual": True
             }
             self.detected_gpu_devices.append(fake_gpu)
-        
+
         # Update gpu_info
         self.gpu_info = {
             "available": len(self.manual_gpu_list) > 0,
@@ -3135,40 +3139,40 @@ class LlamaCppLauncher:
             "devices": self.detected_gpu_devices.copy(),
             "manual_mode": True
         }
-        
+
         # Only update the main GPU checkboxes, not the entire manual interface
         self._update_gpu_checkboxes()
         self._save_configs()
         print(f"DEBUG: Added manual GPU: {name} with {vram_gb:.1f} GB VRAM", file=sys.stderr)
-        
+
         # Update VRAM display to show the new manual GPU
         self._refresh_vram_display()
-    
+
     def _remove_manual_gpu(self):
         """Remove the selected manual GPU."""
         if not hasattr(self, 'manual_gpu_listbox'):
             return
-            
+
         selection = self.manual_gpu_listbox.curselection()
         if not selection:
             messagebox.showwarning("No Selection", "Please select a GPU to remove.")
             return
-        
+
         index = selection[0]
         if 0 <= index < len(self.manual_gpu_list):
             removed_gpu = self.manual_gpu_list.pop(index)
             print(f"DEBUG: Removed manual GPU: {removed_gpu['name']}", file=sys.stderr)
-            
+
             # Update the listbox directly instead of rebuilding entire UI
             self.manual_gpu_listbox.delete(index)
-            
+
             # If there are still GPUs, select the next one (or previous if we removed the last)
             if self.manual_gpu_list:
                 new_selection = min(index, len(self.manual_gpu_list) - 1)
                 self.manual_gpu_listbox.selection_set(new_selection)
                 self.manual_gpu_listbox.activate(new_selection)
                 self.manual_gpu_listbox.see(new_selection)
-                
+
                 # Update the detected_gpu_devices to reflect the new list
                 self.detected_gpu_devices = []
                 for i, manual_gpu in enumerate(self.manual_gpu_list):
@@ -3182,11 +3186,11 @@ class LlamaCppLauncher:
                         "manual": True
                     }
                     self.detected_gpu_devices.append(fake_gpu)
-                
+
                 # Update gpu_info
                 self.gpu_info["device_count"] = len(self.manual_gpu_list)
                 self.gpu_info["devices"] = self.detected_gpu_devices.copy()
-                
+
                 # Only update the main GPU checkboxes, not the entire manual interface
                 self._update_gpu_checkboxes()
             else:
@@ -3196,43 +3200,43 @@ class LlamaCppLauncher:
                 self.app_settings["manual_gpu_mode"] = False
                 # Clear status message and start detection
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
-                # Don't wait for UI - start detection immediately  
+                # Don't wait for UI - start detection immediately
                 self._start_system_info_detection()
-            
+
             # Update VRAM display to reflect GPU removal
             self._refresh_vram_display()
-            
+
             # Save the changes
             self._save_configs()
-            
+
         else:
             messagebox.showwarning("Invalid Selection", "Selected GPU index is out of range.")
-    
+
     def _clear_manual_gpus(self):
         """Clear all manual GPUs."""
         if self.manual_gpu_list:
-            result = messagebox.askyesno("Clear All GPUs", 
+            result = messagebox.askyesno("Clear All GPUs",
                                        f"Are you sure you want to remove all {len(self.manual_gpu_list)} manual GPUs?")
             if result:
                 self.manual_gpu_list.clear()
                 print("DEBUG: Cleared all manual GPUs", file=sys.stderr)
-                
+
                 # Switch back to automatic mode immediately
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
-                
+
                 # Update status and start detection without delay
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
                 self._start_system_info_detection()
-                
+
                 # Save the changes
                 self._save_configs()
-    
+
     def _setup_manual_gpus(self):
         """Setup manual GPUs based on the current manual_gpu_list."""
         if not self.manual_gpu_mode.get():
             return
-        
+
         # Create fake GPU devices from the manual list
         self.detected_gpu_devices = []
         for i, manual_gpu in enumerate(self.manual_gpu_list):
@@ -3246,7 +3250,7 @@ class LlamaCppLauncher:
                 "manual": True
             }
             self.detected_gpu_devices.append(fake_gpu)
-        
+
         # Update gpu_info to reflect manual GPUs
         self.gpu_info = {
             "available": len(self.manual_gpu_list) > 0,
@@ -3254,46 +3258,46 @@ class LlamaCppLauncher:
             "devices": self.detected_gpu_devices.copy(),
             "manual_mode": True
         }
-        
+
         print(f"DEBUG: Set up {len(self.manual_gpu_list)} manual GPUs", file=sys.stderr)
         for i, gpu in enumerate(self.manual_gpu_list):
             print(f"DEBUG:   GPU {i}: {gpu['name']} ({gpu['vram_gb']:.1f} GB)", file=sys.stderr)
-        
+
         # Update the UI
         self._update_gpu_checkboxes()
         self._update_recommendations()
-        
+
         # Update VRAM display to show manual GPU information
         self._refresh_vram_display()
-    
+
     def _migrate_legacy_manual_gpu_config(self):
         """Migrate from old manual_gpu_count + manual_gpu_vram format to new list format."""
         if self.manual_gpu_list:
             return  # Already using new format
-        
+
         try:
             count = int(self.manual_gpu_count.get())
             vram = float(self.manual_gpu_vram.get())
-            
+
             if count > 0 and vram > 0:
                 # Check if we have detected GPUs and if they differ from legacy config
                 detected_count = len(self.detected_gpu_devices)
                 if detected_count > 0:
                     # We have detected GPUs - check if legacy config matches
                     avg_detected_vram = sum(gpu.get("total_memory_gb", 0) for gpu in self.detected_gpu_devices) / detected_count
-                    
+
                     # If the legacy config differs significantly from detected hardware, prefer detected hardware
-                    if (count != detected_count or 
+                    if (count != detected_count or
                         abs(vram - avg_detected_vram) > 1.0):  # More than 1GB difference
                         print(f"DEBUG: Legacy config ({count} GPUs @ {vram}GB) differs from detected hardware ({detected_count} GPUs @ {avg_detected_vram:.1f}GB avg). Using detected hardware.", file=sys.stderr)
                         # Don't migrate legacy config - let the caller create based on detected hardware
                         return
-                
+
                 print(f"DEBUG: Migrating legacy manual GPU config: {count} GPUs with {vram} GB each", file=sys.stderr)
                 for i in range(count):
                     gpu = {"name": f"Manual GPU {i}", "vram_gb": vram}
                     self.manual_gpu_list.append(gpu)
-                
+
                 # Save migrated config
                 self._save_configs()
                 print("DEBUG: Legacy manual GPU config migrated successfully", file=sys.stderr)
@@ -3311,17 +3315,17 @@ class LlamaCppLauncher:
         if self.manual_gpu_mode.get():
             # Switching to manual mode - do this immediately without waiting for detection
             print("DEBUG: Switching to manual GPU mode", file=sys.stderr)
-            
+
             # Clear any ongoing detection
             if hasattr(self, '_detection_in_progress'):
                 self._detection_in_progress = False
-            
+
             # Update status immediately
             self.gpu_detected_status_var.set("Manual mode active")
-            
+
             # Migrate legacy config if needed
             self._migrate_legacy_manual_gpu_config()
-            
+
             # If no manual GPUs exist after migration, create them based on detected hardware
             if not self.manual_gpu_list:
                 # Use detected GPU information to create manual GPUs that match the hardware
@@ -3338,32 +3342,32 @@ class LlamaCppLauncher:
                     # Fallback if no GPUs detected
                     self.manual_gpu_list.append({"name": "Manual GPU 0", "vram_gb": 8.0})
                     print("DEBUG: Added default manual GPU (no hardware detected)", file=sys.stderr)
-            
+
             # Setup manual GPUs immediately
             self._setup_manual_gpus()
         else:
             # Switching back to automatic detection - only now trigger background detection
             print("DEBUG: Switching back to automatic GPU detection...", file=sys.stderr)
             self.gpu_detected_status_var.set("Re-detecting GPUs...")
-            
+
             # Reset manual GPU info
             self.manual_gpu_list.clear()
-            
+
             # Start background detection (this will update the UI when complete)
             self._start_system_info_detection()
-        
+
         self._save_configs()
-    
+
     def _refresh_manual_gpus_from_detected(self):
         """Refresh manual GPU list to match detected hardware."""
         if not self.manual_gpu_mode.get() or not self.detected_gpu_devices:
             return
-        
+
         print(f"DEBUG: Refreshing manual GPUs to match {len(self.detected_gpu_devices)} detected GPUs", file=sys.stderr)
-        
+
         # Clear current manual GPU list
         self.manual_gpu_list.clear()
-        
+
         # Create new manual GPUs based on detected hardware
         for i, detected_gpu in enumerate(self.detected_gpu_devices):
             if not detected_gpu.get("manual", False):  # Only use real detected GPUs
@@ -3373,7 +3377,7 @@ class LlamaCppLauncher:
                 }
                 self.manual_gpu_list.append(manual_gpu)
                 print(f"DEBUG: Refreshed manual GPU {i}: {manual_gpu['name']} ({manual_gpu['vram_gb']:.2f} GB)", file=sys.stderr)
-        
+
         # Save the updated manual GPU list and re-setup
         self._save_configs()
         self._setup_manual_gpus()
@@ -3385,7 +3389,7 @@ class LlamaCppLauncher:
             self.app_settings["last_venv_dir"] = new_dir
             self._save_configs()
             print(f"DEBUG: Updated virtual environment directory to: {new_dir}", file=sys.stderr)
-            
+
             # Re-trigger GPU detection if we're in automatic mode and not already detecting
             if not self.manual_gpu_mode.get():
                 print("DEBUG: Re-triggering GPU detection due to venv change", file=sys.stderr)
@@ -3395,7 +3399,7 @@ class LlamaCppLauncher:
             print("DEBUG: Virtual environment directory cleared", file=sys.stderr)
             self.app_settings["last_venv_dir"] = ""
             self._save_configs()
-            
+
             # Re-trigger GPU detection if we're in automatic mode (fallback to no venv)
             if not self.manual_gpu_mode.get():
                 print("DEBUG: Re-triggering GPU detection due to venv removal", file=sys.stderr)
