@@ -277,6 +277,10 @@ class LlamaCppLauncher:
         # --- New Parameters ---
         self.ignore_eos      = tk.BooleanVar(value=False) # --ignore-eos
         self.n_predict       = tk.StringVar(value="-1")   # --n-predict
+        
+        # --- MoE CPU Parameters ---
+        self.cpu_moe         = tk.BooleanVar(value=False) # --cpu-moe
+        self.n_cpu_moe       = tk.StringVar(value="")     # --n-cpu-moe
 
         # --- Chat Template Selection Variables ---
         # Controls which template source is used: 'default', 'predefined', or 'custom'.
@@ -417,6 +421,9 @@ class LlamaCppLauncher:
         self.n_predict.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to ignore_eos to update default config name if needed
         self.ignore_eos.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Bind trace to MoE CPU parameters to update default config name if needed
+        self.cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.n_cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -1147,6 +1154,21 @@ class LlamaCppLauncher:
         self.prio_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="0=Normal, 1=Medium, 2=High, 3=Realtime (OS dependent)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+        
+        # --- MoE CPU Settings --- (same row)
+        ttk.Label(inner, text="MoE CPU Settings:")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        moe_frame = ttk.Frame(inner)
+        moe_frame.grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=3)
+        
+        self.cpu_moe_check = ttk.Checkbutton(moe_frame, text="Keep all MoE in CPU (--cpu-moe)", variable=self.cpu_moe, state=tk.NORMAL)
+        self.cpu_moe_check.pack(side="left", padx=(0, 10))
+        
+        ttk.Label(moe_frame, text="First N layers in CPU (--n-cpu-moe):")\
+            .pack(side="left", padx=(0, 5))
+        self.n_cpu_moe_entry = ttk.Entry(moe_frame, textvariable=self.n_cpu_moe, width=8, state=tk.NORMAL)
+        self.n_cpu_moe_entry.pack(side="left")
+        r += 1
 
 
         # --- NEW: Generation Settings ---
@@ -1647,7 +1669,8 @@ class LlamaCppLauncher:
         print("DEBUG: _scan_model_dirs thread started", file=sys.stderr)
         found = {} # {display_name: full_path_obj}
         # Pattern to match multi-part files like model-00001-of-00005.gguf or model-F1.gguf
-        multipart_pattern = re.compile(r"^(.*?)(?:-\d{5}-of-\d{5}|-F\d+)\.gguf$", re.IGNORECASE)
+        # Note: -F[1-9] only matches single-digit F parts to avoid matching precision indicators like F16, F32
+        multipart_pattern = re.compile(r"^(.*?)(?:-\d{5}-of-\d{5}|-F[1-9])\.gguf$", re.IGNORECASE)
         # Pattern to match the FIRST part of a multi-part file (e.g., model-00001-of-00005.gguf or model-F1.gguf)
         first_part_pattern = re.compile(r"^(.*?)-(?:00001-of-\d{5}|F1)\.gguf$", re.IGNORECASE)
         

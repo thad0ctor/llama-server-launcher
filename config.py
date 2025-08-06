@@ -82,6 +82,8 @@ class ConfigManager:
             "no_mmap":       False, # Default for --no-mmap flag
             "mlock":         False, # Default for --mlock flag
             "no_kv_offload": False, # Default for --no-kv-offload flag
+            "cpu_moe":       False, # Default for --cpu-moe flag
+            "n_cpu_moe":     "",    # Default for --n-cpu-moe (empty)
     
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
@@ -107,6 +109,8 @@ class ConfigManager:
             "no_mmap":       self.launcher.no_mmap.get(),   # bool
             "mlock":         self.launcher.mlock.get(),    # bool
             "no_kv_offload": self.launcher.no_kv_offload.get(), # bool
+            "cpu_moe":       self.launcher.cpu_moe.get(),  # bool
+            "n_cpu_moe":     self.launcher.n_cpu_moe.get().strip(),
 
         }
 
@@ -142,6 +146,7 @@ class ConfigManager:
                          "no_kv_offload": "no-kv-offload",
              
                          "ignore_eos": "no-eos",
+                         "cpu_moe": "cpu-moe",
                       }
                       parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
             # Handle other string parameters
@@ -270,6 +275,9 @@ class ConfigManager:
             # --- NEW: Add new parameters to config ---
             "ignore_eos":    self.launcher.ignore_eos.get(),
             "n_predict":     self.launcher.n_predict.get(),
+            # --- MoE CPU parameters ---
+            "cpu_moe":       self.launcher.cpu_moe.get(),
+            "n_cpu_moe":     self.launcher.n_cpu_moe.get(),
             # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
             # Save the new template source variable
             "template_source": self.launcher.template_source.get(),
@@ -338,6 +346,9 @@ class ConfigManager:
         # --- NEW: Load new parameters ---
         self.launcher.ignore_eos.set(cfg.get("ignore_eos", False))
         self.launcher.n_predict.set(cfg.get("n_predict", "-1")) # Default -1 for backward compatibility
+        # --- MoE CPU parameters ---
+        self.launcher.cpu_moe.set(cfg.get("cpu_moe", False))
+        self.launcher.n_cpu_moe.set(cfg.get("n_cpu_moe", ""))
         # --- NEW: Load Custom Parameters ---
         # Default to empty list [] for backward compatibility with older configs
         self.launcher.custom_parameters_list = cfg.get("custom_parameters", [])

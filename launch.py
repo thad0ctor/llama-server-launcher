@@ -194,6 +194,11 @@ class LaunchManager:
 
         # Performance options
         self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0") # Omit if 0 (default)
+        
+        # --- MoE CPU options (only for llama.cpp backend) ---
+        if backend != "ik_llama":
+            self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
+            self.add_arg(cmd, "--n-cpu-moe", self.launcher.n_cpu_moe.get(), "") # Omit if empty (default)
 
         # --- NEW: Generation options ---
         self.add_arg(cmd, "--ignore-eos", self.launcher.ignore_eos.get()) # Omit if False (default)
