@@ -118,19 +118,30 @@ class LaunchManager:
 
         cmd.extend(["-m", final_model_path])
 
-        # --- Append mmproj if exists ---
-        mmproj_file = None
-        # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
-        # model_name.Q6_K.gguf.part2of2 from mradermacher
-        re_model = re.compile(r"^(.*?)[-.]\w+(?:-\d{5}-of-\d{5})?\.gguf(?:\.part\d+of\d+)?$", re.I)
-        model_name = re_model.match(Path(model_full_path_str).name).group(1)
-
-        for mmproj in Path(model_full_path_str).parent.iterdir():
-            if "mmproj" in mmproj.name:
-                mmproj_file = mmproj
-                if model_name in mmproj.name: break
-        if mmproj_file:
-            cmd.extend(["--mmproj", str(mmproj_file.resolve())])
+        # --- Append mmproj if enabled and exists ---
+        if self.launcher.mmproj_enabled.get():
+            try:
+                mmproj_file = None
+                # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
+                # model_name.Q6_K.gguf.part2of2 from mradermacher
+                re_model = re.compile(r"^(.*?)[-.]\w+(?:-\d{5}-of-\d{5})?\.gguf(?:\.part\d+of\d+)?$", re.I)
+                model_name_match = re_model.match(Path(model_full_path_str).name)
+                if model_name_match:
+                    model_name = model_name_match.group(1)
+                    
+                    model_dir = Path(model_full_path_str).parent
+                    if model_dir.exists() and model_dir.is_dir():
+                        for mmproj in model_dir.iterdir():
+                            if mmproj.is_file() and "mmproj" in mmproj.name.lower():
+                                mmproj_file = mmproj
+                                if model_name.lower() in mmproj.name.lower(): 
+                                    break
+                                
+                        if mmproj_file:
+                            cmd.extend(["--mmproj", str(mmproj_file.resolve())])
+                            print(f"DEBUG: Adding --mmproj {mmproj_file.name}", file=sys.stderr)
+            except Exception as e:
+                print(f"WARNING: Error scanning for mmproj files: {e}", file=sys.stderr)
 
         # --- Other Arguments ---
         # --- KV Cache Type ---

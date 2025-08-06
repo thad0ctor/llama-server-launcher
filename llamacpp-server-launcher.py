@@ -282,6 +282,9 @@ class LlamaCppLauncher:
         self.cpu_moe         = tk.BooleanVar(value=False) # --cpu-moe
         self.n_cpu_moe       = tk.StringVar(value="")     # --n-cpu-moe
 
+        # --- Multi-modal Projection (mmproj) ---
+        self.mmproj_enabled  = tk.BooleanVar(value=False) # Enable automatic mmproj file detection
+
         # --- Chat Template Selection Variables ---
         # Controls which template source is used: 'default', 'predefined', or 'custom'.
         # Initial state is 'default' (using the model's template if available).
@@ -424,6 +427,8 @@ class LlamaCppLauncher:
         # Bind trace to MoE CPU parameters to update default config name if needed
         self.cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.n_cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Bind trace to mmproj_enabled to update default config name if needed
+        self.mmproj_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -661,6 +666,16 @@ class LlamaCppLauncher:
         self.scan_status_label = ttk.Label(inner, textvariable=self.scan_status_var, foreground="grey", font=("TkSmallCaptionFont"))
         self.scan_status_label.grid(column=1, row=r, columnspan=3, sticky="nw", padx=5, pady=(2,5));
         r += 1
+
+        # --- Multi-modal Projection (mmproj) ---
+        ttk.Label(inner, text="Multi-modal Projection:")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        self.mmproj_enabled_check = ttk.Checkbutton(inner, variable=self.mmproj_enabled, state=tk.NORMAL)
+        self.mmproj_enabled_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, text="Enable automatic mmproj file detection", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="When enabled, automatically scans for and loads mmproj files for multi-modal models", font=("TkSmallCaptionFont"))\
+            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,10)); r += 1
 
         ttk.Label(inner, text="Basic Settings", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1

@@ -84,7 +84,8 @@ class ConfigManager:
             "no_kv_offload": False, # Default for --no-kv-offload flag
             "cpu_moe":       False, # Default for --cpu-moe flag
             "n_cpu_moe":     "",    # Default for --n-cpu-moe (empty)
-
+            "mmproj_enabled": False, # Default for mmproj detection
+    
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
@@ -111,6 +112,7 @@ class ConfigManager:
             "no_kv_offload": self.launcher.no_kv_offload.get(), # bool
             "cpu_moe":       self.launcher.cpu_moe.get(),  # bool
             "n_cpu_moe":     self.launcher.n_cpu_moe.get().strip(),
+            "mmproj_enabled": self.launcher.mmproj_enabled.get(), # bool
 
         }
 
@@ -147,6 +149,7 @@ class ConfigManager:
 
                          "ignore_eos": "no-eos",
                          "cpu_moe": "cpu-moe",
+                         "mmproj_enabled": "mmproj",
                       }
                       parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
             # Handle other string parameters
@@ -278,6 +281,8 @@ class ConfigManager:
             # --- MoE CPU parameters ---
             "cpu_moe":       self.launcher.cpu_moe.get(),
             "n_cpu_moe":     self.launcher.n_cpu_moe.get(),
+            # --- Multi-modal Projection ---
+            "mmproj_enabled": self.launcher.mmproj_enabled.get(),
             # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
             # Save the new template source variable
             "template_source": self.launcher.template_source.get(),
@@ -349,6 +354,8 @@ class ConfigManager:
         # --- MoE CPU parameters ---
         self.launcher.cpu_moe.set(cfg.get("cpu_moe", False))
         self.launcher.n_cpu_moe.set(cfg.get("n_cpu_moe", ""))
+        # --- Multi-modal Projection ---
+        self.launcher.mmproj_enabled.set(cfg.get("mmproj_enabled", False))
         # --- NEW: Load Custom Parameters ---
         # Default to empty list [] for backward compatibility with older configs
         self.launcher.custom_parameters_list = cfg.get("custom_parameters", [])
