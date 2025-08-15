@@ -92,16 +92,15 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 *   **llama.cpp** built with server support (`llama-server and ik_llama` executable)
 *   **requests** - Required for version checking and updates
     *   Install with: `pip install requests`
+*   **gguf** - Required for for GGUF model analysis
+    *   Install with: `pip install git+https://github.com/excosy/ik_gguf.git`
+    *   `pip install gguf` also work if new quant types from ik_llama are not used
 
 ### Optional (Recommended)
 *   **PyTorch** (`torch`) - **Required if you want automatic GPU detection and selection**
     *   Install in your virtual environment: `pip install torch`
     *   Without PyTorch, you can still manually configure GPU settings
     *   Enables automatic CUDA device detection and system resource information
-*   **llama-cpp-python** - **Optional fallback for GGUF model analysis**
-    *   Install in your virtual environment: `pip install llama-cpp-python`
-    *   Provides enhanced model analysis when llama.cpp tools are unavailable
-    *   The launcher works without it using built-in GGUF parsing and llama.cpp tools
 *   **psutil** - **Optional for enhanced system information**
     *   Provides detailed CPU and RAM information across platforms
     *   Install with: `pip install psutil`
@@ -138,7 +137,7 @@ Or follow the [Dependencies](#-dependencies) section above to install dependenci
 
 You'll need to build `llama.cpp or ik_llama` separately and point the launcher to the build directory. Here's an example build configuration:
 
-> **⚠️ Example Environment Disclaimer:**  
+> **⚠️ Example Environment Disclaimer:**
 > The following build example was tested on **Ubuntu 24.04** with **CUDA 12.9** and **GCC 13**. Your build flags may need adjustment based on your system configuration, CUDA version, GCC version, and GPU architecture.
 
 ```bash
@@ -161,7 +160,7 @@ CC=/usr/bin/gcc-13 CXX=/usr/bin/g++-13 cmake .. \
 make -j$(nproc)
 ```
 
-> **📚 Need More Build Help?**  
+> **📚 Need More Build Help?**
 > For additional building guidance, platform-specific instructions, and troubleshooting, refer to the official [llama.cpp documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md).
 
 **Key Build Flags Explained:**

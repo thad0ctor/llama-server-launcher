@@ -39,10 +39,12 @@ from config import ConfigManager
 
 # Import system helper functions
 from system import (
-    get_gpu_info_static, get_ram_info_static, get_cpu_info_static,
-    analyze_gguf_with_llamacpp_tools, calculate_total_gguf_size,
-    parse_gguf_header_simple, analyze_gguf_model_static, SystemInfoManager,
-    LLAMA_CPP_PYTHON_AVAILABLE
+    get_gpu_info_static,
+    get_ram_info_static,
+    get_cpu_info_static,
+    calculate_total_gguf_size,
+    analyze_gguf_model_static,
+    SystemInfoManager,
 )
 
 
@@ -313,6 +315,9 @@ class LlamaCppLauncher:
         self.model_architecture_var = tk.StringVar(value="N/A")
         self.model_filesize_var = tk.StringVar(value="N/A")
         self.model_total_layers_var = tk.StringVar(value="N/A") # Total layers from GGUF analysis
+        self.model_context_length_var = tk.StringVar(value="N/A") # Max Context Length
+        self.model_expert_count_var = tk.StringVar(value="N/A") # Total Expert Count of MoE
+        self.model_expert_used_count_var = tk.StringVar(value="N/A") # Expert Used Count of MoE
         self.model_kv_cache_type_var = tk.StringVar(value="N/A") # Current selected KV cache type
 
         # --- Recommendation Variables ---
@@ -668,7 +673,7 @@ class LlamaCppLauncher:
         r += 1
 
         # --- Multi-modal Projection (mmproj) ---
-        self.mmproj_enabled_check = ttk.Checkbutton(inner, variable=self.mmproj_enabled, 
+        self.mmproj_enabled_check = ttk.Checkbutton(inner, variable=self.mmproj_enabled,
                                                    text="Enable automatic mmproj file detection", state=tk.NORMAL)
         self.mmproj_enabled_check.grid(column=0, row=r, columnspan=4, sticky="w", padx=10, pady=(3,10)); r += 1
 
@@ -697,9 +702,9 @@ class LlamaCppLauncher:
         self.ctx_entry.bind("<FocusOut>", self._override_ctx_size)
         self.ctx_entry.bind("<Return>", self._override_ctx_size)
 
-        ctx_slider = ttk.Scale(ctx_f, from_=1024, to=131072, orient="horizontal",
+        self.ctx_slider = ttk.Scale(ctx_f, from_=1024, to=131072, orient="horizontal",
                                variable=self.ctx_size, command=self._update_ctx_label_from_slider)
-        ctx_slider.grid(column=0, row=0, sticky="ew", padx=(0, 5))
+        self.ctx_slider.grid(column=0, row=0, sticky="ew", padx=(0, 5))
         self.ctx_label.grid(column=1, row=0, padx=5)
         self.ctx_entry.grid(column=2, row=0, padx=5)
         ttk.Button(ctx_f, text="Set", command=self._override_ctx_size, width=4).grid(column=3, row=0, padx=(0, 5))
@@ -908,6 +913,21 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Label(inner, textvariable=self.model_total_layers_var)\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=3); r += 1
+
+        ttk.Label(inner, text="Context Length:")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Label(inner, textvariable=self.model_context_length_var)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=2); r += 1
+
+        ttk.Label(inner, text="Total Expert Count:")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Label(inner, textvariable=self.model_expert_count_var)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=2); r += 1
+
+        ttk.Label(inner, text="Expert Used Count:")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        ttk.Label(inner, textvariable=self.model_expert_used_count_var)\
+            .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=2); r += 1
 
         ttk.Label(inner, text="Current KV Cache Type:")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
@@ -1877,50 +1897,23 @@ class LlamaCppLauncher:
             # Update current KV cache type display immediately
             # This is called by _update_recommendations, which is triggered below
 
-            if LLAMA_CPP_PYTHON_AVAILABLE:
-                 self.gpu_layers_status_var.set("Analyzing model...")
-                 self.gpu_layers_slider.config(state=tk.DISABLED)
-                 # Entry remains enabled, validated state will apply
-                 self._reset_model_info_display() # Reset info fields before analysis starts
-                 self.current_model_analysis = {} # Clear old analysis
-                 self._update_recommendations() # Update recommendations display based on no analysis yet
+            self.gpu_layers_status_var.set("Analyzing model...")
+            self.gpu_layers_slider.config(state=tk.DISABLED)
+            # Entry remains enabled, validated state will apply
+            self._reset_model_info_display() # Reset info fields before analysis starts
+            self.current_model_analysis = {} # Clear old analysis
+            self._update_recommendations() # Update recommendations display based on no analysis yet
 
-                 # Start analysis thread
-                 if self.analysis_thread and self.analysis_thread.is_alive():
-                      print("DEBUG: Previous analysis thread is still running, cancelling old analysis.", file=sys.stderr)
-                      # Ideally, you'd have a way to signal the thread to stop.
-                      # For simplicity here, we just let the old thread finish and ignore its result
-                      # if a new analysis starts, by checking self.model_path in _update_ui_after_analysis.
-                      pass # No explicit cancel mechanism here
+            # Start analysis thread
+            if self.analysis_thread and self.analysis_thread.is_alive():
+                print("DEBUG: Previous analysis thread is still running, cancelling old analysis.", file=sys.stderr)
+                # Ideally, you'd have a way to signal the thread to stop.
+                # For simplicity here, we just let the old thread finish and ignore its result
+                # if a new analysis starts, by checking self.model_path in _update_ui_after_analysis.
+                pass # No explicit cancel mechanism here
 
-                 self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
-                 self.analysis_thread.start()
-            else:
-                 # Analysis not available - check what options we have
-                 backend = self.backend_selection.get()
-                 if backend == "ik_llama":
-                     backend_dir = self.ik_llama_dir.get().strip()
-                     backend_name = "ik_llama"
-                 else:
-                     backend_dir = self.llama_cpp_dir.get().strip()
-                     backend_name = "llama.cpp"
-
-                 if backend_dir:
-                     self.gpu_layers_status_var.set(f"Analyzing model using {backend_name} tools...")
-                     # Try the analysis even without llama-cpp-python
-                     self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
-                     self.analysis_thread.start()
-                 else:
-                     self.gpu_layers_status_var.set(f"Analysis available: Set {backend_name} directory or install llama-cpp-python")
-                     self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if lib missing
-                     self._reset_model_info_display()
-                     self.model_architecture_var.set("Analysis Unavailable")
-                     self.model_filesize_var.set("Analysis Unavailable")
-                     self.model_total_layers_var.set("Analysis Unavailable")
-                     self.current_model_analysis = {}
-                     self._update_recommendations() # Update recommendations based on no analysis
-                     self._generate_default_config_name() # Generate default name even without analysis
-                     self._update_manual_model_visibility() # Update manual model section visibility
+            self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
+            self.analysis_thread.start()
 
 
         else:
@@ -1942,38 +1935,8 @@ class LlamaCppLauncher:
         # Check if the currently selected model in the GUI still matches the one being analyzed
         # This prevents updating the UI with stale results if the user quickly selects another model
         if self.model_path.get() == model_path_str:
-             # Try backend-specific tools first, fall back to llama-cpp-python if available
-             backend = self.backend_selection.get()
-             if backend == "ik_llama":
-                 backend_dir = self.ik_llama_dir.get().strip()
-                 backend_name = "ik_llama"
-             else:
-                 backend_dir = self.llama_cpp_dir.get().strip()
-                 backend_name = "llama.cpp"
-
-             if backend_dir:
-                 print(f"DEBUG: Trying {backend_name} tools from: {backend_dir}", file=sys.stderr)
-                 analysis_result = analyze_gguf_with_llamacpp_tools(model_path_str, backend_dir)
-
-                 # If backend tools failed and we have llama-cpp-python available, try that as fallback
-                 if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
-                     print(f"DEBUG: {backend_name} tools failed, falling back to llama-cpp-python", file=sys.stderr)
-                     analysis_result = analyze_gguf_model_static(model_path_str)
-             else:
-                 # No backend directory set, try simple GGUF parser first
-                 print(f"DEBUG: No {backend_name} directory set, trying simple GGUF parser", file=sys.stderr)
-                 analysis_result = parse_gguf_header_simple(model_path_str)
-
-                 # If simple parser failed and we have llama-cpp-python available, try that as fallback
-                 if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
-                     print("DEBUG: Simple GGUF parser failed, falling back to llama-cpp-python", file=sys.stderr)
-                     analysis_result = analyze_gguf_model_static(model_path_str)
-
-             # Only update UI if the model path hasn't changed while analyzing
-             if self.model_path.get() == model_path_str:
-                self.root.after(0, self._update_ui_after_analysis, analysis_result)
-             else:
-                print(f"DEBUG: Analysis for {model_path_str} finished, but model selection changed. Discarding result.", file=sys.stderr)
+            analysis_result = analyze_gguf_model_static(model_path_str)
+            self.root.after(0, self._update_ui_after_analysis, analysis_result)
         else:
             print(f"DEBUG: Analysis started for {model_path_str}, but model selection changed before analysis began. Skipping.", file=sys.stderr)
 
@@ -2099,6 +2062,20 @@ class LlamaCppLauncher:
             # This will set the slider and potentially update the entry format (-1 vs number)
             self._sync_gpu_layers_from_entry()
 
+        if int(context_length := analysis_result.get("context_length")) > 0:
+            self.model_context_length_var.set(context_length)
+            context_length = int(context_length)
+            self.ctx_slider.config(to=context_length)
+            if self.ctx_size.get() > context_length:
+                self.ctx_size.set(context_length)
+                self._sync_ctx_display(context_length)
+
+        if int(expert_count := analysis_result.get("expert_count")) > 0:
+            self.model_expert_count_var.set(expert_count)
+
+        if int(expert_used_count := analysis_result.get("expert_used_count")) > 0:
+            self.model_expert_used_count_var.set(expert_used_count)
+
         # --- Update Recommendations based on new analysis ---
         self._update_recommendations()
 
@@ -2142,6 +2119,9 @@ class LlamaCppLauncher:
          self.model_architecture_var.set("N/A")
          self.model_filesize_var.set("N/A")
          self.model_total_layers_var.set("N/A")
+         self.model_context_length_var.set("N/A")
+         self.model_expert_count_var.set("N/A")
+         self.model_expert_used_count_var.set("N/A")
          # KV Cache Type display is linked to the variable, not reset here
 
 
