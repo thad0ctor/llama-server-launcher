@@ -210,7 +210,14 @@ class LaunchManager:
         self.add_arg(cmd, "--main-gpu", main_gpu_val, "0")
 
         # Add --flash-attn flag if checked
-        self.add_arg(cmd, "--flash-attn", self.launcher.flash_attn.get())
+        if self.launcher.flash_attn.get():
+            if backend == "ik_llama":
+                # ik_llama doesn't accept "on" after --flash-attn
+                cmd.append("--flash-attn")
+            else:
+                # llama.cpp expects --flash-attn on
+                cmd.append("--flash-attn")
+                cmd.append("on")
 
         # Memory options
         self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)

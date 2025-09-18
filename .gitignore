@@ -3,3 +3,4 @@ llama_cpp_launcher_configs.json
 __pycache__
 bin/
 debug/
+llama.log
