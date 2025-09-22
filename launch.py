@@ -215,9 +215,8 @@ class LaunchManager:
                 # ik_llama doesn't accept "on" after --flash-attn
                 cmd.append("--flash-attn")
             else:
-                # llama.cpp expects --flash-attn on
+                # llama.cpp --flash-attn is a flag (no arguments needed)
                 cmd.append("--flash-attn")
-                cmd.append("on")
 
         # Memory options
         self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)
