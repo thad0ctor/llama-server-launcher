@@ -398,8 +398,7 @@ class ConfigManager:
         self.launcher.n_gpu_layers.set(loaded_gpu_layers_str)
         try:
              val = int(loaded_gpu_layers_str)
-             # Use _set_gpu_layers to set the int var and sync entry, clamping based on current max
-             # (max_layers will be 0 initially if model not loaded yet)
+             # Use _set_gpu_layers to set the int var (no clamping for manual entry values)
              self.launcher._set_gpu_layers(val)
         except ValueError:
              self.launcher.n_gpu_layers.set("0")

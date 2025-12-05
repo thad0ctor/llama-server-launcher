@@ -2152,10 +2152,10 @@ class LlamaCppLauncher:
     def _set_gpu_layers(self, input_value, from_slider=False):
         """
         Helper to set the internal GPU layers state (int) based on user input.
-        Handles clamping based on max_layers. Does NOT directly set the StringVar
-        but updates the IntVar and triggers recommendations.
+        Handles clamping based on max_layers only when from_slider=True.
+        Does NOT directly set the StringVar but updates the IntVar and triggers recommendations.
         input_value can be -1 or a non-negative integer.
-        from_slider: if True, uses debounced recommendations update to prevent excessive calls
+        from_slider: if True, clamps to max and uses debounced recommendations update
         """
         max_layers = self.max_gpu_layers.get() # Get current max layer count
 
@@ -2169,12 +2169,12 @@ class LlamaCppLauncher:
                 int_val = 0 # Cannot offload all if max is unknown/zero
         elif input_value >= 0:
             # If input is non-negative
-            if max_layers > 0:
-                # Clamp positive input value to max_layers if max > 0
+            if from_slider and max_layers > 0:
+                # Clamp slider input to max_layers
                 int_val = min(input_value, max_layers)
             else:
-                # If max_layers <= 0 (analysis failed), preserve the user's input value
-                # This allows users to manually set GPU layers when analysis fails
+                # For manual entry, allow values beyond max_layers
+                # This lets users manually specify layers when they know better
                 int_val = input_value
         # else: input_value < -1 (should be prevented by validation) -> default to 0
 
@@ -2237,24 +2237,8 @@ class LlamaCppLauncher:
             self._set_gpu_layers(value) # Use the helper which will calculate int_val based on max_layers
 
 
-            # Now, determine what the entry StringVar *should* display for consistency
-            # If max_layers > 0, the entry should show the clamped integer value.
-            # If max_layers <= 0, the entry should retain the user's valid input string (current_str).
-
-            canonical_str_for_entry = current_str # Assume user input is fine initially
-
-            if max_layers > 0:
-                 # If max_layers > 0, the entry should represent the *clamped* value
-                 clamped_int_from_set = self.n_gpu_layers_int.get() # Get the result of _set_gpu_layers
-                 canonical_str_for_entry = str(clamped_int_from_set) # Always show the actual integer value
-            else:
-                 # max_layers <= 0 (analysis failed), preserve user input
-                 # The internal int value was set to the user's input by _set_gpu_layers
-                 canonical_str_for_entry = current_str
-
-            # Update the entry's StringVar only if it's different from the calculated canonical string
-            # This prevents loops and ensures the entry displays the correct format (actual number)
-            # when max_layers > 0, while preserving arbitrary valid input when max_layers <= 0.
+            # Preserve the user's manual input - allow values beyond max_layers
+            canonical_str_for_entry = current_str
             if self.n_gpu_layers.get() != canonical_str_for_entry:
                  self.n_gpu_layers.set(canonical_str_for_entry)
 
