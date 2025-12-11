@@ -226,10 +226,9 @@ class LaunchManager:
         # Performance options
         self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0") # Omit if 0 (default)
 
-        # --- MoE CPU options (only for llama.cpp backend) ---
-        if backend != "ik_llama":
-            self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
-            self.add_arg(cmd, "--n-cpu-moe", self.launcher.n_cpu_moe.get(), "") # Omit if empty (default)
+        # --- MoE CPU options ---
+        self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
+        self.add_arg(cmd, "--n-cpu-moe", self.launcher.n_cpu_moe.get(), "") # Omit if empty (default)
 
         # --- NEW: Generation options ---
         self.add_arg(cmd, "--ignore-eos", self.launcher.ignore_eos.get()) # Omit if False (default)
@@ -506,7 +505,8 @@ class LaunchManager:
                         # For dot sourcing, path must be quoted if it contains spaces or special chars
                         # A simpler approach might be using double quotes with escaping if needed
                         # Let's stick to robust double quoting for the path
-                        quoted_ps_act_path = f'"{ps_act_path.replace('"', '`"').replace('`', '``')}"' # Escape double quotes and backticks
+                        escaped_ps_act_path = ps_act_path.replace('"', '`"').replace('`', '``')
+                        quoted_ps_act_path = f'"{escaped_ps_act_path}"' # Escape double quotes and backticks
 
                         f.write(f'Write-Host "Activating virtual environment: {venv_path_str}" -ForegroundColor Cyan\n')
                         # Use try/catch to report activation errors but continue
@@ -846,7 +846,8 @@ class LaunchManager:
                             # Ensure path is correctly formatted for PowerShell ('/' separators often work better)
                             ps_act_path = str(act_script.as_posix())
                             # Quote path using double quotes and escape internal quotes/backticks
-                            quoted_ps_act_path = f'"{ps_act_path.replace('"', '`"').replace('`', '``')}"'
+                            escaped_ps_act_path = ps_act_path.replace('"', '`"').replace('`', '``')
+                            quoted_ps_act_path = f'"{escaped_ps_act_path}"'
 
                             fh.write(f'Write-Host "Activating virtual environment: {venv}" -ForegroundColor Cyan\n')
                             # Use 'try/catch' to report activation errors but continue if not critical
@@ -890,7 +891,8 @@ class LaunchManager:
                          i += 2 # Skip both flag and value
                     else:
                          # Standard quoting for other args
-                         quoted_arg = f'"{current_arg.replace('"', '""').replace("`", "``")}"'
+                         escaped_arg = current_arg.replace('"', '""').replace('`', '``')
+                         quoted_arg = f'"{escaped_arg}"'
                          ps_cmd_parts.append(quoted_arg)
                          i += 1
 
