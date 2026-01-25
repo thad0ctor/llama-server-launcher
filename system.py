@@ -30,19 +30,6 @@ except Exception as e:
     print(f"Warning: PyTorch import failed: {e}", file=sys.stderr)
 
 
-try:
-    # Import Llama only if llama_cpp_python is importable
-    from llama_cpp import Llama
-    LLAMA_CPP_PYTHON_AVAILABLE = True
-except ImportError:
-    LLAMA_CPP_PYTHON_AVAILABLE = False
-    Llama = None # Define Llama as None if import fails
-except Exception as e:
-    # Catch other potential issues during llama_cpp import (e.g., libllama.so not found)
-    LLAMA_CPP_PYTHON_AVAILABLE = False
-    Llama = None
-    print(f"Warning: llama-cpp-python import failed: {e}", file=sys.stderr)
-
 # Check for requests module (required for version checking)
 try:
     import requests
@@ -75,9 +62,6 @@ if not TORCH_AVAILABLE:
     MISSING_DEPS.append("PyTorch (required for GPU detection and CUDA features)")
 
 # Optional dependencies
-if not LLAMA_CPP_PYTHON_AVAILABLE:
-    MISSING_DEPS.append("llama-cpp-python (optional - provides fallback GGUF analysis if llama.cpp tools unavailable)")
-
 if not PSUTIL_AVAILABLE:
     MISSING_DEPS.append("psutil (optional - provides enhanced system information)")
 
@@ -88,7 +72,6 @@ if MISSING_DEPS:
     for dep in MISSING_DEPS:
         print(f" - {dep}")
     print("Please install them using 'pip install -r requirements.txt' or individually with pip.")
-    print("Note: GGUF analysis works without llama-cpp-python using built-in tools or simple header parsing.")
     print("-------------------------------------\n")
 
 
@@ -131,7 +114,11 @@ def get_gpu_info_from_venv(venv_path):
     # Create a small Python script to check for PyTorch/CUDA in the venv
     detection_script = '''
 import sys
+import os
 import json
+
+# Ensure consistent GPU ordering by PCIe bus ID (matches nvidia-smi and llama.cpp)
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
 try:
     import torch
@@ -237,6 +224,9 @@ def get_gpu_info_static():
     if not torch or not TORCH_AVAILABLE:
         msg = "PyTorch not found." if not torch else "CUDA not available via PyTorch."
         return {"available": False, "message": msg, "device_count": 0, "devices": []}
+
+    # Ensure consistent GPU ordering by PCIe bus ID (matches nvidia-smi and llama.cpp)
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
     try:
         device_count = torch.cuda.device_count()
@@ -373,138 +363,6 @@ def get_cpu_info_static():
         return {"error": f"Failed to get CPU info: {str(e)}", "logical_cores": 4, "physical_cores": 2}
 
 
-def analyze_gguf_with_llamacpp_tools(model_path_str, llama_cpp_dir=None):
-    """Analyze GGUF model using llama.cpp/ik_llama tools instead of llama-cpp-python."""
-    import subprocess
-    import json
-    from pathlib import Path
-    
-    model_path = Path(model_path_str)
-    if not model_path.is_file():
-        return {"error": f"Model file not found: {model_path}", "n_layers": None, "architecture": "N/A", "file_size_bytes": 0}
-
-    # Calculate total size across all shards if this is a multi-part file
-    total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
-    
-    analysis_result = {
-        "path": str(model_path),
-        "file_size_bytes": total_size_bytes,
-        "file_size_gb": round(total_size_bytes / (1024**3), 2),
-        "architecture": "unknown",
-        "n_layers": None,
-        "metadata": {},
-        "error": None,
-        "message": None,
-        "shard_count": shard_count,
-        "all_shards": [str(p) for p in all_shards]
-    }
-
-    # Try to find analysis tools from both llama.cpp and ik_llama
-    tools_to_try = []
-    
-    if llama_cpp_dir:
-        backend_base_dir = Path(llama_cpp_dir)
-        # Common locations for llama.cpp/ik_llama tools
-        search_paths = [
-            backend_base_dir,
-            backend_base_dir / "build" / "bin",
-            backend_base_dir / "build",
-            backend_base_dir / "bin",
-        ]
-        
-        # Tool names for both llama.cpp and ik_llama backends
-        tool_names = [
-            # Standard llama.cpp tools
-            "llama-inspect", "gguf-dump", "llama-server",
-            # Possible ik_llama specific tools
-            "ik-llama-inspect", "ik_llama_inspect", "ik-llama-server", "ik_llama_server"
-        ]
-        if sys.platform == "win32":
-            tool_names = [name + ".exe" for name in tool_names]
-        
-        for search_path in search_paths:
-            for tool_name in tool_names:
-                tool_path = search_path / tool_name
-                if tool_path.is_file():
-                    tools_to_try.append((str(tool_path), tool_name.replace(".exe", "")))
-
-    # Try each tool
-    for tool_path, tool_name in tools_to_try:
-        try:
-            if tool_name == "llama-inspect":
-                # llama-inspect typically outputs JSON or structured data
-                result = subprocess.run([tool_path, str(model_path)], 
-                                      capture_output=True, text=True, timeout=30)
-                if result.returncode == 0:
-                    # Parse the output (this would need to be adapted based on actual llama-inspect output format)
-                    output = result.stdout.strip()
-                    # Try to extract key information from the output
-                    if "layers" in output.lower() or "block_count" in output.lower():
-                        # Parse layer count from output
-                        for line in output.split('\n'):
-                            if 'block_count' in line.lower() or 'n_layers' in line.lower():
-                                try:
-                                    # Extract number from line (this is a simple approach, may need refinement)
-                                    import re
-                                    numbers = re.findall(r'\d+', line)
-                                    if numbers:
-                                        analysis_result["n_layers"] = int(numbers[-1])
-                                        break
-                                except:
-                                    pass
-                    
-                    # Extract architecture if possible
-                    for line in output.split('\n'):
-                        if 'architecture' in line.lower():
-                            # Simple extraction - would need refinement based on actual output format
-                            parts = line.split()
-                            if len(parts) > 1:
-                                analysis_result["architecture"] = parts[-1]
-                            break
-                    
-                    analysis_result["message"] = f"Analyzed using {tool_name}"
-                    return analysis_result
-                    
-            elif tool_name == "llama-server":
-                # Try to get model info from llama-server without starting it
-                # Some versions support --model-info or similar flags
-                for flag in ["--model-info", "--print-model-info", "--help"]:
-                    try:
-                        result = subprocess.run([tool_path, flag, "-m", str(model_path)], 
-                                              capture_output=True, text=True, timeout=10)
-                        if result.returncode == 0 and ("layer" in result.stdout.lower() or "block" in result.stdout.lower()):
-                            # Similar parsing as above
-                            output = result.stdout.strip()
-                            for line in output.split('\n'):
-                                if 'block' in line.lower() or 'layer' in line.lower():
-                                    try:
-                                        import re
-                                        numbers = re.findall(r'\d+', line)
-                                        if numbers:
-                                            analysis_result["n_layers"] = int(numbers[-1])
-                                            analysis_result["message"] = f"Analyzed using {tool_name}"
-                                            return analysis_result
-                                    except:
-                                        pass
-                            break
-                    except:
-                        continue
-                        
-        except subprocess.TimeoutExpired:
-            continue
-        except Exception as e:
-            print(f"DEBUG: Tool {tool_name} failed: {e}", file=sys.stderr)
-            continue
-
-    # If no tools worked, try simple GGUF header parsing
-    try:
-        return parse_gguf_header_simple(model_path_str)
-    except Exception as e:
-        analysis_result["error"] = f"All analysis methods failed. Last error: {e}"
-        analysis_result["message"] = "Could not analyze model with available tools"
-        return analysis_result
-
-
 def calculate_total_gguf_size(model_path_str):
     """Calculate total size across all GGUF shards if this is a multi-part file."""
     import re
@@ -554,15 +412,30 @@ def calculate_total_gguf_size(model_path_str):
 
 
 def parse_gguf_header_simple(model_path_str):
-    """Simple GGUF header parser to extract basic metadata without dependencies."""
-    import struct
+    """Simple GGUF header parser to extract basic metadata without dependencies.
+
+    Uses correct GGUF spec type mappings:
+    - Type 0:  UINT8   (1 byte)
+    - Type 1:  INT8    (1 byte)
+    - Type 2:  UINT16  (2 bytes)
+    - Type 3:  INT16   (2 bytes)
+    - Type 4:  UINT32  (4 bytes)
+    - Type 5:  INT32   (4 bytes)
+    - Type 6:  FLOAT32 (4 bytes)
+    - Type 7:  BOOL    (1 byte, stored as int8)
+    - Type 8:  STRING  (variable length)
+    - Type 9:  ARRAY   (variable length)
+    - Type 10: UINT64  (8 bytes)
+    - Type 11: INT64   (8 bytes)
+    - Type 12: FLOAT64 (8 bytes)
+    """
     from pathlib import Path
-    
+
     model_path = Path(model_path_str)
-    
+
     # Calculate total size across all shards if this is a multi-part file
     total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
-    
+
     analysis_result = {
         "path": str(model_path),
         "file_size_bytes": total_size_bytes,
@@ -575,7 +448,74 @@ def parse_gguf_header_simple(model_path_str):
         "shard_count": shard_count,
         "all_shards": [str(p) for p in all_shards]
     }
-    
+
+    # GGUF type definitions per spec
+    # Format: type_id -> (struct_format, size_in_bytes) or None for variable-length types
+    GGUF_TYPES = {
+        0:  ('<B', 1),   # UINT8
+        1:  ('<b', 1),   # INT8
+        2:  ('<H', 2),   # UINT16
+        3:  ('<h', 2),   # INT16
+        4:  ('<I', 4),   # UINT32
+        5:  ('<i', 4),   # INT32
+        6:  ('<f', 4),   # FLOAT32
+        7:  ('<b', 1),   # BOOL (stored as int8)
+        8:  None,        # STRING (variable length)
+        9:  None,        # ARRAY (variable length)
+        10: ('<Q', 8),   # UINT64
+        11: ('<q', 8),   # INT64
+        12: ('<d', 8),   # FLOAT64
+    }
+
+    def read_value(f, value_type):
+        """Read a value from file based on GGUF type."""
+        if value_type == 8:  # STRING
+            value_len_bytes = f.read(8)
+            if len(value_len_bytes) < 8:
+                return None
+            value_len = struct.unpack('<Q', value_len_bytes)[0]
+            if value_len > 1000000:  # Sanity check for string length (1MB max)
+                f.seek(f.tell() + value_len)  # Skip the string
+                return None
+            value_bytes = f.read(value_len)
+            if len(value_bytes) < value_len:
+                return None
+            return value_bytes.decode('utf-8', errors='replace')
+        elif value_type == 7:  # BOOL
+            bool_byte = f.read(1)
+            if len(bool_byte) < 1:
+                return None
+            return struct.unpack('<b', bool_byte)[0] != 0
+        elif value_type in GGUF_TYPES and GGUF_TYPES[value_type] is not None:
+            fmt, size = GGUF_TYPES[value_type]
+            value_bytes = f.read(size)
+            if len(value_bytes) < size:
+                return None
+            return struct.unpack(fmt, value_bytes)[0]
+        else:
+            return None
+
+    def skip_array(f, array_type, array_len):
+        """Skip over array data in the file."""
+        if array_type == 8:  # String array - must read each string length
+            for _ in range(array_len):
+                str_len_bytes = f.read(8)
+                if len(str_len_bytes) < 8:
+                    return False
+                str_len = struct.unpack('<Q', str_len_bytes)[0]
+                if str_len > 1000000:  # Sanity check
+                    return False
+                f.seek(f.tell() + str_len)
+            return True
+        elif array_type == 9:  # Nested array - not typically used, skip conservatively
+            return False
+        elif array_type in GGUF_TYPES and GGUF_TYPES[array_type] is not None:
+            _, element_size = GGUF_TYPES[array_type]
+            f.seek(f.tell() + array_len * element_size)
+            return True
+        else:
+            return False
+
     try:
         with open(model_path, 'rb') as f:
             # Read GGUF magic number
@@ -583,162 +523,92 @@ def parse_gguf_header_simple(model_path_str):
             if magic != b'GGUF':
                 analysis_result["error"] = "Not a valid GGUF file"
                 return analysis_result
-            
+
             # Read version
             version = struct.unpack('<I', f.read(4))[0]
-            
+
             # Read tensor count and metadata count
             tensor_count = struct.unpack('<Q', f.read(8))[0]
             metadata_count = struct.unpack('<Q', f.read(8))[0]
-            
+
+            # Track what we've found for early exit
+            found_architecture = False
+            found_block_count = False
+            architecture_value = None
+
             # Read metadata key-value pairs
             for _ in range(metadata_count):
                 try:
                     # Read key length and key
-                    key_len = struct.unpack('<Q', f.read(8))[0]
-                    key = f.read(key_len).decode('utf-8')
-                    
+                    key_len_bytes = f.read(8)
+                    if len(key_len_bytes) < 8:
+                        break
+                    key_len = struct.unpack('<Q', key_len_bytes)[0]
+                    if key_len > 1000:  # Key names should be reasonable length
+                        break
+                    key_bytes = f.read(key_len)
+                    if len(key_bytes) < key_len:
+                        break
+                    key = key_bytes.decode('utf-8', errors='replace')
+
                     # Read value type
-                    value_type = struct.unpack('<I', f.read(4))[0]
-                    
-                    # Parse value based on type (improved error handling)
-                    value = None
-                    if value_type == 8:  # String
-                        try:
-                            value_len_bytes = f.read(8)
-                            if len(value_len_bytes) < 8:
-                                break  # End of file
-                            value_len = struct.unpack('<Q', value_len_bytes)[0]
-                            if value_len > 100000:  # Sanity check for string length
-                                print(f"DEBUG: Skipping large string for key '{key}': {value_len} bytes", file=sys.stderr)
-                                f.seek(f.tell() + value_len)  # Skip the string
-                                continue
-                            value_bytes = f.read(value_len)
-                            if len(value_bytes) < value_len:
-                                break  # End of file
-                            value = value_bytes.decode('utf-8', errors='replace')
-                        except Exception as e:
-                            print(f"DEBUG: Failed to read string for key '{key}': {e}", file=sys.stderr)
-                            continue
-                    elif value_type == 4:  # Uint32
-                        try:
-                            value_bytes = f.read(4)
-                            if len(value_bytes) < 4:
-                                break
-                            value = struct.unpack('<I', value_bytes)[0]
-                        except Exception as e:
-                            print(f"DEBUG: Failed to read uint32 for key '{key}': {e}", file=sys.stderr)
-                            continue
-                    elif value_type == 5:  # Int32
-                        try:
-                            value_bytes = f.read(4)
-                            if len(value_bytes) < 4:
-                                break
-                            value = struct.unpack('<i', value_bytes)[0]
-                        except Exception as e:
-                            print(f"DEBUG: Failed to read int32 for key '{key}': {e}", file=sys.stderr)
-                            continue
-                    elif value_type == 6:  # Uint64
-                        try:
-                            value_bytes = f.read(8)
-                            if len(value_bytes) < 8:
-                                break
-                            value = struct.unpack('<Q', value_bytes)[0]
-                        except Exception as e:
-                            print(f"DEBUG: Failed to read uint64 for key '{key}': {e}", file=sys.stderr)
-                            continue
-                    elif value_type == 7:  # Float32
-                        try:
-                            value_bytes = f.read(4)
-                            if len(value_bytes) < 4:
-                                break
-                            value = struct.unpack('<f', value_bytes)[0]
-                        except Exception as e:
-                            print(f"DEBUG: Failed to read float32 for key '{key}': {e}", file=sys.stderr)
-                            continue
-                    elif value_type == 9:  # Bool
-                        try:
-                            bool_byte = f.read(1)
-                            if len(bool_byte) < 1:
-                                break
-                            value = bool_byte[0] != 0
-                        except Exception as e:
-                            print(f"DEBUG: Failed to read bool for key '{key}': {e}", file=sys.stderr)
-                            continue
-                    elif value_type == 10:  # Array
-                        try:
-                            array_type_bytes = f.read(4)
-                            array_len_bytes = f.read(8)
-                            if len(array_type_bytes) < 4 or len(array_len_bytes) < 8:
-                                break
-                            array_type = struct.unpack('<I', array_type_bytes)[0]
-                            array_len = struct.unpack('<Q', array_len_bytes)[0]
-                            
-                            print(f"DEBUG: Skipping array for key '{key}': type {array_type}, length {array_len}", file=sys.stderr)
-                            
-                            # Skip array data based on type
-                            if array_type == 8:  # String array
-                                for i in range(min(array_len, 10000)):  # Limit to prevent infinite loops
-                                    try:
-                                        str_len_bytes = f.read(8)
-                                        if len(str_len_bytes) < 8:
-                                            break
-                                        str_len = struct.unpack('<Q', str_len_bytes)[0]
-                                        if str_len > 100000:  # Sanity check
-                                            break
-                                        f.seek(f.tell() + str_len)
-                                    except:
-                                        break
-                            elif array_type == 4:  # Uint32 array
-                                f.seek(f.tell() + array_len * 4)
-                            elif array_type == 6:  # Uint64 array
-                                f.seek(f.tell() + array_len * 8)
-                            elif array_type == 7:  # Float32 array
-                                f.seek(f.tell() + array_len * 4)
-                            else:
-                                # Unknown array type, try to skip conservatively
-                                print(f"DEBUG: Unknown array type {array_type}, attempting to skip", file=sys.stderr)
-                                break
-                        except Exception as e:
-                            print(f"DEBUG: Failed to skip array for key '{key}': {e}", file=sys.stderr)
+                    type_bytes = f.read(4)
+                    if len(type_bytes) < 4:
+                        break
+                    value_type = struct.unpack('<I', type_bytes)[0]
+
+                    # Handle arrays specially (type 9)
+                    if value_type == 9:  # ARRAY
+                        array_type_bytes = f.read(4)
+                        array_len_bytes = f.read(8)
+                        if len(array_type_bytes) < 4 or len(array_len_bytes) < 8:
+                            break
+                        array_type = struct.unpack('<I', array_type_bytes)[0]
+                        array_len = struct.unpack('<Q', array_len_bytes)[0]
+
+                        # Skip the array data (no limit on array size - tokenizers can have 150k+ elements)
+                        if not skip_array(f, array_type, array_len):
+                            print(f"DEBUG: Failed to skip array for key '{key}': type {array_type}, length {array_len}", file=sys.stderr)
                             break
                         continue
-                    else:
-                        print(f"DEBUG: Unknown value type {value_type} for key '{key}', skipping", file=sys.stderr)
-                        continue
-                    
+
+                    # Read the value
+                    value = read_value(f, value_type)
+
                     if value is not None:
                         analysis_result["metadata"][key] = value
-                        
+
                         # Extract key information
                         if key == "general.architecture":
                             analysis_result["architecture"] = str(value)
+                            architecture_value = str(value)
+                            found_architecture = True
+                            print(f"DEBUG: Found architecture: {value}", file=sys.stderr)
+
+                        # Check for block_count with architecture prefix
+                        if architecture_value and key == f"{architecture_value}.block_count":
+                            if isinstance(value, (int, float)) and value > 0:
+                                analysis_result["n_layers"] = int(value)
+                                found_block_count = True
+                                print(f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}", file=sys.stderr)
+
+                        # Also check for generic block_count patterns
                         elif any(pattern in key.lower() for pattern in ['.block_count', '.n_layers', '.layer_count', '.num_layer']):
                             if isinstance(value, (int, float)) and value > 0:
                                 analysis_result["n_layers"] = int(value)
+                                found_block_count = True
                                 print(f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}", file=sys.stderr)
-                        
-                        # Also check for model name patterns that might indicate layer count
-                        if 'name' in key.lower() and isinstance(value, str):
-                            # Try to extract parameter count from model name (e.g., "235B" -> estimate layers)
-                            import re
-                            param_match = re.search(r'(\d+)B', value.upper())
-                            if param_match and analysis_result["n_layers"] is None:
-                                param_count = int(param_match.group(1))
-                                # Rough estimate: large models typically have ~80-120 layers per billion parameters
-                                # For very large models like 235B, use a more conservative estimate
-                                if param_count >= 100:
-                                    estimated_layers = max(80, min(200, param_count // 2))  # Very conservative for huge models
-                                else:
-                                    estimated_layers = max(32, min(120, param_count * 2))  # More typical estimate
-                                print(f"DEBUG: Estimated {estimated_layers} layers from model name '{value}' ({param_count}B parameters)", file=sys.stderr)
-                                analysis_result["n_layers"] = estimated_layers
-                        
+
+                    # Early exit if we have both architecture and block_count
+                    if found_architecture and found_block_count:
+                        print(f"DEBUG: Found both architecture and block_count, exiting early", file=sys.stderr)
+                        break
+
                 except Exception as parse_error:
                     # Skip this metadata entry if parsing fails
                     print(f"DEBUG: Failed to parse metadata entry: {parse_error}", file=sys.stderr)
                     continue
-            
+
             # If we still don't have layer count, make a reasonable guess based on file size
             if analysis_result["n_layers"] is None:
                 file_size_gb = analysis_result["file_size_gb"]
@@ -760,126 +630,16 @@ def parse_gguf_header_simple(model_path_str):
                 else:  # Small model (< 3 GB)
                     estimated_layers = 24
                     print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small file size ({file_size_gb:.1f} GB)", file=sys.stderr)
-                
+
                 analysis_result["n_layers"] = estimated_layers
                 analysis_result["message"] += f" (estimated {estimated_layers} layers from file size)"
-            
+
             return analysis_result
-            
+
     except Exception as e:
         analysis_result["error"] = f"Failed to parse GGUF header: {e}"
         return analysis_result
 
-
-def analyze_gguf_model_static(model_path_str):
-    """Analyze a GGUF model file and extract metadata (static method)."""
-    if not LLAMA_CPP_PYTHON_AVAILABLE or not Llama:
-        return {"error": "llama-cpp-python library not found.", "n_layers": None, "architecture": "N/A", "file_size_bytes": 0}
-
-    model_path = Path(model_path_str)
-    if not model_path.is_file():
-         return {"error": f"Model file not found: {model_path}", "n_layers": None, "architecture": "N/A", "file_size_bytes": 0}
-
-    # Calculate total size across all shards if this is a multi-part file
-    total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
-    
-    analysis_result = {
-        "path": str(model_path),
-        "file_size_bytes": total_size_bytes,
-        "file_size_gb": round(total_size_bytes / (1024**3), 2),
-        "architecture": "unknown",
-        "n_layers": None,
-        "metadata": {},
-        "error": None,
-        "message": None,
-        "shard_count": shard_count,
-        "all_shards": [str(p) for p in all_shards]
-    }
-
-    llm_meta = None # Initialize llm_meta outside the try block
-
-    try:
-        # File size already calculated from shards above, no need to recalculate
-
-        try:
-             # Use minimal parameters for quick metadata load
-             # Setting n_gpu_layers=0 is important to avoid trying to load layers onto potentially unavailable GPUs
-             # Using minimal n_ctx, n_batch, n_threads for minimal resource usage
-             llm_meta = Llama(model_path=str(model_path), n_ctx=32, n_threads=1, n_batch=32,
-                              verbose=False, n_gpu_layers=0, logits_all=False) # logits_all=False to save memory/time
-        except Exception as load_exc:
-             analysis_result["error"] = f"Failed to load model for metadata analysis: {load_exc}"
-             print(f"ERROR: Failed to load model '{model_path.name}' for analysis: {load_exc}", file=sys.stderr)
-             # No traceback here, the caller should handle it or the log message is enough
-             return analysis_result # Exit early if basic load fails
-
-
-        # --- Extract Metadata ---
-        # Attempt 1: Check common metadata keys and attributes
-        if hasattr(llm_meta, 'metadata') and isinstance(llm_meta.metadata, dict) and llm_meta.metadata:
-            analysis_result["metadata"] = llm_meta.metadata
-            # Check various common keys for layer count
-            analysis_result["n_layers"] = llm_meta.metadata.get('llama.block_count')
-            if analysis_result["n_layers"] is None:
-                 analysis_result["n_layers"] = llm_meta.metadata.get('general.architecture.block_count')
-            # Add more architecture-specific keys as needed
-            if analysis_result["n_layers"] is None: analysis_result["n_layers"] = llm_meta.metadata.get('qwen2.block_count')
-            if analysis_result["n_layers"] is None: analysis_result["n_layers"] = llm_meta.metadata.get('gemma.block_count')
-            if analysis_result["n_layers"] is None: analysis_result["n_layers"] = llm_meta.metadata.get('bert.block_count')
-            if analysis_result["n_layers"] is None: analysis_result["n_layers"] = llm_meta.metadata.get('model.block_count') # Fallback
-
-
-            # Check various common keys for architecture
-            analysis_result["architecture"] = llm_meta.metadata.get('general.architecture', 'unknown')
-            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('qwen2.architecture', 'unknown')
-            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('gemma.architecture', 'unknown')
-            if analysis_result["architecture"] == 'unknown': analysis_result["architecture"] = llm_meta.metadata.get('bert.architecture', 'unknown')
-
-
-        # Attempt 2: Check direct attributes if metadata didn't yield layers
-        if analysis_result["n_layers"] is None:
-             if hasattr(llm_meta, 'n_layer'): # Common recent name
-                  analysis_result["n_layers"] = getattr(llm_meta, 'n_layer', None)
-             if analysis_result["n_layers"] is None and hasattr(llm_meta, 'n_layers'): # Older name
-                  analysis_result["n_layers"] = getattr(llm_meta, 'n_layers', None)
-
-        # Fallback architecture if still unknown (less reliable)
-        if analysis_result["architecture"] == 'unknown' and hasattr(llm_meta, 'model_type'):
-             analysis_result["architecture"] = getattr(llm_meta, 'model_type', 'unknown')
-
-
-        # Validate n_layers
-        if analysis_result["n_layers"] is not None:
-            try:
-                analysis_result["n_layers"] = int(analysis_result["n_layers"])
-                if analysis_result["n_layers"] <= 0:
-                    analysis_result["n_layers"] = None # Treat non-positive as unknown
-                    analysis_result["message"] = "Layer count found was not positive."
-            except (ValueError, TypeError):
-                analysis_result["n_layers"] = None # Treat non-integer as unknown
-                analysis_result["message"] = "Layer count metadata found was not an integer."
-
-        if analysis_result["n_layers"] is None:
-             if not analysis_result["message"]: # If no specific message set above
-                  analysis_result["message"] = "Layer count metadata not found or recognized."
-
-
-        return analysis_result
-
-    except Exception as e:
-        # Catch any other unexpected errors during metadata processing or attribute access
-        print(f"ERROR: Failed during GGUF metadata processing for '{model_path.name}': {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        analysis_result["error"] = f"Unexpected error during analysis: {e}"
-        analysis_result["n_layers"] = None # Ensure layers is None on error
-        return analysis_result
-    finally:
-        # Ensure the temporary Llama object is deleted if it was created
-        if llm_meta:
-             try:
-                  del llm_meta
-             except Exception as clean_exc:
-                  print(f"Warning: Failed to delete llama_cpp.Llama instance in analyze_gguf_model_static finally block: {clean_exc}", file=sys.stderr) 
 
 class SystemInfoManager:
     """Manages system information fetching and processing for the launcher."""

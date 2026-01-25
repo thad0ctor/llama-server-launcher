@@ -281,8 +281,15 @@ class ConfigManager:
             # --- MoE CPU parameters ---
             "cpu_moe":       self.launcher.cpu_moe.get(),
             "n_cpu_moe":     self.launcher.n_cpu_moe.get(),
+            # --- Parallel sequences ---
+            "parallel":      self.launcher.parallel.get(),
             # --- Multi-modal Projection ---
             "mmproj_enabled": self.launcher.mmproj_enabled.get(),
+            # --- Fit Parameters ---
+            "fit_enabled": self.launcher.fit_enabled.get(),
+            "fit_ctx": self.launcher.fit_ctx.get(),
+            "fit_ctx_synced": self.launcher.fit_ctx_synced,
+            "fit_target": self.launcher.fit_target.get(),
             # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
             # Save the new template source variable
             "template_source": self.launcher.template_source.get(),
@@ -354,8 +361,21 @@ class ConfigManager:
         # --- MoE CPU parameters ---
         self.launcher.cpu_moe.set(cfg.get("cpu_moe", False))
         self.launcher.n_cpu_moe.set(cfg.get("n_cpu_moe", ""))
+        # --- Parallel sequences ---
+        self.launcher.parallel.set(cfg.get("parallel", "1"))
         # --- Multi-modal Projection ---
         self.launcher.mmproj_enabled.set(cfg.get("mmproj_enabled", False))
+        # --- Fit Parameters ---
+        self.launcher.fit_enabled.set(cfg.get("fit_enabled", True))  # Default: True (on)
+        self.launcher.fit_ctx_synced = cfg.get("fit_ctx_synced", True)  # Default: synced
+        # Load fit_ctx value, or sync from ctx_size if synced
+        if self.launcher.fit_ctx_synced:
+            self.launcher.fit_ctx.set(str(self.launcher.ctx_size.get()))
+        else:
+            self.launcher.fit_ctx.set(cfg.get("fit_ctx", str(self.launcher.ctx_size.get())))
+        self.launcher.fit_target.set(cfg.get("fit_target", "1024"))  # Default: 1024
+        # Update fit fields state based on loaded value
+        self.launcher._update_fit_fields_state()
         # --- NEW: Load Custom Parameters ---
         # Default to empty list [] for backward compatibility with older configs
         self.launcher.custom_parameters_list = cfg.get("custom_parameters", [])

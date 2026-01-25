@@ -218,6 +218,27 @@ class LaunchManager:
                 # llama.cpp --flash-attn requires a value (on|off|auto)
                 cmd.extend(["--flash-attn", "on"])
 
+        # --- Fit Parameters (llama.cpp only, not supported by ik_llama) ---
+        if backend != "ik_llama":
+            # Add --fit on/off based on checkbox state
+            if self.launcher.fit_enabled.get():
+                cmd.extend(["--fit", "on"])
+                print(f"DEBUG: Adding --fit on", file=sys.stderr)
+                # --fit-ctx: synced with ctx_size slider or manually set
+                fit_ctx_val = self.launcher.fit_ctx.get().strip()
+                # Only add if different from llama.cpp default of 4096
+                if fit_ctx_val and fit_ctx_val != "4096":
+                    cmd.extend(["--fit-ctx", fit_ctx_val])
+                    print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
+                # --fit-target: only add if non-default
+                fit_target_val = self.launcher.fit_target.get().strip()
+                if fit_target_val and fit_target_val != "1024":
+                    cmd.extend(["--fit-target", fit_target_val])
+                    print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
+            else:
+                cmd.extend(["--fit", "off"])
+                print(f"DEBUG: Adding --fit off", file=sys.stderr)
+
         # Memory options
         self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)
         self.add_arg(cmd, "--mlock", self.launcher.mlock.get()) # Omit if False (default)
@@ -225,6 +246,7 @@ class LaunchManager:
 
         # Performance options
         self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0") # Omit if 0 (default)
+        self.add_arg(cmd, "--parallel", self.launcher.parallel.get(), "1") # Omit if 1 (default)
 
         # --- MoE CPU options ---
         self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
@@ -466,6 +488,10 @@ class LaunchManager:
                     f.write("$ErrorActionPreference = 'Continue'\n\n")
                     f.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
 
+                    # --- Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering ---
+                    f.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
+                    f.write('$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"\n\n')
+
                     # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
                     if cuda_devices_value:
                         f.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
@@ -650,6 +676,9 @@ class LaunchManager:
                 # Add export statements *before* the main command in the bash script
                 # This should happen *after* venv activation if used.
                 env_commands = []
+
+                # Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering (matches nvidia-smi)
+                env_commands.append('export CUDA_DEVICE_ORDER=PCI_BUS_ID')
 
                 # Add CUDA_VISIBLE_DEVICES
                 if cuda_devices_value:

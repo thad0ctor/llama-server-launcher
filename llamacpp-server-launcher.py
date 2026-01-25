@@ -40,9 +40,7 @@ from config import ConfigManager
 # Import system helper functions
 from system import (
     get_gpu_info_static, get_ram_info_static, get_cpu_info_static,
-    analyze_gguf_with_llamacpp_tools, calculate_total_gguf_size,
-    parse_gguf_header_simple, analyze_gguf_model_static, SystemInfoManager,
-    LLAMA_CPP_PYTHON_AVAILABLE
+    calculate_total_gguf_size, parse_gguf_header_simple, SystemInfoManager
 )
 
 
@@ -282,8 +280,17 @@ class LlamaCppLauncher:
         self.cpu_moe         = tk.BooleanVar(value=False) # --cpu-moe
         self.n_cpu_moe       = tk.StringVar(value="")     # --n-cpu-moe
 
+        # --- Parallel Sequences ---
+        self.parallel        = tk.StringVar(value="1")    # --parallel (number of slots)
+
         # --- Multi-modal Projection (mmproj) ---
         self.mmproj_enabled  = tk.BooleanVar(value=False) # Enable automatic mmproj file detection
+
+        # --- Fit Parameters (memory fitting) ---
+        self.fit_enabled     = tk.BooleanVar(value=True)   # --fit on/off (default: on)
+        self.fit_ctx         = tk.StringVar(value="2048")  # --fit-ctx (synced with ctx_size by default)
+        self.fit_ctx_synced  = True                        # Track if fit_ctx is synced with ctx_size
+        self.fit_target      = tk.StringVar(value="1024")  # --fit-target (MiB to reserve per device)
 
         # --- Chat Template Selection Variables ---
         # Controls which template source is used: 'default', 'predefined', or 'custom'.
@@ -436,6 +443,7 @@ class LlamaCppLauncher:
         self.batch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.ubatch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.ctx_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.ctx_size.trace_add("write", lambda *args: self._sync_fit_ctx_to_ctx_size())
         self.seed.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.temperature.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.min_p.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -446,6 +454,7 @@ class LlamaCppLauncher:
         self.no_mmap.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
 
         self.prio.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.fit_ctx.trace_add("write", lambda *args: self._on_fit_ctx_changed())
         self.mlock.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.no_kv_offload.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Add trace handler for port changes
@@ -1041,9 +1050,16 @@ class LlamaCppLauncher:
         # --- Tensor Split ---
         ttk.Label(inner, text="Tensor Split (--tensor-split):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        # Frame to hold entry and apply button
+        tensor_split_frame = ttk.Frame(inner)
+        tensor_split_frame.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         # Ensure entry is explicitly NORMAL
-        self.tensor_split_entry = ttk.Entry(inner, textvariable=self.tensor_split, width=25, state=tk.NORMAL)
-        self.tensor_split_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        self.tensor_split_entry = ttk.Entry(tensor_split_frame, textvariable=self.tensor_split, width=25, state=tk.NORMAL)
+        self.tensor_split_entry.pack(side="left")
+        # Apply recommended button
+        self.apply_tensor_split_btn = ttk.Button(tensor_split_frame, text="Apply Recommended",
+                                                  command=self._apply_recommended_tensor_split, width=18)
+        self.apply_tensor_split_btn.pack(side="left", padx=(5, 0))
         ttk.Label(inner, text="e.g., '3,1' splits layers 75%/25% across GPUs 0 and 1.", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="Recommended Split (VRAM-based):")\
@@ -1058,7 +1074,7 @@ class LlamaCppLauncher:
         # Ensure entry is explicitly NORMAL
         self.main_gpu_entry = ttk.Entry(inner, textvariable=self.main_gpu, width=10, state=tk.NORMAL)
         self.main_gpu_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Primary GPU index (usually 0). Used with --n-gpu-layers when tensor-split is not set.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Index relative to selected GPUs (0=first selected, 1=second, etc). Usually 0.", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
 
@@ -1070,6 +1086,33 @@ class LlamaCppLauncher:
         self.flash_attn_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
         ttk.Label(inner, text="Use Flash Attention kernel (CUDA only, requires specific build)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+
+        # --- Fit to Memory Settings ---
+        ttk.Label(inner, text="Fit to Memory (--fit):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        self.fit_enabled_check = ttk.Checkbutton(inner, text="Enable", variable=self.fit_enabled,
+                                                  state=tk.NORMAL, command=self._update_fit_fields_state)
+        self.fit_enabled_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (llama.cpp only)", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        # Fit sub-options frame (indented)
+        fit_options_frame = ttk.Frame(inner)
+        fit_options_frame.grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=3)
+
+        ttk.Label(fit_options_frame, text="Min Context (--fit-ctx):")\
+            .pack(side="left", padx=(0, 5))
+        self.fit_ctx_entry = ttk.Entry(fit_options_frame, textvariable=self.fit_ctx, width=8, state=tk.NORMAL)
+        self.fit_ctx_entry.pack(side="left", padx=(0, 15))
+
+        ttk.Label(fit_options_frame, text="Target MiB (--fit-target):")\
+            .pack(side="left", padx=(0, 5))
+        self.fit_target_entry = ttk.Entry(fit_options_frame, textvariable=self.fit_target, width=8, state=tk.NORMAL)
+        self.fit_target_entry.pack(side="left", padx=(0, 10))
+
+        ttk.Label(fit_options_frame, text="(ctx syncs with Context Size slider, target default: 1024)", font=("TkSmallCaptionFont"))\
+            .pack(side="left"); r += 1
 
 
         # --- Memory & Cache settings ---
@@ -1165,6 +1208,14 @@ class LlamaCppLauncher:
         self.prio_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
         ttk.Label(inner, text="0=Normal, 1=Medium, 2=High, 3=Realtime (OS dependent)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
+
+        # --- Parallel Sequences ---
+        ttk.Label(inner, text="Parallel Sequences (--parallel):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        self.parallel_entry = ttk.Entry(inner, textvariable=self.parallel, width=10, state=tk.NORMAL)
+        self.parallel_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="Number of parallel sequences/slots to serve (default: 1)", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
         # --- MoE CPU Settings --- (same row)
         ttk.Label(inner, text="MoE CPU Settings:")\
@@ -1340,6 +1391,35 @@ class LlamaCppLauncher:
 
 
         # Initial state update based on self.template_source (called in __init__)
+
+
+    def _update_fit_fields_state(self, *args):
+        """Enables/disables fit context and target fields based on fit_enabled checkbox."""
+        if self.fit_enabled.get():
+            state = tk.NORMAL
+        else:
+            state = tk.DISABLED
+
+        if hasattr(self, 'fit_ctx_entry') and self.fit_ctx_entry.winfo_exists():
+            self.fit_ctx_entry.config(state=state)
+        if hasattr(self, 'fit_target_entry') and self.fit_target_entry.winfo_exists():
+            self.fit_target_entry.config(state=state)
+
+    def _sync_fit_ctx_to_ctx_size(self, *args):
+        """Sync fit_ctx to ctx_size slider value if still synced."""
+        if self.fit_ctx_synced:
+            self.fit_ctx.set(str(self.ctx_size.get()))
+
+    def _on_fit_ctx_changed(self, *args):
+        """Detect manual changes to fit_ctx and break sync if different from ctx_size."""
+        # Only break sync if the value differs from current ctx_size
+        try:
+            fit_ctx_val = self.fit_ctx.get().strip()
+            ctx_size_val = str(self.ctx_size.get())
+            if fit_ctx_val and fit_ctx_val != ctx_size_val:
+                self.fit_ctx_synced = False
+        except:
+            pass
 
 
     # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
@@ -1877,50 +1957,24 @@ class LlamaCppLauncher:
             # Update current KV cache type display immediately
             # This is called by _update_recommendations, which is triggered below
 
-            if LLAMA_CPP_PYTHON_AVAILABLE:
-                 self.gpu_layers_status_var.set("Analyzing model...")
-                 self.gpu_layers_slider.config(state=tk.DISABLED)
-                 # Entry remains enabled, validated state will apply
-                 self._reset_model_info_display() # Reset info fields before analysis starts
-                 self.current_model_analysis = {} # Clear old analysis
-                 self._update_recommendations() # Update recommendations display based on no analysis yet
+            # Start GGUF analysis using built-in parser
+            self.gpu_layers_status_var.set("Analyzing model...")
+            self.gpu_layers_slider.config(state=tk.DISABLED)
+            # Entry remains enabled, validated state will apply
+            self._reset_model_info_display()  # Reset info fields before analysis starts
+            self.current_model_analysis = {}  # Clear old analysis
+            self._update_recommendations()  # Update recommendations display based on no analysis yet
 
-                 # Start analysis thread
-                 if self.analysis_thread and self.analysis_thread.is_alive():
-                      print("DEBUG: Previous analysis thread is still running, cancelling old analysis.", file=sys.stderr)
-                      # Ideally, you'd have a way to signal the thread to stop.
-                      # For simplicity here, we just let the old thread finish and ignore its result
-                      # if a new analysis starts, by checking self.model_path in _update_ui_after_analysis.
-                      pass # No explicit cancel mechanism here
+            # Start analysis thread
+            if self.analysis_thread and self.analysis_thread.is_alive():
+                print("DEBUG: Previous analysis thread is still running, cancelling old analysis.", file=sys.stderr)
+                # Ideally, you'd have a way to signal the thread to stop.
+                # For simplicity here, we just let the old thread finish and ignore its result
+                # if a new analysis starts, by checking self.model_path in _update_ui_after_analysis.
+                pass  # No explicit cancel mechanism here
 
-                 self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
-                 self.analysis_thread.start()
-            else:
-                 # Analysis not available - check what options we have
-                 backend = self.backend_selection.get()
-                 if backend == "ik_llama":
-                     backend_dir = self.ik_llama_dir.get().strip()
-                     backend_name = "ik_llama"
-                 else:
-                     backend_dir = self.llama_cpp_dir.get().strip()
-                     backend_name = "llama.cpp"
-
-                 if backend_dir:
-                     self.gpu_layers_status_var.set(f"Analyzing model using {backend_name} tools...")
-                     # Try the analysis even without llama-cpp-python
-                     self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
-                     self.analysis_thread.start()
-                 else:
-                     self.gpu_layers_status_var.set(f"Analysis available: Set {backend_name} directory or install llama-cpp-python")
-                     self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if lib missing
-                     self._reset_model_info_display()
-                     self.model_architecture_var.set("Analysis Unavailable")
-                     self.model_filesize_var.set("Analysis Unavailable")
-                     self.model_total_layers_var.set("Analysis Unavailable")
-                     self.current_model_analysis = {}
-                     self._update_recommendations() # Update recommendations based on no analysis
-                     self._generate_default_config_name() # Generate default name even without analysis
-                     self._update_manual_model_visibility() # Update manual model section visibility
+            self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
+            self.analysis_thread.start()
 
 
         else:
@@ -1937,42 +1991,18 @@ class LlamaCppLauncher:
 
 
     def _run_gguf_analysis(self, model_path_str):
-        """Worker function for background GGUF analysis."""
+        """Worker function for background GGUF analysis using built-in GGUF parser."""
         print(f"Analyzing GGUF in background: {model_path_str}", file=sys.stderr)
         # Check if the currently selected model in the GUI still matches the one being analyzed
         # This prevents updating the UI with stale results if the user quickly selects another model
         if self.model_path.get() == model_path_str:
-             # Try backend-specific tools first, fall back to llama-cpp-python if available
-             backend = self.backend_selection.get()
-             if backend == "ik_llama":
-                 backend_dir = self.ik_llama_dir.get().strip()
-                 backend_name = "ik_llama"
-             else:
-                 backend_dir = self.llama_cpp_dir.get().strip()
-                 backend_name = "llama.cpp"
+            # Use the built-in GGUF parser directly
+            analysis_result = parse_gguf_header_simple(model_path_str)
 
-             if backend_dir:
-                 print(f"DEBUG: Trying {backend_name} tools from: {backend_dir}", file=sys.stderr)
-                 analysis_result = analyze_gguf_with_llamacpp_tools(model_path_str, backend_dir)
-
-                 # If backend tools failed and we have llama-cpp-python available, try that as fallback
-                 if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
-                     print(f"DEBUG: {backend_name} tools failed, falling back to llama-cpp-python", file=sys.stderr)
-                     analysis_result = analyze_gguf_model_static(model_path_str)
-             else:
-                 # No backend directory set, try simple GGUF parser first
-                 print(f"DEBUG: No {backend_name} directory set, trying simple GGUF parser", file=sys.stderr)
-                 analysis_result = parse_gguf_header_simple(model_path_str)
-
-                 # If simple parser failed and we have llama-cpp-python available, try that as fallback
-                 if analysis_result.get("error") and LLAMA_CPP_PYTHON_AVAILABLE:
-                     print("DEBUG: Simple GGUF parser failed, falling back to llama-cpp-python", file=sys.stderr)
-                     analysis_result = analyze_gguf_model_static(model_path_str)
-
-             # Only update UI if the model path hasn't changed while analyzing
-             if self.model_path.get() == model_path_str:
+            # Only update UI if the model path hasn't changed while analyzing
+            if self.model_path.get() == model_path_str:
                 self.root.after(0, self._update_ui_after_analysis, analysis_result)
-             else:
+            else:
                 print(f"DEBUG: Analysis for {model_path_str} finished, but model selection changed. Discarding result.", file=sys.stderr)
         else:
             print(f"DEBUG: Analysis started for {model_path_str}, but model selection changed before analysis began. Skipping.", file=sys.stderr)
@@ -2392,8 +2422,15 @@ class LlamaCppLauncher:
         # Check if we're in manual mode
         is_manual_mode = self.manual_gpu_mode.get()
 
+        # Max GPUs per row
+        MAX_GPUS_PER_ROW = 3
+
+        # Frame for GPU checkboxes (uses grid layout with max 3 per row)
+        gpu_list_frame = ttk.Frame(self.gpu_checkbox_frame)
+        gpu_list_frame.pack(side="left", anchor="nw")
+
         if count > 0 and not is_manual_mode:
-            # Show real detected GPU checkboxes
+            # Show real detected GPU checkboxes in grid layout (max 3 per row)
             for i in range(count):
                 gpu_details = self.detected_gpu_devices[i] if i < len(self.detected_gpu_devices) else {}
 
@@ -2402,26 +2439,30 @@ class LlamaCppLauncher:
                 if gpu_details and gpu_details.get("name"):
                      gpu_name_display += f": {gpu_details['name']}"
 
-                cb = ttk.Checkbutton(self.gpu_checkbox_frame, text=gpu_name_display, variable=v)
-                cb.pack(side="left", padx=3, pady=2)
+                row = i // MAX_GPUS_PER_ROW
+                col = i % MAX_GPUS_PER_ROW
+                cb = ttk.Checkbutton(gpu_list_frame, text=gpu_name_display, variable=v)
+                cb.grid(row=row, column=col, sticky="w", padx=3, pady=2)
                 v.trace_add("write", lambda *args, index=i: self._on_gpu_selection_changed(index))
                 self.gpu_vars.append(v)
 
         elif is_manual_mode and self.manual_gpu_list:
-            # Show manual GPU checkboxes
+            # Show manual GPU checkboxes in grid layout (max 3 per row)
             for i, manual_gpu in enumerate(self.manual_gpu_list):
                 v = tk.BooleanVar(value=(i in loaded_selected_gpus))
                 gpu_name_display = f"{manual_gpu['name']} ({manual_gpu['vram_gb']:.1f} GB)"
 
-                cb = ttk.Checkbutton(self.gpu_checkbox_frame, text=gpu_name_display, variable=v)
-                cb.pack(side="left", padx=3, pady=2)
+                row = i // MAX_GPUS_PER_ROW
+                col = i % MAX_GPUS_PER_ROW
+                cb = ttk.Checkbutton(gpu_list_frame, text=gpu_name_display, variable=v)
+                cb.grid(row=row, column=col, sticky="w", padx=3, pady=2)
                 v.trace_add("write", lambda *args, index=i: self._on_gpu_selection_changed(index))
                 self.gpu_vars.append(v)
 
         elif not is_manual_mode and count == 0:
             # No GPUs detected - show message
-            no_gpu_label = ttk.Label(self.gpu_checkbox_frame, text="No CUDA devices detected.", foreground="orange")
-            no_gpu_label.pack(side="left", padx=5, pady=3)
+            no_gpu_label = ttk.Label(gpu_list_frame, text="No CUDA devices detected.", foreground="orange")
+            no_gpu_label.grid(row=0, column=0, sticky="w", padx=5, pady=3)
 
         # Add separator before manual controls
         if (count > 0 and not is_manual_mode) or (is_manual_mode and self.manual_gpu_list):
@@ -2430,7 +2471,7 @@ class LlamaCppLauncher:
 
         # Manual mode controls
         manual_controls_frame = ttk.Frame(self.gpu_checkbox_frame)
-        manual_controls_frame.pack(side="left", padx=5, pady=3)
+        manual_controls_frame.pack(side="left", padx=5, pady=3, anchor="nw")
 
         # Manual mode toggle
         manual_cb = ttk.Checkbutton(manual_controls_frame, text="Manual GPU Mode",
@@ -2558,6 +2599,16 @@ class LlamaCppLauncher:
          self._update_recommendations()
          self._generate_default_config_name() # Update default config name as it depends on selected GPUs
          self._save_configs() # Save selection change
+
+    def _apply_recommended_tensor_split(self):
+        """Apply the recommended tensor split value to the tensor split entry."""
+        recommended = self.recommended_tensor_split_var.get()
+        # Only apply if it's a valid tensor split value (contains numbers and commas)
+        if recommended and not recommended.startswith("N/A"):
+            self.tensor_split.set(recommended)
+            print(f"DEBUG: Applied recommended tensor split: {recommended}", file=sys.stderr)
+        else:
+            print(f"DEBUG: Cannot apply tensor split - no valid recommendation: {recommended}", file=sys.stderr)
 
 
     # ═════════════════════════════════════════════════════════════════
