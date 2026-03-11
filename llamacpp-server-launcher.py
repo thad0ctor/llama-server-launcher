@@ -3455,12 +3455,14 @@ class LlamaCppLauncher:
 #  main
 # ═════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    if sys.platform == "win32": # as the ai wish
+        try:  # high DPI support for Windows
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
+    
     root = tk.Tk()
-    try:      # high dpi support for windows
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
-    except ImportError:
-        pass
+    
     try:
         style = ttk.Style(root)
         themes = style.theme_names()
