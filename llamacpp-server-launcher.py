@@ -3456,6 +3456,11 @@ class LlamaCppLauncher:
 # ═════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     root = tk.Tk()
+    try:      # high dpi support for windows
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except ImportError:
+        pass
     try:
         style = ttk.Style(root)
         themes = style.theme_names()
