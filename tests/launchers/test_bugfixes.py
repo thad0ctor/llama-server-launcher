@@ -30,6 +30,8 @@ import tkinter as tk
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ============================================================================
 # Bug 3: PowerShell backtick / double-quote escape ordering
@@ -165,6 +167,16 @@ class TestEnvInjectionMarkerCollision:
             manager.save_sh_script()
         return out_path.read_text()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "Exercises the Linux branch via sys.platform patching; "
+            "os.name stays 'nt' on real Windows so the code takes the "
+            "wrong branch and Popen is never invoked. See "
+            "test_launch_server.TestLaunchServerLinuxTerminals for the "
+            "same rationale."
+        ),
+    )
     def test_venv_and_env_vars_use_ordered_command_list_no_replace(
         self, manager, launcher_mock, tmp_path
     ):

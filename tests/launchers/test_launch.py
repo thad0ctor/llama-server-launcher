@@ -731,6 +731,10 @@ class TestSaveShScript:
         assert text.startswith("#!/bin/bash")
         assert "set -e" in text
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows filesystems don't honor POSIX exec bits",
+    )
     def test_script_is_executable(self, manager, launcher_mock, tmp_path):
         out = tmp_path / "launch.sh"
         self._write_and_read(manager, launcher_mock, out)

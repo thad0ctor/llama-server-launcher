@@ -191,8 +191,10 @@ class TestBuildUpdateScriptInjectionResistance:
             Path(evil), Path("/tmp/backup"), "v1", "v2",
             "https://example/repo.git", "",
         )
-        # The literal dollar-sign+command must appear only inside single quotes.
-        assert "'/home/user/$(rm -rf /)/launcher'" in s
+        # Derive the expected quoted form from the same Path round-trip the
+        # SUT uses, so the assertion holds on Windows (which normalizes
+        # forward slashes to backslashes when Path() is constructed).
+        assert shlex.quote(str(Path(evil))) in s
 
     def test_backtick_in_path(self):
         """Backtick is classic command substitution — same treatment."""
@@ -201,7 +203,7 @@ class TestBuildUpdateScriptInjectionResistance:
             Path(evil), Path("/tmp/backup"), "v1", "v2",
             "https://example/repo.git", "",
         )
-        assert "'/home/`touch pwned`/launcher'" in s
+        assert shlex.quote(str(Path(evil))) in s
 
     def test_semicolon_in_path(self):
         evil = "/home/user/a;echo pwned;/launcher"

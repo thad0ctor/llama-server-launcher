@@ -90,6 +90,16 @@ class TestLaunchServerWindows:
         assert "$ErrorActionPreference" in content
         assert '$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"' in content
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "The test's fake_mkstemp returns an open fd that isn't closed "
+            "before the launcher tries to os.unlink the temp file. POSIX "
+            "allows unlink on an open file; Windows does not. The test "
+            "verifies cleanup semantics, not the fd leak, so the simplest "
+            "correct thing is to only run it on POSIX."
+        ),
+    )
     def test_windows_missing_venv_activate_aborts_and_cleans_up(
         self, manager, launcher_mock, tmp_path
     ):
@@ -157,6 +167,14 @@ class TestLaunchServerWindows:
 # ============================================================================
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Linux-branch tests patch sys.platform='linux' but can't convincingly "
+        "simulate POSIX on a real Windows runner — os.name stays 'nt', "
+        "pathlib normalizes slashes differently, etc."
+    ),
+)
 class TestLaunchServerLinuxTerminals:
     @pytest.mark.parametrize(
         "terminal",
@@ -249,6 +267,10 @@ class TestLaunchServerLinuxTerminals:
         assert popen.call_count == 1
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Linux-branch test; see TestLaunchServerLinuxTerminals skip note.",
+)
 class TestLaunchServerLinuxFallback:
     def test_no_terminal_found_uses_shell_true_fallback(
         self, manager, launcher_mock
@@ -309,6 +331,10 @@ class TestLaunchServerLinuxFallback:
 # ============================================================================
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="macOS-branch test; see TestLaunchServerLinuxTerminals skip note.",
+)
 class TestLaunchServerMacOS:
     def test_darwin_does_not_take_windows_branch(self, manager, launcher_mock):
         """On darwin, no .ps1 is created; it falls through to the Linux
