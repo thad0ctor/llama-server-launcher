@@ -238,6 +238,33 @@ class SettingsTab:
         except (TypeError, ValueError):
             return 0
 
+    def _persist_ui_settings(self, new_values, failure_title,
+                             failure_prefix, log_prefix):
+        """Apply a dict of new UI settings to app_settings and save.
+
+        Snapshots the keys we're about to touch first, so that if
+        ``launcher._save_configs()`` raises we can restore the previous
+        values — otherwise another save path could later persist the
+        rejected state the user was told wasn't saved.
+
+        Returns True on success, False on failure (caller should short-circuit).
+        """
+        s = self.launcher.app_settings
+        snapshot = {k: s.get(k) for k in new_values}
+        s.update(new_values)
+        try:
+            self.launcher._save_configs()
+        except Exception as e:
+            for k, v in snapshot.items():
+                if v is None:
+                    s.pop(k, None)
+                else:
+                    s[k] = v
+            print(f"{log_prefix}: {e}", file=sys.stderr)
+            messagebox.showerror(failure_title, f"{failure_prefix}:\n{e}")
+            return False
+        return True
+
     def _validate_family(self, family):
         """Confirm ``family`` is in the system font list and return its
         canonical (case-matched) spelling. Returns "" for empty input.
@@ -280,12 +307,27 @@ class SettingsTab:
             messagebox.showwarning("Invalid font size", str(e))
             return
 
-        if mode == "specific" and not theme_name:
-            messagebox.showwarning(
-                "Select a theme",
-                "Choose a theme name from the list when mode is 'Specific theme…'.",
-            )
-            return
+        if mode == "specific":
+            if not theme_name:
+                messagebox.showwarning(
+                    "Select a theme",
+                    "Choose a theme name from the list when mode is 'Specific theme…'.",
+                )
+                return
+            # The combobox is readonly, but theme_name_var can also be seeded
+            # from a stale app_settings value. Confirm the theme is actually
+            # installed — otherwise apply_theme() silently falls back to auto
+            # and we'd re-save mode="specific" pointing at something that
+            # never applied.
+            available = set(ui_theme.list_available_themes(self.root))
+            if theme_name not in available:
+                messagebox.showwarning(
+                    "Unknown theme",
+                    f"'{theme_name}' is not available on this system.\n\n"
+                    "Pick a theme from the dropdown, or change the mode to "
+                    "Auto / Light / Dark.",
+                )
+                return
 
         # Always start from the shipped named-font values before layering the
         # user's overrides. apply_fonts only touches attributes that are set
@@ -315,18 +357,20 @@ class SettingsTab:
             messagebox.showerror("Apply failed", f"Could not apply settings:\n{e}")
             return
 
-        # Commit to app_settings only after a successful apply.
-        s = self.launcher.app_settings
-        s["ui_theme_mode"] = mode
-        s["ui_theme_name"] = theme_name
-        s["ui_font_family"] = family
-        s["ui_font_size"] = size
-
-        try:
-            self.launcher._save_configs()
-        except Exception as e:
-            print(f"Settings save error: {e}", file=sys.stderr)
-            messagebox.showerror("Save failed", f"Could not persist settings:\n{e}")
+        # Commit to app_settings only after a successful apply — and roll
+        # back on save failure so a later Save Config / on_exit path can't
+        # persist values the user was told weren't saved.
+        if not self._persist_ui_settings(
+            {
+                "ui_theme_mode":  mode,
+                "ui_theme_name":  theme_name,
+                "ui_font_family": family,
+                "ui_font_size":   size,
+            },
+            failure_title="Save failed",
+            failure_prefix="Could not persist settings",
+            log_prefix="Settings save error",
+        ):
             return
 
         self._refresh_active_info()
@@ -366,18 +410,20 @@ class SettingsTab:
             messagebox.showerror("Reset failed", f"Could not apply reset:\n{e}")
             return
 
-        # Commit to app_settings only after a successful apply.
-        s = self.launcher.app_settings
-        s["ui_theme_mode"] = "auto"
-        s["ui_theme_name"] = ""
-        s["ui_font_family"] = ""
-        s["ui_font_size"] = 0
-
-        try:
-            self.launcher._save_configs()
-        except Exception as e:
-            print(f"Reset save error: {e}", file=sys.stderr)
-            messagebox.showerror("Save failed", f"Could not persist reset:\n{e}")
+        # Commit to app_settings only after a successful apply — and roll
+        # back on save failure so a later Save Config / on_exit path can't
+        # persist values the user was told weren't saved.
+        if not self._persist_ui_settings(
+            {
+                "ui_theme_mode":  "auto",
+                "ui_theme_name":  "",
+                "ui_font_family": "",
+                "ui_font_size":   0,
+            },
+            failure_title="Save failed",
+            failure_prefix="Could not persist reset",
+            log_prefix="Reset save error",
+        ):
             return
 
         self._refresh_active_info()

@@ -179,9 +179,11 @@ LIGHT_PALETTE = {
     "tab_active":  "#f0f0f0",
 }
 
-# Per-theme palettes. Any theme not listed here falls back to LIGHT_PALETTE
-# (or DARK_PALETTE when mode == "dark"). Tweak individual entries here if you
-# want a specific theme to look more like its native appearance.
+# Per-theme palettes. When a theme is NOT listed here, _palette_for() infers a
+# reasonable default: DARK_PALETTE when mode == "dark" or when _looks_dark()
+# matches the theme name (e.g. a third-party "azure-dark"); LIGHT_PALETTE
+# otherwise. Tweak individual entries here if you want a specific theme to look
+# more like its native appearance.
 THEME_PALETTES = {
     # ----- Basic cross-platform ttk themes -----
     "clam":         {**LIGHT_PALETTE, "bg": "#dcdad5", "bg_alt": "#d0cec8",
