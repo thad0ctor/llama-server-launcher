@@ -636,11 +636,14 @@ jobs:
           # Fail this gate only if a *required* job failed. Soft jobs
           # (typecheck, security-scan, launcher-scripts) are advisory for
           # now and use continue-on-error at the step level.
-          results='${{ toJson(needs) }}'
-          echo "$results"
+          echo "$NEEDS_JSON"
           python3 - <<'PY'
           import json, os, sys
-          needs = json.loads(os.environ.get('NEEDS_JSON') or '${{ toJson(needs) }}')
+          # Read the needs object from the env var set via the step's ``env:``.
+          # Don't fall back to an inline ${{ toJson(needs) }} literal: the JSON
+          # is multi-line after expansion, which breaks Python's single-line
+          # string literal (caused "SyntaxError: unterminated string literal").
+          needs = json.loads(os.environ["NEEDS_JSON"])
           required = {
               "lint", "syntax-check", "unit-tests", "import-smoke",
               "functional-smoke", "gui-smoke", "workflow-lint",
