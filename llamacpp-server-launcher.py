@@ -3647,6 +3647,12 @@ class LlamaCppLauncher:
                 print("DEBUG: No manual GPUs left, switching to automatic mode", file=sys.stderr)
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
+                # Drop stale manual GPU metadata up front so the UI can't keep
+                # showing removed GPUs while the background probe runs (or forever
+                # if detection fails).
+                self.detected_gpu_devices = []
+                self.gpu_info = {"available": False, "device_count": 0, "devices": []}
+                self._update_gpu_checkboxes()
                 # Clear status message and start detection
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
                 # Don't wait for UI - start detection immediately
@@ -3677,6 +3683,14 @@ class LlamaCppLauncher:
                 # Switch back to automatic mode immediately
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
+
+                # Drop stale manual GPU metadata up front so the VRAM display and
+                # checkboxes can't keep showing GPUs the user just removed while
+                # the background probe runs (or forever if detection fails).
+                self.detected_gpu_devices = []
+                self.gpu_info = {"available": False, "device_count": 0, "devices": []}
+                self._update_gpu_checkboxes()
+                self._refresh_vram_display()
 
                 # Update status and start detection without delay
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
