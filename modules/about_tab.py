@@ -23,7 +23,7 @@ class AboutTab:
     def __init__(self):
         self.version = self._load_version()
         self.github_url = "https://github.com/thad0ctor/llama-server-launcher"
-        self.github_version_url = "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/version"
+        self.github_version_url = "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/config/version"
         self.donate_url = "https://www.paypal.me/thad0ctor"
         self.version_status = "Checking..."
         self.remote_version = None
@@ -205,7 +205,6 @@ EXCLUDE_ARGS="-name backup -prune -o -name .git -prune -o -name update_script.sh
 # Backup files
 find "{current_dir}" -maxdepth 1 -type f $EXCLUDE_ARGS -name "*.py" -print -exec cp {{}} "{backup_path}/" \\; -o \\
 $EXCLUDE_ARGS -name "*.md" -print -exec cp {{}} "{backup_path}/" \\; -o \\
-$EXCLUDE_ARGS -path "{current_dir}/config/version" -print -exec cp {{}} "{backup_path}/" \\; -o \\
 $EXCLUDE_ARGS -name ".git*" -print -exec cp {{}} "{backup_path}/" \\; 2>/dev/null || true
 
 # Backup important directories (excluding .git, __pycache__, etc.)
