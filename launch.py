@@ -122,24 +122,36 @@ class LaunchManager:
         if self.launcher.mmproj_enabled.get():
             try:
                 mmproj_file = None
-                # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
-                # model_name.Q6_K.gguf.part2of2 from mradermacher
-                re_model = re.compile(r"^(.*?)[-.]\w+(?:-\d{5}-of-\d{5})?\.gguf(?:\.part\d+of\d+)?$", re.I)
-                model_name_match = re_model.match(Path(model_full_path_str).name)
-                if model_name_match:
-                    model_name = model_name_match.group(1)
-                    
+                selected_mmproj_str = self.launcher.selected_mmproj_path.get().strip() if hasattr(self.launcher, "selected_mmproj_path") else ""
+                if selected_mmproj_str:
+                    selected_mmproj = Path(selected_mmproj_str).resolve()
+                    if selected_mmproj.is_file():
+                        mmproj_file = selected_mmproj
+                        print(f"DEBUG: Using selected mmproj from dropdown: {mmproj_file.name}", file=sys.stderr)
+                    else:
+                        print(f"WARNING: Selected mmproj path is not a file: {selected_mmproj_str}", file=sys.stderr)
+
+                # Fallback to auto-detection if no explicit selection is available.
+                # Prefer candidates whose name contains the model stem so multi-model dirs don't cross-match.
+                if mmproj_file is None:
                     model_dir = Path(model_full_path_str).parent
                     if model_dir.exists() and model_dir.is_dir():
-                        for mmproj in model_dir.iterdir():
-                            if mmproj.is_file() and "mmproj" in mmproj.name.lower():
-                                mmproj_file = mmproj
-                                if model_name.lower() in mmproj.name.lower(): 
-                                    break
-                                
-                        if mmproj_file:
-                            cmd.extend(["--mmproj", str(mmproj_file.resolve())])
-                            print(f"DEBUG: Adding --mmproj {mmproj_file.name}", file=sys.stderr)
+                        # Normalize multipart suffixes before stripping .gguf (Path.stem leaves .gguf
+                        # embedded on foo.gguf.partXofY, which weakens the substring match below).
+                        normalized_name = Path(model_full_path_str).name.lower()
+                        for pattern in (r"\.gguf\.part\d+of\d+$", r"-\d+-of-\d+\.gguf$"):
+                            normalized_name = re.sub(pattern, ".gguf", normalized_name, flags=re.I)
+                        model_stem_l = re.sub(r"\.gguf$", "", normalized_name, flags=re.I)
+                        candidates = [
+                            c for c in model_dir.iterdir()
+                            if c.is_file() and "mmproj" in c.name.lower()
+                        ]
+                        preferred = next((c for c in candidates if model_stem_l and model_stem_l in c.name.lower()), None)
+                        mmproj_file = preferred or (candidates[0] if candidates else None)
+
+                if mmproj_file:
+                    cmd.extend(["--mmproj", str(mmproj_file.resolve())])
+                    print(f"DEBUG: Adding --mmproj {mmproj_file.name}", file=sys.stderr)
             except Exception as e:
                 print(f"WARNING: Error scanning for mmproj files: {e}", file=sys.stderr)
 
@@ -179,11 +191,12 @@ class LaunchManager:
         # But the default *value* shown in the GUI should still be physical cores.
         # Let's compare against the llama.cpp default (logical cores) when deciding whether to *add* the arg.
         self.add_arg(cmd, "--threads", self.launcher.threads.get(), str(self.launcher.logical_cores)) # Omit if matches llama.cpp default (logical)
-        self.add_arg(cmd, "--threads-batch", self.launcher.threads_batch.get(), "4")         # Omit if matches llama.cpp default (4)
+        self.add_arg(cmd, "--threads-batch", self.launcher.threads_batch.get())              # Always pass (no default comparison)
 
         # Llama.cpp internal defaults: --batch-size=512, --ubatch-size=512
-        self.add_arg(cmd, "--batch-size", self.launcher.batch_size.get(), "512")
-        self.add_arg(cmd, "--ubatch-size", self.launcher.ubatch_size.get(), "512")
+        # Always pass batch settings regardless of default values
+        self.add_arg(cmd, "--batch-size", self.launcher.batch_size.get())
+        self.add_arg(cmd, "--ubatch-size", self.launcher.ubatch_size.get())
 
         # Llama.cpp internal defaults: --ctx-size=2048, --seed=-1, --temp=0.8, --min-p=0.05
         self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()), "2048") # Use str() for int var
@@ -274,6 +287,12 @@ class LaunchManager:
         else: # source == "default"
              print("DEBUG: Chat template source is 'Let llama.cpp Decide'. Omitting --chat-template.", file=sys.stderr)
 
+        # --- Jinja rendering (server-side chat template engine) ---
+        # --jinja is a standalone boolean flag on both llama-server and ik_llama-server.
+        if self.launcher.jinja_enabled.get():
+            cmd.append("--jinja")
+            print("DEBUG: Adding --jinja", file=sys.stderr)
+
         # --- NEW: Add Custom Parameters ---
         print(f"DEBUG: Adding {len(self.launcher.custom_parameters_list)} custom parameters...", file=sys.stderr)
         for param_string in self.launcher.custom_parameters_list:
@@ -299,12 +318,12 @@ class LaunchManager:
         # Add a note about using CUDA_VISIBLE_DEVICES if they selected specific GPUs via checkboxes
         # but are NOT using --tensor-split (which explicitly lists devices/split).
         # This warning is helpful because llama.cpp might use all GPUs by default unless restricted by env var or tensor-split.
-        selected_gpu_indices = [i for i, v in enumerate(self.launcher.gpu_vars) if v.get()]
+        ordered_selected_gpus = self.launcher.get_ordered_selected_gpus()
         detected_gpu_count = self.launcher.gpu_info.get("device_count", 0)
-        selected_indices_str = ",".join(map(str, sorted(selected_gpu_indices)))
+        selected_indices_str = ",".join(map(str, ordered_selected_gpus))
 
         # Only warn if GPUs were detected, the user selected a *subset*, and --tensor-split is not used.
-        if detected_gpu_count > 0 and len(selected_gpu_indices) > 0 and len(selected_gpu_indices) < detected_gpu_count and not tensor_split_val:
+        if detected_gpu_count > 0 and len(ordered_selected_gpus) > 0 and len(ordered_selected_gpus) < detected_gpu_count and not tensor_split_val:
              # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
              print(f"\nINFO: Specific GPUs ({selected_indices_str}) were selected via checkboxes, but --tensor-split was not used.", file=sys.stderr)
              # The PowerShell script will set CUDA_VISIBLE_DEVICES, so the warning applies more generally now.
@@ -317,7 +336,7 @@ class LaunchManager:
                   print(f"      The generated PowerShell script will set CUDA_VISIBLE_DEVICES={selected_indices_str}.", file=sys.stderr)
 
              print("      Alternatively, use --tensor-split to explicitly assign layers.", file=sys.stderr)
-        elif len(selected_gpu_indices) > 0 and detected_gpu_count > 0:
+        elif len(ordered_selected_gpus) > 0 and detected_gpu_count > 0:
              # If GPUs were selected (and there are GPUs), maybe a general reminder about env vars?
              # Or just assume the user knows if they selected. Keep the message only for subset selection without tensor-split.
              pass
@@ -458,9 +477,10 @@ class LaunchManager:
 
         tmp_path = None # Initialize tmp_path outside try/except/finally
 
-        # Get selected GPU indices for CUDA_VISIBLE_DEVICES
-        selected_gpu_indices = [i for i, v in enumerate(self.launcher.gpu_vars) if v.get()]
-        cuda_devices_value = ",".join(map(str, sorted(selected_gpu_indices)))
+        # Get selected GPU indices for CUDA_VISIBLE_DEVICES in user-specified order
+        # The order determines which physical GPU becomes which logical GPU index
+        ordered_gpus = self.launcher.get_ordered_selected_gpus()
+        cuda_devices_value = ",".join(map(str, ordered_gpus))
 
         try: # Main try block for creating script and launching process
             if sys.platform == "win32":
@@ -831,9 +851,13 @@ class LaunchManager:
                 fh.write("$ErrorActionPreference = 'Continue'\n\n")
                 fh.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
 
-                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
-                selected_gpu_indices = [i for i, v in enumerate(self.launcher.gpu_vars) if v.get()]
-                cuda_devices_value = ",".join(map(str, sorted(selected_gpu_indices)))
+                # --- Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering ---
+                fh.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
+                fh.write('$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"\n\n')
+
+                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected (in user order) ---
+                ordered_gpus = self.launcher.get_ordered_selected_gpus()
+                cuda_devices_value = ",".join(map(str, ordered_gpus))
 
                 if cuda_devices_value:
                     fh.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
@@ -987,9 +1011,13 @@ class LaunchManager:
 
                 fh.write("set -e  # Exit on any error\n\n")
 
-                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
-                selected_gpu_indices = [i for i, v in enumerate(self.launcher.gpu_vars) if v.get()]
-                cuda_devices_value = ",".join(map(str, sorted(selected_gpu_indices)))
+                # --- Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering ---
+                fh.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
+                fh.write('export CUDA_DEVICE_ORDER=PCI_BUS_ID\n\n')
+
+                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected (in user order) ---
+                ordered_gpus = self.launcher.get_ordered_selected_gpus()
+                cuda_devices_value = ",".join(map(str, ordered_gpus))
 
                 if cuda_devices_value:
                     fh.write(f'echo "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}"\n')

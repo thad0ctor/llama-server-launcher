@@ -114,10 +114,13 @@ class LlamaCppLauncher:
             "last_ik_llama_dir":  "",
             "last_venv_dir":      "",
             "last_model_path":    "",
+            "selected_mmproj_path": "",
             "model_dirs":         [],
             "model_list_height":  8,
             # Save/load selected GPU indices (indices of detected GPUs)
             "selected_gpus":      [],
+            # GPU order for CUDA_VISIBLE_DEVICES (determines logical GPU indices for tensor split)
+            "gpu_order":          [],
             # Save/load network settings
             "host":              "127.0.0.1",
             "port":              "8080",
@@ -285,6 +288,9 @@ class LlamaCppLauncher:
 
         # --- Multi-modal Projection (mmproj) ---
         self.mmproj_enabled  = tk.BooleanVar(value=False) # Enable automatic mmproj file detection
+        self.selected_mmproj_path = tk.StringVar(value=self.app_settings.get("selected_mmproj_path", ""))
+        self.mmproj_selector_var = tk.StringVar(value="")
+        self.mmproj_status_var = tk.StringVar(value="")
 
         # --- Fit Parameters (memory fitting) ---
         self.fit_enabled     = tk.BooleanVar(value=True)   # --fit on/off (default: on)
@@ -293,6 +299,10 @@ class LlamaCppLauncher:
         self.fit_target      = tk.StringVar(value="1024")  # --fit-target (MiB to reserve per device)
 
         # --- Chat Template Selection Variables ---
+        # Pass --jinja to llama-server / ik_llama-server so Jinja chat templates render
+        # correctly. Required for many recent instruction-tuned GGUFs; defaults off since
+        # older servers don't accept the flag.
+        self.jinja_enabled = tk.BooleanVar(value=False)
         # Controls which template source is used: 'default', 'predefined', or 'custom'.
         # Initial state is 'default' (using the model's template if available).
         self.template_source = tk.StringVar(value="default")
@@ -341,6 +351,8 @@ class LlamaCppLauncher:
         # Internal state
         self.model_dirs = []
         self.found_models = {} # {display_name: full_path_obj}
+        self.mmproj_candidates = [] # [Path, ...] for selected model
+        self.mmproj_display_to_path = {} # {display_value: path_string}
         self.current_model_analysis = {} # Holds the result of the last GGUF analysis
         self.analysis_thread = None
         # detected_gpu_devices is populated by SystemInfoManager
@@ -436,6 +448,7 @@ class LlamaCppLauncher:
         self.n_cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to mmproj_enabled to update default config name if needed
         self.mmproj_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.jinja_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -680,6 +693,23 @@ class LlamaCppLauncher:
         self.mmproj_enabled_check = ttk.Checkbutton(inner, variable=self.mmproj_enabled, 
                                                    text="Enable automatic mmproj file detection", state=tk.NORMAL)
         self.mmproj_enabled_check.grid(column=0, row=r, columnspan=4, sticky="w", padx=10, pady=(3,10)); r += 1
+        self.mmproj_selector_label = ttk.Label(inner, text="mmproj File:")
+        self.mmproj_selector_label.grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        self.mmproj_selector_combo = ttk.Combobox(
+            inner,
+            textvariable=self.mmproj_selector_var,
+            state="readonly",
+            width=52
+        )
+        self.mmproj_selector_combo.grid(column=1, row=r, columnspan=3, sticky="ew", padx=5, pady=3)
+        self.mmproj_selector_combo.bind("<<ComboboxSelected>>", self._on_mmproj_selected)
+        r += 1
+        self.mmproj_status_label = ttk.Label(inner, textvariable=self.mmproj_status_var, font=("TkSmallCaptionFont"))
+        self.mmproj_status_label.grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,8))
+        r += 1
+        # Only show the selector when multiple mmproj files are detected for the selected model.
+        self.mmproj_selector_label.grid_remove()
+        self.mmproj_selector_combo.grid_remove()
 
         ttk.Label(inner, text="Basic Settings", font=("TkDefaultFont", 12, "bold"))\
             .grid(column=0, row=r, sticky="w", padx=10, pady=(20,5)); r += 1
@@ -1011,7 +1041,7 @@ class LlamaCppLauncher:
 
         gpu_layers_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Slider range updates with model analysis.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Manual Model Entry (when analysis fails) ---
@@ -1066,6 +1096,45 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         ttk.Label(inner, textvariable=self.recommended_tensor_split_var)\
             .grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=3); r += 1
+
+        # --- GPU Order (for tensor split and CUDA_VISIBLE_DEVICES) ---
+        ttk.Label(inner, text="GPU Order (drag to reorder):")\
+            .grid(column=0, row=r, sticky="nw", padx=10, pady=3)
+
+        gpu_order_frame = ttk.Frame(inner)
+        gpu_order_frame.grid(column=1, row=r, sticky="w", padx=5, pady=3, columnspan=2)
+
+        # Listbox for GPU order (shows selected GPUs in their order)
+        listbox_frame = ttk.Frame(gpu_order_frame)
+        listbox_frame.pack(side="left", fill="both")
+
+        self.gpu_order_listbox = tk.Listbox(listbox_frame, height=3, width=45, selectmode=tk.SINGLE,
+                                            exportselection=False, cursor="hand2")
+        self.gpu_order_listbox.pack(side="left", fill="both")
+
+        # Bind drag-and-drop events for reordering
+        self.gpu_order_listbox.bind('<Button-1>', self._gpu_order_drag_start)
+        self.gpu_order_listbox.bind('<B1-Motion>', self._gpu_order_drag_motion)
+        self.gpu_order_listbox.bind('<ButtonRelease-1>', self._gpu_order_drag_end)
+        self._gpu_order_drag_index = None  # Track the item being dragged
+
+        # Scrollbar for the listbox
+        gpu_order_scrollbar = ttk.Scrollbar(listbox_frame, orient="vertical", command=self.gpu_order_listbox.yview)
+        self.gpu_order_listbox.config(yscrollcommand=gpu_order_scrollbar.set)
+        gpu_order_scrollbar.pack(side="right", fill="y")
+
+        # Up/Down buttons for reordering
+        order_buttons_frame = ttk.Frame(gpu_order_frame)
+        order_buttons_frame.pack(side="left", padx=(5, 0))
+
+        self.gpu_order_up_btn = ttk.Button(order_buttons_frame, text="▲ Up", command=self._move_gpu_order_up, width=8)
+        self.gpu_order_up_btn.pack(side="top", pady=(0, 2))
+
+        self.gpu_order_down_btn = ttk.Button(order_buttons_frame, text="▼ Down", command=self._move_gpu_order_down, width=8)
+        self.gpu_order_down_btn.pack(side="top")
+
+        ttk.Label(inner, text="First GPU in list = GPU 0 for tensor split. Affects CUDA_VISIBLE_DEVICES order.", font=("TkSmallCaptionFont"))\
+            .grid(column=3, row=r, sticky="w", padx=5, pady=3); r += 1
 
 
         # --- Main GPU ---
@@ -1287,6 +1356,11 @@ class LlamaCppLauncher:
                                                     exportselection=False, state=tk.NORMAL)
         custom_params_sb.config(command=self.custom_parameters_listbox.yview)
         self.custom_parameters_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        custom_params_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        # Make scrolling reliable across Linux/Windows/macOS.
+        self.custom_parameters_listbox.bind("<MouseWheel>", self._on_custom_params_mousewheel)
+        self.custom_parameters_listbox.bind("<Button-4>", self._on_custom_params_mousewheel)
+        self.custom_parameters_listbox.bind("<Button-5>", self._on_custom_params_mousewheel)
         r += 1 # Advance row after adding the listbox frame
 
         btn_frame = ttk.Frame(inner); btn_frame.grid(column=3, row=r-1, sticky="ew", padx=5, pady=3, rowspan=2)
@@ -1310,6 +1384,20 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0,5)); r += 1
 
         ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
+
+        # --- Jinja rendering toggle ---
+        # Controls whether --jinja is passed to the server so Jinja chat templates render.
+        self.jinja_enabled_check = ttk.Checkbutton(
+            frame,
+            variable=self.jinja_enabled,
+            text="Enable Jinja template rendering (--jinja)",
+        )
+        self.jinja_enabled_check.grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 3)); r += 1
+        ttk.Label(
+            frame,
+            text="Required for many modern instruction-tuned GGUFs that ship a Jinja chat template.",
+            font=("TkSmallCaptionFont"),
+        ).grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 8)); r += 1
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # --- Template Source Selection (Radio Buttons) ---
@@ -1762,10 +1850,10 @@ class LlamaCppLauncher:
         # Pattern to match multi-part files
         # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
         # model_name.Q6_K.gguf.part01of12 from mradermacher
-        re_multi1 = re.compile(r"^(.*?)-\d{5}-of-\d{5}\.gguf$", re.I)
+        re_multi1 = re.compile(r"^(.*?)-\d+-of-\d+\.gguf$", re.I)
         re_multi2 = re.compile(r"^(.*?)\.gguf\.part\d+of\d+$", re.I)
         # Pattern to match the FIRST part of a multi-part files
-        re_first1 = re.compile(r"^(.*?)-00001-of-\d{5}\.gguf$", re.I)
+        re_first1 = re.compile(r"^(.*?)-0*1-of-\d+\.gguf$", re.I)
         re_first2 = re.compile(r"^(.*?)\.gguf\.part0*1of\d+$", re.I)
 
         # Two-pass approach to handle multi-part files correctly
@@ -1775,13 +1863,16 @@ class LlamaCppLauncher:
             if not isinstance(model_dir, Path) or not model_dir.is_dir(): continue
             print(f"DEBUG: Scanning directory: {model_dir}", file=sys.stderr)
             try:
-                # Collect all GGUF files first
-                for gguf_path in model_dir.rglob('*.gguf'):
-                    if not gguf_path.is_file(): continue
-                    filename = gguf_path.name
+                # Collect GGUF model files with case-insensitive matching, including *.gguf.partXofY.
+                for gguf_path in model_dir.rglob('*'):
+                    if not gguf_path.is_file():
+                        continue
+                    filename_l = gguf_path.name.lower()
+                    if not re.search(r"\.gguf(?:\.part\d+of\d+)?$", filename_l):
+                        continue
                     # Skip non-model GGUF files often found with models
-                    if "mmproj" in filename.lower() or filename.lower().endswith(".bin.gguf"):
-                         continue
+                    if "mmproj" in filename_l or filename_l.endswith(".bin.gguf"):
+                        continue
                     all_gguf_files.append(gguf_path)
             except Exception as e:
                 print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
@@ -1851,6 +1942,7 @@ class LlamaCppLauncher:
         if not model_names:
             self.scan_status_var.set("No GGUF models found in specified directories.")
             self.model_path.set("")
+            self._refresh_mmproj_selection("")
             self._reset_gpu_layer_controls()
             self._reset_model_info_display()
             self.current_model_analysis = {}
@@ -1886,6 +1978,7 @@ class LlamaCppLauncher:
             else:
                  # No models at all, or no valid selection possible
                  self.model_path.set("") # Ensure model path is clear
+                 self._refresh_mmproj_selection("")
                  self.app_settings["last_model_path"] = ""
                  self._save_configs() # Save empty path
                  self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry usable if no model info
@@ -1907,6 +2000,7 @@ class LlamaCppLauncher:
             else:
                 print(f"WARN: Attempted to select invalid index {index} in model listbox.", file=sys.stderr)
                 self.model_path.set("")
+                self._refresh_mmproj_selection("")
                 self.app_settings["last_model_path"] = ""
                 self._save_configs()
                 self._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry usable if no model info
@@ -1918,6 +2012,7 @@ class LlamaCppLauncher:
              print(f"ERROR during _select_model_in_listbox: {e}", file=sys.stderr)
              traceback.print_exc(file=sys.stderr)
              self.model_path.set("")
+             self._refresh_mmproj_selection("")
              self.app_settings["last_model_path"] = ""
              self._save_configs()
              self._reset_gpu_layer_controls(keep_entry_enabled=True)
@@ -1926,12 +2021,121 @@ class LlamaCppLauncher:
              self._update_recommendations()
              self._generate_default_config_name() # Generate default name for no model state
 
+    def _find_mmproj_candidates_for_model(self, model_path_str):
+        """Returns sorted mmproj candidate Paths for a selected model path."""
+        if not model_path_str:
+            return []
+        try:
+            model_path = Path(model_path_str).resolve()
+            if not model_path.is_file():
+                return []
+
+            model_dir = model_path.parent
+            # Normalize multipart suffixes on the full name before stripping .gguf, because
+            # Path.stem on foo.gguf.part01of12 returns "foo.gguf" and leaves .gguf embedded
+            # in later matches, weakening scoring against mmproj candidates.
+            normalized_name = model_path.name.lower()
+            for pattern in (
+                r"\.gguf\.part\d+of\d+$",
+                r"-\d+-of-\d+\.gguf$",
+            ):
+                normalized_name = re.sub(pattern, ".gguf", normalized_name, flags=re.I)
+            model_stem = re.sub(r"\.gguf$", "", normalized_name, flags=re.I)
+            base_model_stem = re.sub(r"[-_.](q\d+.*|iq\d+.*|bf16.*|f16.*)$", "", model_stem, flags=re.I)
+            base_model_stem = base_model_stem.strip("-_.")
+
+            scored = []
+            for candidate in model_dir.iterdir():
+                if not candidate.is_file():
+                    continue
+                candidate_name = candidate.name.lower()
+                if "mmproj" not in candidate_name:
+                    continue
+
+                score = 0
+                if base_model_stem and base_model_stem in candidate_name:
+                    score += 3
+                elif model_stem and model_stem in candidate_name:
+                    score += 2
+                scored.append((score, candidate.name.lower(), candidate.resolve()))
+
+            # Prefer likely model-specific matches, then deterministic name order.
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            return [item[2] for item in scored]
+        except Exception as e:
+            print(f"WARNING: Error discovering mmproj candidates: {e}", file=sys.stderr)
+            return []
+
+    def _refresh_mmproj_selection(self, model_path_str=None):
+        """Updates mmproj selection UI and selected path for the active model."""
+        if model_path_str is None:
+            model_path_str = self.model_path.get().strip()
+
+        self.mmproj_candidates = self._find_mmproj_candidates_for_model(model_path_str)
+        self.mmproj_display_to_path = {}
+
+        if not self.mmproj_candidates:
+            self.mmproj_selector_var.set("")
+            self.selected_mmproj_path.set("")
+            self.mmproj_status_var.set("No mmproj file detected for selected model directory.")
+            if hasattr(self, "mmproj_selector_label"):
+                self.mmproj_selector_label.grid_remove()
+            if hasattr(self, "mmproj_selector_combo"):
+                self.mmproj_selector_combo.grid_remove()
+            return
+
+        # Build display values with parent folder to avoid ambiguity.
+        combo_values = []
+        for mmproj_path in self.mmproj_candidates:
+            display = f"{mmproj_path.name} [{mmproj_path.parent.name}]"
+            self.mmproj_display_to_path[display] = str(mmproj_path)
+            combo_values.append(display)
+        self.mmproj_selector_combo["values"] = combo_values
+
+        previous_selected = self.selected_mmproj_path.get().strip()
+        selected_path = None
+        if previous_selected:
+            for path_obj in self.mmproj_candidates:
+                if str(path_obj) == previous_selected:
+                    selected_path = previous_selected
+                    break
+        if selected_path is None:
+            selected_path = str(self.mmproj_candidates[0])
+            self.selected_mmproj_path.set(selected_path)
+
+        # Sync combobox display value.
+        selected_display = combo_values[0]
+        for display_value, path_value in self.mmproj_display_to_path.items():
+            if path_value == selected_path:
+                selected_display = display_value
+                break
+        self.mmproj_selector_var.set(selected_display)
+
+        if len(self.mmproj_candidates) > 1:
+            self.mmproj_status_var.set(f"Multiple mmproj files found ({len(self.mmproj_candidates)}). Select one.")
+            self.mmproj_selector_label.grid()
+            self.mmproj_selector_combo.grid()
+        else:
+            self.mmproj_status_var.set(f"Using mmproj: {self.mmproj_candidates[0].name}")
+            self.mmproj_selector_label.grid_remove()
+            self.mmproj_selector_combo.grid_remove()
+
+    def _on_mmproj_selected(self, event=None):
+        """Stores the selected mmproj path from the dropdown."""
+        selected_display = self.mmproj_selector_var.get().strip()
+        selected_path = self.mmproj_display_to_path.get(selected_display, "")
+        self.selected_mmproj_path.set(selected_path)
+        if selected_path:
+            self.mmproj_status_var.set(f"Selected mmproj: {Path(selected_path).name}")
+        self._save_configs()
+
 
     def _on_model_selected(self, event=None):
         """Callback when a model is selected. Triggers GGUF analysis."""
         selection = self.model_listbox.curselection()
         if not selection:
             self.model_path.set("")
+            self._refresh_mmproj_selection("")
             self.app_settings["last_model_path"] = ""
             self._save_configs()
             self._reset_gpu_layer_controls()
@@ -1949,6 +2153,7 @@ class LlamaCppLauncher:
             full_path = self.found_models[selected_name] # Use the resolved path from scan results
             full_path_str = str(full_path)
             self.model_path.set(full_path_str)
+            self._refresh_mmproj_selection(full_path_str)
             # Save last model path immediately on selection
             self.app_settings["last_model_path"] = full_path_str
             self._save_configs()
@@ -1980,6 +2185,7 @@ class LlamaCppLauncher:
         else:
             print(f"WARNING: Selected model '{selected_name}' not found in self.found_models dictionary.", file=sys.stderr)
             self.model_path.set("")
+            self._refresh_mmproj_selection("")
             self.app_settings["last_model_path"] = ""
             self._save_configs()
             self._reset_gpu_layer_controls()
@@ -2114,16 +2320,22 @@ class LlamaCppLauncher:
              # The entry remains enabled and the user can still manually set GPU layers
 
         else: # Analysis succeeded, layers found (n_layers > 0)
-            self.max_gpu_layers.set(n_layers)
-            self.gpu_layers_status_var.set(f"Max Layers: {n_layers}")
+            # llama.cpp's --n-gpu-layers counts repeating blocks + 1 output layer
+            # (final norm + lm_head). GGUF `block_count` only covers the repeating
+            # blocks, so full offload requires block_count + 1. Without the +1,
+            # sliding to the max leaves the output layer on CPU (server reports
+            # "offloaded N/N+1 layers").
+            max_offloadable = n_layers + 1
+            self.max_gpu_layers.set(max_offloadable)
+            self.gpu_layers_status_var.set(f"Max Layers: {max_offloadable} ({n_layers} blocks + output)")
             if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
-                self.gpu_layers_slider.config(to=n_layers, state=tk.NORMAL) # Enable slider
+                self.gpu_layers_slider.config(to=max_offloadable, state=tk.NORMAL) # Enable slider
 
             # If tensor split is not blank, set max layers to the maximum quantity instead of defaulting to 0
             tensor_split_val = self.tensor_split.get().strip()
             if tensor_split_val and self.n_gpu_layers.get().strip() in ["0", ""]:
                 # Set to max layers (show actual number instead of -1)
-                self.n_gpu_layers.set(str(n_layers))
+                self.n_gpu_layers.set(str(max_offloadable))
 
             # Sync the controls based on the *current* value in the n_gpu_layers StringVar
             # This will set the slider and potentially update the entry format (-1 vs number)
@@ -2529,7 +2741,8 @@ class LlamaCppLauncher:
                 ttk.Button(remove_frame, text="Remove Selected GPU", command=self._remove_manual_gpu).pack(side="left")
                 ttk.Button(remove_frame, text="Clear All", command=self._clear_manual_gpus).pack(side="left", padx=(5, 0))
 
-        # Trigger immediate update of recommendations instead of delayed
+        # Trigger immediate update of GPU order listbox and recommendations
+        self._update_gpu_order_listbox()
         self._update_recommendations()
 
     def _refresh_vram_display(self):
@@ -2596,9 +2809,172 @@ class LlamaCppLauncher:
          print(f"DEBUG: GPU {index} selection changed. Recalculating recommendations...", file=sys.stderr)
          # Update the selected_gpus list in app_settings immediately
          self.app_settings["selected_gpus"] = [i for i, v in enumerate(self.gpu_vars) if v.get()]
+
+         # Update gpu_order: add newly selected GPUs to the end, remove deselected GPUs
+         current_order = self.app_settings.get("gpu_order", [])
+         selected_set = set(self.app_settings["selected_gpus"])
+
+         # Remove deselected GPUs from order
+         current_order = [g for g in current_order if g in selected_set]
+
+         # Add newly selected GPUs (those in selected_gpus but not in current_order) to the end
+         for gpu_idx in self.app_settings["selected_gpus"]:
+             if gpu_idx not in current_order:
+                 current_order.append(gpu_idx)
+
+         self.app_settings["gpu_order"] = current_order
+         print(f"DEBUG: GPU order updated: {current_order}", file=sys.stderr)
+
+         # Update the GPU order listbox if it exists
+         self._update_gpu_order_listbox()
+
          self._update_recommendations()
          self._generate_default_config_name() # Update default config name as it depends on selected GPUs
          self._save_configs() # Save selection change
+
+    def _update_gpu_order_listbox(self):
+        """Updates the GPU order listbox to reflect current gpu_order."""
+        if not hasattr(self, 'gpu_order_listbox') or not self.gpu_order_listbox.winfo_exists():
+            return
+
+        # Preserve selection
+        current_selection = self.gpu_order_listbox.curselection()
+        selected_idx = current_selection[0] if current_selection else None
+
+        self.gpu_order_listbox.delete(0, tk.END)
+        gpu_order = self.app_settings.get("gpu_order", [])
+
+        for gpu_idx in gpu_order:
+            # detected_gpu_devices is the authoritative source in both auto and manual modes
+            gpu_details = next((gpu for gpu in self.detected_gpu_devices if gpu['id'] == gpu_idx), None)
+            if gpu_details:
+                display_text = f"GPU {gpu_idx}: {gpu_details.get('name', 'Unknown')} ({gpu_details.get('total_memory_gb', 0):.1f} GB)"
+            else:
+                display_text = f"GPU {gpu_idx}"
+            self.gpu_order_listbox.insert(tk.END, display_text)
+
+        # Restore selection if valid
+        if selected_idx is not None and selected_idx < self.gpu_order_listbox.size():
+            self.gpu_order_listbox.selection_set(selected_idx)
+            self.gpu_order_listbox.activate(selected_idx)
+
+    def _move_gpu_order_up(self):
+        """Move selected GPU up in the order (higher priority = lower logical index)."""
+        if not hasattr(self, 'gpu_order_listbox'):
+            return
+        selection = self.gpu_order_listbox.curselection()
+        if not selection or selection[0] == 0:
+            return  # Nothing selected or already at top
+
+        idx = selection[0]
+        gpu_order = self.app_settings.get("gpu_order", [])
+        if idx < len(gpu_order):
+            # Swap with previous
+            gpu_order[idx], gpu_order[idx - 1] = gpu_order[idx - 1], gpu_order[idx]
+            self.app_settings["gpu_order"] = gpu_order
+            self._update_gpu_order_listbox()
+            # Select the moved item
+            self.gpu_order_listbox.selection_set(idx - 1)
+            self.gpu_order_listbox.activate(idx - 1)
+            self._update_recommendations()
+            self._save_configs()
+            print(f"DEBUG: Moved GPU up, new order: {gpu_order}", file=sys.stderr)
+
+    def _move_gpu_order_down(self):
+        """Move selected GPU down in the order (lower priority = higher logical index)."""
+        if not hasattr(self, 'gpu_order_listbox'):
+            return
+        selection = self.gpu_order_listbox.curselection()
+        gpu_order = self.app_settings.get("gpu_order", [])
+        if not selection or selection[0] >= len(gpu_order) - 1:
+            return  # Nothing selected or already at bottom
+
+        idx = selection[0]
+        if idx < len(gpu_order) - 1:
+            # Swap with next
+            gpu_order[idx], gpu_order[idx + 1] = gpu_order[idx + 1], gpu_order[idx]
+            self.app_settings["gpu_order"] = gpu_order
+            self._update_gpu_order_listbox()
+            # Select the moved item
+            self.gpu_order_listbox.selection_set(idx + 1)
+            self.gpu_order_listbox.activate(idx + 1)
+            self._update_recommendations()
+            self._save_configs()
+            print(f"DEBUG: Moved GPU down, new order: {gpu_order}", file=sys.stderr)
+
+    def _gpu_order_drag_start(self, event):
+        """Handle start of drag operation on GPU order listbox."""
+        if not hasattr(self, 'gpu_order_listbox'):
+            return
+        # Get the index of the item under the mouse
+        index = self.gpu_order_listbox.nearest(event.y)
+        if index >= 0 and index < self.gpu_order_listbox.size():
+            self._gpu_order_drag_index = index
+            self.gpu_order_listbox.selection_clear(0, tk.END)
+            self.gpu_order_listbox.selection_set(index)
+            self.gpu_order_listbox.activate(index)
+
+    def _gpu_order_drag_motion(self, event):
+        """Handle drag motion - move item as mouse moves."""
+        if not hasattr(self, 'gpu_order_listbox') or self._gpu_order_drag_index is None:
+            return
+
+        # Get the index under the current mouse position
+        current_index = self.gpu_order_listbox.nearest(event.y)
+        if current_index < 0 or current_index >= self.gpu_order_listbox.size():
+            return
+
+        # If we've moved to a different position, swap within the listbox without
+        # rebuilding it. Rebuilding on every motion tick causes flicker and wasted work;
+        # the gpu_order list itself is the source of truth and is updated here.
+        if current_index != self._gpu_order_drag_index:
+            gpu_order = self.app_settings.get("gpu_order", [])
+            if self._gpu_order_drag_index < len(gpu_order) and current_index < len(gpu_order):
+                item = gpu_order.pop(self._gpu_order_drag_index)
+                gpu_order.insert(current_index, item)
+                self.app_settings["gpu_order"] = gpu_order
+
+                # Move the matching listbox row in place.
+                moved_text = self.gpu_order_listbox.get(self._gpu_order_drag_index)
+                self.gpu_order_listbox.delete(self._gpu_order_drag_index)
+                self.gpu_order_listbox.insert(current_index, moved_text)
+
+                self.gpu_order_listbox.selection_clear(0, tk.END)
+                self.gpu_order_listbox.selection_set(current_index)
+                self.gpu_order_listbox.activate(current_index)
+
+                self._gpu_order_drag_index = current_index
+
+    def _gpu_order_drag_end(self, event):
+        """Handle end of drag operation."""
+        if self._gpu_order_drag_index is not None:
+            # Rebuild once at the end to re-sync display (GPU labels, VRAM, etc.) and persist.
+            self._update_gpu_order_listbox()
+            self._update_recommendations()
+            self._save_configs()
+            gpu_order = self.app_settings.get("gpu_order", [])
+            print(f"DEBUG: Drag complete, GPU order: {gpu_order}", file=sys.stderr)
+        self._gpu_order_drag_index = None
+
+    def get_ordered_selected_gpus(self):
+        """Returns the list of selected GPU indices in the user-specified order.
+
+        This order determines:
+        - CUDA_VISIBLE_DEVICES order (first GPU becomes logical GPU 0)
+        - Tensor split order (first value applies to first GPU in this order)
+        """
+        gpu_order = self.app_settings.get("gpu_order", [])
+        selected_gpus = set(self.app_settings.get("selected_gpus", []))
+
+        # Return only GPUs that are both in the order and currently selected
+        ordered = [g for g in gpu_order if g in selected_gpus]
+
+        # Add any selected GPUs not in the order (shouldn't happen normally, but defensive)
+        for g in sorted(selected_gpus):
+            if g not in ordered:
+                ordered.append(g)
+
+        return ordered
 
     def _apply_recommended_tensor_split(self):
         """Apply the recommended tensor split value to the tensor split entry."""
@@ -2635,9 +3011,10 @@ class LlamaCppLauncher:
 
         # --- Tensor Split Recommendation (VRAM-based) ---
         n_layers = self.current_model_analysis.get("n_layers")
-        # Get the list of indices of the GPUs that are *currently checked* in the UI
-        selected_gpu_indices = [i for i, v in enumerate(self.gpu_vars) if v.get()]
-        num_selected_gpus = len(selected_gpu_indices)
+        # Get the list of selected GPUs in user-specified order
+        # This order determines CUDA_VISIBLE_DEVICES and thus which physical GPU is GPU 0, 1, etc.
+        ordered_selected_gpus = self.get_ordered_selected_gpus()
+        num_selected_gpus = len(ordered_selected_gpus)
 
         if n_layers is None or n_layers <= 0:
             self.recommended_tensor_split_var.set("N/A - Model layers unknown")
@@ -2646,10 +3023,10 @@ class LlamaCppLauncher:
         elif not self.gpu_info['available'] or not self.detected_gpu_devices:
              self.recommended_tensor_split_var.set("N/A - CUDA not available or GPUs not detected")
         else:
-            # Gather VRAM for *selected* GPUs, maintaining their order based on selected_gpu_indices
+            # Gather VRAM for *selected* GPUs, maintaining their order based on user's GPU order
             selected_gpu_vram = []
             vram_info_found = True
-            for gpu_id in selected_gpu_indices:
+            for gpu_id in ordered_selected_gpus:
                  # Find the VRAM for this GPU ID in the detected list
                  gpu_details = next((gpu for gpu in self.detected_gpu_devices if gpu['id'] == gpu_id), None)
                  if gpu_details and gpu_details.get('total_memory_gb') is not None:
@@ -2677,9 +3054,9 @@ class LlamaCppLauncher:
             remainder = n_layers - current_total_layers
 
             # Distribute the remainder layers to GPUs with the largest fractional parts
-            # Sort GPUs by fractional part in descending order, based on selected_gpu_indices order
-            # This ensures distribution bias follows the order the user selected, which might influence llama.cpp's internal assignment order
-            fractional_parts_in_order = [(gpu_id, (n_layers * float_layers_per_gpu[gpu_id]) - rounded_layers[gpu_id]) for gpu_id in selected_gpu_indices]
+            # Sort GPUs by fractional part in descending order, based on user's GPU order
+            # This ensures distribution bias follows the order the user specified
+            fractional_parts_in_order = [(gpu_id, (n_layers * float_layers_per_gpu[gpu_id]) - rounded_layers[gpu_id]) for gpu_id in ordered_selected_gpus]
             fractional_parts_sorted = sorted(fractional_parts_in_order, key=lambda item: item[1], reverse=True)
 
             # Use a list to track which GPU IDs have received an extra layer to handle remainders efficiently
@@ -2690,11 +3067,11 @@ class LlamaCppLauncher:
                  rounded_layers[gpu_id_to_add_layer] += 1
 
 
-            # Ensure the final split list is in the order of *selected* GPU indices
+            # Ensure the final split list is in the user's GPU order
             # Create a dictionary from the rounded_layers result, then build the list
-            # using the order from selected_gpu_indices
+            # using the order from ordered_selected_gpus (first GPU in order = first value in tensor split)
             final_rounded_layers = {gpu_id: count for gpu_id, count in rounded_layers.items()}
-            recommended_split_list = [final_rounded_layers.get(gpu_id, 0) for gpu_id in selected_gpu_indices] # Use .get(gpu_id, 0) defensively
+            recommended_split_list = [final_rounded_layers.get(gpu_id, 0) for gpu_id in ordered_selected_gpus] # Use .get(gpu_id, 0) defensively
 
 
             # Sanity check: does the sum of recommended layers equal total layers?
@@ -2800,6 +3177,20 @@ class LlamaCppLauncher:
                   self.custom_parameters_listbox.see(new_index)
              except ValueError:
                   pass # Item no longer exists
+
+    def _on_custom_params_mousewheel(self, event):
+        """Handles mouse-wheel scrolling for custom parameters listbox."""
+        if getattr(event, "num", None) == 4:
+            self.custom_parameters_listbox.yview_scroll(-1, "units")
+            return "break"
+        if getattr(event, "num", None) == 5:
+            self.custom_parameters_listbox.yview_scroll(1, "units")
+            return "break"
+        if getattr(event, "delta", 0):
+            # Windows uses +/-120 steps; macOS may use smaller deltas.
+            step = -1 if event.delta > 0 else 1
+            self.custom_parameters_listbox.yview_scroll(step, "units")
+            return "break"
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -3208,6 +3599,20 @@ class LlamaCppLauncher:
             removed_gpu = self.manual_gpu_list.pop(index)
             print(f"DEBUG: Removed manual GPU: {removed_gpu['name']}", file=sys.stderr)
 
+            # Manual GPU IDs get rebuilt as 0..n-1 below. Remap selected_gpus / gpu_order
+            # to the post-removal indices so tensor-split and CUDA_VISIBLE_DEVICES keep
+            # pointing at the same logical GPUs.
+            def _remap(i):
+                if i == index:
+                    return None
+                return i - 1 if i > index else i
+            self.app_settings["selected_gpus"] = [
+                r for r in (_remap(i) for i in self.app_settings.get("selected_gpus", [])) if r is not None
+            ]
+            self.app_settings["gpu_order"] = [
+                r for r in (_remap(i) for i in self.app_settings.get("gpu_order", [])) if r is not None
+            ]
+
             # Update the listbox directly instead of rebuilding entire UI
             self.manual_gpu_listbox.delete(index)
 
@@ -3243,6 +3648,12 @@ class LlamaCppLauncher:
                 print("DEBUG: No manual GPUs left, switching to automatic mode", file=sys.stderr)
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
+                # Drop stale manual GPU metadata up front so the UI can't keep
+                # showing removed GPUs while the background probe runs (or forever
+                # if detection fails).
+                self.detected_gpu_devices = []
+                self.gpu_info = {"available": False, "device_count": 0, "devices": []}
+                self._update_gpu_checkboxes()
                 # Clear status message and start detection
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")
                 # Don't wait for UI - start detection immediately
@@ -3266,9 +3677,21 @@ class LlamaCppLauncher:
                 self.manual_gpu_list.clear()
                 print("DEBUG: Cleared all manual GPUs", file=sys.stderr)
 
+                # Drop any manual-mode GPU selection state; detection will repopulate for real GPUs.
+                self.app_settings["selected_gpus"] = []
+                self.app_settings["gpu_order"] = []
+
                 # Switch back to automatic mode immediately
                 self.manual_gpu_mode.set(False)
                 self.app_settings["manual_gpu_mode"] = False
+
+                # Drop stale manual GPU metadata up front so the VRAM display and
+                # checkboxes can't keep showing GPUs the user just removed while
+                # the background probe runs (or forever if detection fails).
+                self.detected_gpu_devices = []
+                self.gpu_info = {"available": False, "device_count": 0, "devices": []}
+                self._update_gpu_checkboxes()
+                self._refresh_vram_display()
 
                 # Update status and start detection without delay
                 self.gpu_detected_status_var.set("Re-detecting GPUs...")

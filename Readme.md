@@ -24,6 +24,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 
 *   **Comprehensive Parameter Control:** Fine-tune your `llama.cpp` server:
     *   **Model Management:** Scan directories for GGUF models, automatic model analysis (layers, architecture, size) with fallbacks, manual model info entry.
+    *   **Vision/mmproj Handling:** Automatic `mmproj` detection, with an `mmproj` dropdown shown when multiple projector files are found for the selected model.
     *   **Core Parameters:** Threads (main & batch), context size, batch sizes (prompt & ubatch), sampling (temperature, min_p, seed).
     *   **GPU Offloading:** GPU layers, tensor split (with VRAM-based recommendations), main GPU selection, Flash Attention toggle.
     *   **Memory & Cache:** KV cache types (K & V), mmap, mlock, no KV offload.

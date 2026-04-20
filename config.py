@@ -85,7 +85,8 @@ class ConfigManager:
             "cpu_moe":       False, # Default for --cpu-moe flag
             "n_cpu_moe":     "",    # Default for --n-cpu-moe (empty)
             "mmproj_enabled": False, # Default for mmproj detection
-    
+            "jinja_enabled": False, # Default for --jinja flag
+
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
@@ -113,6 +114,7 @@ class ConfigManager:
             "cpu_moe":       self.launcher.cpu_moe.get(),  # bool
             "n_cpu_moe":     self.launcher.n_cpu_moe.get().strip(),
             "mmproj_enabled": self.launcher.mmproj_enabled.get(), # bool
+            "jinja_enabled": self.launcher.jinja_enabled.get(), # bool
 
         }
 
@@ -150,6 +152,7 @@ class ConfigManager:
                          "ignore_eos": "no-eos",
                          "cpu_moe": "cpu-moe",
                          "mmproj_enabled": "mmproj",
+                         "jinja_enabled": "jinja",
                       }
                       parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
             # Handle other string parameters
@@ -252,6 +255,7 @@ class ConfigManager:
             "ik_llama_dir":  self.launcher.ik_llama_dir.get(),
             "venv_dir":      self.launcher.venv_dir.get(),
             "model_path":    self.launcher.model_path.get(),
+            "selected_mmproj_path": self.launcher.selected_mmproj_path.get(),
             "cache_type_k":  self.launcher.cache_type_k.get(),
             "cache_type_v":  self.launcher.cache_type_v.get(),
             "threads":       self.launcher.threads.get(), # Save the user-set value
@@ -295,6 +299,8 @@ class ConfigManager:
             "template_source": self.launcher.template_source.get(),
             "predefined_template_name": self.launcher.predefined_template_name.get(),
             "custom_template_string": self.launcher.custom_template_string.get(),
+            # Toggle for --jinja (independent of template source)
+            "jinja_enabled": self.launcher.jinja_enabled.get(),
             # --- NEW: Save Custom Parameters ---
             "custom_parameters": self.launcher.custom_parameters_list, # Save the list of strings
         }
@@ -302,6 +308,8 @@ class ConfigManager:
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
         # This is redundant with app_settings, but keeps config self-contained for this tab.
         cfg["gpu_indices"] = self.launcher.app_settings.get("selected_gpus", [])
+        # Save GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
+        cfg["gpu_order"] = self.launcher.app_settings.get("gpu_order", [])
 
         # Add environmental variables configuration
         cfg.update(self.launcher.env_vars_manager.save_to_config())
@@ -365,6 +373,7 @@ class ConfigManager:
         self.launcher.parallel.set(cfg.get("parallel", "1"))
         # --- Multi-modal Projection ---
         self.launcher.mmproj_enabled.set(cfg.get("mmproj_enabled", False))
+        self.launcher.selected_mmproj_path.set(cfg.get("selected_mmproj_path", ""))
         # --- Fit Parameters ---
         self.launcher.fit_enabled.set(cfg.get("fit_enabled", True))  # Default: True (on)
         self.launcher.fit_ctx_synced = cfg.get("fit_ctx_synced", True)  # Default: synced
@@ -399,6 +408,7 @@ class ConfigManager:
         self.launcher.predefined_template_name.set(cfg.get("predefined_template_name", default_predefined_key))
 
         self.launcher.custom_template_string.set(cfg.get("custom_template_string", ""))
+        self.launcher.jinja_enabled.set(cfg.get("jinja_enabled", False))
 
         # Update UI state and display based on loaded values
         # The trace on self.launcher.template_source should trigger _update_template_controls_state and _update_effective_template_display
@@ -409,8 +419,21 @@ class ConfigManager:
         loaded_gpu_indices = cfg.get("gpu_indices", self.launcher.app_settings.get("selected_gpus", [])) # Fallback to app_settings key if old config format
         # Store loaded indices in app_settings *before* updating checkboxes
         self.launcher.app_settings["selected_gpus"] = loaded_gpu_indices
+
+        # Load GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
+        # If no gpu_order in config, default to the loaded indices in their natural order
+        loaded_gpu_order = cfg.get("gpu_order", loaded_gpu_indices[:])
+        # Ensure gpu_order only contains selected GPUs (defensive, in case of config mismatch)
+        selected_set = set(loaded_gpu_indices)
+        loaded_gpu_order = [g for g in loaded_gpu_order if g in selected_set]
+        # Add any missing selected GPUs to the end
+        for g in loaded_gpu_indices:
+            if g not in loaded_gpu_order:
+                loaded_gpu_order.append(g)
+        self.launcher.app_settings["gpu_order"] = loaded_gpu_order
+
         self.launcher._update_gpu_checkboxes() # This will set the checkboxes according to self.launcher.app_settings["selected_gpus"]
-        # _update_gpu_checkboxes also triggers _update_recommendations
+        # _update_gpu_checkboxes also triggers _update_recommendations and updates the GPU order listbox
 
 
         # Load n_gpu_layers - This interacts with model analysis results
@@ -788,10 +811,21 @@ class ConfigManager:
             # Ensure custom_parameters is a list
             if not isinstance(self.launcher.app_settings.get("custom_parameters"), list):
                  self.launcher.app_settings["custom_parameters"] = []
+            if not isinstance(self.launcher.app_settings.get("selected_mmproj_path"), str):
+                 self.launcher.app_settings["selected_mmproj_path"] = ""
+            if not isinstance(self.launcher.app_settings.get("gpu_order"), list):
+                 self.launcher.app_settings["gpu_order"] = []
 
             # Filter selected_gpus to only include indices of currently detected GPUs
             valid_gpu_indices = {gpu['id'] for gpu in self.launcher.detected_gpu_devices}
             self.launcher.app_settings["selected_gpus"] = [idx for idx in self.launcher.app_settings["selected_gpus"] if idx in valid_gpu_indices]
+            # Filter gpu_order the same way and append any newly-selected GPUs that were missing
+            selected_set = set(self.launcher.app_settings["selected_gpus"])
+            gpu_order = [idx for idx in self.launcher.app_settings.get("gpu_order", []) if idx in selected_set]
+            for idx in self.launcher.app_settings["selected_gpus"]:
+                if idx not in gpu_order:
+                    gpu_order.append(idx)
+            self.launcher.app_settings["gpu_order"] = gpu_order
 
             # Load custom parameters into the internal list
             self.launcher.custom_parameters_list = self.launcher.app_settings.get("custom_parameters", [])
@@ -820,14 +854,15 @@ class ConfigManager:
              print(f"Config Load Error: Failed to parse JSON from {self.launcher.config_path}\nError: {e}", file=sys.stderr)
              exception = e
         except Exception as e:
-            print(f"Config Load Error: Could not load config from {self.launcher.config_path}\nError: {exc}", file=sys.stderr)
+            print(f"Config Load Error: Could not load config from {self.launcher.config_path}\nError: {e}", file=sys.stderr)
             exception = e
         if exception:
             messagebox.showerror("Config Load Error", f"Could not load config from:\n{self.launcher.config_path}\n\nError: {exception}\n\nUsing default settings.")
             # Reset to defaults on other load errors
             self.launcher.app_settings = {
                 "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
-                "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "custom_parameters": [],
+                "selected_mmproj_path": "",
+                "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "gpu_order": [], "custom_parameters": [],
                 "host": "127.0.0.1", "port": "8080"  # Add default network settings
             }
             self.launcher.saved_configs = {}
@@ -858,11 +893,13 @@ class ConfigManager:
         # Save current values to app_settings
         self.launcher.app_settings["model_dirs"] = [str(p) for p in valid_model_dirs]
         self.launcher.app_settings["last_model_path"] = self.launcher.model_path.get()
+        self.launcher.app_settings["selected_mmproj_path"] = self.launcher.selected_mmproj_path.get()
         self.launcher.app_settings["last_llama_cpp_dir"] = self.launcher.llama_cpp_dir.get()
         self.launcher.app_settings["last_ik_llama_dir"] = self.launcher.ik_llama_dir.get()
         self.launcher.app_settings["last_venv_dir"] = self.launcher.venv_dir.get()
         # Save selected GPU indices from the current state of the checkboxes
         self.launcher.app_settings["selected_gpus"] = [i for i, v in enumerate(self.launcher.gpu_vars) if v.get()]
+        # gpu_order is already maintained in app_settings by the UI callbacks, no need to recalculate
         # Save custom parameters list
         self.launcher.app_settings["custom_parameters"] = self.launcher.custom_parameters_list
         # Save network settings - ensure these are saved
