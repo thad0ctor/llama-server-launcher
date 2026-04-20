@@ -144,7 +144,7 @@ class LaunchManager:
                         model_stem_l = re.sub(r"\.gguf$", "", normalized_name, flags=re.I)
                         candidates = [
                             c for c in model_dir.iterdir()
-                            if c.is_file() and ("mmproj" in c.name.lower() or c.name.lower().endswith(".bin.gguf"))
+                            if c.is_file() and "mmproj" in c.name.lower()
                         ]
                         preferred = next((c for c in candidates if model_stem_l and model_stem_l in c.name.lower()), None)
                         mmproj_file = preferred or (candidates[0] if candidates else None)

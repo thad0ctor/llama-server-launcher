@@ -448,6 +448,7 @@ class LlamaCppLauncher:
         self.n_cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to mmproj_enabled to update default config name if needed
         self.mmproj_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.jinja_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -2048,7 +2049,7 @@ class LlamaCppLauncher:
                 if not candidate.is_file():
                     continue
                 candidate_name = candidate.name.lower()
-                if "mmproj" not in candidate_name and not candidate_name.endswith(".bin.gguf"):
+                if "mmproj" not in candidate_name:
                     continue
 
                 score = 0
