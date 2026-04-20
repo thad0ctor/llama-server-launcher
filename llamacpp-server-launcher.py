@@ -28,6 +28,10 @@ from env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariable
 # Import the about tab module
 from about_tab import create_about_tab
 
+# Import the settings tab + UI theme helpers
+from settings_tab import create_settings_tab
+import ui_theme
+
 # Import the ik_llama configuration tab module
 from ik_llama import IkLlamaTab
 
@@ -134,6 +138,12 @@ class LlamaCppLauncher:
             "manual_model_mode":  False,
             "manual_model_layers": "32",
             "manual_model_size_gb": "7.0",
+            # UI appearance (Settings tab). "auto"/"light"/"dark"/"specific"; empty values
+            # mean "use system/theme default" for font family/size.
+            "ui_theme_mode":       "auto",
+            "ui_theme_name":       "",
+            "ui_font_family":      "",
+            "ui_font_size":        0,
         }
         # List to store custom parameters entered by the user (strings)
         self.custom_parameters_list = [] # <-- New attribute for custom parameters
@@ -423,6 +433,19 @@ class LlamaCppLauncher:
         # Update labels based on loaded backend selection and set current backend directory
         self._update_root_directory_labels()
 
+        # Apply persisted UI appearance (theme / font) before building widgets
+        # so new widgets pick up the settings from the start.
+        try:
+            ui_theme.apply_ui_preferences(
+                self.root,
+                theme_mode=self.app_settings.get("ui_theme_mode", "auto"),
+                explicit_theme=self.app_settings.get("ui_theme_name", "") or None,
+                font_family=self.app_settings.get("ui_font_family", ""),
+                font_size=int(self.app_settings.get("ui_font_size", 0) or 0),
+            )
+        except Exception as e:
+            print(f"Failed to apply saved UI preferences: {e}", file=sys.stderr)
+
         # build GUI
         self._create_widgets()
 
@@ -545,7 +568,7 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
         nb.add(chat_frame, text="Chat Template") # Add the new tab
@@ -553,6 +576,7 @@ class LlamaCppLauncher:
         # ik_llama tab will be added conditionally
         self.ik_llama_frame = ik_llama_frame
         nb.add(cfg_frame,  text="Configurations")
+        nb.add(settings_frame, text="Settings") # UI appearance / font
         nb.add(about_frame, text="About") # Add the about tab
 
 
@@ -562,6 +586,7 @@ class LlamaCppLauncher:
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_config_tab(cfg_frame)
+        self._setup_settings_tab(settings_frame) # UI settings tab
         self._setup_about_tab(about_frame) # Setup the about tab
 
         # Update ik_llama tab visibility based on current backend selection
@@ -1671,6 +1696,11 @@ class LlamaCppLauncher:
         """Set up the ik_llama configuration tab using the IkLlamaTab class."""
         # Create the ik_llama tab using the dedicated class
         self.ik_llama_tab.create_tab(parent)
+
+    def _setup_settings_tab(self, parent):
+        """Set up the Settings (UI appearance) tab."""
+        self.settings_tab = create_settings_tab(self)
+        self.settings_tab.setup_settings_tab(parent)
 
     def _setup_about_tab(self, parent):
         """Set up the About tab using the AboutTab class."""
@@ -3332,8 +3362,19 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     # Fixed structure: method definition is outside other methods
     def on_exit(self):
-        self._save_configs()
-        self.root.destroy()
+        try:
+            self._save_configs()
+        except Exception as e:
+            print(f"on_exit: save failed: {e}", file=sys.stderr)
+        try:
+            self.root.quit()
+            self.root.destroy()
+        except Exception:
+            pass
+        # Force-terminate the Python process so any lingering daemon threads,
+        # Tk resources, or parked subprocess pipes don't keep the terminal
+        # stuck. os._exit skips atexit handlers but we've already saved.
+        os._exit(0)
 
     def _browse_backend_dir(self):
         """Opens a directory chooser for the currently selected backend directory."""
@@ -3878,105 +3919,18 @@ class LlamaCppLauncher:
 #  main
 # ═════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    # PR #6: enable system DPI awareness on Windows so Tk doesn't render blurry
+    # on high-DPI displays. Value 1 = PROCESS_SYSTEM_DPI_AWARE (DPI is queried
+    # once at startup and applied process-wide); true per-monitor handling would
+    # require value 2 plus WM_DPICHANGED handling, which Tk doesn't do natively.
+    # Must run before tk.Tk() is instantiated.
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            pass
+
     root = tk.Tk()
-    try:
-        style = ttk.Style(root)
-        themes = style.theme_names()
-        # Prioritize themes that are likely dark or modern looking
-        preferred_themes = ['forest-dark', 'forest-light', 'win11dark','win11light','vista', 'xpnative', 'winnative', 'clam', 'alt', 'default']
-        used_theme = False
-        for theme in preferred_themes:
-            if theme in themes:
-                try:
-                     print(f"Applying theme: {theme}", file=sys.stderr)
-                     style.theme_use(theme)
-                     used_theme = True
-
-                     # Basic heuristic to attempt dark theme configuration if name suggests it
-                     # This might be redundant or conflict if the theme itself handles it well
-                     # Only apply these if the theme name suggests dark and we successfully applied it
-                     if not theme.startswith('forest') and ('dark' in theme.lower() or 'black' in theme.lower() or 'highcontrast' in theme.lower()):
-                          try:
-                               # Get background/foreground from the theme's defaults
-                               # Use lookup with default to avoid errors if element doesn't exist in theme
-                               # Note: These lookups might only work well *after* theme_use.
-                               bg_color = style.lookup('.', 'background', default='#2b2b2b') # Use root style lookup
-                               fg_color = style.lookup('TLabel', 'foreground', default='#ffffff')
-                               entry_bg = style.lookup('TEntry', 'fieldbackground', default='#3c3c3c')
-                               entry_fg = style.lookup('TEntry', 'foreground', default='#ffffff')
-                               # Fallback specific colors if theme lookup fails (more robust)
-                               if not bg_color: bg_color = '#2b2b2b'
-                               if not fg_color: fg_color = '#ffffff'
-                               if not entry_bg: entry_bg = '#3c3c3c'
-                               if not entry_fg: entry_fg = '#ffffff'
-
-
-                               # Listbox is tk, not ttk, needs option_add or direct config if available
-                               listbox_bg = style.lookup('TListbox', 'background', default=entry_bg) or entry_bg
-                               listbox_fg = style.lookup('TListbox', 'foreground', default=entry_fg) or entry_fg
-                               listbox_select_bg = style.lookup('TListbox', 'selectbackground', default='#505050') or '#505050'
-                               listbox_select_fg = style.lookup('TListbox', 'selectforeground', default='#ffffff') or '#ffffff'
-
-                               # Apply to root and all widgets implicitly
-                               root.configure(bg=bg_color)
-                               # ttk widgets inherit from the style root, but apply explicit colors for safety
-                               # Note: Style configuration is complex and theme-dependent.
-                               # Applying these might override theme specifics.
-                               # It's often better to just let the theme handle it if possible.
-                               # Let's try just configuring the root and Listbox/ScrolledText explicitly as they aren't ttk widgets.
-                               # The 'forest' themes handle this automatically. Only needed for fallback themes.
-
-                               # Configure general style for implicit inheritance
-                               style.configure('.', background=bg_color, foreground=fg_color)
-                               # Explicitly configure some widget types
-                               style.configure('TFrame', background=bg_color)
-                               style.configure('TLabel', background=bg_color, foreground=fg_color)
-                               style.configure('TCheckbutton', background=bg_color, foreground=fg_color)
-                               style.configure('TRadiobutton', background=bg_color, foreground=fg_color) # If used
-                               # style.configure('TButton', background=bg_color, foreground=fg_color) # Buttons are tricky
-
-                               # Listbox is tk, not ttk, needs option_add
-                               # Use try/except as option_add might not be available in all contexts or for all styles
-                               try:
-                                  root.option_add('*Listbox.background', listbox_bg)
-                                  root.option_add('*Listbox.foreground', listbox_fg)
-                                  root.option_add('*Listbox.selectBackground', listbox_select_bg)
-                                  root.option_add('*Listbox.selectForeground', listbox_select_fg)
-                               except tk.TclError: print("Note: Failed to configure Tk Listbox colors via option_add.", file=sys.stderr)
-
-                               # Combobox dropdown list might need configuring (may inherit from Listbox options)
-                               # Explicit mapping might be needed if listbox options don't propagate
-                               try:
-                                    style.map('TCombobox', fieldbackground=[('readonly', entry_bg), ('!readonly', entry_bg)],
-                                                             foreground=[('readonly', entry_fg), ('!readonly', entry_fg)])
-                                    style.map('TEntry', fieldbackground=[('!disabled', entry_bg)], foreground=[('!disabled', entry_fg)])
-                               except tk.TclError: print("Note: Failed to configure TCombobox/TEntry colors via map.", file=sys.stderr)
-                               # ScrolledText is tk, needs option_add
-                               try:
-                                   root.option_add('*ScrolledText.background', entry_bg)
-                                   root.option_add('*ScrolledText.foreground', entry_fg)
-                                   # Need to set insertbackground for cursor color in dark themes
-                                   root.option_add('*ScrolledText.insertBackground', fg_color)
-                                   # Selection colors
-                                   root.option_add('*ScrolledText.selectBackground', listbox_select_bg)
-                                   root.option_add('*ScrolledText.selectForeground', listbox_select_fg)
-                               except tk.TclError: print("Note: Failed to configure Tk ScrolledText colors via option_add.", file=sys.stderr)
-
-
-                          except tk.TclError as style_err:
-                               print(f"Note: Could not fully configure basic dark theme styles after applying {theme}: {style_err}", file=sys.stderr)
-                          except Exception as general_style_err:
-                               print(f"Note: Unexpected error during dark theme styling after applying {theme}: {general_style_err}", file=sys.stderr)
-                     break # Stop after applying the first preferred theme found
-                except tk.TclError as e:
-                     print(f"Failed to apply theme {theme}: {e}", file=sys.stderr)
-                     continue # Try the next theme
-        if not used_theme:
-             print("Could not apply preferred ttk themes. Using default theme.", file=sys.stderr)
-    except Exception as e:
-         print(f"ttk themes not available or failed to apply: {e}", file=sys.stderr)
-
-
     app  = LlamaCppLauncher(root)
     root.protocol("WM_DELETE_WINDOW", app.on_exit)
     root.mainloop()
