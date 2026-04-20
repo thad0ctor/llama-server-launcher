@@ -270,11 +270,36 @@ echo "Skipped downloading images folder (using existing)"
 cd "{current_dir}"
 rm -rf temp_clone
 
+# Restore user-owned gitignored state from backup. The fresh clone never
+# contains llama_cpp_launcher_configs.json (it's gitignored), so without this
+# step every self-update would silently wipe the user's saved configurations.
+# We detect the layout of the freshly-cloned tree and write the restored file
+# to the location the new code will look in.
+echo "Restoring user configuration from backup..."
+USER_CONFIG_SRC=""
+if [ -f "{backup_path}/config/llama_cpp_launcher_configs.json" ]; then
+    USER_CONFIG_SRC="{backup_path}/config/llama_cpp_launcher_configs.json"
+elif [ -f "{backup_path}/llama_cpp_launcher_configs.json" ]; then
+    USER_CONFIG_SRC="{backup_path}/llama_cpp_launcher_configs.json"
+fi
+
+if [ -n "$USER_CONFIG_SRC" ]; then
+    if [ -d "{current_dir}/config" ] && [ -d "{current_dir}/modules" ]; then
+        cp "$USER_CONFIG_SRC" "{current_dir}/config/llama_cpp_launcher_configs.json"
+        echo "  Restored: config/llama_cpp_launcher_configs.json"
+    else
+        cp "$USER_CONFIG_SRC" "{current_dir}/llama_cpp_launcher_configs.json"
+        echo "  Restored: llama_cpp_launcher_configs.json (repo root; will migrate on next launch)"
+    fi
+else
+    echo "  No user configuration found in backup - clean install, nothing to restore."
+fi
+
 echo ""
 echo "=== Update Complete ==="
 echo "New version installed successfully!"
 echo "Backup saved in: {backup_path}"
-echo "JSON configuration files were preserved."
+echo "User configurations were preserved and restored."
 echo ""
 echo "You can now restart the application."
 echo ""

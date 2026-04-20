@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from tkinter import messagebox, filedialog
@@ -749,6 +750,14 @@ class ConfigManager:
             if not local_path.exists() or local_path.stat().st_size == 0:
                 try:
                     local_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Preserve a recoverable copy of the pre-migration file so a mid-migration
+                    # failure or an unexpected later wipe still has a restore point on disk.
+                    migration_backup = legacy_path.with_name(legacy_path.name + ".premigration_backup")
+                    try:
+                        shutil.copy2(legacy_path, migration_backup)
+                        print(f"INFO: Migration backup saved to {migration_backup}", file=sys.stderr)
+                    except OSError as backup_err:
+                        print(f"WARNING: Could not create migration backup at {migration_backup}: {backup_err}", file=sys.stderr)
                     legacy_path.replace(local_path)
                     print(f"INFO: Migrated config from {legacy_path} to {local_path}", file=sys.stderr)
                 except OSError as e:
@@ -963,6 +972,34 @@ class ConfigManager:
             "configs":      self.launcher.saved_configs,
             "app_settings": self.launcher.app_settings,
         }
+
+        # Data-loss safeguard: refuse to overwrite a file whose "configs" section is
+        # already populated with an empty one. Catches the failure mode where a
+        # silent load error leaves saved_configs={} and a subsequent save path
+        # (host/port trace, on_exit, etc.) would otherwise wipe the user's data.
+        if not self.launcher.saved_configs and self.launcher.config_path.exists():
+            try:
+                existing_data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
+                if existing_data.get("configs"):
+                    print(
+                        f"WARNING: Refusing to overwrite populated config at "
+                        f"{self.launcher.config_path} with an empty configs dict. "
+                        f"This usually indicates a failed load at startup; your "
+                        f"existing configurations were preserved.",
+                        file=sys.stderr,
+                    )
+                    messagebox.showwarning(
+                        "Config Save Blocked",
+                        f"Refused to overwrite your saved configurations.\n\n"
+                        f"The in-memory configs list was empty, which usually means "
+                        f"configs failed to load at startup. To prevent data loss, "
+                        f"the existing file was not modified.\n\n"
+                        f"File preserved at:\n{self.launcher.config_path}"
+                    )
+                    return
+            except (OSError, json.JSONDecodeError):
+                pass  # If we can't read/parse the existing file, let the save proceed.
+
         try:
             self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             print(f"DEBUG: Successfully saved config to FULL PATH: {self.launcher.config_path.resolve()}") # Add debug print
