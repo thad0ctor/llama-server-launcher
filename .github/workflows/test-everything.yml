@@ -631,30 +631,28 @@ jobs:
       - build-artifacts
     runs-on: ubuntu-latest
     steps:
+      # Implementation note: previous versions of this step embedded a Python
+      # heredoc (``python3 - <<'PY' ... PY``) inside ``run: |``. YAML's literal
+      # block scalar preserves relative indentation, which tripped the Python
+      # parser with "unexpected indent" or "unterminated string literal" in
+      # subtle edge cases. A pure bash + jq implementation is bulletproof and
+      # easier to read.
       - name: Check all required jobs succeeded
         run: |
-          # Fail this gate only if a *required* job failed. Soft jobs
-          # (typecheck, security-scan, launcher-scripts) are advisory for
-          # now and use continue-on-error at the step level.
-          echo "$NEEDS_JSON"
-          python3 - <<'PY'
-          import json, os, sys
-          # Read the needs object from the env var set via the step's ``env:``.
-          # Don't fall back to an inline ${{ toJson(needs) }} literal: the JSON
-          # is multi-line after expansion, which breaks Python's single-line
-          # string literal (caused "SyntaxError: unterminated string literal").
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          required = {
-              "lint", "syntax-check", "unit-tests", "import-smoke",
-              "functional-smoke", "gui-smoke", "workflow-lint",
-              "build-artifacts",
-          }
-          bad = [j for j, v in needs.items()
-                 if j in required and v.get("result") not in ("success", "skipped")]
-          if bad:
-              print(f"::error::Required jobs failed: {bad}")
-              sys.exit(1)
-          print("All required jobs passed.")
-          PY
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq '.'
+          required="lint syntax-check unit-tests import-smoke functional-smoke gui-smoke workflow-lint build-artifacts"
+          bad=""
+          for job in $required; do
+            result=$(echo "$NEEDS_JSON" | jq -r --arg j "$job" '.[$j].result // "missing"')
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              bad="$bad $job($result)"
+            fi
+          done
+          if [ -n "$bad" ]; then
+            echo "::error::Required jobs failed:$bad"
+            exit 1
+          fi
+          echo "All required jobs passed."
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
