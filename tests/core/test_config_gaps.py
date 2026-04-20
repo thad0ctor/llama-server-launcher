@@ -516,13 +516,25 @@ class TestConfigNameSanitization:
 # ===========================================================================
 
 class TestUnicodeAndBom:
-    def test_bom_prefixed_json_loads(self, rich_launcher_factory, tmp_path):
+    def test_bom_prefixed_json_is_rejected_cleanly(
+        self, rich_launcher_factory, tmp_path
+    ):
+        """``json.loads`` reads the file via ``encoding='utf-8'`` (not
+        ``utf-8-sig``), so a UTF-8 BOM prefix causes ``json.JSONDecodeError``
+        with ``'Unexpected UTF-8 BOM'``. The module must treat this as a
+        parse failure, not a silent empty-configs state: a BOM-prefixed file
+        usually means the user hand-edited in a Windows editor that auto-
+        added the BOM, and we don't want to silently wipe their configs.
+
+        Observable contract on rejection:
+          * ``configs_loaded_successfully`` is False (the save guard uses
+            this to refuse overwriting the file on next save).
+          * ``launcher.saved_configs`` is ``{}``.
+          * ``launcher.app_settings`` gets populated with the module's
+            baseline defaults so the UI can still render.
+        """
         from modules.config import ConfigManager
         cfg_path = tmp_path / "cfg.json"
-        # UTF-8 BOM + valid JSON. json.loads in Python 3 tolerates BOM via
-        # utf-8-sig? Actually json.loads rejects BOM. Write with utf-8-sig
-        # to confirm the module reads via utf-8 (expected failure =
-        # safeguard path). We document current behaviour.
         cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(
             {"configs": {}, "app_settings": {}}
         ).encode("utf-8"))
@@ -530,11 +542,26 @@ class TestUnicodeAndBom:
         cm = ConfigManager(launcher)
         with patch("modules.config.messagebox"):
             cm.load_saved_configs()
-        # BOM with utf-8 decoding raises -> load failure flag set.
-        # Either behaviour is acceptable, assert on observable state.
-        # If the parser tolerated the BOM, saved_configs stays empty and
-        # load succeeded. If it rejected it, we still end up with {}.
+
+        # 1) Explicit failure flag — next save must refuse to overwrite.
+        assert cm.configs_loaded_successfully is False
+        # 2) No partial config state leaks in.
         assert launcher.saved_configs == {}
+        # 3) app_settings falls back to the default key set so the UI
+        # has something to render. We assert on the *key shape* rather
+        # than specific values — values are platform-dependent — which
+        # still catches a regression that drops any of the defaults.
+        expected_keys = {
+            "custom_parameters", "gpu_order", "host", "last_llama_cpp_dir",
+            "last_model_path", "last_venv_dir", "model_dirs",
+            "model_list_height", "port", "selected_gpus",
+            "selected_mmproj_path", "ui_font_family", "ui_font_size",
+            "ui_theme_mode", "ui_theme_name",
+        }
+        assert expected_keys.issubset(launcher.app_settings.keys()), (
+            f"Missing default app_settings keys after BOM rejection: "
+            f"{expected_keys - set(launcher.app_settings.keys())}"
+        )
 
     def test_unicode_config_name_loads(
         self, rich_launcher_factory, tmp_path

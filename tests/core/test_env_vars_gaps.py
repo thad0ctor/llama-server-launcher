@@ -171,10 +171,13 @@ class TestCaseInsensitiveDuplicates:
 # Round-trip with duplicates in existing saved state
 # ---------------------------------------------------------------------------
 
-def test_load_from_config_preserves_existing_duplicates(env_manager):
-    """Legacy configs may have been saved with case-variant duplicates before
-    the bug fix. Load must preserve them intact; the dedupe rule only
-    applies to *new* additions."""
+def test_load_from_config_dedupes_case_insensitive_duplicates(env_manager):
+    """The duplicate-name invariant is class-wide, not just for new adds.
+    Legacy configs that happened to contain case-variant duplicates get
+    deduped on load — first occurrence wins — so the post-load state
+    matches what add_custom_env_var and update_custom_env_var will
+    enforce. Otherwise the ``load -> use -> save`` round-trip would let
+    forbidden states keep propagating."""
     payload = {
         "environmental_variables": {
             "enabled": True,
@@ -182,12 +185,66 @@ def test_load_from_config_preserves_existing_duplicates(env_manager):
             "custom": [
                 {"name": "FOO", "value": "1"},
                 {"name": "foo", "value": "2"},
+                {"name": "BAR", "value": "x"},
             ],
         }
     }
     env_manager.load_from_config(payload)
-    # Both preserved (legacy data).
-    assert env_manager.custom_env_vars == [("FOO", "1"), ("foo", "2")]
-    # But a new add with either case is rejected.
+    # First-occurrence-wins dedup: FOO kept, foo dropped, BAR kept.
+    assert env_manager.custom_env_vars == [("FOO", "1"), ("BAR", "x")]
+    # Subsequent adds with any casing of the retained names are still rejected.
     assert env_manager.add_custom_env_var("Foo", "3") is False
-    assert env_manager.add_custom_env_var("FOO", "3") is False
+    assert env_manager.add_custom_env_var("bar", "3") is False
+
+
+def test_load_from_config_normalises_whitespace_and_drops_empties(env_manager):
+    """Whitespace-only names/values should be dropped on load the same way
+    add_custom_env_var rejects them, otherwise a hand-edited config could
+    seed entries the manager itself would refuse."""
+    payload = {
+        "environmental_variables": {
+            "enabled": True,
+            "predefined": {},
+            "custom": [
+                {"name": "  SPACED  ", "value": "  v  "},
+                {"name": "   ", "value": "x"},       # empty name after strip
+                {"name": "EMPTY_VAL", "value": "  "},  # empty value after strip
+                {"name": 123, "value": "bad-type"},    # non-string name
+            ],
+        }
+    }
+    env_manager.load_from_config(payload)
+    assert env_manager.custom_env_vars == [("SPACED", "v")]
+
+
+def test_update_custom_env_var_rejects_case_insensitive_conflict(env_manager):
+    """Renaming index 1 to collide (case-insensitively) with index 0 must
+    be rejected — otherwise the UI + manager can end up in a state where
+    add() forbids a name that update() just created."""
+    env_manager.add_custom_env_var("FOO", "1")
+    env_manager.add_custom_env_var("BAR", "2")
+    # Attempt to rename BAR -> foo (collides with FOO at index 0).
+    result = env_manager.update_custom_env_var(1, "foo", "new")
+    assert result is False
+    # State unchanged.
+    assert env_manager.custom_env_vars == [("FOO", "1"), ("BAR", "2")]
+
+
+def test_update_custom_env_var_same_index_recase_allowed(env_manager):
+    """Editing the entry at index ``i`` to a different casing of its own
+    name is still allowed — it's an in-place re-save, not a duplicate."""
+    env_manager.add_custom_env_var("FOO", "1")
+    env_manager.add_custom_env_var("BAR", "2")
+    result = env_manager.update_custom_env_var(0, "foo", "1-lower")
+    assert result is True
+    assert env_manager.custom_env_vars == [("foo", "1-lower"), ("BAR", "2")]
+
+
+def test_update_custom_env_var_returns_false_on_empty_or_oob(env_manager):
+    """Empty name/value and out-of-range index both return False and leave
+    state unchanged — mirrors add_custom_env_var."""
+    env_manager.add_custom_env_var("X", "1")
+    assert env_manager.update_custom_env_var(0, "", "v") is False
+    assert env_manager.update_custom_env_var(0, "N", "") is False
+    assert env_manager.update_custom_env_var(99, "N", "v") is False
+    assert env_manager.custom_env_vars == [("X", "1")]

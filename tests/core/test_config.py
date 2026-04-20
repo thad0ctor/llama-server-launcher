@@ -573,8 +573,11 @@ def test_get_config_path_removes_empty_existing_file(launcher_factory, tmp_path)
         path = cm.get_config_path()
 
     # The empty file was deleted and the returned path is still the local path.
+    # Assert removal directly — ``not stale.exists() or size==0`` was vacuously
+    # satisfied when the file started at size 0 and the cleanup step did
+    # nothing, letting a regression slip through silently.
     assert path == stale
-    assert not stale.exists() or stale.stat().st_size == 0
+    assert not stale.exists()
 
 
 # ---------------------------------------------------------------------------

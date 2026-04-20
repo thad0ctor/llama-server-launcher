@@ -511,3 +511,128 @@ def test_parse_oversized_string_len_never_read_in_full(
         f"Parser called f.read with size {max_read_size[0]} — larger than the "
         f"soft cap. This would allocate multi-GB on a legitimate large GGUF."
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression: skip_array must bounds-check every seek against file size
+#
+# Before the fix, ``skip_array`` blindly did ``f.seek(f.tell() + str_len)`` on
+# string-array elements and ``f.seek(f.tell() + array_len * element_size)``
+# on numeric-array elements — both using untrusted 64-bit lengths straight
+# from the file. A malformed file could claim an absurd length, send the
+# stream position far past EOF, and leave the caller mis-interpreting later
+# short reads as earlier truncation. The fix validates each proposed seek
+# against ``os.fstat(...).st_size`` before advancing.
+# ---------------------------------------------------------------------------
+
+
+def _parse_and_record_max_pos(path: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Parse a GGUF blob and return the maximum stream position the parser
+    ever reached. Used to assert that ``skip_array``'s bounds check keeps
+    the position within the file even when fed an adversarial length.
+    """
+    import builtins
+
+    from modules import system as _system_mod
+
+    max_pos = [0]
+    real_open = builtins.open
+
+    class _PosTrackingFile:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+        def seek(self, *args, **kwargs):
+            r = self._inner.seek(*args, **kwargs)
+            max_pos[0] = max(max_pos[0], self._inner.tell())
+            return r
+
+        def read(self, *args, **kwargs):
+            data = self._inner.read(*args, **kwargs)
+            max_pos[0] = max(max_pos[0], self._inner.tell())
+            return data
+
+        def tell(self):
+            return self._inner.tell()
+
+    def tracking_open(file, mode="r", *args, **kwargs):
+        fh = real_open(file, mode, *args, **kwargs)
+        if mode == "rb" and str(file) == str(path):
+            return _PosTrackingFile(fh)
+        return fh
+
+    monkeypatch.setattr(builtins, "open", tracking_open)
+    _system_mod.parse_gguf_header_simple(str(path))
+    return max_pos[0]
+
+
+def test_skip_array_string_len_past_eof_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A string-array element whose claimed length exceeds the file size
+    must NOT send the stream position past EOF. Before the fix, skip_array
+    did ``f.seek(f.tell() + str_len)`` with str_len straight from the file,
+    leaving the position billions of bytes past EOF and corrupting the
+    interpretation of later reads."""
+    blob = bytearray()
+    blob += b"GGUF"
+    blob += struct.pack("<I", 3)
+    blob += struct.pack("<Q", 0)
+    blob += struct.pack("<Q", 1)
+
+    # Single string-array element claiming 10 GiB despite ~60-byte file.
+    blob += _pack_string("tokenizer.evil")
+    blob += struct.pack("<I", _T_ARRAY)
+    blob += struct.pack("<I", _T_STRING)
+    blob += struct.pack("<Q", 1)
+    blob += struct.pack("<Q", 10 * 1024**3)
+
+    path = tmp_path / "liar_string_array.gguf"
+    path.write_bytes(bytes(blob))
+
+    file_size = path.stat().st_size
+    max_pos = _parse_and_record_max_pos(path, monkeypatch)
+
+    assert max_pos <= file_size, (
+        f"Max stream position {max_pos} exceeded file size {file_size} — "
+        f"bounds check failed on the string-array branch of skip_array."
+    )
+
+
+def test_skip_array_numeric_array_len_past_eof_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same trust issue as the string-array path, numeric-array branch —
+    ``array_len * element_size`` could blow past the file."""
+    blob = bytearray()
+    blob += b"GGUF"
+    blob += struct.pack("<I", 3)
+    blob += struct.pack("<Q", 0)
+    blob += struct.pack("<Q", 1)
+
+    # Array of uint32 claiming 10 billion elements — 40 GB of "data".
+    blob += _pack_string("tokenizer.evil_numeric")
+    blob += struct.pack("<I", _T_ARRAY)
+    blob += struct.pack("<I", _T_UINT32)
+    blob += struct.pack("<Q", 10_000_000_000)
+
+    path = tmp_path / "liar_numeric_array.gguf"
+    path.write_bytes(bytes(blob))
+
+    file_size = path.stat().st_size
+    max_pos = _parse_and_record_max_pos(path, monkeypatch)
+
+    assert max_pos <= file_size, (
+        f"Max stream position {max_pos} exceeded file size {file_size} — "
+        f"bounds check failed on the numeric-array branch of skip_array."
+    )

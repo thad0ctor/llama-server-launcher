@@ -43,14 +43,38 @@ def build_update_script(current_dir, backup_path, current_version, remote_versio
     github_url:
         Clone URL. Quoted via shlex.
     exclusions:
-        Pre-built find-exclusion string produced by ``_get_backup_exclusions``.
-        Already contains shell syntax, so it is NOT re-quoted.
+        Iterable of raw ``.gitignore``-style patterns (e.g. ``['*.pyc', '.venv']``)
+        or ``None`` / empty for no extra exclusions. Each pattern is individually
+        passed through :func:`shlex.quote` at composition time; the script uses
+        bash arrays (``EXCLUDE_ARGS=(...)`` + ``"${EXCLUDE_ARGS[@]}"``) so a
+        pattern containing a single quote or whitespace can't break out of
+        quoting or inject shell metacharacters.
     """
+    # Reject the old pre-built-shell-fragment string form loudly so a stale
+    # caller doesn't silently iterate over characters of the string.
+    if isinstance(exclusions, str):
+        if exclusions:
+            raise TypeError(
+                "build_update_script now accepts exclusions as an iterable of "
+                "raw gitignore patterns, not a pre-built shell fragment string."
+            )
+        exclusions = []
+    elif exclusions is None:
+        exclusions = []
+
     q_current_dir = shlex.quote(str(current_dir))
     q_backup_path = shlex.quote(str(backup_path))
     q_current_version = shlex.quote(str(current_version))
     q_remote_version = shlex.quote(str(remote_version) if remote_version is not None else "")
     q_github_url = shlex.quote(str(github_url))
+
+    # Build the dynamic tail of the EXCLUDE_ARGS array. Each pattern is
+    # shlex.quote'd; bash parses the single-quoted form inside the array
+    # literal and stores the raw pattern as one array element — safe even if
+    # the pattern contains apostrophes or whitespace.
+    exclusions_fragment = "".join(
+        f" -o -name {shlex.quote(str(p))} -prune" for p in exclusions
+    )
 
     script = f"""#!/bin/bash
 set -e
@@ -67,13 +91,16 @@ mkdir -p {q_backup_path}
 # Backup files (excluding JSON files, .gitignore patterns, and git data)
 echo "Backing up important files (excluding temporary/cache files)..."
 
-# Create exclusion arguments for find
-EXCLUDE_ARGS="-name backup -prune -o -name .git -prune -o -name update_script.sh -prune{exclusions}"
+# Create exclusion arguments for find. A bash array + "${{EXCLUDE_ARGS[@]}}"
+# expansion preserves each element as a single argument, unlike a plain
+# string + word splitting which would choke on patterns containing spaces
+# or apostrophes.
+EXCLUDE_ARGS=(-name backup -prune -o -name .git -prune -o -name update_script.sh -prune{exclusions_fragment})
 
 # Backup files
-find {q_current_dir} -maxdepth 1 -type f $EXCLUDE_ARGS -name "*.py" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
-$EXCLUDE_ARGS -name "*.md" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
-$EXCLUDE_ARGS -name ".git*" -print -exec cp {{}} {q_backup_path}/ \\; 2>/dev/null || true
+find {q_current_dir} -maxdepth 1 -type f "${{EXCLUDE_ARGS[@]}}" -name "*.py" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
+"${{EXCLUDE_ARGS[@]}}" -name "*.md" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
+"${{EXCLUDE_ARGS[@]}}" -name ".git*" -print -exec cp {{}} {q_backup_path}/ \\; 2>/dev/null || true
 
 # Backup important directories (excluding .git, __pycache__, etc.)
 for dir in {q_current_dir}/*; do
@@ -363,35 +390,35 @@ class AboutTab:
         )
     
     def _get_backup_exclusions(self, current_dir):
-        """Generate find exclusion arguments based on .gitignore patterns."""
-        exclusions = []
-        gitignore_path = current_dir / ".gitignore"
-        
-        # Default exclusions (common patterns)
-        default_exclusions = [
+        """Return a list of raw ``.gitignore``-style exclusion patterns.
+
+        Patterns are returned unquoted and unformatted — the caller
+        (:func:`build_update_script`) is responsible for shell-quoting them
+        when composing the final bash script. Returning raw patterns means
+        a ``.gitignore`` entry containing a single quote (e.g.
+        ``don't_touch/*.tmp``) can't break out of the quoting and malform
+        or inject into the generated update script.
+        """
+        patterns = [
             "__pycache__", "*.pyc", "*.pyo", "*.pyd",
             ".pytest_cache", ".mypy_cache", ".coverage",
             "*.egg-info", ".tox", ".venv", "venv",
-            ".DS_Store", "Thumbs.db", "*.tmp", "*.log"
+            ".DS_Store", "Thumbs.db", "*.tmp", "*.log",
         ]
-        
-        # Add exclusions from .gitignore if it exists
+        gitignore_path = current_dir / ".gitignore"
+
         try:
             if gitignore_path.exists():
                 with open(gitignore_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith('#'):
-                            default_exclusions.append(line)
+                            patterns.append(line)
         except Exception as e:
             print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
-        
-        # Convert to find exclusion arguments
-        for pattern in default_exclusions:
-            if pattern:
-                exclusions.append(f" -o -name '{pattern}' -prune")
-        
-        return "".join(exclusions)
+
+        # Drop any accidentally-empty entries.
+        return [p for p in patterns if p]
     
     def _open_url(self, url):
         """Open URL in the default web browser."""

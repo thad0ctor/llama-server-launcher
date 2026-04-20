@@ -143,6 +143,23 @@ class TestReadVersionString:
 
         assert entry_module._read_version_string() == "2024-01-01-1"
 
+    def test_non_utf8_bytes_fall_back_to_unknown(
+        self, entry_module, monkeypatch, tmp_path
+    ):
+        """A malformed version file (non-UTF-8 bytes) must not crash
+        ``--version``. ``Path.read_text(encoding='utf-8')`` raises
+        ``UnicodeDecodeError`` which is NOT an ``OSError``; if the helper
+        only catches ``OSError`` the exception escapes and the CLI aborts."""
+        fake_module_path = tmp_path / "launcher.py"
+        fake_module_path.write_text("")
+        (tmp_path / "config").mkdir()
+        # 0x80 is a lone continuation byte — invalid as the start of a UTF-8
+        # sequence, so read_text(encoding='utf-8') raises UnicodeDecodeError.
+        (tmp_path / "config" / "version").write_bytes(b"\x80\x81\x82")
+        monkeypatch.setattr(entry_module, "__file__", str(fake_module_path))
+
+        assert entry_module._read_version_string() == "unknown"
+
 
 # ---------------------------------------------------------------------------
 # LlamaCppLauncher.cleanup

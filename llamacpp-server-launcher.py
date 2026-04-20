@@ -28,7 +28,10 @@ def _read_version_string():
         if version_file.exists():
             text = version_file.read_text(encoding="utf-8").strip()
             return text if text else "unknown"
-    except OSError:
+    except (OSError, UnicodeError):
+        # OSError covers missing/permission/IO failures; UnicodeError covers
+        # a version file that contains non-UTF-8 bytes (its subclass
+        # UnicodeDecodeError is raised by read_text and is NOT an OSError).
         pass
     return "unknown"
 
@@ -3487,8 +3490,15 @@ class LlamaCppLauncher:
             except Exception as e:
                 print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-                # Even on error, schedule completion handler to update UI (flag will be cleared there)
-                self.root.after(0, lambda: self._on_system_info_detection_complete(error=str(e)))
+                # Capture the message eagerly. ``except ... as e`` unbinds ``e``
+                # when the block exits, and Tk's ``.after(0, ...)`` runs the
+                # callback later on the main thread — so a naive ``lambda:
+                # ... error=str(e)`` raises NameError at callback time.
+                error_message = str(e)
+                self.root.after(
+                    0,
+                    lambda: self._on_system_info_detection_complete(error=error_message),
+                )
 
         # Start detection in background thread
         detection_thread = Thread(target=detect_system_info, daemon=True)

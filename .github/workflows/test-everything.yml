@@ -201,13 +201,15 @@ jobs:
       # Real test run. `--strict-markers` catches typos in @pytest.mark.*,
       # `-ra` summarises skipped/xfailed, `-o xfail_strict=True` turns
       # unexpected-passes into failures so silently-fixed bugs surface.
-      # Coverage is scoped to modules/ (project code), not test code.
+      # Coverage scoping lives in ``.coveragerc`` (include/omit globs), read
+      # via bare ``--cov``. Previously we passed ``--cov=llamacpp-server-launcher``
+      # which silently collected nothing because pytest-cov treats the value
+      # as a module name and hyphens are illegal in module names.
       - name: Run pytest with coverage
         shell: bash
         run: |
           pytest \
-            --cov=modules \
-            --cov=llamacpp-server-launcher \
+            --cov \
             --cov-report=xml:coverage.xml \
             --cov-report=term \
             --cov-report=html:htmlcov \
@@ -395,15 +397,26 @@ jobs:
           echo "--- gui.log ---"
           cat gui.log || true
           echo "--- end gui.log ---"
-          # `timeout` returns 124 when it kills a still-running process —
-          # that is the *success* path here (GUI stayed up for 8s).
+          # The point of this job is to prove the GUI stayed up for the full
+          # 8s — i.e. ``timeout`` had to kill it. Two accepted exit codes:
+          #   124 — timeout expired without --preserve-status
+          #   143 — child was killed by SIGTERM (128 + 15; happens with
+          #         --preserve-status set)
+          # Anything else, including rc=0, means the launcher exited on its
+          # own before the window ran out. A startup regression that
+          # produces a clean early exit would otherwise masquerade as a
+          # passing smoke test.
           rc=${rc:-0}
-          if [ "$rc" = "124" ] || [ "$rc" = "143" ] || [ "$rc" = "0" ]; then
+          if [ "$rc" = "124" ] || [ "$rc" = "143" ]; then
             echo "GUI smoke passed (exit=$rc)."
             exit 0
           fi
-          echo "::error::GUI crashed during startup (exit=$rc)"
-          exit "$rc"
+          if [ "$rc" = "0" ]; then
+            echo "::error::GUI exited cleanly before the 8s window — startup regression?"
+          else
+            echo "::error::GUI crashed during startup (exit=$rc)"
+          fi
+          exit 1
 
       - name: Upload GUI log
         if: always()
@@ -515,20 +528,22 @@ jobs:
           }
         continue-on-error: true
 
-      # Basic .bat sanity: each .bat file must parse under Windows cmd.
-      # Handled in a separate Windows job below.
+      # .bat readability/smoke check handled in a separate Windows job below.
+      # cmd.exe has no "parse-only" mode — running a .bat file always
+      # executes it — so the best we can do statically is confirm the file
+      # is present, non-empty, and readable as text.
 
   launcher-scripts-bat:
-    name: Launcher scripts (.bat syntax)
+    name: Launcher scripts (.bat readability)
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # PowerShell is more predictable here than cmd — `dir` in cmd returns
-      # exit 1 when no files match, which poisons the step's exit code even
-      # though the "check" itself succeeded. PowerShell lets us gate cleanly.
-      - name: Check .bat files
+      # Why PowerShell rather than cmd: ``dir`` in cmd exits 1 when no files
+      # match, poisoning the step's exit code even when the check succeeds.
+      # PowerShell lets us gate on an empty-match case cleanly.
+      - name: Check .bat files are present and readable
         shell: pwsh
         run: |
           $files = Get-ChildItem -Path . -Recurse -Include *.bat -ErrorAction SilentlyContinue |
@@ -537,17 +552,32 @@ jobs:
             Write-Host "::notice::No .bat files found to check."
             exit 0
           }
+          # NOTE: this is intentionally NOT a syntax check. cmd.exe has no
+          # parse-only flag; any actual "check" would run the script, which
+          # can have side effects. We only verify:
+          #   1. Get-Content can read the file (not locked / not inaccessible)
+          #   2. The file is non-empty (empty .bat usually means a broken
+          #      generator)
+          #   3. The content decodes as text (ASCII/UTF-8 with or without BOM)
+          # A genuine syntax error in a shipped .bat would surface at the
+          # user's first execution; catching it earlier is out of scope.
           $failed = @()
           foreach ($f in $files) {
             Write-Host "Checking $($f.FullName)"
-            # Parse-only invocation: cmd reads the script through stdin and
-            # exits without running it. A genuine syntax error is rare for
-            # batch files, so this is mostly a smoke check.
-            $null = cmd /c "exit /b 0" -< $f.FullName 2>&1
-            if ($LASTEXITCODE -ne 0) { $failed += $f.FullName }
+            try {
+              $content = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+            } catch {
+              Write-Host "  unreadable: $_"
+              $failed += $f.FullName
+              continue
+            }
+            if (-not $content -or $content.Length -eq 0) {
+              Write-Host "  empty file"
+              $failed += $f.FullName
+            }
           }
           if ($failed) {
-            Write-Host "::error::Potentially malformed .bat files: $($failed -join ', ')"
+            Write-Host "::error::Unreadable or empty .bat files: $($failed -join ', ')"
             exit 1
           }
           Write-Host "Done."
@@ -641,7 +671,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "$NEEDS_JSON" | jq '.'
-          required="lint syntax-check unit-tests import-smoke functional-smoke gui-smoke workflow-lint build-artifacts"
+          # Hard-fail jobs — a failure in any of these should block merge
+          # via branch protection. ``typecheck``, ``security-scan``, and
+          # ``launcher-scripts`` are advisory (continue-on-error at the step
+          # level) so they're intentionally omitted. ``launcher-scripts-bat``
+          # IS required because its readability check hard-fails.
+          required="lint syntax-check unit-tests import-smoke functional-smoke gui-smoke launcher-scripts-bat workflow-lint build-artifacts"
           bad=""
           for job in $required; do
             result=$(echo "$NEEDS_JSON" | jq -r --arg j "$job" '.[$j].result // "missing"')

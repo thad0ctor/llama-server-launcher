@@ -323,6 +323,137 @@ class TestChatTemplateContent:
 
 
 # ---------------------------------------------------------------------------
+# Env var export escaping (bash save_sh_script path + launch_server parallel)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "bash -n is not available on a bare Windows runner; the escape "
+        "logic is POSIX-specific anyway."
+    ),
+)
+class TestEnvVarExportEscaping:
+    """The bash generator escapes ``\\``, ``\"``, ``$``, ``\\``` inside the
+    double-quoted value of ``export VAR="..."``. Newlines are deliberately
+    not escaped because bash ``""`` preserves literal newlines and any
+    ``\\n -> \\\\n`` substitution would corrupt the user's value.
+    """
+
+    def _run_with_env(self, manager, launcher_mock, tmp_path, env_vars):
+        launcher_mock.env_vars_manager.get_enabled_env_vars.return_value = env_vars
+        out = tmp_path / "e.sh"
+        return _save_sh_and_read(manager, launcher_mock, out), out
+
+    def test_multiline_value_produces_valid_bash(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Regression against a proposed ``.replace('\\n', '\\\\n')`` fix
+        that would have corrupted multi-line values. The newline stays
+        literal, the quoted string spans lines, bash parses it fine."""
+        import shutil, subprocess
+
+        text, out = self._run_with_env(
+            manager, launcher_mock, tmp_path,
+            {"MULTI": "line1\nline2\nline3"},
+        )
+
+        # The newline lives INSIDE the quoted value — verify the literal
+        # bytes of the script contain ``"line1<NL>line2<NL>line3"``.
+        assert 'export MULTI="line1\nline2\nline3"' in text
+
+        # bash -n must accept the script (syntax check only, no execution).
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("bash not installed on this runner")
+        result = subprocess.run(
+            [bash, "-n", str(out)], capture_output=True, text=True
+        )
+        assert result.returncode == 0, (
+            f"bash -n rejected multi-line export: {result.stderr}"
+        )
+
+    def test_multiline_value_round_trips_via_bash(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Strongest form of the guarantee: run the export through bash and
+        read the variable back. The literal newline must survive."""
+        import shutil, subprocess
+
+        text, _ = self._run_with_env(
+            manager, launcher_mock, tmp_path,
+            {"MULTI": "line1\nline2\nline3"},
+        )
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("bash not installed on this runner")
+
+        # Grep just the export line + echo it back via bash -c to avoid
+        # running the whole launcher script (which would try to start a
+        # real server).
+        export_line = next(
+            line for line in text.splitlines()
+            if line.startswith("export MULTI=")
+        )
+        snippet = (
+            f"{export_line}\n" if export_line.endswith('"') else ""
+        )
+        # The export assignment is already correctly multi-line in the
+        # script, so we reconstruct it by searching for the opening
+        # ``export MULTI="`` and the next unescaped closing ``"``.
+        start = text.index('export MULTI="')
+        end = text.index('"\n', start + len('export MULTI="'))
+        snippet = text[start:end + 1] + "\n"
+        snippet += 'printf "%s" "$MULTI"'
+        result = subprocess.run(
+            [bash, "-c", snippet], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "line1\nline2\nline3"
+
+    @pytest.mark.parametrize(
+        "raw, expect_in_value",
+        [
+            # double quote
+            ('has "quotes"', 'has "quotes"'),
+            # literal $ should not expand — export preserves it
+            ('pre$HOME post', 'pre$HOME post'),
+            # literal backtick should not execute as command substitution
+            ('in `date` text', 'in `date` text'),
+            # literal backslash stays a single backslash after bash parsing
+            ('a\\b', 'a\\b'),
+            # combo
+            ('q"e $V `c` \\z', 'q"e $V `c` \\z'),
+        ],
+    )
+    def test_metachars_are_preserved_literally(
+        self, manager, launcher_mock, tmp_path, raw, expect_in_value
+    ):
+        """Every char bash would interpret inside ``""`` must reach the
+        variable value intact — no command substitution, no expansion,
+        no backslash loss."""
+        import shutil, subprocess
+
+        self._run_with_env(
+            manager, launcher_mock, tmp_path, {"V": raw},
+        )
+        text = (tmp_path / "e.sh").read_text()
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("bash not installed on this runner")
+
+        start = text.index('export V="')
+        end = text.index('"\n', start + len('export V="'))
+        snippet = text[start:end + 1] + '\nprintf "%s" "$V"'
+        result = subprocess.run(
+            [bash, "-c", snippet], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == expect_in_value
+
+
+# ---------------------------------------------------------------------------
 # GPU edge cases
 # ---------------------------------------------------------------------------
 

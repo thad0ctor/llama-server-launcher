@@ -131,10 +131,35 @@ class EnvironmentalVariablesManager:
         if 0 <= index < len(self.custom_env_vars):
             self.custom_env_vars.pop(index)
     
-    def update_custom_env_var(self, index: int, name: str, value: str):
-        """Update a custom environmental variable."""
-        if 0 <= index < len(self.custom_env_vars):
-            self.custom_env_vars[index] = (name.strip(), value.strip())
+    def update_custom_env_var(self, index: int, name: str, value: str) -> bool:
+        """Update a custom environmental variable in place.
+
+        Returns True if the update was applied. Returns False and leaves the
+        list unchanged if:
+          * ``index`` is out of range, or
+          * ``name`` or ``value`` strip to empty, or
+          * the new name collides (case-insensitively) with ANOTHER entry's
+            name — same-entry re-save is always allowed so a caller can
+            change casing of the variable they're editing in place.
+
+        The duplicate-guard mirrors :meth:`add_custom_env_var` so a
+        ``load -> edit -> save`` round-trip can't drift the list into a
+        state the UI layer's duplicate-rejection rule would refuse.
+        """
+        if not (0 <= index < len(self.custom_env_vars)):
+            return False
+        name_stripped = name.strip()
+        value_stripped = value.strip()
+        if not name_stripped or not value_stripped:
+            return False
+        upper_new = name_stripped.upper()
+        for i, (existing_name, _) in enumerate(self.custom_env_vars):
+            if i == index:
+                continue
+            if existing_name.strip().upper() == upper_new:
+                return False
+        self.custom_env_vars[index] = (name_stripped, value_stripped)
+        return True
     
     def get_env_vars_for_launch(self) -> Dict[str, str]:
         """
@@ -158,10 +183,32 @@ class EnvironmentalVariablesManager:
                 self.enabled_predefined_vars[var_name] = var_data.get("value", 
                     self.PREDEFINED_ENV_VARS.get(var_name, {}).get("default", ""))
         
-        # Load custom variables
+        # Load custom variables. Apply the same normalisation +
+        # case-insensitive dedup rule as add_custom_env_var / update_custom_env_var
+        # so an older config containing e.g. both ``FOO`` and ``foo`` doesn't
+        # bypass the invariant by the back door. First occurrence wins.
         custom = env_config.get("custom", [])
-        self.custom_env_vars = [(item["name"], item["value"]) for item in custom 
-                               if isinstance(item, dict) and "name" in item and "value" in item]
+        loaded: List[Tuple[str, str]] = []
+        seen_upper: set = set()
+        for item in custom:
+            if not isinstance(item, dict):
+                continue
+            if "name" not in item or "value" not in item:
+                continue
+            name_raw = item["name"]
+            value_raw = item["value"]
+            if not isinstance(name_raw, str) or not isinstance(value_raw, str):
+                continue
+            name_stripped = name_raw.strip()
+            value_stripped = value_raw.strip()
+            if not name_stripped or not value_stripped:
+                continue
+            key = name_stripped.upper()
+            if key in seen_upper:
+                continue
+            seen_upper.add(key)
+            loaded.append((name_stripped, value_stripped))
+        self.custom_env_vars = loaded
     
     def save_to_config(self) -> dict:
         """Save environmental variables configuration to a dictionary."""

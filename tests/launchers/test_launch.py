@@ -268,9 +268,12 @@ class TestExecutableNames:
         assert names == ["llama-server", "server", "llama-cpp-python-server"]
 
     def test_llama_cpp_darwin(self, manager):
+        # Assert the exact expected names — the old assertion ``".exe" not
+        # in "".join(names)`` passed on an empty list too, so a regression
+        # that dropped the names would have slipped through.
         with patch.object(sys, "platform", "darwin"):
             names = manager._get_llama_cpp_executable_names()
-        assert ".exe" not in "".join(names)
+        assert names == ["llama-server", "server", "llama-cpp-python-server"]
 
     def test_ik_llama_win32(self, manager):
         with patch.object(sys, "platform", "win32"):
@@ -634,11 +637,17 @@ class TestBuildCmdErrors:
             cmd = manager.build_cmd()
         assert cmd is None
         assert mb.showerror.called
-        call_args = mb.showerror.call_args
-        # Error title "Executable Not Found"
-        assert "Executable Not Found" in call_args.args[0] or "llama" in str(
-            call_args
-        ).lower()
+        # Assert the structured showerror args directly — the prior
+        # ``"llama" in str(call_args).lower()`` fallback was satisfied by
+        # almost any error message in this project (every error references
+        # "llama.cpp" or the llama-server exe name), so a regression
+        # showing an unrelated error under the same title would have
+        # slipped through.
+        title, message = mb.showerror.call_args.args[:2]
+        assert title == "Executable Not Found"
+        # The message must point at the search location so the user knows
+        # where to look.
+        assert str(empty) in message
 
     def test_missing_model_returns_none(self, manager, launcher_mock):
         launcher_mock.model_path.set("")
@@ -824,6 +833,8 @@ class TestSaveShScript:
     def test_model_path_with_space_is_quoted(
         self, manager, launcher_mock, tmp_path
     ):
+        import shlex
+
         # Build a tree with a space in the path.
         spaced = tmp_path / "dir with space"
         spaced.mkdir()
@@ -841,20 +852,48 @@ class TestSaveShScript:
 
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        # shlex.quote wraps tokens containing spaces in single quotes.
-        assert "'dir with space" in text or "'" in text
-        assert "model file.gguf" in text
+
+        # Assert the exact shlex-quoted token is present — a bare substring
+        # like "'" or "model file.gguf" would pass even if quoting broke
+        # and left the path word-split across two bash tokens.
+        expected_model_token = shlex.quote(str(model))
+        expected_exe_token = shlex.quote(str(exe))
+        assert expected_model_token in text, (
+            f"Model path not shlex-quoted in script. Expected token: "
+            f"{expected_model_token!r}"
+        )
+        assert expected_exe_token in text, (
+            f"Executable path not shlex-quoted in script. Expected token: "
+            f"{expected_exe_token!r}"
+        )
+        # And the ``-m`` flag must be immediately followed by the quoted
+        # model path (catches a regression where quoting is right but the
+        # flag/value pair gets reordered).
+        assert f"-m {expected_model_token}" in text
 
     def test_chat_template_gets_single_quote_escape(
         self, manager, launcher_mock, tmp_path
     ):
+        import shlex
+
+        template = "it's a template"
         launcher_mock.template_source.set("custom")
-        launcher_mock.current_template_display.set("it's a template")
+        launcher_mock.current_template_display.set(template)
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        # bash single-quote escape for embedded apostrophe: '"'"'
-        assert "--chat-template" in text
-        assert "it" in text and "template" in text
+
+        # shlex.quote of an apostrophe-containing value uses the canonical
+        # bash trick: close the single-quoted string, emit a double-quoted
+        # ``'``, reopen the single-quoted string.
+        #     it's a template  ->  'it'"'"'s a template'
+        expected = shlex.quote(template)
+        # Sanity-check the encoded form so a shlex.quote behavior change
+        # would surface here first:
+        assert expected == "'it'\"'\"'s a template'"
+        # The ``--chat-template`` flag must appear paired with this exact
+        # token. A weaker substring check (e.g. ``"it" in text``) would
+        # have passed even if the apostrophe escape collapsed.
+        assert f"--chat-template {expected}" in text
 
     def test_script_returns_early_if_user_cancels_dialog(
         self, manager, launcher_mock, tmp_path

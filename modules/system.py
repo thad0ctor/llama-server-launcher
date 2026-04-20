@@ -541,6 +541,13 @@ def parse_gguf_header_simple(model_path_str):
         should bail). Nested arrays (type 9) are uncommon but legal per
         spec; we recursively walk them so the parse loop doesn't silently
         halt on files that include them.
+
+        Every seek that uses an untrusted length (``str_len`` read from the
+        file, or ``array_len * element_size``) is bounds-checked against
+        the on-disk file size, so a malformed file claiming absurd lengths
+        can't leave the stream position far past EOF and corrupt
+        downstream reads. We use ``os.fstat`` for the size — one syscall,
+        no seek, no save/restore dance.
         """
         if depth > _MAX_NESTING_DEPTH:
             print(
@@ -549,15 +556,21 @@ def parse_gguf_header_simple(model_path_str):
                 file=sys.stderr,
             )
             return False
+        file_end = os.fstat(f.fileno()).st_size
         if array_type == 8:  # String array - must read each string length
             for _ in range(array_len):
                 str_len_bytes = f.read(8)
                 if len(str_len_bytes) < 8:
                     return False
                 str_len = struct.unpack('<Q', str_len_bytes)[0]
-                # Consume the bytes regardless of size; we don't keep the
-                # value, but we must advance the stream to stay aligned.
-                f.seek(f.tell() + str_len)
+                # Don't blindly seek past EOF — a corrupted/adversarial
+                # str_len could send the stream so far past the end that a
+                # subsequent read appears truncated but the loop mistakes
+                # it for an earlier truncation. Validate first.
+                current_pos = f.tell()
+                if str_len < 0 or current_pos + str_len > file_end:
+                    return False
+                f.seek(current_pos + str_len)
             return True
         elif array_type == 9:  # Nested array - recurse so we don't desync
             for _ in range(array_len):
@@ -572,7 +585,13 @@ def parse_gguf_header_simple(model_path_str):
             return True
         elif array_type in GGUF_TYPES and GGUF_TYPES[array_type] is not None:
             _, element_size = GGUF_TYPES[array_type]
-            f.seek(f.tell() + array_len * element_size)
+            # Same bounds concern as above: ``array_len`` is an untrusted
+            # 64-bit value, so ``array_len * element_size`` could be huge.
+            current_pos = f.tell()
+            total_bytes = array_len * element_size
+            if array_len < 0 or current_pos + total_bytes > file_end:
+                return False
+            f.seek(current_pos + total_bytes)
             return True
         else:
             print(

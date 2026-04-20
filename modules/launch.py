@@ -701,8 +701,22 @@ class LaunchManager:
                 if env_vars:
                     commands.append('echo "Setting environmental variables..."')
                     for var_name, var_value in env_vars.items():
-                        # Escape shell special chars in the value before embedding
-                        # it in a bash double-quoted string literal.
+                        # Escape the four metacharacters that bash processes
+                        # inside a ``"..."`` string: ``\``, ``"``, ``$``, and
+                        # backtick. Order matters — backslash first so the
+                        # backslashes we add for the other three don't get
+                        # doubled again on a second pass.
+                        #
+                        # Embedded newlines / carriage returns are deliberately
+                        # NOT escaped: bash double-quoted strings allow literal
+                        # newlines in the value, so ``export VAR="foo<NL>bar"``
+                        # is syntactically valid and round-trips the user's
+                        # multi-line value intact. Replacing ``\n`` with ``\\n``
+                        # would corrupt the value because bash ``""`` does not
+                        # process ``\n`` as a newline escape — the user would
+                        # see a literal two-character ``\n`` in their env var.
+                        # See tests/launchers/test_shell_safety.py
+                        # ``TestEnvVarExportEscaping`` for the regression.
                         escaped_value = (
                             var_value.replace('\\', '\\\\')
                                      .replace('"', '\\"')
@@ -1032,8 +1046,19 @@ class LaunchManager:
                 if env_vars:
                     fh.write('echo "Setting environmental variables..."\n')
                     for var_name, var_value in env_vars.items():
-                        # Escape shell special characters in the value
-                        escaped_value = var_value.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                        # Escape the four metacharacters bash processes inside
+                        # ``"..."``: backslash FIRST (so the backslashes we
+                        # insert for the rest don't get doubled), then ``"``,
+                        # ``$``, and backtick. Newlines deliberately pass
+                        # through — see the matching block in launch_server()
+                        # and tests/launchers/test_shell_safety.py
+                        # ``TestEnvVarExportEscaping``.
+                        escaped_value = (
+                            var_value.replace('\\', '\\\\')
+                                     .replace('"', '\\"')
+                                     .replace('$', '\\$')
+                                     .replace('`', '\\`')
+                        )
                         fh.write(f'export {var_name}="{escaped_value}"\n')
                     fh.write('\n')
 

