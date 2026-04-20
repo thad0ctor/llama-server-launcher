@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import os
 import re
@@ -13,6 +14,56 @@ import ctypes
 import shlex # <-- Import shlex for parameter splitting
 import math
 import time
+
+
+def _read_version_string():
+    """Best-effort reader for the shipped version file, used by ``--version``.
+
+    Returns a plain string. Never raises — if the file is missing or unreadable
+    we just report ``unknown`` rather than letting a CLI flag blow up because
+    of a stale install.
+    """
+    try:
+        version_file = Path(__file__).resolve().parent / "config" / "version"
+        if version_file.exists():
+            text = version_file.read_text(encoding="utf-8").strip()
+            return text if text else "unknown"
+    except OSError:
+        pass
+    return "unknown"
+
+
+def parse_cli_args(argv=None):
+    """Parse command-line arguments for the launcher.
+
+    Extracted from the ``__main__`` block so ``--help`` and ``--version`` are
+    handled by argparse (which exits cleanly) instead of being silently swallowed
+    and landing the user in the GUI. The call in ``__main__`` happens *before*
+    ``tk.Tk()`` is instantiated so that help/version requests don't pop a window.
+
+    Parameters
+    ----------
+    argv:
+        List of arguments *without* the program name. Defaults to
+        ``sys.argv[1:]`` when None.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed arguments. Currently just a marker namespace — the launcher
+        doesn't yet accept other options — but having the parser makes it
+        easy to add new flags without further refactoring.
+    """
+    parser = argparse.ArgumentParser(
+        prog="llamacpp-server-launcher",
+        description="Tk-based launcher for the llama.cpp HTTP server.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"llamacpp-server-launcher {_read_version_string()}",
+    )
+    return parser.parse_args(argv)
 
 # Debug logging control
 DEBUG_VERBOSE = os.getenv('LLAMA_LAUNCHER_DEBUG', '').lower() in ('1', 'true', 'yes')
@@ -3919,6 +3970,12 @@ class LlamaCppLauncher:
 #  main
 # ═════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    # Handle --help / --version *before* doing anything with Tk so a CLI probe
+    # (packaging systems, `man`-like helpers, CI dry-runs) doesn't pop a GUI
+    # window just to read the version. argparse exits the process for these
+    # two flags, so the rest of this block only runs on a real invocation.
+    parse_cli_args()
+
     # PR #6: enable system DPI awareness on Windows so Tk doesn't render blurry
     # on high-DPI displays. Value 1 = PROCESS_SYSTEM_DPI_AWARE (DPI is queried
     # once at startup and applied process-wide); true per-monitor handling would

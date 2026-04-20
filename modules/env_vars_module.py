@@ -103,10 +103,28 @@ class EnvironmentalVariablesManager:
         return self.enabled_predefined_vars.get(var_name, 
                                                self.PREDEFINED_ENV_VARS[var_name]["default"])
     
-    def add_custom_env_var(self, name: str, value: str):
-        """Add a custom environmental variable."""
-        if name.strip() and value.strip():
-            self.custom_env_vars.append((name.strip(), value.strip()))
+    def add_custom_env_var(self, name: str, value: str) -> bool:
+        """Add a custom environmental variable.
+
+        Rejects (case-insensitively) duplicate names so the manager's direct
+        API matches the UI layer's duplicate-rejection rule — environmental
+        variables on POSIX are case-sensitive but the UI treats FOO/foo as
+        conflicts, and allowing the manager to diverge produces a state the
+        UI can't represent cleanly.
+
+        Returns True if the variable was added, False if it was rejected
+        (empty name/value, or duplicate name).
+        """
+        name_stripped = name.strip()
+        value_stripped = value.strip()
+        if not name_stripped or not value_stripped:
+            return False
+        # Reject case-insensitive duplicates to match the UI layer.
+        for existing_name, _ in self.custom_env_vars:
+            if existing_name.strip().upper() == name_stripped.upper():
+                return False
+        self.custom_env_vars.append((name_stripped, value_stripped))
+        return True
     
     def remove_custom_env_var(self, index: int):
         """Remove a custom environmental variable by index."""
@@ -219,29 +237,53 @@ class EnvironmentalVariablesManager:
 class EnvironmentalVariablesTab:
     """GUI tab for managing environmental variables."""
     
-    def __init__(self, parent_frame, env_manager: EnvironmentalVariablesManager):
+    def __init__(self, parent_frame, env_manager: EnvironmentalVariablesManager,
+                 autosetup: bool = True):
         """
         Initialize the environmental variables tab.
-        
+
         Args:
-            parent_frame: Parent tkinter frame for this tab
-            env_manager: EnvironmentalVariablesManager instance
+            parent_frame: Parent tkinter frame for this tab. Must be a realized
+                widget if ``autosetup`` is True — ``_setup_tab`` constructs
+                widgets immediately.
+            env_manager: EnvironmentalVariablesManager instance.
+            autosetup: When True (default) widgets are built immediately. Set
+                False to defer widget construction — call :meth:`build_ui`
+                once the parent is ready. Handy for tests that need to
+                exercise the non-widget attributes without standing up Tk.
         """
         self.parent = parent_frame
         self.env_manager = env_manager
-        
+
         # Tkinter variables for predefined vars
         self.predefined_var_states = {}
         self.predefined_var_values = {}
         self.predefined_var_checkboxes = {}  # Store checkbox widget references
         self.predefined_var_entries = {}     # Store entry widget references
-        
+
         # Tkinter variables for custom vars
         self.custom_var_name = tk.StringVar()
         self.custom_var_value = tk.StringVar()
-        
-        # Setup the tab UI automatically
+
+        # Track whether widgets have been constructed. Callers using the
+        # deferred mode should inspect this before touching preview_text /
+        # custom_vars_listbox.
+        self._ui_built = False
+
+        # Setup the tab UI automatically unless the caller opted out.
+        if autosetup:
+            self.build_ui()
+
+    def build_ui(self):
+        """Construct the widgets for this tab. Separate from ``__init__`` so
+        tests (and deferred-construction call sites) can postpone widget
+        creation until the parent frame is realized.
+
+        Safe to call once. A second call is a no-op."""
+        if self._ui_built:
+            return
         self._setup_tab()
+        self._ui_built = True
     
     def _setup_tab(self):
         """Set up the environmental variables tab UI."""
