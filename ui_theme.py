@@ -299,92 +299,99 @@ def _apply_style_palette(root, style, palette):
         pass
 
     # --- Base ttk styles ---------------------------------------------------
-    try:
-        style.configure(".", background=bg, foreground=fg,
-                        fieldbackground=field_bg, bordercolor=border,
-                        lightcolor=bg_alt, darkcolor=bg,
-                        selectbackground=sel_bg, selectforeground=sel_fg)
-        style.map(".",
-                  foreground=[("disabled", disabled_fg)],
-                  background=[("active", btn_hover)])
+    # Wrap each style.configure / style.map in its own try so an unsupported
+    # option on one widget class (e.g. some themes reject ``focuscolor`` on
+    # TButton, or ``lightcolor`` on TProgressbar) doesn't abort the rest and
+    # leave later widgets like TNotebook or Treeview un-styled.
 
-        for widget in ("TFrame", "TLabelframe", "TPanedwindow", "TSeparator"):
-            style.configure(widget, background=bg)
-        style.configure("TLabelframe.Label", background=bg, foreground=fg)
+    def _safe(fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except tk.TclError as e:
+            print(f"Note: skipped ttk style update ({args[:1]}): {e}",
+                  file=sys.stderr)
 
-        for widget in ("TLabel", "TCheckbutton", "TRadiobutton", "TMenubutton"):
-            style.configure(widget, background=bg, foreground=fg)
-            style.map(widget,
-                      background=[("active", bg_alt)],
-                      foreground=[("disabled", disabled_fg)])
+    _safe(style.configure, ".", background=bg, foreground=fg,
+          fieldbackground=field_bg, bordercolor=border,
+          lightcolor=bg_alt, darkcolor=bg,
+          selectbackground=sel_bg, selectforeground=sel_fg)
+    _safe(style.map, ".",
+          foreground=[("disabled", disabled_fg)],
+          background=[("active", btn_hover)])
 
-        style.configure("TButton", background=btn_bg, foreground=fg,
-                        bordercolor=border, focusthickness=1, focuscolor=sel_bg)
-        style.map("TButton",
-                  background=[("active", btn_hover), ("pressed", sel_bg),
-                              ("disabled", bg_alt)],
-                  foreground=[("disabled", disabled_fg)])
+    for widget in ("TFrame", "TLabelframe", "TPanedwindow", "TSeparator"):
+        _safe(style.configure, widget, background=bg)
+    _safe(style.configure, "TLabelframe.Label", background=bg, foreground=fg)
 
-        style.configure("TEntry", fieldbackground=field_bg, foreground=fg,
-                        insertcolor=fg, bordercolor=border,
-                        lightcolor=border, darkcolor=border,
-                        selectbackground=sel_bg, selectforeground=sel_fg)
-        style.map("TEntry",
-                  fieldbackground=[("disabled", bg_alt), ("readonly", field_bg)],
-                  foreground=[("disabled", disabled_fg), ("readonly", fg)])
+    for widget in ("TLabel", "TCheckbutton", "TRadiobutton", "TMenubutton"):
+        _safe(style.configure, widget, background=bg, foreground=fg)
+        _safe(style.map, widget,
+              background=[("active", bg_alt)],
+              foreground=[("disabled", disabled_fg)])
 
-        style.configure("TSpinbox", fieldbackground=field_bg, foreground=fg,
-                        arrowcolor=fg, bordercolor=border, background=btn_bg,
-                        insertcolor=fg, selectbackground=sel_bg,
-                        selectforeground=sel_fg)
-        style.map("TSpinbox",
-                  fieldbackground=[("disabled", bg_alt), ("readonly", field_bg)],
-                  foreground=[("disabled", disabled_fg), ("readonly", fg)],
-                  background=[("active", btn_hover)])
+    _safe(style.configure, "TButton", background=btn_bg, foreground=fg,
+          bordercolor=border, focusthickness=1, focuscolor=sel_bg)
+    _safe(style.map, "TButton",
+          background=[("active", btn_hover), ("pressed", sel_bg),
+                      ("disabled", bg_alt)],
+          foreground=[("disabled", disabled_fg)])
 
-        style.configure("TCombobox", fieldbackground=field_bg, foreground=fg,
-                        background=btn_bg, arrowcolor=fg, bordercolor=border,
-                        insertcolor=fg, selectbackground=sel_bg,
-                        selectforeground=sel_fg)
-        style.map("TCombobox",
-                  fieldbackground=[("readonly", field_bg), ("!readonly", field_bg),
-                                   ("disabled", bg_alt)],
-                  foreground=[("readonly", fg), ("!readonly", fg),
-                              ("disabled", disabled_fg)],
-                  selectbackground=[("readonly", sel_bg)],
-                  selectforeground=[("readonly", sel_fg)])
+    _safe(style.configure, "TEntry", fieldbackground=field_bg, foreground=fg,
+          insertcolor=fg, bordercolor=border,
+          lightcolor=border, darkcolor=border,
+          selectbackground=sel_bg, selectforeground=sel_fg)
+    _safe(style.map, "TEntry",
+          fieldbackground=[("disabled", bg_alt), ("readonly", field_bg)],
+          foreground=[("disabled", disabled_fg), ("readonly", fg)])
 
-        style.configure("TNotebook", background=bg, bordercolor=border,
-                        tabmargins=(2, 2, 2, 0))
-        style.configure("TNotebook.Tab", background=tab_bg, foreground=fg_muted,
-                        bordercolor=border, padding=(10, 4),
-                        lightcolor=bg_alt, darkcolor=bg)
-        style.map("TNotebook.Tab",
-                  background=[("selected", tab_active), ("active", btn_hover)],
-                  foreground=[("selected", fg), ("active", fg)])
+    _safe(style.configure, "TSpinbox", fieldbackground=field_bg, foreground=fg,
+          arrowcolor=fg, bordercolor=border, background=btn_bg,
+          insertcolor=fg, selectbackground=sel_bg, selectforeground=sel_fg)
+    _safe(style.map, "TSpinbox",
+          fieldbackground=[("disabled", bg_alt), ("readonly", field_bg)],
+          foreground=[("disabled", disabled_fg), ("readonly", fg)],
+          background=[("active", btn_hover)])
 
-        style.configure("TScrollbar", background=btn_bg, troughcolor=bg,
-                        bordercolor=border, arrowcolor=fg,
-                        lightcolor=border, darkcolor=border)
-        style.map("TScrollbar",
-                  background=[("active", btn_hover), ("pressed", sel_bg)],
-                  arrowcolor=[("disabled", disabled_fg)])
+    _safe(style.configure, "TCombobox", fieldbackground=field_bg, foreground=fg,
+          background=btn_bg, arrowcolor=fg, bordercolor=border,
+          insertcolor=fg, selectbackground=sel_bg, selectforeground=sel_fg)
+    _safe(style.map, "TCombobox",
+          fieldbackground=[("readonly", field_bg), ("!readonly", field_bg),
+                           ("disabled", bg_alt)],
+          foreground=[("readonly", fg), ("!readonly", fg),
+                      ("disabled", disabled_fg)],
+          selectbackground=[("readonly", sel_bg)],
+          selectforeground=[("readonly", sel_fg)])
 
-        style.configure("TScale", background=bg, troughcolor=field_bg)
-        style.configure("TProgressbar", background=accent, troughcolor=field_bg,
-                        bordercolor=border, lightcolor=accent, darkcolor=accent)
+    _safe(style.configure, "TNotebook", background=bg, bordercolor=border,
+          tabmargins=(2, 2, 2, 0))
+    _safe(style.configure, "TNotebook.Tab", background=tab_bg, foreground=fg_muted,
+          bordercolor=border, padding=(10, 4),
+          lightcolor=bg_alt, darkcolor=bg)
+    _safe(style.map, "TNotebook.Tab",
+          background=[("selected", tab_active), ("active", btn_hover)],
+          foreground=[("selected", fg), ("active", fg)])
 
-        style.configure("Treeview", background=field_bg, foreground=fg,
-                        fieldbackground=field_bg, bordercolor=border)
-        style.map("Treeview",
-                  background=[("selected", sel_bg)],
-                  foreground=[("selected", sel_fg)])
-        style.configure("Treeview.Heading", background=btn_bg, foreground=fg,
-                        bordercolor=border)
-        style.map("Treeview.Heading",
-                  background=[("active", btn_hover)])
-    except tk.TclError as e:
-        print(f"Note: ttk style palette application partial: {e}", file=sys.stderr)
+    _safe(style.configure, "TScrollbar", background=btn_bg, troughcolor=bg,
+          bordercolor=border, arrowcolor=fg,
+          lightcolor=border, darkcolor=border)
+    _safe(style.map, "TScrollbar",
+          background=[("active", btn_hover), ("pressed", sel_bg)],
+          arrowcolor=[("disabled", disabled_fg)])
+
+    _safe(style.configure, "TScale", background=bg, troughcolor=field_bg)
+    _safe(style.configure, "TProgressbar", background=accent, troughcolor=field_bg,
+          bordercolor=border, lightcolor=accent, darkcolor=accent)
+
+    _safe(style.configure, "Treeview", background=field_bg, foreground=fg,
+          fieldbackground=field_bg, bordercolor=border)
+    _safe(style.map, "Treeview",
+          background=[("selected", sel_bg)],
+          foreground=[("selected", sel_fg)])
+    _safe(style.configure, "Treeview.Heading", background=btn_bg, foreground=fg,
+          bordercolor=border)
+    _safe(style.map, "Treeview.Heading",
+          background=[("active", btn_hover)])
 
     # --- Classic tk widgets via the option database -----------------------
     # option_add only affects widgets created AFTER the call, so we also
@@ -523,8 +530,22 @@ def apply_theme(root, mode="auto", explicit_theme=None):
     # matches the theme we picked. "specific" falls through as-is so the
     # theme's own palette is used.
     effective_mode = mode
-    if mode == "specific" and explicit_theme and explicit_theme in available:
-        chosen = explicit_theme
+    if mode == "specific":
+        if explicit_theme and explicit_theme in available:
+            chosen = explicit_theme
+        elif _STARTUP_THEME and _STARTUP_THEME in available:
+            # Persisted theme is no longer installed — fall back to the theme
+            # Tk had at startup rather than silently behaving like "auto" and
+            # following OS dark-mode, which the user didn't ask for.
+            print(f"Note: specific theme '{explicit_theme}' not available; "
+                  f"falling back to startup theme '{_STARTUP_THEME}'",
+                  file=sys.stderr)
+            chosen = _STARTUP_THEME
+        else:
+            chosen = _pick_theme(available, AUTO_PREFERRED)
+            print(f"Note: specific theme '{explicit_theme}' not available and "
+                  f"no startup theme captured; falling back to '{chosen}'",
+                  file=sys.stderr)
     elif mode == "light":
         chosen = _pick_theme(available, LIGHT_PREFERRED)
     elif mode == "dark":
