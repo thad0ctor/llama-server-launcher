@@ -807,6 +807,21 @@ class LaunchManager:
                 cleanup_thread = Thread(target=self.launcher.cleanup, args=(tmp_path,), daemon=True)
                 cleanup_thread.start()
 
+    def _get_launchers_dir(self):
+        """Return the launchers/ output dir, falling back to repo root if creation fails."""
+        repo_root = Path(__file__).parent.parent
+        launchers_dir = repo_root / "launchers"
+        try:
+            launchers_dir.mkdir(parents=True, exist_ok=True)
+            return launchers_dir
+        except OSError as exc:
+            messagebox.showwarning(
+                "Launcher Directory Warning",
+                f"Could not create launcher directory:\n{launchers_dir}\n\n"
+                f"Falling back to repository root.\nError: {exc}"
+            )
+            return repo_root
+
     def save_ps1_script(self):
         """Save a PowerShell script with the current configuration."""
         cmd_list = self.build_cmd()
@@ -830,8 +845,10 @@ class LaunchManager:
 
             if not default_name.lower().endswith(".ps1"): default_name += ".ps1"
 
+        launchers_dir = self._get_launchers_dir()
         path = filedialog.asksaveasfilename(defaultextension=".ps1",
                                             initialfile=default_name,
+                                            initialdir=str(launchers_dir),
                                             filetypes=[("PowerShell Script", "*.ps1"), ("All Files", "*.*")])
         if not path: return
 
@@ -994,8 +1011,10 @@ class LaunchManager:
 
             if not default_name.lower().endswith(".sh"): default_name += ".sh"
 
+        launchers_dir = self._get_launchers_dir()
         path = filedialog.asksaveasfilename(defaultextension=".sh",
                                             initialfile=default_name,
+                                            initialdir=str(launchers_dir),
                                             filetypes=[("Bash Script", "*.sh"), ("All Files", "*.*")])
         if not path: return
 

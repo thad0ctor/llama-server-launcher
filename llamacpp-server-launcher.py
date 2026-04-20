@@ -23,26 +23,26 @@ def debug_print(message, force=False):
         print(f"DEBUG: {message}", file=sys.stderr)
 
 # Import the environmental variables module
-from env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariablesTab
+from modules.env_vars_module import EnvironmentalVariablesManager, EnvironmentalVariablesTab
 
 # Import the about tab module
-from about_tab import create_about_tab
+from modules.about_tab import create_about_tab
 
 # Import the settings tab + UI theme helpers
-from settings_tab import create_settings_tab
-import ui_theme
+from modules.settings_tab import create_settings_tab
+from modules import ui_theme
 
 # Import the ik_llama configuration tab module
-from ik_llama import IkLlamaTab
+from modules.ik_llama import IkLlamaTab
 
 # Import the launch functionality module
-from launch import LaunchManager
+from modules.launch import LaunchManager
 
 # Import the configuration management module
-from config import ConfigManager
+from modules.config import ConfigManager
 
 # Import system helper functions
-from system import (
+from modules.system import (
     get_gpu_info_static, get_ram_info_static, get_cpu_info_static,
     calculate_total_gguf_size, parse_gguf_header_simple, SystemInfoManager
 )
@@ -920,7 +920,7 @@ class LlamaCppLauncher:
 
          # 1. Check script directory
          script_dir = Path(__file__).parent
-         local_path = script_dir / template_file_name
+         local_path = script_dir / "config" / template_file_name
          loaded = self._load_chat_templates_from_json(local_path)
          if loaded: return loaded
 

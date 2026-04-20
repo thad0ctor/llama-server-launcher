@@ -4,7 +4,7 @@ import sys
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 
-import ui_theme
+from modules import ui_theme
 
 
 class SettingsTab:

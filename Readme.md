@@ -52,7 +52,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 
 
 *   **Chat Template Flexibility:**
-    *   Load predefined chat templates from `chat_templates.json`.
+    *   Load predefined chat templates from `config/chat_templates.json`.
     *   Option to let `llama.cpp` decide the template based on model metadata.
     *   Provide your own custom Jinja2 template string.
 

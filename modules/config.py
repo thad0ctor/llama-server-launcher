@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from tkinter import messagebox, filedialog
@@ -14,6 +15,10 @@ class ConfigManager:
     def __init__(self, launcher_instance):
         """Initialize with reference to the main launcher instance."""
         self.launcher = launcher_instance
+        # True unless the most recent load_saved_configs() hit a parse/read error.
+        # Used by save_configs() to distinguish a silent load failure from a
+        # deliberate "delete all configs" save.
+        self.configs_loaded_successfully = True
 
     def generate_default_config_name(self):
         """Generates a default configuration name based on current settings."""
@@ -741,11 +746,32 @@ class ConfigManager:
 
     def get_config_path(self):
         """Get the configuration file path, with fallback handling."""
-        local_path = Path(Path(__file__).parent, "llama_cpp_launcher_configs.json") # Renamed slightly to avoid potential clashes
+        repo_root = Path(__file__).parent.parent
+        local_path = repo_root / "config" / "llama_cpp_launcher_configs.json" # Renamed slightly to avoid potential clashes
+        legacy_path = repo_root / "llama_cpp_launcher_configs.json"
+        # Migrate pre-reorg config from repo root into config/ on first run after upgrade.
+        if legacy_path.exists() and legacy_path.is_file() and legacy_path.stat().st_size > 0:
+            if not local_path.exists() or local_path.stat().st_size == 0:
+                try:
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Preserve a recoverable copy of the pre-migration file so a mid-migration
+                    # failure or an unexpected later wipe still has a restore point on disk.
+                    migration_backup = legacy_path.with_name(legacy_path.name + ".premigration_backup")
+                    try:
+                        shutil.copy2(legacy_path, migration_backup)
+                        print(f"INFO: Migration backup saved to {migration_backup}", file=sys.stderr)
+                    except OSError as backup_err:
+                        print(f"WARNING: Could not create migration backup at {migration_backup}: {backup_err}", file=sys.stderr)
+                    legacy_path.replace(local_path)
+                    print(f"INFO: Migrated config from {legacy_path} to {local_path}", file=sys.stderr)
+                except OSError as e:
+                    print(f"WARNING: Could not migrate legacy config at {legacy_path}: {e}", file=sys.stderr)
         print(f"DEBUG: Checking local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
         print(f"DEBUG: Current working directory: {Path.cwd()}", file=sys.stderr)
         try:
-            # Check if we can write to the current directory
+            local_dir = local_path.parent
+            local_dir.mkdir(parents=True, exist_ok=True)
+
             # Check if a config file exists and is empty (possibly from a failed previous run)
             # If empty, we can safely delete it and use the local path.
             if local_path.exists() and local_path.stat().st_size == 0:
@@ -753,11 +779,11 @@ class ConfigManager:
                  except OSError: pass # Ignore if delete fails
 
             # Check write permissions AFTER cleanup attempt
-            if os.access(".", os.W_OK):
+            if os.access(local_dir, os.W_OK):
                  print(f"DEBUG: Using local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
                  return local_path
             else:
-                 raise PermissionError("No write access in current directory.") # Force fallback
+                 raise PermissionError(f"No write access to config directory: {local_dir}") # Force fallback
 
 
         except (OSError, PermissionError, IOError) as e:
@@ -788,6 +814,8 @@ class ConfigManager:
         """Load saved configurations from file."""
         if not self.launcher.config_path.exists() or not self.launcher.config_path.is_file() or self.launcher.config_path.name in ("null", "NUL"):
              print(f"DEBUG: No config file found at: {self.launcher.config_path.resolve()} or config saving is disabled. Using default settings.", file=sys.stderr)
+             # No file = fresh install; an empty in-memory state is legitimate.
+             self.configs_loaded_successfully = True
              return
 
         print(f"DEBUG: Loading config from FULL PATH: {self.launcher.config_path.resolve()}", file=sys.stderr)
@@ -887,6 +915,9 @@ class ConfigManager:
             }
             self.launcher.saved_configs = {}
             self.launcher.custom_parameters_list = [] # Reset internal list
+            self.configs_loaded_successfully = False
+        else:
+            self.configs_loaded_successfully = True
 
     def save_configs(self):
         """Saves the app settings and configurations to file."""
@@ -950,9 +981,43 @@ class ConfigManager:
             "configs":      self.launcher.saved_configs,
             "app_settings": self.launcher.app_settings,
         }
+
+        # Data-loss safeguard: only fires when the most recent load failed AND the
+        # in-memory configs dict is empty AND the on-disk file still has populated
+        # configs. This catches the failure mode where a silent load error leaves
+        # saved_configs={} and a subsequent save path (host/port trace, on_exit,
+        # etc.) would otherwise wipe the file. A user who intentionally deletes
+        # every config after a successful load is NOT blocked — the flag is True
+        # in that case.
+        if (not self.configs_loaded_successfully
+                and not self.launcher.saved_configs
+                and self.launcher.config_path.exists()):
+            try:
+                existing_data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
+                if existing_data.get("configs"):
+                    print(
+                        f"WARNING: Refusing to overwrite populated config at "
+                        f"{self.launcher.config_path} with an empty configs dict "
+                        f"after a failed load. Your existing configurations were preserved.",
+                        file=sys.stderr,
+                    )
+                    messagebox.showwarning(
+                        "Config Save Blocked",
+                        f"Refused to overwrite your saved configurations.\n\n"
+                        f"Configs failed to load at startup and the in-memory list is "
+                        f"empty. To prevent data loss, the existing file was not modified.\n\n"
+                        f"File preserved at:\n{self.launcher.config_path}"
+                    )
+                    return
+            except (OSError, json.JSONDecodeError):
+                pass  # If we can't read/parse the existing file, let the save proceed.
+
         try:
             self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             print(f"DEBUG: Successfully saved config to FULL PATH: {self.launcher.config_path.resolve()}") # Add debug print
+            # A successful save means the on-disk state is now authoritative, so
+            # clear the load-failure flag and trust in-memory state from here on.
+            self.configs_loaded_successfully = True
         except Exception as exc:
             print(f"Config Save Error: Failed to save settings to {self.launcher.config_path}\nError: {exc}", file=sys.stderr)
             # Attempt fallback only if the initial path wasn't already a fallback

@@ -23,7 +23,7 @@ class AboutTab:
     def __init__(self):
         self.version = self._load_version()
         self.github_url = "https://github.com/thad0ctor/llama-server-launcher"
-        self.github_version_url = "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/version"
+        self.github_version_url = "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/config/version"
         self.donate_url = "https://www.paypal.me/thad0ctor"
         self.version_status = "Checking..."
         self.remote_version = None
@@ -33,9 +33,9 @@ class AboutTab:
     def _load_version(self):
         """Load version from the version file."""
         try:
-            # Get the directory where this script is located
-            script_dir = Path(__file__).parent
-            version_file = script_dir / "version"
+            # Get the repo root directory (this module lives in modules/)
+            script_dir = Path(__file__).parent.parent
+            version_file = script_dir / "config" / "version"
             
             if version_file.exists():
                 with open(version_file, 'r', encoding='utf-8') as f:
@@ -126,8 +126,8 @@ class AboutTab:
     def _start_update_process(self):
         """Start the update process in a new terminal."""
         try:
-            # Get the current directory
-            current_dir = Path(__file__).parent
+            # Get the repo root directory (this module lives in modules/)
+            current_dir = Path(__file__).parent.parent
             
             # Create update script
             script_content = self._generate_update_script(current_dir)
@@ -205,7 +205,6 @@ EXCLUDE_ARGS="-name backup -prune -o -name .git -prune -o -name update_script.sh
 # Backup files
 find "{current_dir}" -maxdepth 1 -type f $EXCLUDE_ARGS -name "*.py" -print -exec cp {{}} "{backup_path}/" \\; -o \\
 $EXCLUDE_ARGS -name "*.md" -print -exec cp {{}} "{backup_path}/" \\; -o \\
-$EXCLUDE_ARGS -name "version" -print -exec cp {{}} "{backup_path}/" \\; -o \\
 $EXCLUDE_ARGS -name ".git*" -print -exec cp {{}} "{backup_path}/" \\; 2>/dev/null || true
 
 # Backup important directories (excluding .git, __pycache__, etc.)
@@ -235,7 +234,7 @@ echo "Removing old files for clean installation..."
 # Remove Python files and other source files
 find "{current_dir}" -maxdepth 1 -type f -name "*.py" ! -name "update_script.sh" -delete 2>/dev/null || true
 find "{current_dir}" -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || true
-find "{current_dir}" -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
+find "{current_dir}/config" -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
 find "{current_dir}" -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
 
 # Remove directories (except JSON config dirs, backup, and .git)
@@ -271,11 +270,36 @@ echo "Skipped downloading images folder (using existing)"
 cd "{current_dir}"
 rm -rf temp_clone
 
+# Restore user-owned gitignored state from backup. The fresh clone never
+# contains llama_cpp_launcher_configs.json (it's gitignored), so without this
+# step every self-update would silently wipe the user's saved configurations.
+# We detect the layout of the freshly-cloned tree and write the restored file
+# to the location the new code will look in.
+echo "Restoring user configuration from backup..."
+USER_CONFIG_SRC=""
+if [ -f "{backup_path}/config/llama_cpp_launcher_configs.json" ]; then
+    USER_CONFIG_SRC="{backup_path}/config/llama_cpp_launcher_configs.json"
+elif [ -f "{backup_path}/llama_cpp_launcher_configs.json" ]; then
+    USER_CONFIG_SRC="{backup_path}/llama_cpp_launcher_configs.json"
+fi
+
+if [ -n "$USER_CONFIG_SRC" ]; then
+    if [ -d "{current_dir}/config" ] && [ -d "{current_dir}/modules" ]; then
+        cp "$USER_CONFIG_SRC" "{current_dir}/config/llama_cpp_launcher_configs.json"
+        echo "  Restored: config/llama_cpp_launcher_configs.json"
+    else
+        cp "$USER_CONFIG_SRC" "{current_dir}/llama_cpp_launcher_configs.json"
+        echo "  Restored: llama_cpp_launcher_configs.json (repo root; will migrate on next launch)"
+    fi
+else
+    echo "  No user configuration found in backup - clean install, nothing to restore."
+fi
+
 echo ""
 echo "=== Update Complete ==="
 echo "New version installed successfully!"
 echo "Backup saved in: {backup_path}"
-echo "JSON configuration files were preserved."
+echo "User configurations were preserved and restored."
 echo ""
 echo "You can now restart the application."
 echo ""
