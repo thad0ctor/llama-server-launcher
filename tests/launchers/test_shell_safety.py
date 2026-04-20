@@ -352,7 +352,8 @@ class TestEnvVarExportEscaping:
         """Regression against a proposed ``.replace('\\n', '\\\\n')`` fix
         that would have corrupted multi-line values. The newline stays
         literal, the quoted string spans lines, bash parses it fine."""
-        import shutil, subprocess
+        import shutil
+        import subprocess
 
         text, out = self._run_with_env(
             manager, launcher_mock, tmp_path,
@@ -379,7 +380,8 @@ class TestEnvVarExportEscaping:
     ):
         """Strongest form of the guarantee: run the export through bash and
         read the variable back. The literal newline must survive."""
-        import shutil, subprocess
+        import shutil
+        import subprocess
 
         text, _ = self._run_with_env(
             manager, launcher_mock, tmp_path,
@@ -433,7 +435,8 @@ class TestEnvVarExportEscaping:
         """Every char bash would interpret inside ``""`` must reach the
         variable value intact — no command substitution, no expansion,
         no backslash loss."""
-        import shutil, subprocess
+        import shutil
+        import subprocess
 
         self._run_with_env(
             manager, launcher_mock, tmp_path, {"V": raw},
