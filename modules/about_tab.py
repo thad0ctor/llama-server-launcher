@@ -33,9 +33,9 @@ class AboutTab:
     def _load_version(self):
         """Load version from the version file."""
         try:
-            # Get the directory where this script is located
-            script_dir = Path(__file__).parent
-            version_file = script_dir / "version"
+            # Get the repo root directory (this module lives in modules/)
+            script_dir = Path(__file__).parent.parent
+            version_file = script_dir / "config" / "version"
             
             if version_file.exists():
                 with open(version_file, 'r', encoding='utf-8') as f:
@@ -126,8 +126,8 @@ class AboutTab:
     def _start_update_process(self):
         """Start the update process in a new terminal."""
         try:
-            # Get the current directory
-            current_dir = Path(__file__).parent
+            # Get the repo root directory (this module lives in modules/)
+            current_dir = Path(__file__).parent.parent
             
             # Create update script
             script_content = self._generate_update_script(current_dir)
@@ -205,7 +205,7 @@ EXCLUDE_ARGS="-name backup -prune -o -name .git -prune -o -name update_script.sh
 # Backup files
 find "{current_dir}" -maxdepth 1 -type f $EXCLUDE_ARGS -name "*.py" -print -exec cp {{}} "{backup_path}/" \\; -o \\
 $EXCLUDE_ARGS -name "*.md" -print -exec cp {{}} "{backup_path}/" \\; -o \\
-$EXCLUDE_ARGS -name "version" -print -exec cp {{}} "{backup_path}/" \\; -o \\
+$EXCLUDE_ARGS -path "{current_dir}/config/version" -print -exec cp {{}} "{backup_path}/" \\; -o \\
 $EXCLUDE_ARGS -name ".git*" -print -exec cp {{}} "{backup_path}/" \\; 2>/dev/null || true
 
 # Backup important directories (excluding .git, __pycache__, etc.)
@@ -235,7 +235,7 @@ echo "Removing old files for clean installation..."
 # Remove Python files and other source files
 find "{current_dir}" -maxdepth 1 -type f -name "*.py" ! -name "update_script.sh" -delete 2>/dev/null || true
 find "{current_dir}" -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || true
-find "{current_dir}" -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
+find "{current_dir}/config" -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
 find "{current_dir}" -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
 
 # Remove directories (except JSON config dirs, backup, and .git)

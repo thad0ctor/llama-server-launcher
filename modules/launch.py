@@ -830,8 +830,11 @@ class LaunchManager:
 
             if not default_name.lower().endswith(".ps1"): default_name += ".ps1"
 
+        launchers_dir = Path(__file__).parent.parent / "launchers"
+        launchers_dir.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(defaultextension=".ps1",
                                             initialfile=default_name,
+                                            initialdir=str(launchers_dir),
                                             filetypes=[("PowerShell Script", "*.ps1"), ("All Files", "*.*")])
         if not path: return
 
@@ -994,8 +997,11 @@ class LaunchManager:
 
             if not default_name.lower().endswith(".sh"): default_name += ".sh"
 
+        launchers_dir = Path(__file__).parent.parent / "launchers"
+        launchers_dir.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(defaultextension=".sh",
                                             initialfile=default_name,
+                                            initialdir=str(launchers_dir),
                                             filetypes=[("Bash Script", "*.sh"), ("All Files", "*.*")])
         if not path: return
 

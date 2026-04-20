@@ -1,9 +1,9 @@
-llama_cpp_configs.json
-llama_cpp_launcher_configs.json
+config/llama_cpp_launcher_configs.json
 __pycache__
 bin/
 debug/
 llama.log
 venv
-launch_*.ps1
-launch_*.sh
+launchers/*.ps1
+launchers/*.sh
+!launchers/.gitkeep

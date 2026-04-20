@@ -741,7 +741,18 @@ class ConfigManager:
 
     def get_config_path(self):
         """Get the configuration file path, with fallback handling."""
-        local_path = Path(Path(__file__).parent, "llama_cpp_launcher_configs.json") # Renamed slightly to avoid potential clashes
+        repo_root = Path(__file__).parent.parent
+        local_path = repo_root / "config" / "llama_cpp_launcher_configs.json" # Renamed slightly to avoid potential clashes
+        legacy_path = repo_root / "llama_cpp_launcher_configs.json"
+        # Migrate pre-reorg config from repo root into config/ on first run after upgrade.
+        if legacy_path.exists() and legacy_path.is_file() and legacy_path.stat().st_size > 0:
+            if not local_path.exists() or local_path.stat().st_size == 0:
+                try:
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    legacy_path.replace(local_path)
+                    print(f"INFO: Migrated config from {legacy_path} to {local_path}", file=sys.stderr)
+                except OSError as e:
+                    print(f"WARNING: Could not migrate legacy config at {legacy_path}: {e}", file=sys.stderr)
         print(f"DEBUG: Checking local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
         print(f"DEBUG: Current working directory: {Path.cwd()}", file=sys.stderr)
         try:
