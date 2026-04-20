@@ -15,6 +15,10 @@ class ConfigManager:
     def __init__(self, launcher_instance):
         """Initialize with reference to the main launcher instance."""
         self.launcher = launcher_instance
+        # True unless the most recent load_saved_configs() hit a parse/read error.
+        # Used by save_configs() to distinguish a silent load failure from a
+        # deliberate "delete all configs" save.
+        self.configs_loaded_successfully = True
 
     def generate_default_config_name(self):
         """Generates a default configuration name based on current settings."""
@@ -810,6 +814,8 @@ class ConfigManager:
         """Load saved configurations from file."""
         if not self.launcher.config_path.exists() or not self.launcher.config_path.is_file() or self.launcher.config_path.name in ("null", "NUL"):
              print(f"DEBUG: No config file found at: {self.launcher.config_path.resolve()} or config saving is disabled. Using default settings.", file=sys.stderr)
+             # No file = fresh install; an empty in-memory state is legitimate.
+             self.configs_loaded_successfully = True
              return
 
         print(f"DEBUG: Loading config from FULL PATH: {self.launcher.config_path.resolve()}", file=sys.stderr)
@@ -909,6 +915,9 @@ class ConfigManager:
             }
             self.launcher.saved_configs = {}
             self.launcher.custom_parameters_list = [] # Reset internal list
+            self.configs_loaded_successfully = False
+        else:
+            self.configs_loaded_successfully = True
 
     def save_configs(self):
         """Saves the app settings and configurations to file."""
@@ -973,27 +982,30 @@ class ConfigManager:
             "app_settings": self.launcher.app_settings,
         }
 
-        # Data-loss safeguard: refuse to overwrite a file whose "configs" section is
-        # already populated with an empty one. Catches the failure mode where a
-        # silent load error leaves saved_configs={} and a subsequent save path
-        # (host/port trace, on_exit, etc.) would otherwise wipe the user's data.
-        if not self.launcher.saved_configs and self.launcher.config_path.exists():
+        # Data-loss safeguard: only fires when the most recent load failed AND the
+        # in-memory configs dict is empty AND the on-disk file still has populated
+        # configs. This catches the failure mode where a silent load error leaves
+        # saved_configs={} and a subsequent save path (host/port trace, on_exit,
+        # etc.) would otherwise wipe the file. A user who intentionally deletes
+        # every config after a successful load is NOT blocked — the flag is True
+        # in that case.
+        if (not self.configs_loaded_successfully
+                and not self.launcher.saved_configs
+                and self.launcher.config_path.exists()):
             try:
                 existing_data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
                 if existing_data.get("configs"):
                     print(
                         f"WARNING: Refusing to overwrite populated config at "
-                        f"{self.launcher.config_path} with an empty configs dict. "
-                        f"This usually indicates a failed load at startup; your "
-                        f"existing configurations were preserved.",
+                        f"{self.launcher.config_path} with an empty configs dict "
+                        f"after a failed load. Your existing configurations were preserved.",
                         file=sys.stderr,
                     )
                     messagebox.showwarning(
                         "Config Save Blocked",
                         f"Refused to overwrite your saved configurations.\n\n"
-                        f"The in-memory configs list was empty, which usually means "
-                        f"configs failed to load at startup. To prevent data loss, "
-                        f"the existing file was not modified.\n\n"
+                        f"Configs failed to load at startup and the in-memory list is "
+                        f"empty. To prevent data loss, the existing file was not modified.\n\n"
                         f"File preserved at:\n{self.launcher.config_path}"
                     )
                     return
@@ -1003,6 +1015,9 @@ class ConfigManager:
         try:
             self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             print(f"DEBUG: Successfully saved config to FULL PATH: {self.launcher.config_path.resolve()}") # Add debug print
+            # A successful save means the on-disk state is now authoritative, so
+            # clear the load-failure flag and trust in-memory state from here on.
+            self.configs_loaded_successfully = True
         except Exception as exc:
             print(f"Config Save Error: Failed to save settings to {self.launcher.config_path}\nError: {exc}", file=sys.stderr)
             # Attempt fallback only if the initial path wasn't already a fallback
