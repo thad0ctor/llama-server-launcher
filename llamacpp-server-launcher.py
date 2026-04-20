@@ -29,8 +29,8 @@ from modules.env_vars_module import EnvironmentalVariablesManager, Environmental
 from modules.about_tab import create_about_tab
 
 # Import the settings tab + UI theme helpers
-from settings_tab import create_settings_tab
-import ui_theme
+from modules.settings_tab import create_settings_tab
+from modules import ui_theme
 
 # Import the ik_llama configuration tab module
 from modules.ik_llama import IkLlamaTab
