@@ -756,7 +756,9 @@ class ConfigManager:
         print(f"DEBUG: Checking local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
         print(f"DEBUG: Current working directory: {Path.cwd()}", file=sys.stderr)
         try:
-            # Check if we can write to the current directory
+            local_dir = local_path.parent
+            local_dir.mkdir(parents=True, exist_ok=True)
+
             # Check if a config file exists and is empty (possibly from a failed previous run)
             # If empty, we can safely delete it and use the local path.
             if local_path.exists() and local_path.stat().st_size == 0:
@@ -764,11 +766,11 @@ class ConfigManager:
                  except OSError: pass # Ignore if delete fails
 
             # Check write permissions AFTER cleanup attempt
-            if os.access(".", os.W_OK):
+            if os.access(local_dir, os.W_OK):
                  print(f"DEBUG: Using local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
                  return local_path
             else:
-                 raise PermissionError("No write access in current directory.") # Force fallback
+                 raise PermissionError(f"No write access to config directory: {local_dir}") # Force fallback
 
 
         except (OSError, PermissionError, IOError) as e:

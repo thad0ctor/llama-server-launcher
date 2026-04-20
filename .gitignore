@@ -7,3 +7,4 @@ venv
 launchers/*.ps1
 launchers/*.sh
 !launchers/.gitkeep
+/backup
