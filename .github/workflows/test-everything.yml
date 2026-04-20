@@ -19,11 +19,27 @@ name: Test Everything
 on:
   push:
     branches: [main]
+    # paths-ignore: skip CI when the ONLY changed files match. A mixed
+    # commit (e.g. workflow tweak + code change) still runs the full suite
+    # because at least one path is outside the ignore list.
+    paths-ignore:
+      - 'config/version'         # version bumps ship no executable change
+      - '**/*.md'                # docs edits
+      - '.github/workflows/**'   # workflow-only edits (comments, triggers,
+                                 # new jobs land on the *next* code commit)
+      - '.gitignore'
+      - '.coveragerc'            # coverage config — no runtime effect
   # `pull_request` fires on opened, synchronize (new commit pushed), and
   # reopened by default — so this covers both "PR opened" and "new commit
   # against an existing PR" without extra configuration.
   pull_request:
     branches: [main]
+    paths-ignore:
+      - 'config/version'
+      - '**/*.md'
+      - '.github/workflows/**'
+      - '.gitignore'
+      - '.coveragerc'
   workflow_dispatch:
   schedule:
     # Biweekly: 06:00 UTC on the 1st and 15th of every month. Catches
