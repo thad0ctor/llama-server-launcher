@@ -466,7 +466,10 @@ class TestBuildCmdHappyPath:
         idx = cmd.index("--flash-attn")
         # Either we're at the end, or the next token is another flag.
         if idx + 1 < len(cmd):
-            assert cmd[idx + 1] in ("on", "off") is False
+            # Chained-comparison trap: `a in b is False` parses as
+            # `(a in b) and (b is False)` — always False. Use an explicit
+            # `not in` instead.
+            assert cmd[idx + 1] not in ("on", "off")
             assert cmd[idx + 1].startswith("-")
 
     def test_cache_type_k_default_omitted(self, manager, launcher_mock):
