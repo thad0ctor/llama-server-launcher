@@ -1,0 +1,22 @@
+[run]
+# pytest-cov's ``--cov=<name>`` only accepts a *package name* (not a path)
+# or an importable module. ``llamacpp-server-launcher`` has a hyphen in its
+# filename, so it can't be imported by name and ``--cov=llamacpp-server-launcher``
+# silently collects nothing. Listing the file under ``include`` below lets
+# coverage measure it via ``--cov`` (bare), which reads this config.
+include =
+    modules/*.py
+    llamacpp-server-launcher.py
+
+omit =
+    tests/*
+    backup/*
+    */__pycache__/*
+    .venv/*
+    venv/*
+
+[report]
+precision = 1
+# Skip 100%-covered trivial files from the report to keep it readable.
+skip_covered = False
+show_missing = False

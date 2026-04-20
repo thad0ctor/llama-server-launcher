@@ -46,9 +46,15 @@ class ConfigManager:
                      raw_name = Path(model_path_str).stem # Get filename without extension
 
 
-                # Sanitize the raw name for filename use
-                safe_name = re.sub(r'[\\/*?:"<>| ]', '_', raw_name)
-                safe_name = safe_name[:40].strip('_') # Truncate and clean
+                # Sanitize the raw name for filename use.
+                # Strip leading/trailing whitespace first, then replace illegal
+                # filename chars (Windows + POSIX), ASCII control chars (\x00-\x1f)
+                # and DEL (\x7f) with underscores.
+                safe_name = raw_name.strip()
+                safe_name = re.sub(r'[\\/*?:"<>| \x00-\x1f\x7f]', '_', safe_name)
+                # Windows disallows trailing dots/spaces in filenames; strip them too.
+                safe_name = safe_name.rstrip('. ')
+                safe_name = safe_name[:40].strip('_. ')  # Truncate and clean
                 if safe_name:
                     parts.append(safe_name)
                 else:
@@ -788,14 +794,17 @@ class ConfigManager:
 
         except (OSError, PermissionError, IOError) as e:
             print(f"Warning: Could not use local config path due to permissions/IO issue: {e}", file=sys.stderr)
-            # Fallback to user config directory
-            if sys.platform == "win32":
-                appdata = os.getenv("APPDATA")
-                fallback_dir = Path(appdata) / "LlamaCppLauncher" if appdata else Path.home() / ".llama_cpp_launcher"
-            else: # Linux, macOS, etc.
-                 fallback_dir = Path.home() / ".config" / "llama_cpp_launcher"
-
+            # Fallback to user config directory. Wrap the Path.home() /
+            # APPDATA resolution in the same try/except as the mkdir below
+            # so a fully-broken environment (no HOME, no APPDATA) still
+            # returns a sensible null-device sentinel instead of crashing.
+            fallback_dir = None
             try:
+                if sys.platform == "win32":
+                    appdata = os.getenv("APPDATA")
+                    fallback_dir = Path(appdata) / "LlamaCppLauncher" if appdata else Path.home() / ".llama_cpp_launcher"
+                else:  # Linux, macOS, etc.
+                    fallback_dir = Path.home() / ".config" / "llama_cpp_launcher"
                 fallback_dir.mkdir(parents=True, exist_ok=True)
                 fallback_path = fallback_dir / "configs.json"
                 # Check if fallback path exists and is empty, clean it up if so
@@ -1040,18 +1049,72 @@ class ConfigManager:
                  # If the original path was already a fallback, just report the error
                  messagebox.showerror("Config Save Error", f"Failed to save settings to:\n{self.launcher.config_path}\n\nError: {exc}")
 
+    @staticmethod
+    def _sanitize_config_name(name):
+        """Normalize a user-supplied configuration name so it can't escape the
+        configs dict / on-disk file via path traversal.
+
+        We store configs as JSON keys, but the name is also echoed in error
+        messages and is used as-is if callers ever extend the storage backend
+        to a per-config file. Stripping path separators, drive letters and
+        traversal tokens at the save boundary defends against both concerns.
+        """
+        if name is None:
+            return ""
+        if not isinstance(name, str):
+            name = str(name)
+        # Reject absolute paths outright and drop directory components —
+        # ``Path(...).name`` returns the final component only and is empty
+        # when the input is purely separators like "/" or "../../".
+        cleaned = name.strip()
+        if not cleaned:
+            return ""
+        # Strip any path components. Works for both POSIX and Windows-style.
+        cleaned = cleaned.replace("\\", "/")
+        # Take the last path segment after stripping traversal tokens.
+        parts = [p for p in cleaned.split("/") if p not in ("", ".", "..")]
+        cleaned = parts[-1] if parts else ""
+        # Remove Windows drive-letter prefix like "C:" if somehow still present.
+        cleaned = re.sub(r"^[A-Za-z]:", "", cleaned)
+        # Remove NUL and other control chars that would corrupt on-disk state.
+        cleaned = re.sub(r"[\x00-\x1f\x7f]", "", cleaned)
+        # Reject a "..." -- all-dots name that Windows treats as traversal.
+        if set(cleaned) <= {"."}:
+            return ""
+        # Reject Windows device names. Windows refuses to create files named
+        # CON/PRN/AUX/NUL or COM1-9/LPT1-9 (with or without an extension), so
+        # sanitizing them here keeps configs portable across platforms.
+        stem = cleaned.split(".", 1)[0].upper()
+        _WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
+            f"COM{i}" for i in range(1, 10)
+        } | {f"LPT{i}" for i in range(1, 10)}
+        if stem in _WIN_RESERVED:
+            return ""
+        return cleaned.strip()
+
     def save_configuration(self):
         """Saves the current UI settings as a named configuration."""
-        name = self.launcher.config_name.get().strip()
+        raw_name = self.launcher.config_name.get()
+        raw_name = raw_name.strip() if isinstance(raw_name, str) else raw_name
+        # Sanitize the user-supplied name at the save boundary so a name like
+        # "../../../etc/passwd" can't escape the configs dict / config dir.
+        name = self._sanitize_config_name(raw_name)
         if not name:
             # Auto-generate a name based on current settings
             suggested_name = self.generate_default_config_name()
+            # Defensively sanitize the generated name too.
+            suggested_name = self._sanitize_config_name(suggested_name) or "default_config"
             self.launcher.config_name.set(suggested_name)
             name = suggested_name
 
         # Ensure name is not None
         if name is None:
             name = "default_config"
+            self.launcher.config_name.set(name)
+
+        # If sanitization changed the name, reflect it back to the UI so the
+        # user sees what was actually saved.
+        if raw_name != name:
             self.launcher.config_name.set(name)
 
         current_cfg = self.current_cfg()
