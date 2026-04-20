@@ -299,6 +299,10 @@ class LlamaCppLauncher:
         self.fit_target      = tk.StringVar(value="1024")  # --fit-target (MiB to reserve per device)
 
         # --- Chat Template Selection Variables ---
+        # Pass --jinja to llama-server / ik_llama-server so Jinja chat templates render
+        # correctly. Required for many recent instruction-tuned GGUFs; defaults off since
+        # older servers don't accept the flag.
+        self.jinja_enabled = tk.BooleanVar(value=False)
         # Controls which template source is used: 'default', 'predefined', or 'custom'.
         # Initial state is 'default' (using the model's template if available).
         self.template_source = tk.StringVar(value="default")
@@ -1379,6 +1383,20 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0,5)); r += 1
 
         ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
+
+        # --- Jinja rendering toggle ---
+        # Controls whether --jinja is passed to the server so Jinja chat templates render.
+        self.jinja_enabled_check = ttk.Checkbutton(
+            frame,
+            variable=self.jinja_enabled,
+            text="Enable Jinja template rendering (--jinja)",
+        )
+        self.jinja_enabled_check.grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 3)); r += 1
+        ttk.Label(
+            frame,
+            text="Required for many modern instruction-tuned GGUFs that ship a Jinja chat template.",
+            font=("TkSmallCaptionFont"),
+        ).grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 8)); r += 1
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # --- Template Source Selection (Radio Buttons) ---

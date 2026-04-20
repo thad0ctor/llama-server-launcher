@@ -85,7 +85,8 @@ class ConfigManager:
             "cpu_moe":       False, # Default for --cpu-moe flag
             "n_cpu_moe":     "",    # Default for --n-cpu-moe (empty)
             "mmproj_enabled": False, # Default for mmproj detection
-    
+            "jinja_enabled": False, # Default for --jinja flag
+
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
@@ -113,6 +114,7 @@ class ConfigManager:
             "cpu_moe":       self.launcher.cpu_moe.get(),  # bool
             "n_cpu_moe":     self.launcher.n_cpu_moe.get().strip(),
             "mmproj_enabled": self.launcher.mmproj_enabled.get(), # bool
+            "jinja_enabled": self.launcher.jinja_enabled.get(), # bool
 
         }
 
@@ -150,6 +152,7 @@ class ConfigManager:
                          "ignore_eos": "no-eos",
                          "cpu_moe": "cpu-moe",
                          "mmproj_enabled": "mmproj",
+                         "jinja_enabled": "jinja",
                       }
                       parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
             # Handle other string parameters
@@ -296,6 +299,8 @@ class ConfigManager:
             "template_source": self.launcher.template_source.get(),
             "predefined_template_name": self.launcher.predefined_template_name.get(),
             "custom_template_string": self.launcher.custom_template_string.get(),
+            # Toggle for --jinja (independent of template source)
+            "jinja_enabled": self.launcher.jinja_enabled.get(),
             # --- NEW: Save Custom Parameters ---
             "custom_parameters": self.launcher.custom_parameters_list, # Save the list of strings
         }
@@ -403,6 +408,7 @@ class ConfigManager:
         self.launcher.predefined_template_name.set(cfg.get("predefined_template_name", default_predefined_key))
 
         self.launcher.custom_template_string.set(cfg.get("custom_template_string", ""))
+        self.launcher.jinja_enabled.set(cfg.get("jinja_enabled", False))
 
         # Update UI state and display based on loaded values
         # The trace on self.launcher.template_source should trigger _update_template_controls_state and _update_effective_template_display

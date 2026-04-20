@@ -287,6 +287,12 @@ class LaunchManager:
         else: # source == "default"
              print("DEBUG: Chat template source is 'Let llama.cpp Decide'. Omitting --chat-template.", file=sys.stderr)
 
+        # --- Jinja rendering (server-side chat template engine) ---
+        # --jinja is a standalone boolean flag on both llama-server and ik_llama-server.
+        if self.launcher.jinja_enabled.get():
+            cmd.append("--jinja")
+            print("DEBUG: Adding --jinja", file=sys.stderr)
+
         # --- NEW: Add Custom Parameters ---
         print(f"DEBUG: Adding {len(self.launcher.custom_parameters_list)} custom parameters...", file=sys.stderr)
         for param_string in self.launcher.custom_parameters_list:
