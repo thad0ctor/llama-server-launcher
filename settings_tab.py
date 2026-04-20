@@ -97,10 +97,12 @@ class SettingsTab:
         # --- Font family ---
         ttk.Label(parent, text="Font family:") \
             .grid(column=0, row=row, sticky="w", padx=10, pady=4)
-        families = ui_theme.list_font_families(self.root)
+        # Cache the system font list so _apply_and_save can validate against
+        # it without re-querying Tk every time.
+        self._available_font_families = ui_theme.list_font_families(self.root)
         self.font_family_combo = ttk.Combobox(
             parent, textvariable=self.font_family_var,
-            values=[""] + families, width=30,
+            values=[""] + self._available_font_families, width=30,
         )
         self.font_family_combo.grid(column=1, row=row, sticky="w", padx=5, pady=4)
         ttk.Label(parent, text="(blank = system default)", font=("TkSmallCaptionFont",)) \
@@ -236,11 +238,41 @@ class SettingsTab:
         except (TypeError, ValueError):
             return 0
 
+    def _validate_family(self, family):
+        """Confirm ``family`` is in the system font list and return its
+        canonical (case-matched) spelling. Returns "" for empty input.
+        Raises ValueError if the typed family doesn't match any system font —
+        keeps typos from being persisted to app_settings.
+        """
+        if not family:
+            return ""
+        available = getattr(self, "_available_font_families", None) or []
+        # Match case-insensitively so "arial" still resolves to "Arial", but
+        # persist the canonical spelling Tk actually advertises.
+        lut = {f.lower(): f for f in available}
+        canonical = lut.get(family.lower())
+        if not canonical:
+            raise ValueError(
+                f"'{family}' is not available on this system.\n\n"
+                "Choose a family from the dropdown, or leave the field blank "
+                "to use the system default.",
+            )
+        return canonical
+
     # ------------------------------------------------------------------ actions
     def _apply_and_save(self):
         mode = self.theme_mode_var.get()
         theme_name = self.theme_name_var.get() if mode == "specific" else ""
         family = self.font_family_var.get().strip()
+
+        try:
+            family = self._validate_family(family)
+        except ValueError as e:
+            messagebox.showwarning("Unknown font family", str(e))
+            return
+        # Normalize the var so the user sees the canonical spelling
+        if family != self.font_family_var.get():
+            self.font_family_var.set(family)
 
         try:
             size = self._resolve_font_size()
@@ -254,12 +286,6 @@ class SettingsTab:
                 "Choose a theme name from the list when mode is 'Specific theme…'.",
             )
             return
-
-        s = self.launcher.app_settings
-        s["ui_theme_mode"] = mode
-        s["ui_theme_name"] = theme_name
-        s["ui_font_family"] = family
-        s["ui_font_size"] = size
 
         # Always start from the shipped named-font values before layering the
         # user's overrides. apply_fonts only touches attributes that are set
@@ -281,7 +307,20 @@ class SettingsTab:
                 font_size=size,
             )
         except Exception as e:
+            # Don't persist (or even mutate in-memory state) when apply fails —
+            # the user would otherwise reopen the app thinking this theme/font
+            # is active, and other save paths could pick up a state that never
+            # actually rendered.
             print(f"Settings apply error: {e}", file=sys.stderr)
+            messagebox.showerror("Apply failed", f"Could not apply settings:\n{e}")
+            return
+
+        # Commit to app_settings only after a successful apply.
+        s = self.launcher.app_settings
+        s["ui_theme_mode"] = mode
+        s["ui_theme_name"] = theme_name
+        s["ui_font_family"] = family
+        s["ui_font_size"] = size
 
         try:
             self.launcher._save_configs()
@@ -315,19 +354,24 @@ class SettingsTab:
         except Exception as e:
             print(f"Font reset error: {e}", file=sys.stderr)
 
-        s = self.launcher.app_settings
-        s["ui_theme_mode"] = "auto"
-        s["ui_theme_name"] = ""
-        s["ui_font_family"] = ""
-        s["ui_font_size"] = 0
-
         try:
             ui_theme.apply_ui_preferences(
                 self.root, theme_mode="auto",
                 explicit_theme=None, font_family="", font_size=0,
             )
         except Exception as e:
+            # Same rationale as _apply_and_save: never mutate / persist a
+            # state that didn't actually take effect.
             print(f"Reset apply error: {e}", file=sys.stderr)
+            messagebox.showerror("Reset failed", f"Could not apply reset:\n{e}")
+            return
+
+        # Commit to app_settings only after a successful apply.
+        s = self.launcher.app_settings
+        s["ui_theme_mode"] = "auto"
+        s["ui_theme_name"] = ""
+        s["ui_font_family"] = ""
+        s["ui_font_size"] = 0
 
         try:
             self.launcher._save_configs()

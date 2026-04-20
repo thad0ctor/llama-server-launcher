@@ -248,8 +248,14 @@ def _palette_for(chosen_theme, mode):
         if themed and not _is_dark_palette(themed):
             return themed
         return LIGHT_PALETTE
-    # auto / specific → honour the theme's own palette if we have one
-    return THEME_PALETTES.get(chosen_theme, LIGHT_PALETTE)
+    # auto / specific → honour the theme's own palette if we have one; else
+    # infer from the theme name so a third-party dark theme (sun-valley-dark,
+    # azure-dark, etc.) selected via "Specific" doesn't get a light palette
+    # blasted over it, leaving unreadable text on dark backgrounds.
+    themed = THEME_PALETTES.get(chosen_theme)
+    if themed:
+        return themed
+    return DARK_PALETTE if _looks_dark(chosen_theme) else LIGHT_PALETTE
 
 
 # ═══════════════════════════════════════════════════════════════════════
