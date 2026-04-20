@@ -45,6 +45,77 @@ def _pick_theme(available, preferred, fallback=None):
     return available[0] if available else None
 
 
+_STARTUP_THEME = None  # Tk's default theme captured before any user override
+
+
+def _capture_startup_theme(style):
+    """Remember the theme Tk was using before this module started applying
+    anything, so 'auto' can fall back to it when OS dark-mode detection is
+    unavailable instead of blindly picking a dark-leaning preset."""
+    global _STARTUP_THEME
+    if _STARTUP_THEME is None:
+        try:
+            _STARTUP_THEME = style.theme_use()
+        except tk.TclError:
+            _STARTUP_THEME = None
+    return _STARTUP_THEME
+
+
+def _detect_os_dark_mode():
+    """Best-effort OS dark-mode detection.
+
+    Returns True if the OS is in dark mode, False for light, None if unknown.
+    Short timeouts and swallowed errors keep startup responsive when the
+    detection tool isn't available.
+    """
+    if sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            )
+            try:
+                apps_use_light, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            finally:
+                winreg.CloseKey(key)
+            return not bool(apps_use_light)
+        except (OSError, FileNotFoundError, ImportError):
+            return None
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["defaults", "read", "-g", "AppleInterfaceStyle"],
+                capture_output=True, text=True, timeout=2,
+            )
+            return r.returncode == 0 and "Dark" in r.stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+    # Linux / other — try GNOME first, then generic GTK.
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return "dark" in r.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return "dark" in r.stdout.lower()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Colour matrices
 # ═══════════════════════════════════════════════════════════════════════
@@ -428,14 +499,33 @@ def apply_theme(root, mode="auto", explicit_theme=None):
     if not available:
         return (None, False)
 
+    # Remember the theme Tk had active before any of our overrides land — used
+    # as the last-resort fallback for "auto" when OS dark-mode detection fails.
+    _capture_startup_theme(style)
+
+    # ``effective_mode`` is what _palette_for actually sees. For "auto" we
+    # resolve it to "dark"/"light" when we can detect the OS, so the palette
+    # matches the theme we picked. "specific" falls through as-is so the
+    # theme's own palette is used.
+    effective_mode = mode
     if mode == "specific" and explicit_theme and explicit_theme in available:
         chosen = explicit_theme
     elif mode == "light":
         chosen = _pick_theme(available, LIGHT_PREFERRED)
     elif mode == "dark":
         chosen = _pick_theme(available, DARK_PREFERRED)
-    else:  # auto
-        chosen = _pick_theme(available, AUTO_PREFERRED)
+    else:  # auto — follow the OS if we can, else the startup default
+        os_dark = _detect_os_dark_mode()
+        if os_dark is True:
+            chosen = _pick_theme(available, DARK_PREFERRED)
+            effective_mode = "dark"
+        elif os_dark is False:
+            chosen = _pick_theme(available, LIGHT_PREFERRED)
+            effective_mode = "light"
+        elif _STARTUP_THEME and _STARTUP_THEME in available:
+            chosen = _STARTUP_THEME
+        else:
+            chosen = _pick_theme(available, AUTO_PREFERRED)
 
     if not chosen:
         return (None, False)
@@ -447,7 +537,7 @@ def apply_theme(root, mode="auto", explicit_theme=None):
         print(f"Failed to apply theme {chosen}: {e}", file=sys.stderr)
         return (None, False)
 
-    palette = _palette_for(chosen, mode)
+    palette = _palette_for(chosen, effective_mode)
     _apply_style_palette(root, style, palette)
     is_dark = _is_dark_palette(palette)
     return (chosen, is_dark)

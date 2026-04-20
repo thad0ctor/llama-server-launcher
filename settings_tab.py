@@ -261,14 +261,16 @@ class SettingsTab:
         s["ui_font_family"] = family
         s["ui_font_size"] = size
 
-        # size == 0 means "system default" — apply_fonts is a no-op for 0, so we
-        # explicitly restore the shipped named-font values before applying the
-        # theme. Otherwise the previously-applied custom size sticks.
-        if size <= 0 and not family:
-            try:
-                ui_theme.reset_fonts_to_system(self.root)
-            except Exception as e:
-                print(f"Font reset error: {e}", file=sys.stderr)
+        # Always start from the shipped named-font values before layering the
+        # user's overrides. apply_fonts only touches attributes that are set
+        # (blank family or size<=0 are treated as "don't change"), so if the
+        # user clears just one field after previously customising both, the old
+        # value would otherwise stick — e.g. Arial/16 → blank family + 12
+        # would render as Arial/12 instead of system-default/12.
+        try:
+            ui_theme.reset_fonts_to_system(self.root)
+        except Exception as e:
+            print(f"Font reset error: {e}", file=sys.stderr)
 
         try:
             ui_theme.apply_ui_preferences(

@@ -823,8 +823,12 @@ class ConfigManager:
                 self.launcher.app_settings["ui_theme_name"] = ""
             if not isinstance(self.launcher.app_settings.get("ui_font_family"), str):
                 self.launcher.app_settings["ui_font_family"] = ""
+            # Clamp to the same 0..31 range the Settings tab enforces, so a
+            # hand-edited value like 200 can't rescale every named Tk font at
+            # startup and wedge the UI before the user can reach the tab.
             try:
-                self.launcher.app_settings["ui_font_size"] = int(self.launcher.app_settings.get("ui_font_size", 0) or 0)
+                font_size = int(self.launcher.app_settings.get("ui_font_size", 0) or 0)
+                self.launcher.app_settings["ui_font_size"] = font_size if 0 <= font_size < 32 else 0
             except (TypeError, ValueError):
                 self.launcher.app_settings["ui_font_size"] = 0
             # ui_scaling was removed — strip any leftover key so old configs don't carry it forward

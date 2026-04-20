@@ -3919,8 +3919,11 @@ class LlamaCppLauncher:
 #  main
 # ═════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    # PR #6: enable per-monitor DPI awareness on Windows so Tk doesn't render blurry
-    # on high-DPI displays. Must run before tk.Tk() is instantiated.
+    # PR #6: enable system DPI awareness on Windows so Tk doesn't render blurry
+    # on high-DPI displays. Value 1 = PROCESS_SYSTEM_DPI_AWARE (DPI is queried
+    # once at startup and applied process-wide); true per-monitor handling would
+    # require value 2 plus WM_DPICHANGED handling, which Tk doesn't do natively.
+    # Must run before tk.Tk() is instantiated.
     if sys.platform == "win32":
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
