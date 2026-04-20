@@ -4,6 +4,8 @@ Used by both startup (to apply persisted UI preferences before widgets are built
 and the Settings tab (to re-apply preferences when the user changes them).
 """
 
+import shutil
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import ttk, font as tkfont
@@ -61,6 +63,26 @@ def _capture_startup_theme(style):
     return _STARTUP_THEME
 
 
+def _run_resolved(argv, timeout=2):
+    """Run ``argv`` after resolving argv[0] to an absolute path via shutil.which.
+
+    Refuses to run bare binary names from PATH — prevents a hostile PATH from
+    hijacking our OS-probe commands (``defaults`` on macOS, ``gsettings`` on
+    Linux). Returns a CompletedProcess on success, or None if the binary isn't
+    installed or the call fails.
+    """
+    exe = shutil.which(argv[0])
+    if not exe:
+        return None
+    try:
+        return subprocess.run(
+            [exe, *argv[1:]],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _detect_os_dark_mode():
     """Best-effort OS dark-mode detection.
 
@@ -83,36 +105,21 @@ def _detect_os_dark_mode():
         except (OSError, FileNotFoundError, ImportError):
             return None
     if sys.platform == "darwin":
-        try:
-            import subprocess
-            r = subprocess.run(
-                ["defaults", "read", "-g", "AppleInterfaceStyle"],
-                capture_output=True, text=True, timeout=2,
-            )
-            return r.returncode == 0 and "Dark" in r.stdout
-        except (OSError, subprocess.SubprocessError):
+        r = _run_resolved(["defaults", "read", "-g", "AppleInterfaceStyle"])
+        if r is None:
             return None
-    # Linux / other — try GNOME first, then generic GTK.
-    try:
-        import subprocess
-        r = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return "dark" in r.stdout.lower()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        import subprocess
-        r = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return "dark" in r.stdout.lower()
-    except (OSError, subprocess.SubprocessError):
-        pass
+        return r.returncode == 0 and "Dark" in r.stdout
+    # Linux / other — try GNOME color-scheme first, then legacy gtk-theme.
+    r = _run_resolved(
+        ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+    )
+    if r is not None and r.returncode == 0 and r.stdout.strip():
+        return "dark" in r.stdout.lower()
+    r = _run_resolved(
+        ["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"],
+    )
+    if r is not None and r.returncode == 0 and r.stdout.strip():
+        return "dark" in r.stdout.lower()
     return None
 
 
