@@ -375,27 +375,32 @@ def calculate_total_gguf_size(model_path_str):
     
     model_path = Path(model_path_str)
     
-    # Check if this looks like a multi-part GGUF file (e.g., "00001-of-00003.gguf")
-    shard_pattern = re.search(r'-(\d+)-of-(\d+)\.gguf$', model_path.name, re.IGNORECASE)
+    # Check if this looks like a multi-part GGUF file (e.g., "00001-of-00003.gguf").
+    # Capture the separator and extension literally so we can reproduce the
+    # original filename case when looking up sibling shards on case-sensitive
+    # filesystems (e.g., "-OF-" / ".GGUF" stays uppercase).
+    shard_pattern = re.search(r'-(\d+)(-of-)(\d+)(\.gguf)$', model_path.name, re.IGNORECASE)
     if not shard_pattern:
         # Not a multi-part file, return single file size
         return model_path.stat().st_size, 1, [model_path]
-    
+
     current_shard = int(shard_pattern.group(1))
-    total_shards = int(shard_pattern.group(2))
-    
+    separator = shard_pattern.group(2)
+    total_shards = int(shard_pattern.group(3))
+    extension = shard_pattern.group(4)
+
     print(f"DEBUG: Detected multi-part GGUF: shard {current_shard} of {total_shards}", file=sys.stderr)
-    
+
     # Find all related shard files
     base_name = model_path.name[:shard_pattern.start()]  # Everything before "-00001-of-00003.gguf"
     parent_dir = model_path.parent
-    
+
     total_size = 0
     found_shards = []
     missing_shards = []
-    
+
     for shard_num in range(1, total_shards + 1):
-        shard_name = f"{base_name}-{shard_num:05d}-of-{total_shards:05d}.gguf"
+        shard_name = f"{base_name}-{shard_num:05d}{separator}{total_shards:05d}{extension}"
         shard_path = parent_dir / shard_name
         
         if shard_path.exists():
@@ -472,6 +477,11 @@ def parse_gguf_header_simple(model_path_str):
         12: ('<d', 8),   # FLOAT64
     }
 
+    # Soft cap for a single string value; values larger than this are still
+    # consumed from the stream (so parsing continues) but not retained in the
+    # result dict. A warning is emitted so the caller can see it happened.
+    _STRING_SOFT_CAP = 1_000_000
+
     def read_value(f, value_type):
         """Read a value from file based on GGUF type."""
         if value_type == 8:  # STRING
@@ -479,8 +489,26 @@ def parse_gguf_header_simple(model_path_str):
             if len(value_len_bytes) < 8:
                 return None
             value_len = struct.unpack('<Q', value_len_bytes)[0]
-            if value_len > 1000000:  # Sanity check for string length (1MB max)
-                f.seek(f.tell() + value_len)  # Skip the string
+            # Check the soft cap BEFORE allocating, so a corrupted or
+            # adversarial value_len claim (e.g. 5 GB) can't OOM the parser
+            # on a legitimately large GGUF that actually has those bytes.
+            # Skip past the bytes with seek() to keep the stream aligned.
+            if value_len > _STRING_SOFT_CAP:
+                # Validate that the file is actually long enough to hold
+                # the claimed value; otherwise we have a truncated/malformed
+                # file and the parse should bail.
+                current_pos = f.tell()
+                f.seek(0, os.SEEK_END)
+                file_end = f.tell()
+                if current_pos + value_len > file_end:
+                    return None
+                f.seek(current_pos + value_len)
+                print(
+                    f"WARNING: GGUF string value is {value_len} bytes "
+                    f"(> {_STRING_SOFT_CAP} soft cap); value dropped from "
+                    f"metadata but parse continues.",
+                    file=sys.stderr,
+                )
                 return None
             value_bytes = f.read(value_len)
             if len(value_bytes) < value_len:
@@ -500,25 +528,77 @@ def parse_gguf_header_simple(model_path_str):
         else:
             return None
 
-    def skip_array(f, array_type, array_len):
-        """Skip over array data in the file."""
+    # Hard cap on recursion for nested array-of-arrays metadata. GGUF files in
+    # the wild never approach this; a malicious file claiming deep nesting is
+    # rejected before it can trigger RecursionError on the Python stack.
+    _MAX_NESTING_DEPTH = 16
+
+    def skip_array(f, array_type, array_len, depth=0):
+        """Skip over array data in the file.
+
+        Returns True on success, False if EOF was hit, a malformed length
+        was encountered, or nesting exceeded ``_MAX_NESTING_DEPTH`` (caller
+        should bail). Nested arrays (type 9) are uncommon but legal per
+        spec; we recursively walk them so the parse loop doesn't silently
+        halt on files that include them.
+
+        Every seek that uses an untrusted length (``str_len`` read from the
+        file, or ``array_len * element_size``) is bounds-checked against
+        the on-disk file size, so a malformed file claiming absurd lengths
+        can't leave the stream position far past EOF and corrupt
+        downstream reads. We use ``os.fstat`` for the size — one syscall,
+        no seek, no save/restore dance.
+        """
+        if depth > _MAX_NESTING_DEPTH:
+            print(
+                f"WARNING: GGUF nested array exceeds max depth "
+                f"{_MAX_NESTING_DEPTH}; aborting parse.",
+                file=sys.stderr,
+            )
+            return False
+        file_end = os.fstat(f.fileno()).st_size
         if array_type == 8:  # String array - must read each string length
             for _ in range(array_len):
                 str_len_bytes = f.read(8)
                 if len(str_len_bytes) < 8:
                     return False
                 str_len = struct.unpack('<Q', str_len_bytes)[0]
-                if str_len > 1000000:  # Sanity check
+                # Don't blindly seek past EOF — a corrupted/adversarial
+                # str_len could send the stream so far past the end that a
+                # subsequent read appears truncated but the loop mistakes
+                # it for an earlier truncation. Validate first.
+                current_pos = f.tell()
+                if str_len < 0 or current_pos + str_len > file_end:
                     return False
-                f.seek(f.tell() + str_len)
+                f.seek(current_pos + str_len)
             return True
-        elif array_type == 9:  # Nested array - not typically used, skip conservatively
-            return False
+        elif array_type == 9:  # Nested array - recurse so we don't desync
+            for _ in range(array_len):
+                inner_type_bytes = f.read(4)
+                inner_len_bytes = f.read(8)
+                if len(inner_type_bytes) < 4 or len(inner_len_bytes) < 8:
+                    return False
+                inner_type = struct.unpack('<I', inner_type_bytes)[0]
+                inner_len = struct.unpack('<Q', inner_len_bytes)[0]
+                if not skip_array(f, inner_type, inner_len, depth + 1):
+                    return False
+            return True
         elif array_type in GGUF_TYPES and GGUF_TYPES[array_type] is not None:
             _, element_size = GGUF_TYPES[array_type]
-            f.seek(f.tell() + array_len * element_size)
+            # Same bounds concern as above: ``array_len`` is an untrusted
+            # 64-bit value, so ``array_len * element_size`` could be huge.
+            current_pos = f.tell()
+            total_bytes = array_len * element_size
+            if array_len < 0 or current_pos + total_bytes > file_end:
+                return False
+            f.seek(current_pos + total_bytes)
             return True
         else:
+            print(
+                f"WARNING: GGUF array has unknown element type {array_type}; "
+                f"cannot skip safely, aborting parse.",
+                file=sys.stderr,
+            )
             return False
 
     try:
@@ -526,15 +606,41 @@ def parse_gguf_header_simple(model_path_str):
             # Read GGUF magic number
             magic = f.read(4)
             if magic != b'GGUF':
-                analysis_result["error"] = "Not a valid GGUF file"
+                # The spec allowed a short-lived big-endian variant ('FUGG'
+                # when read little-endian). Detect and reject it with a
+                # clear error rather than silently misparsing.
+                if magic == b'FUGG':
+                    analysis_result["error"] = (
+                        "Big-endian GGUF files are not supported by this parser"
+                    )
+                else:
+                    analysis_result["error"] = "Not a valid GGUF file"
                 return analysis_result
 
             # Read version
-            version = struct.unpack('<I', f.read(4))[0]
+            version_bytes = f.read(4)
+            if len(version_bytes) < 4:
+                analysis_result["error"] = "Failed to parse GGUF header: truncated version field"
+                return analysis_result
+            version = struct.unpack('<I', version_bytes)[0]
+
+            # Only GGUF v2 and v3 are widely used; v1 had a different layout
+            # and anything beyond v3 is unknown to this parser. Flag it
+            # clearly instead of silently producing garbage output.
+            if version not in (2, 3):
+                analysis_result["error"] = (
+                    f"Unsupported GGUF version {version}; expected 2 or 3"
+                )
+                return analysis_result
 
             # Read tensor count and metadata count
-            tensor_count = struct.unpack('<Q', f.read(8))[0]
-            metadata_count = struct.unpack('<Q', f.read(8))[0]
+            tc_bytes = f.read(8)
+            mc_bytes = f.read(8)
+            if len(tc_bytes) < 8 or len(mc_bytes) < 8:
+                analysis_result["error"] = "Failed to parse GGUF header: truncated counts"
+                return analysis_result
+            tensor_count = struct.unpack('<Q', tc_bytes)[0]
+            metadata_count = struct.unpack('<Q', mc_bytes)[0]
 
             # Track what we've found for early exit
             found_architecture = False

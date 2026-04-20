@@ -10,11 +10,200 @@ import webbrowser
 from pathlib import Path
 import sys
 import os
+import shlex
 import subprocess
 import requests
 import threading
 from datetime import datetime
 import shutil
+
+
+def build_update_script(current_dir, backup_path, current_version, remote_version,
+                        github_url, exclusions):
+    """Build the bash update script text.
+
+    Pure helper extracted from :meth:`AboutTab._generate_update_script` so it
+    can be tested with adversarial path inputs (paths containing ``$``, backtick,
+    ``;``, quotes, etc.) without standing up a Tk GUI.
+
+    All interpolated paths are passed through :func:`shlex.quote` before being
+    embedded in the bash script body. ``github_url`` is also quoted even though
+    it's currently a literal — defense in depth in case it ever becomes derived
+    from remote data. Version strings are embedded in plain ``echo`` statements
+    inside double-quoted strings, so they're also quoted for safety.
+
+    Parameters
+    ----------
+    current_dir, backup_path:
+        :class:`pathlib.Path` (or string) paths. Used in multiple places in the
+        script. Each use site re-quotes the value — cheaper than carrying two
+        versions around and prevents us accidentally using the un-quoted form.
+    current_version, remote_version:
+        Version strings displayed in ``echo`` headers. Quoted via shlex.
+    github_url:
+        Clone URL. Quoted via shlex.
+    exclusions:
+        Iterable of raw ``.gitignore``-style patterns (e.g. ``['*.pyc', '.venv']``)
+        or ``None`` / empty for no extra exclusions. Each pattern is individually
+        passed through :func:`shlex.quote` at composition time; the script uses
+        bash arrays (``EXCLUDE_ARGS=(...)`` + ``"${EXCLUDE_ARGS[@]}"``) so a
+        pattern containing a single quote or whitespace can't break out of
+        quoting or inject shell metacharacters.
+    """
+    # Reject the old pre-built-shell-fragment string form loudly so a stale
+    # caller doesn't silently iterate over characters of the string.
+    if isinstance(exclusions, str):
+        if exclusions:
+            raise TypeError(
+                "build_update_script now accepts exclusions as an iterable of "
+                "raw gitignore patterns, not a pre-built shell fragment string."
+            )
+        exclusions = []
+    elif exclusions is None:
+        exclusions = []
+
+    q_current_dir = shlex.quote(str(current_dir))
+    q_backup_path = shlex.quote(str(backup_path))
+    q_current_version = shlex.quote(str(current_version))
+    q_remote_version = shlex.quote(str(remote_version) if remote_version is not None else "")
+    q_github_url = shlex.quote(str(github_url))
+
+    # Build the dynamic tail of the EXCLUDE_ARGS array. Each pattern is
+    # shlex.quote'd; bash parses the single-quoted form inside the array
+    # literal and stores the raw pattern as one array element — safe even if
+    # the pattern contains apostrophes or whitespace.
+    exclusions_fragment = "".join(
+        f" -o -name {shlex.quote(str(p))} -prune" for p in exclusions
+    )
+
+    script = f"""#!/bin/bash
+set -e
+
+echo "=== Llama Server Launcher Auto-Update ==="
+echo "Current Version: "{q_current_version}
+echo "Target Version: "{q_remote_version}
+echo ""
+
+# Create backup directory
+echo "Creating backup directory..."
+mkdir -p {q_backup_path}
+
+# Backup files (excluding JSON files, .gitignore patterns, and git data)
+echo "Backing up important files (excluding temporary/cache files)..."
+
+# Create exclusion arguments for find. A bash array + "${{EXCLUDE_ARGS[@]}}"
+# expansion preserves each element as a single argument, unlike a plain
+# string + word splitting which would choke on patterns containing spaces
+# or apostrophes.
+EXCLUDE_ARGS=(-name backup -prune -o -name .git -prune -o -name update_script.sh -prune{exclusions_fragment})
+
+# Backup files
+find {q_current_dir} -maxdepth 1 -type f "${{EXCLUDE_ARGS[@]}}" -name "*.py" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
+"${{EXCLUDE_ARGS[@]}}" -name "*.md" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
+"${{EXCLUDE_ARGS[@]}}" -name ".git*" -print -exec cp {{}} {q_backup_path}/ \\; 2>/dev/null || true
+
+# Backup important directories (excluding .git, __pycache__, etc.)
+for dir in {q_current_dir}/*; do
+    if [ -d "$dir" ]; then
+        dirname=$(basename "$dir")
+        case "$dirname" in
+            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache)
+                echo "Skipping $dirname (cache/git/static data)"
+                ;;
+            *)
+                if [ ! -f {q_current_dir}/.gitignore ] || ! grep -q "^$dirname$" {q_current_dir}/.gitignore 2>/dev/null; then
+                    echo "Backing up directory: $dirname"
+                    cp -r "$dir" {q_backup_path}/
+                fi
+                ;;
+        esac
+    fi
+done
+
+echo "Backup completed in: "{q_backup_path}
+echo ""
+
+# Remove old files (keep JSON files and backup directory)
+echo "Removing old files for clean installation..."
+
+# Remove Python files and other source files
+find {q_current_dir} -maxdepth 1 -type f -name "*.py" ! -name "update_script.sh" -delete 2>/dev/null || true
+find {q_current_dir} -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || true
+find {q_current_dir}/config -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
+find {q_current_dir} -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
+
+# Remove directories (except JSON config dirs, backup, and .git)
+for dir in {q_current_dir}/*; do
+    if [ -d "$dir" ]; then
+        dirname=$(basename "$dir")
+        case "$dirname" in
+            backup|.git|images)
+                echo "Preserving $dirname"
+                ;;
+            *)
+                echo "Removing directory: $dirname"
+                rm -rf "$dir"
+                ;;
+        esac
+    fi
+done
+
+echo "Old files cleaned up."
+echo ""
+
+# Clone new version
+echo "Cloning latest version from GitHub..."
+cd {q_current_dir}
+git clone {q_github_url} temp_clone
+cd temp_clone
+
+# Move files from temp clone to current directory
+echo "Installing new version..."
+# Move all files except .git and images directories
+find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} {q_current_dir}/ \\; 2>/dev/null || true
+echo "Skipped downloading images folder (using existing)"
+cd {q_current_dir}
+rm -rf temp_clone
+
+# Restore user-owned gitignored state from backup. The fresh clone never
+# contains llama_cpp_launcher_configs.json (it's gitignored), so without this
+# step every self-update would silently wipe the user's saved configurations.
+# We detect the layout of the freshly-cloned tree and write the restored file
+# to the location the new code will look in.
+echo "Restoring user configuration from backup..."
+USER_CONFIG_SRC=""
+if [ -f {q_backup_path}/config/llama_cpp_launcher_configs.json ]; then
+    USER_CONFIG_SRC={q_backup_path}/config/llama_cpp_launcher_configs.json
+elif [ -f {q_backup_path}/llama_cpp_launcher_configs.json ]; then
+    USER_CONFIG_SRC={q_backup_path}/llama_cpp_launcher_configs.json
+fi
+
+if [ -n "$USER_CONFIG_SRC" ]; then
+    if [ -d {q_current_dir}/config ] && [ -d {q_current_dir}/modules ]; then
+        cp "$USER_CONFIG_SRC" {q_current_dir}/config/llama_cpp_launcher_configs.json
+        echo "  Restored: config/llama_cpp_launcher_configs.json"
+    else
+        cp "$USER_CONFIG_SRC" {q_current_dir}/llama_cpp_launcher_configs.json
+        echo "  Restored: llama_cpp_launcher_configs.json (repo root; will migrate on next launch)"
+    fi
+else
+    echo "  No user configuration found in backup - clean install, nothing to restore."
+fi
+
+echo ""
+echo "=== Update Complete ==="
+echo "New version installed successfully!"
+echo "Backup saved in: "{q_backup_path}
+echo "User configurations were preserved and restored."
+echo ""
+echo "You can now restart the application."
+echo ""
+read -p "Press Enter to exit..."
+
+# Clean up update script
+rm -f {q_current_dir}/update_script.sh
+"""
+    return script
 
 
 class AboutTab:
@@ -176,170 +365,60 @@ class AboutTab:
             messagebox.showerror("Update Error", f"Failed to start update process:\n{str(e)}")
     
     def _generate_update_script(self, current_dir):
-        """Generate the update script content."""
+        """Generate the update script content.
+
+        Delegates to :func:`build_update_script`, a pure helper that can be
+        tested independently of this class. All paths are passed through
+        :func:`shlex.quote` when interpolated into the bash script body so a
+        path containing shell metacharacters (``$``, backtick, ``;``, etc.)
+        can't smuggle in extra commands at update time.
+        """
         backup_dir = current_dir / "backup"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = backup_dir / f"backup_{timestamp}"
-        
+
         # Generate exclusion patterns from .gitignore
         exclusions = self._get_backup_exclusions(current_dir)
-        
-        script = f"""#!/bin/bash
-set -e
 
-echo "=== Llama Server Launcher Auto-Update ==="
-echo "Current Version: {self.version}"
-echo "Target Version: {self.remote_version}"
-echo ""
-
-# Create backup directory
-echo "Creating backup directory..."
-mkdir -p "{backup_path}"
-
-# Backup files (excluding JSON files, .gitignore patterns, and git data)
-echo "Backing up important files (excluding temporary/cache files)..."
-
-# Create exclusion arguments for find
-EXCLUDE_ARGS="-name backup -prune -o -name .git -prune -o -name update_script.sh -prune{exclusions}"
-
-# Backup files
-find "{current_dir}" -maxdepth 1 -type f $EXCLUDE_ARGS -name "*.py" -print -exec cp {{}} "{backup_path}/" \\; -o \\
-$EXCLUDE_ARGS -name "*.md" -print -exec cp {{}} "{backup_path}/" \\; -o \\
-$EXCLUDE_ARGS -name ".git*" -print -exec cp {{}} "{backup_path}/" \\; 2>/dev/null || true
-
-# Backup important directories (excluding .git, __pycache__, etc.)
-for dir in "{current_dir}"/*; do
-    if [ -d "$dir" ]; then
-        dirname=$(basename "$dir")
-        case "$dirname" in
-            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache)
-                echo "Skipping $dirname (cache/git/static data)"
-                ;;
-            *)
-                if [ ! -f "{current_dir}/.gitignore" ] || ! grep -q "^$dirname$" "{current_dir}/.gitignore" 2>/dev/null; then
-                    echo "Backing up directory: $dirname"
-                    cp -r "$dir" "{backup_path}/"
-                fi
-                ;;
-        esac
-    fi
-done
-
-echo "Backup completed in: {backup_path}"
-echo ""
-
-# Remove old files (keep JSON files and backup directory)
-echo "Removing old files for clean installation..."
-
-# Remove Python files and other source files
-find "{current_dir}" -maxdepth 1 -type f -name "*.py" ! -name "update_script.sh" -delete 2>/dev/null || true
-find "{current_dir}" -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || true
-find "{current_dir}/config" -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
-find "{current_dir}" -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
-
-# Remove directories (except JSON config dirs, backup, and .git)
-for dir in "{current_dir}"/*; do
-    if [ -d "$dir" ]; then
-        dirname=$(basename "$dir")
-        case "$dirname" in
-            backup|.git|images)
-                echo "Preserving $dirname"
-                ;;
-            *)
-                echo "Removing directory: $dirname"
-                rm -rf "$dir"
-                ;;
-        esac
-    fi
-done
-
-echo "Old files cleaned up."
-echo ""
-
-# Clone new version
-echo "Cloning latest version from GitHub..."
-cd "{current_dir}"
-git clone {self.github_url} temp_clone
-cd temp_clone
-
-# Move files from temp clone to current directory
-echo "Installing new version..."
-# Move all files except .git and images directories
-find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} "{current_dir}/" \\; 2>/dev/null || true
-echo "Skipped downloading images folder (using existing)"
-cd "{current_dir}"
-rm -rf temp_clone
-
-# Restore user-owned gitignored state from backup. The fresh clone never
-# contains llama_cpp_launcher_configs.json (it's gitignored), so without this
-# step every self-update would silently wipe the user's saved configurations.
-# We detect the layout of the freshly-cloned tree and write the restored file
-# to the location the new code will look in.
-echo "Restoring user configuration from backup..."
-USER_CONFIG_SRC=""
-if [ -f "{backup_path}/config/llama_cpp_launcher_configs.json" ]; then
-    USER_CONFIG_SRC="{backup_path}/config/llama_cpp_launcher_configs.json"
-elif [ -f "{backup_path}/llama_cpp_launcher_configs.json" ]; then
-    USER_CONFIG_SRC="{backup_path}/llama_cpp_launcher_configs.json"
-fi
-
-if [ -n "$USER_CONFIG_SRC" ]; then
-    if [ -d "{current_dir}/config" ] && [ -d "{current_dir}/modules" ]; then
-        cp "$USER_CONFIG_SRC" "{current_dir}/config/llama_cpp_launcher_configs.json"
-        echo "  Restored: config/llama_cpp_launcher_configs.json"
-    else
-        cp "$USER_CONFIG_SRC" "{current_dir}/llama_cpp_launcher_configs.json"
-        echo "  Restored: llama_cpp_launcher_configs.json (repo root; will migrate on next launch)"
-    fi
-else
-    echo "  No user configuration found in backup - clean install, nothing to restore."
-fi
-
-echo ""
-echo "=== Update Complete ==="
-echo "New version installed successfully!"
-echo "Backup saved in: {backup_path}"
-echo "User configurations were preserved and restored."
-echo ""
-echo "You can now restart the application."
-echo ""
-read -p "Press Enter to exit..."
-
-# Clean up update script
-rm -f "{current_dir}/update_script.sh"
-"""
-        return script
+        return build_update_script(
+            current_dir=current_dir,
+            backup_path=backup_path,
+            current_version=self.version,
+            remote_version=self.remote_version,
+            github_url=self.github_url,
+            exclusions=exclusions,
+        )
     
     def _get_backup_exclusions(self, current_dir):
-        """Generate find exclusion arguments based on .gitignore patterns."""
-        exclusions = []
-        gitignore_path = current_dir / ".gitignore"
-        
-        # Default exclusions (common patterns)
-        default_exclusions = [
+        """Return a list of raw ``.gitignore``-style exclusion patterns.
+
+        Patterns are returned unquoted and unformatted — the caller
+        (:func:`build_update_script`) is responsible for shell-quoting them
+        when composing the final bash script. Returning raw patterns means
+        a ``.gitignore`` entry containing a single quote (e.g.
+        ``don't_touch/*.tmp``) can't break out of the quoting and malform
+        or inject into the generated update script.
+        """
+        patterns = [
             "__pycache__", "*.pyc", "*.pyo", "*.pyd",
             ".pytest_cache", ".mypy_cache", ".coverage",
             "*.egg-info", ".tox", ".venv", "venv",
-            ".DS_Store", "Thumbs.db", "*.tmp", "*.log"
+            ".DS_Store", "Thumbs.db", "*.tmp", "*.log",
         ]
-        
-        # Add exclusions from .gitignore if it exists
+        gitignore_path = current_dir / ".gitignore"
+
         try:
             if gitignore_path.exists():
                 with open(gitignore_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith('#'):
-                            default_exclusions.append(line)
+                            patterns.append(line)
         except Exception as e:
             print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
-        
-        # Convert to find exclusion arguments
-        for pattern in default_exclusions:
-            if pattern:
-                exclusions.append(f" -o -name '{pattern}' -prune")
-        
-        return "".join(exclusions)
+
+        # Drop any accidentally-empty entries.
+        return [p for p in patterns if p]
     
     def _open_url(self, url):
         """Open URL in the default web browser."""

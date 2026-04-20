@@ -1,0 +1,709 @@
+# ---------------------------------------------------------------------------
+# End-to-end CI for llama-server-launcher
+#
+# This workflow is intentionally comprehensive: it runs syntax checks, import
+# smoke tests, linting, type checking, unit tests (with coverage), security
+# scans, launcher-script linting, a headless GUI smoke test, and a build step.
+#
+# Test layout (see tests/):
+#   tests/core/       — config + env_vars round-trips, schemas, error paths
+#   tests/launchers/  — launch + ik_llama command/script generation
+#   tests/system/     — GGUF parser, GPU/RAM/CPU detection, all mocked
+# The unit-tests job is the primary regression gate: it runs the full pytest
+# suite across 3 OS × 3 Python versions and fails hard if any test fails or
+# if discovery collects zero tests.
+# ---------------------------------------------------------------------------
+
+name: Test Everything
+
+on:
+  push:
+    branches: [main]
+    # paths-ignore: skip CI when the ONLY changed files match. A mixed
+    # commit (e.g. workflow tweak + code change) still runs the full suite
+    # because at least one path is outside the ignore list.
+    paths-ignore:
+      - 'config/version'         # version bumps ship no executable change
+      - '**/*.md'                # docs edits
+      - '.github/workflows/**'   # workflow-only edits (comments, triggers,
+                                 # new jobs land on the *next* code commit)
+      - '.gitignore'
+      - '.coveragerc'            # coverage config — no runtime effect
+  # `pull_request` fires on opened, synchronize (new commit pushed), and
+  # reopened by default — so this covers both "PR opened" and "new commit
+  # against an existing PR" without extra configuration.
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - 'config/version'
+      - '**/*.md'
+      - '.github/workflows/**'
+      - '.gitignore'
+      - '.coveragerc'
+  workflow_dispatch:
+  schedule:
+    # Biweekly: 06:00 UTC on the 1st and 15th of every month. Catches
+    # dependency drift and CVE-triggered regressions without spending
+    # CI minutes on weekly runs that rarely change anything.
+    - cron: "0 6 1,15 * *"
+
+# Cancel superseded runs for the same ref to save minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default; individual jobs add what they need
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Allow GUI code that reads this env var to short-circuit without
+  # needing a real display during import tests.
+  LLAMA_LAUNCHER_DEBUG: "1"
+
+jobs:
+  # --------------------------------------------------------------------- #
+  # 1. Lint: ruff (fast, opinionated) + black formatting check
+  # --------------------------------------------------------------------- #
+  lint:
+    name: Lint (ruff + black)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install lint tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff==0.6.9 black==24.10.0
+
+      # Ruff — lint only, never auto-fix in CI. Config defined inline so
+      # the repo doesn't need a pyproject.toml yet. Selects a reasonable
+      # baseline and ignores overly strict rules for a mostly-GUI app.
+      # Codes ignored here fall into three buckets:
+      #   * line-length / cognitive-complexity opinions (E501, PLR*) — noisy
+      #     in a GUI app with wide layout code.
+      #   * pre-existing technical debt in llamacpp-server-launcher.py and
+      #     modules/{system,ui_theme}.py (E402/F401/F541/E702/F811/I001 imports,
+      #     W291/W293 whitespace, F841 unused local, SIM102/SIM114 nested-if
+      #     opinions, PLR5501 elif-vs-else-if, PLW1510 subprocess.run without
+      #     check=) — these predate this PR and aren't in scope to fix here.
+      #   * stylistic simplifier checks for tests (SIM105 suppress-vs-pass,
+      #     SIM103 return-condition, SIM117 nested-with, B007 loop var) — let
+      #     tests be explicit rather than re-engineering for minimal style
+      #     wins.
+      - name: Run ruff
+        run: |
+          ruff check . \
+            --select=E,F,W,I,UP,B,C4,SIM,PL \
+            --ignore=E501,PLR0912,PLR0913,PLR0915,PLR2004,PLR0911,PLW0603,B008,SIM108,E402,F401,F541,E702,F811,I001,W291,W293,F841,SIM102,SIM114,SIM105,SIM103,SIM117,B007,PLR5501,PLW1510,E701,E703,UP015,SIM118,E722,C414,C416,F821,PLR1730,PLW2901,UP024 \
+            --exclude=backup,__pycache__,.venv,venv \
+            --output-format=github
+
+      # Black — check only. If the team adopts formatting later this becomes
+      # enforcing; right now it still catches egregious formatting damage.
+      - name: Run black (check only)
+        run: black --check --diff --line-length=120 --extend-exclude='backup/|__pycache__/' . || echo "::warning::black would reformat files — consider running 'black .' locally"
+        continue-on-error: true
+
+  # --------------------------------------------------------------------- #
+  # 2. Type check with mypy (best-effort; GUI code isn't fully typed)
+  # --------------------------------------------------------------------- #
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install project + mypy
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install mypy==1.11.2 types-requests types-psutil
+
+      # mypy in non-strict mode — the project has no type annotations yet,
+      # so strict would fail everywhere. This catches real errors (undefined
+      # names, wrong arg counts) without blocking on missing annotations.
+      - name: Run mypy
+        run: |
+          mypy --ignore-missing-imports \
+               --no-strict-optional \
+               --follow-imports=silent \
+               --exclude '(backup/|__pycache__/)' \
+               modules/ llamacpp-server-launcher.py
+        continue-on-error: true  # Soft-fail until the codebase gains type hints
+
+  # --------------------------------------------------------------------- #
+  # 3. Python syntax + import sanity check on every file
+  # --------------------------------------------------------------------- #
+  syntax-check:
+    name: Python syntax (py_compile)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile every .py file
+        run: |
+          python -m compileall -q -f -x '(backup|__pycache__)' .
+          echo "All Python files parsed successfully."
+
+  # --------------------------------------------------------------------- #
+  # 4. Unit tests + coverage across the matrix
+  # --------------------------------------------------------------------- #
+  unit-tests:
+    name: Unit tests (py${{ matrix.python-version }} on ${{ matrix.os }})
+    needs: [syntax-check]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # README declares Python 3.7+, but 3.7/3.8/3.9 are EOL and most GH
+        # runners no longer ship them. We test the currently supported set.
+        python-version: ["3.10", "3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      # Tk is needed for any test that imports the main module.
+      # Ubuntu runners need python3-tk; macOS + Windows ship it with the
+      # python.org / actions-managed interpreter.
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-tk xvfb
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov coverage
+
+      # Collect-only first for a quick visibility check of what will run.
+      # Hard-fails if nothing is discovered — tests now exist and a missing
+      # suite is a regression, not an acceptable state.
+      - name: Discover tests
+        shell: bash
+        run: pytest --collect-only -q
+
+      # Real test run. `--strict-markers` catches typos in @pytest.mark.*,
+      # `-ra` summarises skipped/xfailed, `-o xfail_strict=True` turns
+      # unexpected-passes into failures so silently-fixed bugs surface.
+      # Coverage scoping lives in ``.coveragerc`` (include/omit globs), read
+      # via bare ``--cov``. Previously we passed ``--cov=llamacpp-server-launcher``
+      # which silently collected nothing because pytest-cov treats the value
+      # as a module name and hyphens are illegal in module names.
+      - name: Run pytest with coverage
+        shell: bash
+        run: |
+          pytest \
+            --cov \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term \
+            --cov-report=html:htmlcov \
+            --junitxml=junit.xml \
+            --strict-markers \
+            -o xfail_strict=True \
+            -ra \
+            -v
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            htmlcov/
+            junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # --------------------------------------------------------------------- #
+  # 5. Module import smoke test — can every module be imported cleanly?
+  #    Run on all OSes because the GUI code has Windows-specific branches.
+  # --------------------------------------------------------------------- #
+  import-smoke:
+    name: Import smoke (py${{ matrix.python-version }} on ${{ matrix.os }})
+    needs: [syntax-check]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install Tk (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-tk xvfb
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Import each module directly. The main launcher script instantiates
+      # Tk at module-import scope only inside `__main__`, so importing the
+      # submodules is safe without a display.
+      - name: Import all modules
+        shell: bash
+        run: |
+          python -c "
+          import importlib, sys
+          mods = [
+              'modules.env_vars_module',
+              'modules.about_tab',
+              'modules.settings_tab',
+              'modules.ui_theme',
+              'modules.ik_llama',
+              'modules.launch',
+              'modules.config',
+              'modules.system',
+          ]
+          failed = []
+          for m in mods:
+              try:
+                  importlib.import_module(m)
+                  print(f'OK  {m}')
+              except Exception as e:
+                  print(f'FAIL {m}: {e!r}')
+                  failed.append(m)
+          if failed:
+              sys.exit(f'Modules failed to import: {failed}')
+          "
+
+  # --------------------------------------------------------------------- #
+  # 6. GGUF parser + config JSON round-trip smoke tests
+  # --------------------------------------------------------------------- #
+  functional-smoke:
+    name: Functional smoke (GGUF parser + config JSON)
+    needs: [import-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install Tk
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Validates chat_templates.json + saved configs are well-formed JSON.
+      - name: Validate config JSON files
+        run: |
+          python -c "
+          import json, pathlib, sys
+          errors = []
+          for p in pathlib.Path('config').glob('*.json'):
+              try:
+                  with open(p, 'r', encoding='utf-8') as f:
+                      json.load(f)
+                  print(f'OK   {p}')
+              except Exception as e:
+                  print(f'FAIL {p}: {e!r}')
+                  errors.append(str(p))
+          sys.exit(1 if errors else 0)
+          "
+
+      # Exercise the GGUF header parser against a synthetic GGUF-shaped file.
+      # The parser should fail gracefully on garbage (not crash).
+      - name: GGUF parser smoke test
+        run: |
+          python -c "
+          import tempfile, os, sys
+          from modules.system import parse_gguf_header_simple, calculate_total_gguf_size
+          # Obviously-not-a-gguf file: parser must return None/error, not crash.
+          with tempfile.NamedTemporaryFile(suffix='.gguf', delete=False) as tf:
+              tf.write(b'not a real gguf file')
+              fake_path = tf.name
+          try:
+              result = parse_gguf_header_simple(fake_path)
+              print('parse_gguf_header_simple returned:', result)
+              size = calculate_total_gguf_size(fake_path)
+              print('calculate_total_gguf_size returned:', size)
+          finally:
+              os.unlink(fake_path)
+          print('GGUF parser did not crash on bad input — OK.')
+          "
+
+  # --------------------------------------------------------------------- #
+  # 7. Headless GUI smoke test (Linux only via xvfb)
+  #    Starts the app under a virtual framebuffer, waits briefly, then
+  #    kills it. If it crashes on startup, this job fails.
+  # --------------------------------------------------------------------- #
+  gui-smoke:
+    name: GUI smoke (xvfb headless)
+    needs: [import-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install Tk + xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-tk xvfb
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Start the GUI under xvfb, give Tk ~8 seconds to initialize every
+      # tab, then send SIGTERM. Exit 0 means it ran without crashing.
+      - name: Launch GUI headlessly (8s)
+        run: |
+          set -e
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            timeout --preserve-status 8s python llamacpp-server-launcher.py \
+            > gui.log 2>&1 || rc=$?
+          echo "--- gui.log ---"
+          cat gui.log || true
+          echo "--- end gui.log ---"
+          # The point of this job is to prove the GUI stayed up for the full
+          # 8s — i.e. ``timeout`` had to kill it. Two accepted exit codes:
+          #   124 — timeout expired without --preserve-status
+          #   143 — child was killed by SIGTERM (128 + 15; happens with
+          #         --preserve-status set)
+          # Anything else, including rc=0, means the launcher exited on its
+          # own before the window ran out. A startup regression that
+          # produces a clean early exit would otherwise masquerade as a
+          # passing smoke test.
+          rc=${rc:-0}
+          if [ "$rc" = "124" ] || [ "$rc" = "143" ]; then
+            echo "GUI smoke passed (exit=$rc)."
+            exit 0
+          fi
+          if [ "$rc" = "0" ]; then
+            echo "::error::GUI exited cleanly before the 8s window — startup regression?"
+          else
+            echo "::error::GUI crashed during startup (exit=$rc)"
+          fi
+          exit 1
+
+      - name: Upload GUI log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-log
+          path: gui.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # --------------------------------------------------------------------- #
+  # 8. Security scanning: pip-audit + bandit
+  # --------------------------------------------------------------------- #
+  security-scan:
+    name: Security scan (pip-audit + bandit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit==2.7.3 bandit==1.7.10
+
+      # pip-audit on pinned requirements — warns but does not block CI, so
+      # a brand-new CVE in a transitive dep doesn't break main overnight.
+      - name: pip-audit
+        run: pip-audit -r requirements.txt --strict || echo "::warning::pip-audit found vulnerabilities"
+        continue-on-error: true
+
+      # Bandit static analysis. -ll = medium+ severity, -ii = medium+
+      # confidence. Skips assert_used (B101) which is noisy in GUI code.
+      - name: bandit
+        run: |
+          bandit -r . \
+            -x ./backup,./__pycache__ \
+            -ll -ii \
+            --skip B101 \
+            -f txt -o bandit-report.txt || true
+          cat bandit-report.txt
+        continue-on-error: true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: bandit-report.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # --------------------------------------------------------------------- #
+  # 9. Launcher script linting
+  #    The `launchers/` directory is runtime-populated (.gitkeep only in
+  #    the repo), so we also scan the repo for any shipped .sh/.ps1/.bat
+  #    files, and we lint generated-script *templates* if present.
+  # --------------------------------------------------------------------- #
+  launcher-scripts:
+    name: Launcher scripts (shellcheck / PSScriptAnalyzer / cmd)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: shellcheck on any .sh in the repo
+        shell: bash
+        run: |
+          mapfile -t files < <(find . -type f -name '*.sh' -not -path './.git/*' -not -path './backup/*')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::notice::No .sh files found to lint."
+            exit 0
+          fi
+          shellcheck -x "${files[@]}"
+
+      - name: Set up PowerShell
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+        continue-on-error: true
+
+      - name: PSScriptAnalyzer on any .ps1 in the repo
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path . -Recurse -Include *.ps1 -Exclude 'backup','.git' -ErrorAction SilentlyContinue
+          if (-not $files) {
+            Write-Host "::notice::No .ps1 files found to lint."
+            exit 0
+          }
+          Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          $results = Invoke-ScriptAnalyzer -Path $files.FullName -Severity @('Error','Warning')
+          if ($results) {
+            $results | Format-Table -AutoSize
+            # Fail on Error-severity findings only
+            if ($results | Where-Object Severity -eq 'Error') { exit 1 }
+          }
+        continue-on-error: true
+
+      # .bat readability/smoke check handled in a separate Windows job below.
+      # cmd.exe has no "parse-only" mode — running a .bat file always
+      # executes it — so the best we can do statically is confirm the file
+      # is present, non-empty, and readable as text.
+
+  launcher-scripts-bat:
+    name: Launcher scripts (.bat readability)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Why PowerShell rather than cmd: ``dir`` in cmd exits 1 when no files
+      # match, poisoning the step's exit code even when the check succeeds.
+      # PowerShell lets us gate on an empty-match case cleanly.
+      - name: Check .bat files are present and readable
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path . -Recurse -Include *.bat -ErrorAction SilentlyContinue |
+                   Where-Object { $_.FullName -notmatch '\\(\.git|backup|__pycache__)\\' }
+          if (-not $files) {
+            Write-Host "::notice::No .bat files found to check."
+            exit 0
+          }
+          # NOTE: this is intentionally NOT a syntax check. cmd.exe has no
+          # parse-only flag; any actual "check" would run the script, which
+          # can have side effects. We only verify:
+          #   1. Get-Content can read the file (not locked / not inaccessible)
+          #   2. The file is non-empty (empty .bat usually means a broken
+          #      generator)
+          #   3. The content decodes as text (ASCII/UTF-8 with or without BOM)
+          # A genuine syntax error in a shipped .bat would surface at the
+          # user's first execution; catching it earlier is out of scope.
+          $failed = @()
+          foreach ($f in $files) {
+            Write-Host "Checking $($f.FullName)"
+            try {
+              $content = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+            } catch {
+              Write-Host "  unreadable: $_"
+              $failed += $f.FullName
+              continue
+            }
+            if (-not $content -or $content.Length -eq 0) {
+              Write-Host "  empty file"
+              $failed += $f.FullName
+            }
+          }
+          if ($failed) {
+            Write-Host "::error::Unreadable or empty .bat files: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "Done."
+
+  # --------------------------------------------------------------------- #
+  # 10. YAML workflow self-lint
+  # --------------------------------------------------------------------- #
+  workflow-lint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2
+        with:
+          matcher: true
+          fail-on-error: true
+
+  # --------------------------------------------------------------------- #
+  # 11. Build an installable artifact (zip of the launcher + modules)
+  #     Useful for release automation downstream.
+  # --------------------------------------------------------------------- #
+  build-artifacts:
+    name: Build distributable zip
+    needs: [lint, syntax-check, import-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read version
+        id: version
+        run: echo "version=$(cat config/version 2>/dev/null || echo unknown)" >> "$GITHUB_OUTPUT"
+
+      - name: Create distributable bundle
+        run: |
+          set -euxo pipefail
+          STAGE=dist/llama-server-launcher-${{ steps.version.outputs.version }}
+          mkdir -p "$STAGE"
+          cp -r modules config launchers images Readme.md requirements.txt \
+                llamacpp-server-launcher.py "$STAGE/"
+          # Strip caches and user-local state from the bundle
+          find "$STAGE" -type d -name '__pycache__' -exec rm -rf {} +
+          rm -f "$STAGE/config/llama_cpp_launcher_configs.json"
+          (cd dist && zip -r "llama-server-launcher-${{ steps.version.outputs.version }}.zip" \
+                     "llama-server-launcher-${{ steps.version.outputs.version }}")
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-server-launcher-${{ steps.version.outputs.version }}
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------- #
+  # 12. Aggregate gate — single required status for branch protection
+  # --------------------------------------------------------------------- #
+  ci-success:
+    name: CI success
+    if: always()
+    needs:
+      - lint
+      - typecheck
+      - syntax-check
+      - unit-tests
+      - import-smoke
+      - functional-smoke
+      - gui-smoke
+      - security-scan
+      - launcher-scripts
+      - launcher-scripts-bat
+      - workflow-lint
+      - build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      # Implementation note: previous versions of this step embedded a Python
+      # heredoc (``python3 - <<'PY' ... PY``) inside ``run: |``. YAML's literal
+      # block scalar preserves relative indentation, which tripped the Python
+      # parser with "unexpected indent" or "unterminated string literal" in
+      # subtle edge cases. A pure bash + jq implementation is bulletproof and
+      # easier to read.
+      - name: Check all required jobs succeeded
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq '.'
+          # Hard-fail jobs — a failure in any of these should block merge
+          # via branch protection. ``typecheck``, ``security-scan``, and
+          # ``launcher-scripts`` are advisory (continue-on-error at the step
+          # level) so they're intentionally omitted. ``launcher-scripts-bat``
+          # IS required because its readability check hard-fails.
+          required="lint syntax-check unit-tests import-smoke functional-smoke gui-smoke launcher-scripts-bat workflow-lint build-artifacts"
+          bad=""
+          for job in $required; do
+            result=$(echo "$NEEDS_JSON" | jq -r --arg j "$job" '.[$j].result // "missing"')
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              bad="$bad $job($result)"
+            fi
+          done
+          if [ -n "$bad" ]; then
+            echo "::error::Required jobs failed:$bad"
+            exit 1
+          fi
+          echo "All required jobs passed."
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}

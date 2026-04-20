@@ -414,6 +414,69 @@ class LaunchManager:
         else:
             return ["llama-server", "ik-llama-server", "ik_llama_server"]
 
+    @staticmethod
+    def _ps_escape_double_quoted(s):
+        """Escape a string so it is safe inside a PowerShell double-quoted literal.
+
+        In PowerShell double-quoted strings the backtick is the escape character
+        (``\\`` → `` ` ``) and a literal double quote is written as `` `" ``. So
+        backticks must be escaped FIRST, then double quotes — otherwise the
+        backtick we inject to escape `"` gets double-escaped by the second pass
+        and emerges as `` `` `` (literal backtick) plus an unescaped `"`, which
+        prematurely terminates the string.
+        """
+        return s.replace('`', '``').replace('"', '`"')
+
+    @staticmethod
+    def _ps_quote_arg(arg):
+        """Quote a single command-line argument for a PowerShell command line.
+
+        Uses double quotes and escapes internal double quotes by doubling them
+        (the convention PS expects when an arg is passed to a native exe), and
+        escapes backticks by doubling them first so they don't double-escape
+        into literal backticks.
+        """
+        escaped = arg.replace('`', '``').replace('"', '""')
+        return f'"{escaped}"'
+
+    def _build_ps_cmd_parts(self, cmd_list):
+        """Build a list of PowerShell-quoted command tokens from ``cmd_list``.
+
+        The first element is treated as the executable path and rendered with
+        ``& "..."``. ``--chat-template`` followed by its value is single-quoted
+        (with embedded single quotes doubled) so that backslashes, ``$``, ``
+        ``` ``, etc. in the Jinja template are preserved verbatim.
+
+        Any malformed ``--chat-template`` (missing value) raises ``ValueError``
+        to signal the caller; upstream ``build_cmd`` is expected to have
+        validated this already.
+        """
+        if not cmd_list:
+            raise ValueError("cmd_list is empty")
+
+        parts = []
+        exe_posix = str(Path(cmd_list[0]).resolve().as_posix())
+        parts.append(f'& "{self._ps_escape_double_quoted(exe_posix)}"')
+
+        i = 1
+        while i < len(cmd_list):
+            current = cmd_list[i]
+            if current == "--chat-template":
+                if i + 1 >= len(cmd_list):
+                    raise ValueError(
+                        "Malformed cmd_list: --chat-template flag has no value"
+                    )
+                template_string = cmd_list[i + 1]
+                escaped_template = template_string.replace("'", "''")
+                parts.append("--chat-template")
+                parts.append(f"'{escaped_template}'")
+                i += 2
+            else:
+                parts.append(self._ps_quote_arg(current))
+                i += 1
+
+        return parts
+
     def add_arg(self, cmd_list, arg_name, value, default_value=None):
         """
         Adds argument to cmd list if its value is non-empty or, if a default is given,
@@ -547,12 +610,11 @@ class LaunchManager:
                         # Use dot-sourcing (. .\path\to\Activate.ps1) to activate in the current shell
                         # Format path with forward slashes for PowerShell compatibility and quote it
                         ps_act_path = str(act_script.as_posix())
-                        # Use single quotes for the path itself in the script if it contains spaces/special chars
-                        # For dot sourcing, path must be quoted if it contains spaces or special chars
-                        # A simpler approach might be using double quotes with escaping if needed
-                        # Let's stick to robust double quoting for the path
-                        escaped_ps_act_path = ps_act_path.replace('"', '`"').replace('`', '``')
-                        quoted_ps_act_path = f'"{escaped_ps_act_path}"' # Escape double quotes and backticks
+                        # Escape backticks FIRST, then double-quotes. Doing it in the
+                        # other order double-escapes any backtick inserted during the
+                        # quote replacement (turning `" into ``", which PS parses as
+                        # a literal backtick followed by an unescaped quote).
+                        quoted_ps_act_path = f'"{self._ps_escape_double_quoted(ps_act_path)}"'
 
                         f.write(f'Write-Host "Activating virtual environment: {venv_path_str}" -ForegroundColor Cyan\n')
                         # Use try/catch to report activation errors but continue
@@ -561,77 +623,19 @@ class LaunchManager:
                     f.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
                     # --- Build the command string for PowerShell using appropriate quoting ---
-                    # Join the cmd_list parts with spaces, and then quote each part individually for PowerShell
-                    # This handles parameters like --arg "value with spaces" correctly after shlex.split
-                    ps_cmd_parts = []
-                    # First argument is the executable path, handle specially with '&'.
-                    exe_path_obj = Path(cmd_list[0]).resolve() # Resolve path for robustness
-                    # Format path with forward slashes and quote it for PowerShell
-                    # Escape internal quotes and backticks for safety within the string literal passed to PowerShell
-                    quoted_exe_path_ps = str(exe_path_obj.as_posix()).replace('"', '`"').replace('`', '``')
-                    ps_cmd_parts.append(f'& "{quoted_exe_path_ps}"') # Use double quotes for the path
-
-                    # Process remaining arguments (from cmd_list, already includes custom params)
-                    # For each argument in cmd_list (after the executable), quote it for PowerShell
-                    # Use double quotes by default, escaping internal quotes and backticks
-                    # Special case --chat-template needs value in single quotes.
-                    for arg in cmd_list[1:]:
-                         if arg == "--chat-template" and len(cmd_list) > cmd_list.index("--chat-template") + 1:
-                             # This check is a bit redundant as build_cmd should ensure a value exists,
-                             # but defensive coding is good. Need to find the *next* argument in cmd_list.
-                             # Find index of the flag and get the next element
-                             try:
-                                 flag_index = cmd_list.index("--chat-template")
-                                 if flag_index + 1 < len(cmd_list):
-                                     template_string = cmd_list[flag_index + 1]
-                                     # Escape internal single quotes by doubling them (' becomes '')
-                                     escaped_template_string = template_string.replace("'", "''")
-                                     # Enclose the *entire* escaped template string in single quotes (') for the final PS command string
-                                     quoted_template_arg = f"'{escaped_template_string}'"
-
-                                     ps_cmd_parts.append("--chat-template")
-                                     ps_cmd_parts.append(quoted_template_arg)
-                                     # Need to skip the *next* element in the loop's iteration
-                                     # A simple loop like this is tricky. Let's reconstruct differently.
-
-                                     # Reworking the loop structure to handle pairs like --chat-template
-                                     # Re-initialize ps_cmd_parts and loop index
-                                     ps_cmd_parts = []
-                                     ps_cmd_parts.append(f'& "{quoted_exe_path_ps}"') # Add executable again
-
-                                     i = 1 # Start index after the executable
-                                     while i < len(cmd_list):
-                                         current_arg = cmd_list[i]
-                                         if current_arg == "--chat-template" and i + 1 < len(cmd_list):
-                                              template_string = cmd_list[i+1]
-                                              escaped_template_string = template_string.replace("'", "''")
-                                              quoted_template_arg = f"'{escaped_template_string}'"
-                                              ps_cmd_parts.append("--chat-template")
-                                              ps_cmd_parts.append(quoted_template_arg)
-                                              i += 2 # Skip both flag and value
-                                         else:
-                                              # Standard quoting for other args - fixed for KDE Konsole
-                                              # Separate the string operations to avoid complex escaping
-                                              escaped_arg = current_arg.replace('"', '""')
-                                              escaped_arg = escaped_arg.replace('`', '``')
-                                              quoted_arg = f'"{escaped_arg}"'
-                                              ps_cmd_parts.append(quoted_arg)
-                                              i += 1
-                                     break # Exit this inner while loop once reconstructed
-
-                             except ValueError: # --chat-template not found, should not happen here
-                                 pass # Continue with the original loop if this somehow occurs
-
-                         else:
-                             # Standard quoting for other args - fixed for KDE Konsole
-                             # Separate the string operations to avoid complex escaping
-                             escaped_arg = arg.replace('"', '""')
-                             escaped_arg = escaped_arg.replace('`', '``')
-                             quoted_arg = f'"{escaped_arg}"'
-                             ps_cmd_parts.append(quoted_arg)
-
-                    # After processing all args, write the final command string
-                    f.write(" ".join(ps_cmd_parts) + "\n\n") # Join all parts and write
+                    try:
+                        ps_cmd_parts = self._build_ps_cmd_parts(cmd_list)
+                    except ValueError as ve:
+                        messagebox.showerror(
+                            "Launch Error",
+                            f"Internal error building launch command: {ve}"
+                        )
+                        print(f"ERROR: {ve}", file=sys.stderr)
+                        if tmp_path is not None:
+                            try: Path(tmp_path).unlink()
+                            except OSError: pass
+                        return
+                    f.write(" ".join(ps_cmd_parts) + "\n\n")
 
                     # Add error check after the command in case llama-server returns a non-zero exit code
                     # Check $LASTEXITCODE, not global:LASTEXITCODE for the server process itself
@@ -667,17 +671,6 @@ class LaunchManager:
                 quoted_cmd_parts = [shlex.quote(arg) for arg in cmd_list]
                 server_command_str = " ".join(quoted_cmd_parts)
 
-                # Check if stdout is connected to a terminal (-t 1)
-                # Use 'read -r' to prevent backslash interpretation
-                # Use || true to make the read command succeed even if cancelled (like Ctrl+C)
-                # Combine commands with '&&' so pause only happens if server command succeeds (or detaches)
-                # Let's add a check for the last command's exit status ($?) and only pause on non-zero exit or if run interactively
-                # bash pause: read -p "Press Enter to close..." -r || true
-                # Combined bash script with error check and pause:
-                # `command ; exit_status=$? ; if [ -t 1 ] || [ $exit_status -ne 0 ]; then read -rp "Press Enter to close..." ; fi ; exit $exit_status`
-                # Or simpler: `command ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status`
-                # Using </dev/tty ensures read prompts even if stdout is redirected.
-
                 if use_venv:
                     venv_path = Path(venv_path_str).resolve()
                     act_script = venv_path / "bin" / "activate"
@@ -685,43 +678,66 @@ class LaunchManager:
                         messagebox.showerror("Error", f"Venv activation script not found:\n{act_script}")
                         return # Exit the launch process
 
-                    # Build the core command that will be sourced
-                    # Remove the extra quoting since we're passing the command directly
-                    full_script_content = f'source {str(act_script)} && echo "Virtual environment activated." && echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
+                # --- Build the bash script content as an ordered list of commands
+                # chained with ' && ', then append the server launch + pause trailer
+                # with ';' so the trailer runs even if the server exits non-zero.
+                # Building as a list avoids brittle .replace() surgery on literal
+                # markers that could collide with user-supplied paths.
+                commands = []
 
-                else: # No venv
-                    full_script_content = f'echo "Launching server..." && {server_command_str} ; command_status=$? ; if [[ -t 1 || $command_status -ne 0 ]]; then read -rp "Press Enter to close..." </dev/tty ; fi ; exit $command_status'
+                if use_venv:
+                    # ``act_script`` was validated above.
+                    commands.append(f'source {shlex.quote(str(act_script))}')
+                    commands.append('echo "Virtual environment activated."')
 
-                # --- CUDA_VISIBLE_DEVICES and Environmental Variables for Linux/macOS (Bash) ---
-                # Add export statements *before* the main command in the bash script
-                # This should happen *after* venv activation if used.
-                env_commands = []
+                # CUDA_DEVICE_ORDER is always set for consistent PCIe ordering
+                commands.append('export CUDA_DEVICE_ORDER=PCI_BUS_ID')
 
-                # Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering (matches nvidia-smi)
-                env_commands.append('export CUDA_DEVICE_ORDER=PCI_BUS_ID')
-
-                # Add CUDA_VISIBLE_DEVICES
                 if cuda_devices_value:
-                    env_commands.append(f'export CUDA_VISIBLE_DEVICES={cuda_devices_value}')
-                    env_commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
+                    commands.append(f'export CUDA_VISIBLE_DEVICES={cuda_devices_value}')
+                    commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
 
-                # Add environmental variables
                 env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
                 if env_vars:
-                    env_commands.append('echo "Setting environmental variables..."')
+                    commands.append('echo "Setting environmental variables..."')
                     for var_name, var_value in env_vars.items():
-                        env_commands.append(f'export {var_name}="{var_value}"')
+                        # Escape the four metacharacters that bash processes
+                        # inside a ``"..."`` string: ``\``, ``"``, ``$``, and
+                        # backtick. Order matters — backslash first so the
+                        # backslashes we add for the other three don't get
+                        # doubled again on a second pass.
+                        #
+                        # Embedded newlines / carriage returns are deliberately
+                        # NOT escaped: bash double-quoted strings allow literal
+                        # newlines in the value, so ``export VAR="foo<NL>bar"``
+                        # is syntactically valid and round-trips the user's
+                        # multi-line value intact. Replacing ``\n`` with ``\\n``
+                        # would corrupt the value because bash ``""`` does not
+                        # process ``\n`` as a newline escape — the user would
+                        # see a literal two-character ``\n`` in their env var.
+                        # See tests/launchers/test_shell_safety.py
+                        # ``TestEnvVarExportEscaping`` for the regression.
+                        escaped_value = (
+                            var_value.replace('\\', '\\\\')
+                                     .replace('"', '\\"')
+                                     .replace('$', '\\$')
+                                     .replace('`', '\\`')
+                        )
+                        commands.append(f'export {var_name}="{escaped_value}"')
 
-                # Combine environment commands into a single string
-                env_line = ""
-                if env_commands:
-                    env_line = " && ".join(env_commands) + " && "
+                commands.append('echo "Launching server..."')
+                commands.append(server_command_str)
 
-                # Insert the environment line after venv activation if used
-                if use_venv and env_line:
-                    full_script_content = full_script_content.replace('echo "Virtual environment activated." && ', 'echo "Virtual environment activated." && ' + env_line)
-                elif env_line:
-                    full_script_content = env_line + full_script_content
+                # The launcher command is joined with ' && ' for fail-fast. After it,
+                # attach the exit-status capture + pause trailer with ';'.
+                # Using </dev/tty ensures read prompts even if stdout is redirected.
+                pause_trailer = (
+                    ' ; command_status=$? ; '
+                    'if [[ -t 1 || $command_status -ne 0 ]]; then '
+                    'read -rp "Press Enter to close..." </dev/tty ; fi ; '
+                    'exit $command_status'
+                )
+                full_script_content = " && ".join(commands) + pause_trailer
 
                 # Attempt to launch in a new terminal window
                 # Use 'bash -c' to execute the command string.
@@ -915,9 +931,7 @@ class LaunchManager:
                             # Use literal path syntax for PowerShell activation script source
                             # Ensure path is correctly formatted for PowerShell ('/' separators often work better)
                             ps_act_path = str(act_script.as_posix())
-                            # Quote path using double quotes and escape internal quotes/backticks
-                            escaped_ps_act_path = ps_act_path.replace('"', '`"').replace('`', '``')
-                            quoted_ps_act_path = f'"{escaped_ps_act_path}"'
+                            quoted_ps_act_path = f'"{self._ps_escape_double_quoted(ps_act_path)}"'
 
                             fh.write(f'Write-Host "Activating virtual environment: {venv}" -ForegroundColor Cyan\n')
                             # Use 'try/catch' to report activation errors but continue if not critical
@@ -938,35 +952,16 @@ class LaunchManager:
                 fh.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
                 # --- Build the command string for PowerShell using appropriate quoting ---
-                # Similar logic as launch_server for Windows
-                ps_cmd_parts = []
-                # First argument is the executable path, handle specially with '&'.
-                exe_path_obj = Path(cmd_list[0]).resolve() # Resolve path for reliability.
-                # Format path with forward slashes for PowerShell compatibility
-                # Also escape internal quotes and backticks for safety within the string literal
-                quoted_exe_path_ps = str(exe_path_obj.as_posix()).replace('"', '`"').replace('`', '``')
-                ps_cmd_parts.append(f'& "{quoted_exe_path_ps}"') # Still use double quotes here as it's a path
-
-                # Process remaining arguments (from cmd_list, already includes custom params)
-                # Reworking the loop structure to handle pairs like --chat-template
-                i = 1 # Start index after the executable
-                while i < len(cmd_list):
-                    current_arg = cmd_list[i]
-                    if current_arg == "--chat-template" and i + 1 < len(cmd_list):
-                         template_string = cmd_list[i+1]
-                         escaped_template_string = template_string.replace("'", "''")
-                         quoted_template_arg = f"'{escaped_template_string}'"
-                         ps_cmd_parts.append("--chat-template")
-                         ps_cmd_parts.append(quoted_template_arg)
-                         i += 2 # Skip both flag and value
-                    else:
-                         # Standard quoting for other args
-                         escaped_arg = current_arg.replace('"', '""').replace('`', '``')
-                         quoted_arg = f'"{escaped_arg}"'
-                         ps_cmd_parts.append(quoted_arg)
-                         i += 1
-
-                fh.write(" ".join(ps_cmd_parts) + "\n\n") # Join all parts and write
+                try:
+                    ps_cmd_parts = self._build_ps_cmd_parts(cmd_list)
+                except ValueError as ve:
+                    messagebox.showerror(
+                        "Script Save Error",
+                        f"Internal error building command: {ve}"
+                    )
+                    print(f"ERROR: {ve}", file=sys.stderr)
+                    return
+                fh.write(" ".join(ps_cmd_parts) + "\n\n")
 
                 # Check for non-zero exit code after the command
                 # Check $LASTEXITCODE, not global:LASTEXITCODE for the server process itself
@@ -1051,8 +1046,19 @@ class LaunchManager:
                 if env_vars:
                     fh.write('echo "Setting environmental variables..."\n')
                     for var_name, var_value in env_vars.items():
-                        # Escape shell special characters in the value
-                        escaped_value = var_value.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+                        # Escape the four metacharacters bash processes inside
+                        # ``"..."``: backslash FIRST (so the backslashes we
+                        # insert for the rest don't get doubled), then ``"``,
+                        # ``$``, and backtick. Newlines deliberately pass
+                        # through — see the matching block in launch_server()
+                        # and tests/launchers/test_shell_safety.py
+                        # ``TestEnvVarExportEscaping``.
+                        escaped_value = (
+                            var_value.replace('\\', '\\\\')
+                                     .replace('"', '\\"')
+                                     .replace('$', '\\$')
+                                     .replace('`', '\\`')
+                        )
                         fh.write(f'export {var_name}="{escaped_value}"\n')
                     fh.write('\n')
 
