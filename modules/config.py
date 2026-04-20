@@ -827,6 +827,24 @@ class ConfigManager:
             if not isinstance(self.launcher.app_settings.get("gpu_order"), list):
                  self.launcher.app_settings["gpu_order"] = []
 
+            # UI appearance settings — coerce to expected types so stray edits don't crash startup
+            if self.launcher.app_settings.get("ui_theme_mode") not in ("auto", "light", "dark", "specific"):
+                self.launcher.app_settings["ui_theme_mode"] = "auto"
+            if not isinstance(self.launcher.app_settings.get("ui_theme_name"), str):
+                self.launcher.app_settings["ui_theme_name"] = ""
+            if not isinstance(self.launcher.app_settings.get("ui_font_family"), str):
+                self.launcher.app_settings["ui_font_family"] = ""
+            # Clamp to the same 0..31 range the Settings tab enforces, so a
+            # hand-edited value like 200 can't rescale every named Tk font at
+            # startup and wedge the UI before the user can reach the tab.
+            try:
+                font_size = int(self.launcher.app_settings.get("ui_font_size", 0) or 0)
+                self.launcher.app_settings["ui_font_size"] = font_size if 0 <= font_size < 32 else 0
+            except (TypeError, ValueError):
+                self.launcher.app_settings["ui_font_size"] = 0
+            # ui_scaling was removed — strip any leftover key so old configs don't carry it forward
+            self.launcher.app_settings.pop("ui_scaling", None)
+
             # Filter selected_gpus to only include indices of currently detected GPUs
             valid_gpu_indices = {gpu['id'] for gpu in self.launcher.detected_gpu_devices}
             self.launcher.app_settings["selected_gpus"] = [idx for idx in self.launcher.app_settings["selected_gpus"] if idx in valid_gpu_indices]
@@ -874,7 +892,9 @@ class ConfigManager:
                 "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
                 "selected_mmproj_path": "",
                 "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "gpu_order": [], "custom_parameters": [],
-                "host": "127.0.0.1", "port": "8080"  # Add default network settings
+                "host": "127.0.0.1", "port": "8080",  # Add default network settings
+                "ui_theme_mode": "auto", "ui_theme_name": "",
+                "ui_font_family": "", "ui_font_size": 0,
             }
             self.launcher.saved_configs = {}
             self.launcher.custom_parameters_list = [] # Reset internal list
