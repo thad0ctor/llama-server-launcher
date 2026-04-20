@@ -9,6 +9,11 @@ import ctypes
 import struct
 from pathlib import Path
 
+# Set CUDA device ordering before importing torch or touching CUDA state.
+# Otherwise the launcher UI can detect one GPU order while launch scripts use
+# PCIe order, causing selected indices to point at the wrong physical cards.
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+
 # Add debug prints for Python environment
 print("\n=== Python Environment Debug Info ===", file=sys.stderr)
 print(f"Python executable: {sys.executable}", file=sys.stderr)
