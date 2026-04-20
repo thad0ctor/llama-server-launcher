@@ -1040,7 +1040,7 @@ class LlamaCppLauncher:
 
         gpu_layers_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Slider range updates with model analysis.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Manual Model Entry (when analysis fails) ---
@@ -2319,16 +2319,22 @@ class LlamaCppLauncher:
              # The entry remains enabled and the user can still manually set GPU layers
 
         else: # Analysis succeeded, layers found (n_layers > 0)
-            self.max_gpu_layers.set(n_layers)
-            self.gpu_layers_status_var.set(f"Max Layers: {n_layers}")
+            # llama.cpp's --n-gpu-layers counts repeating blocks + 1 output layer
+            # (final norm + lm_head). GGUF `block_count` only covers the repeating
+            # blocks, so full offload requires block_count + 1. Without the +1,
+            # sliding to the max leaves the output layer on CPU (server reports
+            # "offloaded N/N+1 layers").
+            max_offloadable = n_layers + 1
+            self.max_gpu_layers.set(max_offloadable)
+            self.gpu_layers_status_var.set(f"Max Layers: {max_offloadable} ({n_layers} blocks + output)")
             if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
-                self.gpu_layers_slider.config(to=n_layers, state=tk.NORMAL) # Enable slider
+                self.gpu_layers_slider.config(to=max_offloadable, state=tk.NORMAL) # Enable slider
 
             # If tensor split is not blank, set max layers to the maximum quantity instead of defaulting to 0
             tensor_split_val = self.tensor_split.get().strip()
             if tensor_split_val and self.n_gpu_layers.get().strip() in ["0", ""]:
                 # Set to max layers (show actual number instead of -1)
-                self.n_gpu_layers.set(str(n_layers))
+                self.n_gpu_layers.set(str(max_offloadable))
 
             # Sync the controls based on the *current* value in the n_gpu_layers StringVar
             # This will set the slider and potentially update the entry format (-1 vs number)
