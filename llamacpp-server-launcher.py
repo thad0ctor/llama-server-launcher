@@ -2012,18 +2012,17 @@ class LlamaCppLauncher:
                 return []
 
             model_dir = model_path.parent
-            model_name = model_path.name
-            model_stem = model_path.stem.lower()
-            base_model_stem = model_stem
-
-            # Strip common multipart and quant suffix patterns to improve matching.
-            multipart_patterns = [
-                r"-\d{5}-of-\d{5}$",
-                r"\.part\d+of\d+$",
-            ]
-            for pattern in multipart_patterns:
-                base_model_stem = re.sub(pattern, "", base_model_stem, flags=re.I)
-            base_model_stem = re.sub(r"[-_.](q\d+.*|iq\d+.*|bf16.*|f16.*)$", "", base_model_stem, flags=re.I)
+            # Normalize multipart suffixes on the full name before stripping .gguf, because
+            # Path.stem on foo.gguf.part01of12 returns "foo.gguf" and leaves .gguf embedded
+            # in later matches, weakening scoring against mmproj candidates.
+            normalized_name = model_path.name.lower()
+            for pattern in (
+                r"\.gguf\.part\d+of\d+$",
+                r"-\d+-of-\d+\.gguf$",
+            ):
+                normalized_name = re.sub(pattern, ".gguf", normalized_name, flags=re.I)
+            model_stem = re.sub(r"\.gguf$", "", normalized_name, flags=re.I)
+            base_model_stem = re.sub(r"[-_.](q\d+.*|iq\d+.*|bf16.*|f16.*)$", "", model_stem, flags=re.I)
             base_model_stem = base_model_stem.strip("-_.")
 
             scored = []
@@ -2039,8 +2038,6 @@ class LlamaCppLauncher:
                     score += 3
                 elif model_stem and model_stem in candidate_name:
                     score += 2
-                if model_name.lower().split(".gguf")[0] in candidate_name:
-                    score += 1
                 scored.append((score, candidate.name.lower(), candidate.resolve()))
 
             # Prefer likely model-specific matches, then deterministic name order.
@@ -3577,6 +3574,20 @@ class LlamaCppLauncher:
             removed_gpu = self.manual_gpu_list.pop(index)
             print(f"DEBUG: Removed manual GPU: {removed_gpu['name']}", file=sys.stderr)
 
+            # Manual GPU IDs get rebuilt as 0..n-1 below. Remap selected_gpus / gpu_order
+            # to the post-removal indices so tensor-split and CUDA_VISIBLE_DEVICES keep
+            # pointing at the same logical GPUs.
+            def _remap(i):
+                if i == index:
+                    return None
+                return i - 1 if i > index else i
+            self.app_settings["selected_gpus"] = [
+                r for r in (_remap(i) for i in self.app_settings.get("selected_gpus", [])) if r is not None
+            ]
+            self.app_settings["gpu_order"] = [
+                r for r in (_remap(i) for i in self.app_settings.get("gpu_order", [])) if r is not None
+            ]
+
             # Update the listbox directly instead of rebuilding entire UI
             self.manual_gpu_listbox.delete(index)
 
@@ -3634,6 +3645,10 @@ class LlamaCppLauncher:
             if result:
                 self.manual_gpu_list.clear()
                 print("DEBUG: Cleared all manual GPUs", file=sys.stderr)
+
+                # Drop any manual-mode GPU selection state; detection will repopulate for real GPUs.
+                self.app_settings["selected_gpus"] = []
+                self.app_settings["gpu_order"] = []
 
                 # Switch back to automatic mode immediately
                 self.manual_gpu_mode.set(False)

@@ -136,7 +136,12 @@ class LaunchManager:
                 if mmproj_file is None:
                     model_dir = Path(model_full_path_str).parent
                     if model_dir.exists() and model_dir.is_dir():
-                        model_stem_l = Path(model_full_path_str).stem.lower()
+                        # Normalize multipart suffixes before stripping .gguf (Path.stem leaves .gguf
+                        # embedded on foo.gguf.partXofY, which weakens the substring match below).
+                        normalized_name = Path(model_full_path_str).name.lower()
+                        for pattern in (r"\.gguf\.part\d+of\d+$", r"-\d+-of-\d+\.gguf$"):
+                            normalized_name = re.sub(pattern, ".gguf", normalized_name, flags=re.I)
+                        model_stem_l = re.sub(r"\.gguf$", "", normalized_name, flags=re.I)
                         candidates = [
                             c for c in model_dir.iterdir()
                             if c.is_file() and ("mmproj" in c.name.lower() or c.name.lower().endswith(".bin.gguf"))
