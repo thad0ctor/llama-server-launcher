@@ -528,6 +528,43 @@ class LaunchManager:
              # User entered an empty string. Omit the argument.
              print(f"DEBUG: Omitting '{arg_name}' due to empty value. Default '{default_value_str}' will be used.", file=sys.stderr)
 
+    def _resolve_cuda_visible_devices_action(self):
+        """Decide how generated scripts should handle ``CUDA_VISIBLE_DEVICES``.
+
+        Centralising this keeps the four emit sites (live bash, live
+        PowerShell, save-sh, save-ps1) in lock-step so they can't silently
+        drift apart again.
+
+        Returns one of:
+          ``('export', '<indices>')`` — emit ``CUDA_VISIBLE_DEVICES=<indices>``.
+          ``('unset',  None)``        — explicitly unset the variable so an
+                                        inherited shell value can't leak in.
+          ``('skip',   None)``        — no CUDA context at all; leave alone.
+
+        Manual GPU mode maps to ``unset``: manual indices are synthetic
+        (``0..N-1`` against the user's planning list) and have no relation to
+        physical PCIe bus IDs. Passing them through would filter the wrong
+        real devices on a CUDA-enabled host.
+        """
+        is_manual_mode = self.launcher.gpu_info.get("manual_mode", False)
+        device_count = self.launcher.gpu_info.get("device_count", 0)
+
+        if is_manual_mode:
+            # Synthetic indices — never export them. Unset so any inherited
+            # shell value doesn't silently filter real hardware.
+            return ("unset", None)
+
+        ordered_gpus = self.launcher.get_ordered_selected_gpus()
+        if ordered_gpus:
+            return ("export", ",".join(map(str, ordered_gpus)))
+
+        if device_count > 0:
+            # Real GPUs detected but user deselected all of them.
+            return ("unset", None)
+
+        # No CUDA context to manage.
+        return ("skip", None)
+
     def launch_server(self):
         """Launch the llama-server with the configured settings."""
         cmd_list = self.build_cmd()
@@ -540,10 +577,14 @@ class LaunchManager:
 
         tmp_path = None # Initialize tmp_path outside try/except/finally
 
-        # Get selected GPU indices for CUDA_VISIBLE_DEVICES in user-specified order
-        # The order determines which physical GPU becomes which logical GPU index
-        ordered_gpus = self.launcher.get_ordered_selected_gpus()
-        cuda_devices_value = ",".join(map(str, ordered_gpus))
+        # Resolve how to handle CUDA_VISIBLE_DEVICES for the child process.
+        # The action is shared across the Windows (PowerShell) and POSIX (bash)
+        # live-launch branches below.
+        cuda_action, cuda_devices_value = self._resolve_cuda_visible_devices_action()
+        # For backward-compat with code that just checks "is there a value to
+        # emit": the export branch sets a non-empty string; unset/skip get "".
+        if cuda_action != "export":
+            cuda_devices_value = ""
 
         try: # Main try block for creating script and launching process
             if sys.platform == "win32":
@@ -575,14 +616,14 @@ class LaunchManager:
                     f.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
                     f.write('$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"\n\n')
 
-                    # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected ---
-                    if cuda_devices_value:
+                    # --- Add CUDA_VISIBLE_DEVICES action ---
+                    if cuda_action == "export":
                         f.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
                         f.write(f'$env:CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
-                    elif self.launcher.gpu_info.get("device_count", 0) > 0:
-                         # If GPUs are detected but none are selected, explicitly unset the variable
-                         # to rely on default llama.cpp behavior or let the OS handle it.
-                         # This avoids accidentally inheriting a variable from the environment.
+                    elif cuda_action == "unset":
+                         # GPUs detected but none selected, or manual GPU mode —
+                         # either way, clear CUDA_VISIBLE_DEVICES so an inherited
+                         # shell value can't silently re-enable filtered hardware.
                          f.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
                          f.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
 
@@ -693,9 +734,15 @@ class LaunchManager:
                 # CUDA_DEVICE_ORDER is always set for consistent PCIe ordering
                 commands.append('export CUDA_DEVICE_ORDER=PCI_BUS_ID')
 
-                if cuda_devices_value:
+                if cuda_action == "export":
                     commands.append(f'export CUDA_VISIBLE_DEVICES={cuda_devices_value}')
                     commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
+                elif cuda_action == "unset":
+                    # GPUs detected but none selected, or manual GPU mode —
+                    # either way, clear CUDA_VISIBLE_DEVICES so an inherited
+                    # shell value can't silently re-enable filtered hardware.
+                    commands.append('unset CUDA_VISIBLE_DEVICES')
+                    commands.append('echo "Clearing CUDA_VISIBLE_DEVICES environment variable."')
 
                 env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
                 if env_vars:
@@ -888,15 +935,15 @@ class LaunchManager:
                 fh.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
                 fh.write('$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"\n\n')
 
-                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected (in user order) ---
-                ordered_gpus = self.launcher.get_ordered_selected_gpus()
-                cuda_devices_value = ",".join(map(str, ordered_gpus))
-
-                if cuda_devices_value:
+                # --- Add CUDA_VISIBLE_DEVICES action ---
+                cuda_action, cuda_devices_value = self._resolve_cuda_visible_devices_action()
+                if cuda_action == "export":
                     fh.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
                     fh.write(f'$env:CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
-                elif self.launcher.gpu_info.get("device_count", 0) > 0:
-                     # If GPUs are detected but none are selected, explicitly unset the variable
+                elif cuda_action == "unset":
+                     # GPUs detected but none selected, or manual GPU mode —
+                     # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
+                     # filtering real hardware via synthetic/stale indices.
                      fh.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
                      fh.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
 
@@ -1029,15 +1076,15 @@ class LaunchManager:
                 fh.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
                 fh.write('export CUDA_DEVICE_ORDER=PCI_BUS_ID\n\n')
 
-                # --- Add CUDA_VISIBLE_DEVICES setting if GPUs are selected (in user order) ---
-                ordered_gpus = self.launcher.get_ordered_selected_gpus()
-                cuda_devices_value = ",".join(map(str, ordered_gpus))
-
-                if cuda_devices_value:
+                # --- Add CUDA_VISIBLE_DEVICES action ---
+                cuda_action, cuda_devices_value = self._resolve_cuda_visible_devices_action()
+                if cuda_action == "export":
                     fh.write(f'echo "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}"\n')
                     fh.write(f'export CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
-                elif self.launcher.gpu_info.get("device_count", 0) > 0:
-                     # If GPUs are detected but none are selected, explicitly unset the variable
+                elif cuda_action == "unset":
+                     # GPUs detected but none selected, or manual GPU mode —
+                     # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
+                     # filtering real hardware via synthetic/stale indices.
                      fh.write('echo "Clearing CUDA_VISIBLE_DEVICES environment variable."\n')
                      fh.write('unset CUDA_VISIBLE_DEVICES\n\n')
 

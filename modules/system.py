@@ -9,10 +9,48 @@ import ctypes
 import struct
 from pathlib import Path
 
-# Set CUDA device ordering before importing torch or touching CUDA state.
-# Otherwise the launcher UI can detect one GPU order while launch scripts use
-# PCIe order, causing selected indices to point at the wrong physical cards.
-os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+# Force CUDA device ordering to PCI_BUS_ID before importing torch or touching
+# CUDA state.
+#
+# This must be a hard override (not ``setdefault``) — the generated launch
+# scripts unconditionally ``export CUDA_DEVICE_ORDER=PCI_BUS_ID``. If we
+# honoured a user-inherited value like ``FASTEST_FIRST`` here, PyTorch would
+# enumerate devices by speed rank while llama-server enumerates them by
+# PCIe bus, so the UI's "GPU 0" would point at a different physical card
+# than the one the launch command eventually targets.
+_INHERITED_CUDA_DEVICE_ORDER = os.environ.get("CUDA_DEVICE_ORDER")
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+if _INHERITED_CUDA_DEVICE_ORDER and _INHERITED_CUDA_DEVICE_ORDER != "PCI_BUS_ID":
+    print(
+        f"INFO: Overriding inherited CUDA_DEVICE_ORDER='{_INHERITED_CUDA_DEVICE_ORDER}' "
+        "→ 'PCI_BUS_ID' so GPU detection enumerates devices the same way the "
+        "generated launch command will.",
+        file=sys.stderr,
+    )
+
+# Clear any inherited CUDA_VISIBLE_DEVICES before torch touches CUDA state.
+#
+# If the user ran the launcher from a shell that already had
+# CUDA_VISIBLE_DEVICES set (e.g. they pre-filtered devices), PyTorch would
+# detect the filtered view and label those devices 0..N-1 in the UI
+# checkboxes. When the user then selected "GPU 0" and launched, the script
+# would emit ``export CUDA_VISIBLE_DEVICES=0`` (physical 0 under PCI_BUS_ID
+# ordering) — which is NOT the physical GPU the UI showed them. The UI index
+# and the launch-time index would point at different physical cards.
+#
+# Popping the variable here — before ``import torch`` — ensures detection
+# enumerates *all* physical GPUs, so UI indices == PCIe indices == what the
+# generated launch script will use. Users can still hide GPUs by unchecking
+# them in the UI; the emitted CUDA_VISIBLE_DEVICES will reflect that choice.
+_INHERITED_CUDA_VISIBLE_DEVICES = os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+if _INHERITED_CUDA_VISIBLE_DEVICES is not None:
+    print(
+        f"INFO: Cleared inherited CUDA_VISIBLE_DEVICES='{_INHERITED_CUDA_VISIBLE_DEVICES}' "
+        "so GPU detection can enumerate all physical devices. Use the GPU "
+        "checkbox list in the UI to select which GPUs to use — the generated "
+        "launch command will restrict the server accordingly.",
+        file=sys.stderr,
+    )
 
 # Add debug prints for Python environment
 print("\n=== Python Environment Debug Info ===", file=sys.stderr)
@@ -261,6 +299,88 @@ def get_gpu_info_static():
         print(f"Error querying CUDA devices: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return {"available": False, "message": f"Error querying CUDA devices: {e}", "device_count": 0, "devices": []}
+
+
+def format_gpu_mapping_table(gpu_info):
+    """Format the authoritative GPU mapping as a human-readable table.
+
+    The returned string is what the whole launcher treats as ground truth:
+      * ``id`` column is the physical PCIe-bus-id index (since we force
+        ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` at module load).
+      * This same ``id`` is what the UI checkbox label shows, what
+        ``app_settings['selected_gpus']`` / ``gpu_order`` store, and what
+        the generated launch script emits as ``CUDA_VISIBLE_DEVICES``.
+
+    Kept as a pure formatter (no printing) so tests can assert on the exact
+    text and callers can decide whether to print, log, or display.
+    """
+    is_manual = bool(gpu_info.get("manual_mode"))
+    devices = list(gpu_info.get("devices") or [])
+    mode_label = "manual GPU mode" if is_manual else "auto-detected (PCI_BUS_ID order)"
+
+    header = f"===== GPU mapping — {mode_label} ====="
+    if is_manual:
+        # Manual indices are synthetic — they're planning placeholders that
+        # do NOT map to physical PCIe devices, so the launcher deliberately
+        # does NOT emit them as CUDA_VISIBLE_DEVICES (it unsets instead).
+        # The dump's footer must say so, or users will read the auto-mode
+        # footer and think manual-mode selections filter real hardware.
+        footer_msg = (
+            "These indices are synthetic (for capacity planning / preview "
+            "only). They DO NOT map to physical CUDA devices, so in manual "
+            "mode the generated launch script emits 'unset CUDA_VISIBLE_DEVICES' "
+            "rather than exporting these indices — otherwise the CUDA runtime "
+            "would filter the wrong real GPUs."
+        )
+    else:
+        footer_msg = (
+            "These indices are the single source of truth across the UI "
+            "(checkbox labels, drag-reorder list), the recommended tensor-split, "
+            "and the generated CUDA_VISIBLE_DEVICES in launch scripts. "
+            "--main-gpu and --tensor-split are applied AFTER the CUDA runtime "
+            "remaps to this set, so they count from 0 against the selected "
+            "(not physical) subset."
+        )
+    footer = "=" * len(header)
+
+    if not devices:
+        reason = gpu_info.get("message") or "no CUDA devices detected"
+        return f"{header}\n  (no devices — {reason})\n{footer}\n{footer_msg}"
+
+    # Build table rows. Keep the column widths tight so the output stays
+    # readable even on narrow terminals.
+    rows = [("IDX", "NAME", "VRAM", "COMPUTE")]
+    for dev in devices:
+        idx = dev.get("id")
+        name = str(dev.get("name") or "?")
+        vram_gb = dev.get("total_memory_gb")
+        vram_str = f"{vram_gb:.1f} GB" if isinstance(vram_gb, (int, float)) else "?"
+        cc = str(dev.get("compute_capability") or "?")
+        rows.append((str(idx), name, vram_str, cc))
+
+    col_widths = [max(len(row[i]) for row in rows) for i in range(4)]
+
+    def _fmt(row):
+        return "  " + " | ".join(
+            cell.ljust(col_widths[i]) for i, cell in enumerate(row)
+        )
+
+    header_row = _fmt(rows[0])
+    sep = "  " + "-+-".join("-" * w for w in col_widths)
+    body = "\n".join(_fmt(r) for r in rows[1:])
+
+    return "\n".join([header, header_row, sep, body, footer, footer_msg])
+
+
+def log_gpu_mapping(gpu_info, stream=None):
+    """Print the mapping table to ``stream`` (defaults to stderr).
+
+    Separate from :func:`format_gpu_mapping_table` so tests can check the
+    formatter output without parsing stderr."""
+    text = format_gpu_mapping_table(gpu_info)
+    if stream is None:
+        stream = sys.stderr
+    print(text, file=stream)
 
 
 def get_ram_info_static():
@@ -787,6 +907,12 @@ class SystemInfoManager:
 
         # Store detected devices separately for easier access
         self.launcher.detected_gpu_devices = self.launcher.gpu_info.get("devices", [])
+
+        # One-time authoritative mapping dump. After this line, every consumer
+        # (UI checkbox labels, drag-reorder list, tensor-split recommendation,
+        # CUDA_VISIBLE_DEVICES emission) uses the indices shown here — so when
+        # a user reports a mapping surprise, this is the table to cross-check.
+        log_gpu_mapping(self.launcher.gpu_info)
         # Store logical/physical cores for initial thread defaults and recommendations
         self.launcher.logical_cores = self.launcher.cpu_info.get("logical_cores", 4)
         self.launcher.physical_cores = self.launcher.cpu_info.get("physical_cores", 2) # Use fallback 2 if psutil failed or physical count is 0
