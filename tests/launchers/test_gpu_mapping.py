@@ -154,20 +154,25 @@ class TestGetOrderedSelectedGpus:
 
 @pytest.fixture(scope="module")
 def tk_root():
+    """Return a headless Tcl interpreter for tk.Var instances.
+
+    Uses ``tk.Tcl()`` rather than ``tk.Tk()`` so these tests run on CI
+    runners without a display (otherwise the tk.Tk() call raises TclError
+    and every downstream test silently skips — a regression we only saw
+    when CodeRabbit pointed it out). The launch.py code paths under test
+    (build_cmd, save_sh_script, save_ps1_script, launch_server) only use
+    the tk.*Var ``get()`` / ``set()`` APIs which work fine against a Tcl
+    interpreter — no widgets are ever created.
+    """
     try:
-        root = tk.Tk()
+        root = tk.Tcl()
     except tk.TclError as exc:
         pytest.skip(f"tkinter unavailable: {exc}")
-    root.withdraw()
     yield root
-    try:
-        root.destroy()
-    except Exception:
-        pass
 
 
-def _mk(cls, value):
-    v = cls()
+def _mk(master, cls, value):
+    v = cls(master=master)
     v.set(value)
     return v
 
@@ -194,45 +199,45 @@ def built_tree(tmp_path):
 def launcher_mock(tk_root, built_tree):
     """Minimal launcher mock sufficient for build_cmd / save_sh_script."""
     m = MagicMock()
-    m.backend_selection = _mk(tk.StringVar, "llama.cpp")
-    m.llama_cpp_dir = _mk(tk.StringVar, str(built_tree["base"]))
-    m.ik_llama_dir = _mk(tk.StringVar, str(built_tree["base"]))
-    m.venv_dir = _mk(tk.StringVar, "")
-    m.model_path = _mk(tk.StringVar, str(built_tree["model"]))
-    m.mmproj_enabled = _mk(tk.BooleanVar, False)
-    m.selected_mmproj_path = _mk(tk.StringVar, "")
-    m.cache_type_k = _mk(tk.StringVar, "f16")
-    m.cache_type_v = _mk(tk.StringVar, "f16")
-    m.threads = _mk(tk.StringVar, "")
+    m.backend_selection = _mk(tk_root, tk.StringVar, "llama.cpp")
+    m.llama_cpp_dir = _mk(tk_root, tk.StringVar, str(built_tree["base"]))
+    m.ik_llama_dir = _mk(tk_root, tk.StringVar, str(built_tree["base"]))
+    m.venv_dir = _mk(tk_root, tk.StringVar, "")
+    m.model_path = _mk(tk_root, tk.StringVar, str(built_tree["model"]))
+    m.mmproj_enabled = _mk(tk_root, tk.BooleanVar, False)
+    m.selected_mmproj_path = _mk(tk_root, tk.StringVar, "")
+    m.cache_type_k = _mk(tk_root, tk.StringVar, "f16")
+    m.cache_type_v = _mk(tk_root, tk.StringVar, "f16")
+    m.threads = _mk(tk_root, tk.StringVar, "")
     m.logical_cores = 8
-    m.threads_batch = _mk(tk.StringVar, "")
-    m.batch_size = _mk(tk.StringVar, "")
-    m.ubatch_size = _mk(tk.StringVar, "")
-    m.ctx_size = _mk(tk.IntVar, 2048)
-    m.seed = _mk(tk.StringVar, "-1")
-    m.temperature = _mk(tk.StringVar, "0.8")
-    m.min_p = _mk(tk.StringVar, "0.05")
-    m.tensor_split = _mk(tk.StringVar, "")
-    m.n_gpu_layers = _mk(tk.StringVar, "0")
-    m.main_gpu = _mk(tk.StringVar, "0")
-    m.flash_attn = _mk(tk.BooleanVar, False)
-    m.fit_enabled = _mk(tk.BooleanVar, False)
-    m.fit_ctx = _mk(tk.StringVar, "")
-    m.fit_target = _mk(tk.StringVar, "")
-    m.no_mmap = _mk(tk.BooleanVar, False)
-    m.mlock = _mk(tk.BooleanVar, False)
-    m.no_kv_offload = _mk(tk.BooleanVar, False)
-    m.prio = _mk(tk.StringVar, "0")
-    m.parallel = _mk(tk.StringVar, "1")
-    m.cpu_moe = _mk(tk.BooleanVar, False)
-    m.n_cpu_moe = _mk(tk.StringVar, "")
-    m.ignore_eos = _mk(tk.BooleanVar, False)
-    m.n_predict = _mk(tk.StringVar, "-1")
-    m.host = _mk(tk.StringVar, "127.0.0.1")
-    m.port = _mk(tk.StringVar, "8080")
-    m.template_source = _mk(tk.StringVar, "default")
-    m.current_template_display = _mk(tk.StringVar, "")
-    m.jinja_enabled = _mk(tk.BooleanVar, False)
+    m.threads_batch = _mk(tk_root, tk.StringVar, "")
+    m.batch_size = _mk(tk_root, tk.StringVar, "")
+    m.ubatch_size = _mk(tk_root, tk.StringVar, "")
+    m.ctx_size = _mk(tk_root, tk.IntVar, 2048)
+    m.seed = _mk(tk_root, tk.StringVar, "-1")
+    m.temperature = _mk(tk_root, tk.StringVar, "0.8")
+    m.min_p = _mk(tk_root, tk.StringVar, "0.05")
+    m.tensor_split = _mk(tk_root, tk.StringVar, "")
+    m.n_gpu_layers = _mk(tk_root, tk.StringVar, "0")
+    m.main_gpu = _mk(tk_root, tk.StringVar, "0")
+    m.flash_attn = _mk(tk_root, tk.BooleanVar, False)
+    m.fit_enabled = _mk(tk_root, tk.BooleanVar, False)
+    m.fit_ctx = _mk(tk_root, tk.StringVar, "")
+    m.fit_target = _mk(tk_root, tk.StringVar, "")
+    m.no_mmap = _mk(tk_root, tk.BooleanVar, False)
+    m.mlock = _mk(tk_root, tk.BooleanVar, False)
+    m.no_kv_offload = _mk(tk_root, tk.BooleanVar, False)
+    m.prio = _mk(tk_root, tk.StringVar, "0")
+    m.parallel = _mk(tk_root, tk.StringVar, "1")
+    m.cpu_moe = _mk(tk_root, tk.BooleanVar, False)
+    m.n_cpu_moe = _mk(tk_root, tk.StringVar, "")
+    m.ignore_eos = _mk(tk_root, tk.BooleanVar, False)
+    m.n_predict = _mk(tk_root, tk.StringVar, "-1")
+    m.host = _mk(tk_root, tk.StringVar, "127.0.0.1")
+    m.port = _mk(tk_root, tk.StringVar, "8080")
+    m.template_source = _mk(tk_root, tk.StringVar, "default")
+    m.current_template_display = _mk(tk_root, tk.StringVar, "")
+    m.jinja_enabled = _mk(tk_root, tk.BooleanVar, False)
     m.custom_parameters_list = []
     m.get_ordered_selected_gpus = MagicMock(return_value=[])
     m.gpu_info = {"device_count": 0}
@@ -1069,12 +1074,48 @@ class TestMappingConsistencyInvariant:
     ``id`` column shown in the dump. Pin down the invariants so a future
     refactor can't silently drift one consumer away from the others."""
 
-    def test_detection_builds_ids_in_range_order(self, system_module):
+    def test_detection_builds_ids_in_range_order(
+        self, system_module, monkeypatch
+    ):
         """Auto-detection assigns ``id=i`` for ``i in range(device_count)``.
         This is the foundation of the mapping — UI indices, CUDA ordinals,
-        gpu_order storage all assume it."""
+        gpu_order storage all assume it.
+
+        Stubs ``torch.cuda`` with a deterministic 4-device payload rather
+        than calling real detection. CI runners are CPU-only, so the real
+        path returns an empty list — the invariant would pass vacuously.
+        With the stub, every ``id`` field must equal its list position or
+        the assertion fires.
+        """
+        import types
+
+        def _props(name):
+            return types.SimpleNamespace(
+                name=name,
+                total_memory=16 * 1024**3,
+                major=8,
+                minor=6,
+                multi_processor_count=84,
+            )
+
+        device_names = ["GPU-alpha", "GPU-beta", "GPU-gamma", "GPU-delta"]
+        fake_cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: len(device_names),
+            get_device_properties=lambda i: _props(device_names[i]),
+        )
+        monkeypatch.setattr(
+            system_module, "torch",
+            types.SimpleNamespace(cuda=fake_cuda),
+        )
+        monkeypatch.setattr(system_module, "TORCH_AVAILABLE", True)
+
         info = system_module.get_gpu_info_static()
-        for i, dev in enumerate(info.get("devices", [])):
+
+        assert info["device_count"] == len(device_names), (
+            "stubbed detection produced the wrong device count — helper drift?"
+        )
+        for i, dev in enumerate(info["devices"]):
             assert dev["id"] == i, (
                 f"device[{i}]['id'] == {dev['id']}, expected {i} — "
                 "breaks the invariant that list position == physical id."
