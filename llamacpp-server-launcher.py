@@ -3046,17 +3046,31 @@ class LlamaCppLauncher:
         This order determines:
         - CUDA_VISIBLE_DEVICES order (first GPU becomes logical GPU 0)
         - Tensor split order (first value applies to first GPU in this order)
+
+        Duplicate entries in gpu_order (from buggy drag-reorder history or a
+        hand-edited config) are collapsed to the first occurrence. Without
+        this, CUDA_VISIBLE_DEVICES would contain repeated device ordinals —
+        rejected by the CUDA runtime — and --tensor-split would carry more
+        values than there are selected GPUs, silently offloading to the wrong
+        device.
         """
         gpu_order = self.app_settings.get("gpu_order", [])
         selected_gpus = set(self.app_settings.get("selected_gpus", []))
 
-        # Return only GPUs that are both in the order and currently selected
-        ordered = [g for g in gpu_order if g in selected_gpus]
+        # Keep first occurrence only — preserves the user's drag-order choice
+        # while dropping any accidental duplicates.
+        ordered = []
+        seen = set()
+        for g in gpu_order:
+            if g in selected_gpus and g not in seen:
+                ordered.append(g)
+                seen.add(g)
 
         # Add any selected GPUs not in the order (shouldn't happen normally, but defensive)
         for g in sorted(selected_gpus):
-            if g not in ordered:
+            if g not in seen:
                 ordered.append(g)
+                seen.add(g)
 
         return ordered
 
@@ -3829,9 +3843,11 @@ class LlamaCppLauncher:
             "manual_mode": True
         }
 
-        print(f"DEBUG: Set up {len(self.manual_gpu_list)} manual GPUs", file=sys.stderr)
-        for i, gpu in enumerate(self.manual_gpu_list):
-            print(f"DEBUG:   GPU {i}: {gpu['name']} ({gpu['vram_gb']:.1f} GB)", file=sys.stderr)
+        # Re-dump the mapping — the device list just changed, so the previously
+        # logged table is stale. Keeps stderr honest about which indices the
+        # launch command will use.
+        from modules.system import log_gpu_mapping
+        log_gpu_mapping(self.gpu_info)
 
         # Update the UI
         self._update_gpu_checkboxes()
