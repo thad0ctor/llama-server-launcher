@@ -636,14 +636,14 @@ class TestInheritedCudaVisibleDevicesCleared:
         probe_script = (
             "import os\n"
             "import sys\n"
-            "sys.path.insert(0, %r)\n"
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
             # Capture the pre-import state.
             "pre = os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')\n"
             "import modules.system  # noqa: F401\n"
             "post = os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')\n"
             "import json\n"
             "print(json.dumps({'pre': pre, 'post': post}))\n"
-        ) % str(REPO_ROOT)
+        )
 
         env = {
             **__import__("os").environ,
@@ -685,11 +685,11 @@ class TestInheritedCudaVisibleDevicesCleared:
         probe_script = (
             "import os\n"
             "import sys\n"
-            "sys.path.insert(0, %r)\n"
+            f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
             "import modules.system  # noqa: F401\n"
             "import json\n"
             "print(json.dumps({'post': os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}))\n"
-        ) % str(REPO_ROOT)
+        )
 
         env = {k: v for k, v in _os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
         result = _sp.run(
@@ -725,7 +725,7 @@ def _probe_system_import(preset_env):
     probe_script = (
         "import os\n"
         "import sys\n"
-        "sys.path.insert(0, %r)\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
         "import modules.system  # noqa: F401\n"
         "import json\n"
         "print(json.dumps({\n"
@@ -734,7 +734,7 @@ def _probe_system_import(preset_env):
         "    'inherited_cvd': getattr(modules.system, '_INHERITED_CUDA_VISIBLE_DEVICES', None),\n"
         "    'inherited_cdo': getattr(modules.system, '_INHERITED_CUDA_DEVICE_ORDER', None),\n"
         "}))\n"
-    ) % str(REPO_ROOT)
+    )
 
     # Start from the current env so the child has PATH/HOME/etc., then layer
     # the test's pre-set values on top (and pop any key the caller marked
