@@ -917,8 +917,11 @@ def system_module():
 
     prev_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
     prev_cdo = os.environ.get("CUDA_DEVICE_ORDER")
-    module = importlib.import_module("modules.system")
+    # Enter the try BEFORE import_module — modules.system mutates os.environ
+    # at module-load time before it imports torch, so an exception from the
+    # torch import would otherwise leave the env mutated with no teardown.
     try:
+        module = importlib.import_module("modules.system")
         yield module
     finally:
         if prev_cvd is None:
