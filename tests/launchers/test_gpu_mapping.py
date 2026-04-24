@@ -393,9 +393,14 @@ class TestCudaVisibleDevicesLiveVsScript:
         saved_text = (tmp_path / "launch.sh").read_text()
         assert 'export CUDA_VISIBLE_DEVICES="1,0"' in saved_text
 
-        # Live-launch script:
+        # Live-launch script: accept either quoted or unquoted form. Both
+        # are semantically equivalent in bash, and the style is an
+        # implementation detail that tests shouldn't pin down.
         live_text = _capture_live_launch_script(manager)
-        assert "CUDA_VISIBLE_DEVICES=1,0" in live_text
+        assert (
+            "CUDA_VISIBLE_DEVICES=1,0" in live_text
+            or 'CUDA_VISIBLE_DEVICES="1,0"' in live_text
+        )
 
     @pytest.mark.skipif(
         sys.platform == "win32",
