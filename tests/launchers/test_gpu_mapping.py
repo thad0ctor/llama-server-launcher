@@ -897,6 +897,40 @@ class TestEntryMethodScenarios:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture()
+def system_module():
+    """Yield ``modules.system`` with ``CUDA_VISIBLE_DEVICES`` /
+    ``CUDA_DEVICE_ORDER`` snapshot/restored around use.
+
+    ``modules.system`` mutates those env vars at import time by design
+    (pops the former, forces the latter to ``PCI_BUS_ID``). In the normal
+    test session ``tests/system/test_system.py``'s module-level import
+    triggers that before any test here runs, but this file may be the
+    first to import the module when someone runs
+    ``pytest tests/launchers/test_gpu_mapping.py`` in isolation with the
+    vars set in their shell. The snapshot/restore keeps the test runner's
+    ``os.environ`` honest across tests in that case, so every in-process
+    ``modules.system`` usage in this file goes through this fixture.
+    """
+    import importlib
+    import os
+
+    prev_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+    prev_cdo = os.environ.get("CUDA_DEVICE_ORDER")
+    module = importlib.import_module("modules.system")
+    try:
+        yield module
+    finally:
+        if prev_cvd is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = prev_cvd
+        if prev_cdo is None:
+            os.environ.pop("CUDA_DEVICE_ORDER", None)
+        else:
+            os.environ["CUDA_DEVICE_ORDER"] = prev_cdo
+
+
 class TestGpuMappingFormatter:
     """The startup dump is the single source of truth for a user debugging
     a mapping surprise. If the formatter is wrong, the user's mental model
@@ -914,30 +948,27 @@ class TestGpuMappingFormatter:
             info["message"] = message
         return info
 
-    def test_header_announces_mode_auto(self):
-        from modules.system import format_gpu_mapping_table
-        text = format_gpu_mapping_table(self._mk_info([
+    def test_header_announces_mode_auto(self, system_module):
+        text = system_module.format_gpu_mapping_table(self._mk_info([
             {"id": 0, "name": "RTX 3090", "total_memory_gb": 24.0,
              "compute_capability": "8.6"}
         ]))
         assert "auto-detected (PCI_BUS_ID order)" in text
         assert "manual GPU mode" not in text
 
-    def test_header_announces_mode_manual(self):
-        from modules.system import format_gpu_mapping_table
-        text = format_gpu_mapping_table(self._mk_info([
+    def test_header_announces_mode_manual(self, system_module):
+        text = system_module.format_gpu_mapping_table(self._mk_info([
             {"id": 0, "name": "Planned GPU", "total_memory_gb": 16.0,
              "compute_capability": "Unknown"}
         ], manual=True))
         assert "manual GPU mode" in text
         assert "auto-detected" not in text
 
-    def test_rows_preserve_detection_order(self):
+    def test_rows_preserve_detection_order(self, system_module):
         """The physical PCIe bus ID ordering must be preserved verbatim in
         the table. Re-sorting (e.g. by name or VRAM) would break the
         promise that "row N = physical GPU N = what launch scripts will
         emit for CUDA_VISIBLE_DEVICES"."""
-        from modules.system import format_gpu_mapping_table
         devices = [
             {"id": 0, "name": "Zeta GPU", "total_memory_gb": 8.0,
              "compute_capability": "7.5"},
@@ -946,7 +977,7 @@ class TestGpuMappingFormatter:
             {"id": 2, "name": "Middle GPU", "total_memory_gb": 16.0,
              "compute_capability": "8.0"},
         ]
-        text = format_gpu_mapping_table(self._mk_info(devices))
+        text = system_module.format_gpu_mapping_table(self._mk_info(devices))
         zeta = text.index("Zeta GPU")
         alpha = text.index("Alpha GPU")
         middle = text.index("Middle GPU")
@@ -956,33 +987,30 @@ class TestGpuMappingFormatter:
             "all index by this order."
         )
 
-    def test_no_devices_explains_why(self):
-        from modules.system import format_gpu_mapping_table
-        text = format_gpu_mapping_table(self._mk_info(
+    def test_no_devices_explains_why(self, system_module):
+        text = system_module.format_gpu_mapping_table(self._mk_info(
             [], message="PyTorch not found"
         ))
         assert "(no devices" in text
         assert "PyTorch not found" in text
 
-    def test_each_column_present_for_each_gpu(self):
-        from modules.system import format_gpu_mapping_table
+    def test_each_column_present_for_each_gpu(self, system_module):
         devices = [
             {"id": 0, "name": "First", "total_memory_gb": 12.0,
              "compute_capability": "8.0"},
             {"id": 1, "name": "Second", "total_memory_gb": 24.0,
              "compute_capability": "8.9"},
         ]
-        text = format_gpu_mapping_table(self._mk_info(devices))
+        text = system_module.format_gpu_mapping_table(self._mk_info(devices))
         # Every value must appear; VRAM rounded to 1 decimal place.
         for expected in ["First", "Second", "12.0 GB", "24.0 GB", "8.0", "8.9"]:
             assert expected in text, f"missing {expected!r} in formatted table"
 
-    def test_footer_explains_the_index_semantics_auto_mode(self):
+    def test_footer_explains_the_index_semantics_auto_mode(self, system_module):
         """Users who hit a mapping surprise usually don't know that
         --main-gpu is interpreted AFTER CUDA_VISIBLE_DEVICES remap. The
         dump's footer is the documented place for that hint."""
-        from modules.system import format_gpu_mapping_table
-        text = format_gpu_mapping_table(self._mk_info([
+        text = system_module.format_gpu_mapping_table(self._mk_info([
             {"id": 0, "name": "X", "total_memory_gb": 8.0,
              "compute_capability": "7.5"}
         ]))
@@ -993,12 +1021,11 @@ class TestGpuMappingFormatter:
         # CUDA_VISIBLE_DEVICES — that's the manual-mode footer.
         assert "unset CUDA_VISIBLE_DEVICES" not in text
 
-    def test_footer_explains_manual_mode_does_not_export(self):
+    def test_footer_explains_manual_mode_does_not_export(self, system_module):
         """Manual-mode footer must warn that synthetic indices won't be
         emitted as CUDA_VISIBLE_DEVICES — otherwise users would read the
         auto-mode footer and think their selection filters real hardware."""
-        from modules.system import format_gpu_mapping_table
-        text = format_gpu_mapping_table(self._mk_info([
+        text = system_module.format_gpu_mapping_table(self._mk_info([
             {"id": 0, "name": "Planned A", "total_memory_gb": 16.0,
              "compute_capability": "Unknown"}
         ], manual=True))
@@ -1008,24 +1035,22 @@ class TestGpuMappingFormatter:
         # And the auto-mode "single source of truth" wording isn't present.
         assert "single source of truth" not in text
 
-    def test_missing_fields_do_not_crash(self):
+    def test_missing_fields_do_not_crash(self, system_module):
         """Real-world gpu_info from fallback paths can be sparse — ensure
         the formatter degrades gracefully instead of raising KeyError."""
-        from modules.system import format_gpu_mapping_table
-        text = format_gpu_mapping_table(self._mk_info([{"id": 0}]))
+        text = system_module.format_gpu_mapping_table(self._mk_info([{"id": 0}]))
         # Should produce *something* for the id=0 row without raising.
         assert "0" in text
         assert "?" in text  # placeholder for missing fields
 
-    def test_log_helper_writes_to_stream(self):
+    def test_log_helper_writes_to_stream(self, system_module):
         """``log_gpu_mapping`` is the print-to-stream wrapper; separate
         from the formatter so tests (and future log-capture users) can
         depend on either independently."""
         import io
 
-        from modules.system import log_gpu_mapping
         buf = io.StringIO()
-        log_gpu_mapping({
+        system_module.log_gpu_mapping({
             "available": True,
             "device_count": 1,
             "devices": [{"id": 0, "name": "GPU", "total_memory_gb": 8.0,
@@ -1041,23 +1066,21 @@ class TestMappingConsistencyInvariant:
     ``id`` column shown in the dump. Pin down the invariants so a future
     refactor can't silently drift one consumer away from the others."""
 
-    def test_detection_builds_ids_in_range_order(self):
+    def test_detection_builds_ids_in_range_order(self, system_module):
         """Auto-detection assigns ``id=i`` for ``i in range(device_count)``.
         This is the foundation of the mapping — UI indices, CUDA ordinals,
         gpu_order storage all assume it."""
-        from modules.system import get_gpu_info_static
-        info = get_gpu_info_static()
+        info = system_module.get_gpu_info_static()
         for i, dev in enumerate(info.get("devices", [])):
             assert dev["id"] == i, (
                 f"device[{i}]['id'] == {dev['id']}, expected {i} — "
                 "breaks the invariant that list position == physical id."
             )
 
-    def test_format_table_id_matches_list_position(self):
+    def test_format_table_id_matches_list_position(self, system_module):
         """The formatter must show the ``id`` field verbatim — not the
         list position — so that if detection ever returns an out-of-order
         list the dump would make the discrepancy visible."""
-        from modules.system import format_gpu_mapping_table
         # Deliberately craft an out-of-order list to verify the formatter
         # prints each row's own ``id`` rather than ``enumerate`` position.
         devices = [
@@ -1066,7 +1089,7 @@ class TestMappingConsistencyInvariant:
             {"id": 0, "name": "first", "total_memory_gb": 12.0,
              "compute_capability": "8.0"},
         ]
-        text = format_gpu_mapping_table({
+        text = system_module.format_gpu_mapping_table({
             "available": True,
             "device_count": 2,
             "devices": devices,
@@ -1088,13 +1111,12 @@ class TestMappingDumpIntegration:
     """End-to-end check: when detection runs, the mapping dump appears on
     stderr with the same indices the launcher will use at launch time."""
 
-    def test_dump_emitted_during_fetch_system_info(self):
+    def test_dump_emitted_during_fetch_system_info(self, system_module):
         """SystemInfoManager.fetch_system_info must emit the mapping dump
         after it populates the launcher's detected_gpu_devices."""
         import io
         from contextlib import redirect_stderr
 
-        from modules import system as system_mod
         from unittest.mock import MagicMock
 
         launcher = MagicMock()
@@ -1118,14 +1140,14 @@ class TestMappingDumpIntegration:
 
         buf = io.StringIO()
         with redirect_stderr(buf), \
-             patch.object(system_mod, "get_gpu_info_with_venv",
+             patch.object(system_module, "get_gpu_info_with_venv",
                           return_value=fake_info), \
-             patch.object(system_mod, "get_ram_info_static",
+             patch.object(system_module, "get_ram_info_static",
                           return_value={"total_ram_gb": 32.0}), \
-             patch.object(system_mod, "get_cpu_info_static",
+             patch.object(system_module, "get_cpu_info_static",
                           return_value={"logical_cores": 16,
                                         "physical_cores": 8}):
-            mgr = system_mod.SystemInfoManager(launcher)
+            mgr = system_module.SystemInfoManager(launcher)
             mgr.fetch_system_info()
 
         captured = buf.getvalue()
