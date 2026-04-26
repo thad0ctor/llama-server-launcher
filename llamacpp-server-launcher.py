@@ -302,7 +302,12 @@ class LlamaCppLauncher:
 
         # Default ON: ik_llama enables FA by default in the binary, llama.cpp
         # benefits from it on most modern GPUs, and turning it on is the
-        # near-universal choice. Untick to explicitly disable on either backend.
+        # near-universal choice. Untick semantics differ per backend (see
+        # the FA emission block in modules/launch.py):
+        #   ik_llama unchecked  -> emits `--flash-attn off` (must be explicit
+        #                          to override the binary's `default: on`)
+        #   llama.cpp unchecked -> omits the flag entirely (let the binary
+        #                          fall back to its `default: auto`)
         self.flash_attn      = tk.BooleanVar(value=True)
         # String for --tensor-split argument (e.g., "100,0,0" or device indices)
         self.tensor_split    = tk.StringVar(value="")

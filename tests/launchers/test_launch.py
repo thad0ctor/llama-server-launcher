@@ -537,15 +537,16 @@ class TestBuildCmdHappyPath:
     def test_ik_llama_emits_bare_fit_flag_when_supported(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
-        """ik_llama's --fit is a bare flag (no on/off arg). Sending `--fit on`
-        the way llama.cpp expects would either error or be misinterpreted as a
-        positional arg, so we must emit the bare form."""
+        """Launch-flow path: probing is on and the (stubbed) probe says --fit
+        is supported. ik_llama's --fit is a bare flag (no on/off arg) — sending
+        `--fit on` the way llama.cpp expects would either error or be
+        misinterpreted as a positional arg, so we must emit the bare form."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("")
         launcher_mock.fit_target.set("")
-        cmd = manager.build_cmd()
+        cmd = manager.build_cmd(probe_backend=True)
         assert cmd is not None
         assert "--fit" in cmd
         # The next token after --fit must NOT be "on" or "off" — it should be
@@ -559,14 +560,15 @@ class TestBuildCmdHappyPath:
     def test_ik_llama_maps_fit_target_to_fit_margin_when_supported(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
-        """ik_llama uses --fit-margin instead of --fit-target. The shared
-        fit_target UI value should map onto --fit-margin if the binary
-        advertises it."""
+        """Launch-flow path: probing is on and the (stubbed) probe says
+        --fit-margin is supported. The shared fit_target UI value should map
+        onto --fit-margin (ik_llama uses --fit-margin instead of
+        --fit-target)."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_target.set("2048")
-        cmd = manager.build_cmd()
+        cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-margin" in cmd
         assert cmd[cmd.index("--fit-margin") + 1] == "2048"
         # Must NEVER emit the llama.cpp-spelled flag against ik_llama.
@@ -575,34 +577,36 @@ class TestBuildCmdHappyPath:
     def test_ik_llama_omits_fit_margin_when_target_at_default(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
-        """fit_target default of 1024 means 'don't override' — should not emit
-        --fit-margin even when ik_llama advertises it."""
+        """Launch-flow path with probing on. fit_target default of 1024 means
+        'don't override' — must not emit --fit-margin even when ik_llama
+        advertises it."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_target.set("1024")
-        cmd = manager.build_cmd()
+        cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-margin" not in cmd
 
     def test_ik_llama_drops_fit_ctx_silently(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
-        """ik_llama has no --fit-ctx equivalent. The shared UI value must be
-        dropped without ever appearing on the command line under either
-        spelling."""
+        """Launch-flow path with probing on. ik_llama has no --fit-ctx
+        equivalent (regardless of binary version), so the shared UI value
+        must be dropped without ever appearing on the command line under
+        either spelling."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("8192")
-        cmd = manager.build_cmd()
+        cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-ctx" not in cmd
 
     def test_ik_llama_emits_nothing_when_disabled(
-        self, manager, launcher_mock, built_tree, monkeypatch
+        self, manager, launcher_mock, built_tree
     ):
         """ik_llama has no `--fit off` — disabling fit means the flag is
-        simply absent from the command line."""
-        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        simply absent from the command line. fit_enabled=False short-circuits
+        before any probe, so neither probe_backend nor a stub matters here."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(False)
         cmd = manager.build_cmd()
