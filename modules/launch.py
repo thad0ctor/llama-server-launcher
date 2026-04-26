@@ -359,14 +359,18 @@ class LaunchManager:
         main_gpu_val = self.launcher.main_gpu.get().strip()
         self.add_arg(cmd, "--main-gpu", main_gpu_val, "0")
 
-        # Add --flash-attn flag if checked
+        # --- Flash Attention ---
+        # Both backends require a value after --flash-attn (bare flag errors
+        # on each: llama.cpp wants on|off|auto, ik_llama wants auto|on|off|0|1).
+        # Backend defaults differ — llama.cpp defaults to 'auto', ik_llama
+        # defaults to 'on' — so the unchecked-box semantics also differ:
+        #   ik_llama unchecked  -> emit --flash-attn off (must be explicit
+        #                          to override the binary's on default)
+        #   llama.cpp unchecked -> emit nothing (let the binary use 'auto')
         if self.launcher.flash_attn.get():
-            if backend == "ik_llama":
-                # ik_llama doesn't accept "on" after --flash-attn
-                cmd.append("--flash-attn")
-            else:
-                # llama.cpp --flash-attn requires a value (on|off|auto)
-                cmd.extend(["--flash-attn", "on"])
+            cmd.extend(["--flash-attn", "on"])
+        elif backend == "ik_llama":
+            cmd.extend(["--flash-attn", "off"])
 
         # --- Fit Parameters ---
         # llama.cpp and ik_llama both support --fit, but with different CLI

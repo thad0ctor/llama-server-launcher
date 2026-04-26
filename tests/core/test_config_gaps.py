@@ -187,7 +187,9 @@ class TestLoadConfiguration:
         assert launcher.ubatch_size.get() == "512"
         assert launcher.ctx_size.get() == 2048
         assert launcher.seed.get() == "-1"
-        assert launcher.flash_attn.get() is False
+        # Default flipped to True: ik_llama enables FA by default in the
+        # binary, and llama.cpp benefits from it on most modern GPUs.
+        assert launcher.flash_attn.get() is True
         assert launcher.ignore_eos.get() is False
         assert launcher.n_predict.get() == "-1"
         assert launcher.parallel.get() == "1"
@@ -853,16 +855,33 @@ class TestGenerateDefaultConfigName:
         name = cm.generate_default_config_name()
         assert "s=42" in name
 
-    def test_flash_attn_boolean_abbreviation(
+    def test_flash_attn_boolean_abbreviation_when_disabled(
         self, rich_launcher_factory, tmp_path
     ):
+        """flash_attn defaults to True now, so checking the box matches the
+        default and is omitted from the name. Unchecking the box differs
+        from the default and should appear as 'no-fa'."""
+        from modules.config import ConfigManager
+        launcher = self._launcher(rich_launcher_factory, tmp_path)
+        launcher.model_path.set("/tmp/m.gguf")
+        launcher.flash_attn.set(False)
+        cm = ConfigManager(launcher)
+        name = cm.generate_default_config_name()
+        assert "no-fa" in name.split("_")
+
+    def test_flash_attn_boolean_at_default_omitted(
+        self, rich_launcher_factory, tmp_path
+    ):
+        """Conversely, leaving flash_attn at its True default must NOT add
+        any token (otherwise every default config name would be polluted)."""
         from modules.config import ConfigManager
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.flash_attn.set(True)
         cm = ConfigManager(launcher)
         name = cm.generate_default_config_name()
-        assert "fa" in name.split("_")
+        assert "fa" not in name.split("_")
+        assert "no-fa" not in name.split("_")
 
     def test_ctx_size_nondefault_added(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager

@@ -300,7 +300,10 @@ class LlamaCppLauncher:
         # Status/info next to layers control
         self.gpu_layers_status_var = tk.StringVar(value="Select model to see layer info")
 
-        self.flash_attn      = tk.BooleanVar(value=False)
+        # Default ON: ik_llama enables FA by default in the binary, llama.cpp
+        # benefits from it on most modern GPUs, and turning it on is the
+        # near-universal choice. Untick to explicitly disable on either backend.
+        self.flash_attn      = tk.BooleanVar(value=True)
         # String for --tensor-split argument (e.g., "100,0,0" or device indices)
         self.tensor_split    = tk.StringVar(value="")
         self.main_gpu        = tk.StringVar(value="0") # String for --main-gpu entry (device index)
@@ -1232,7 +1235,7 @@ class LlamaCppLauncher:
         # Ensure checkbox is explicitly NORMAL
         self.flash_attn_check = ttk.Checkbutton(inner, variable=self.flash_attn, state=tk.NORMAL)
         self.flash_attn_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Use Flash Attention kernel (CUDA only, requires specific build)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="ON by default. Untick to force off (ik_llama defaults to on; this passes --flash-attn off)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
 

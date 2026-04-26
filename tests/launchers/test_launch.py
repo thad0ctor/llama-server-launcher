@@ -670,7 +670,7 @@ class TestBuildCmdHappyPath:
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()  # default probe_backend=False
         assert cmd is not None
-        probe_spy.assert_not_called(), (
+        assert not probe_spy.called, (
             "save-script flow must not invoke the runtime feature probe"
         )
 
@@ -748,26 +748,46 @@ class TestBuildCmdHappyPath:
         assert "--tensor-split" in cmd
         assert cmd[cmd.index("--tensor-split") + 1] == "0.5,0.5"
 
-    def test_flash_attn_llama_cpp_uses_on(self, manager, launcher_mock):
+    def test_flash_attn_llama_cpp_checked_emits_on(self, manager, launcher_mock):
         launcher_mock.flash_attn.set(True)
         launcher_mock.backend_selection.set("llama.cpp")
         cmd = manager.build_cmd()
         idx = cmd.index("--flash-attn")
         assert cmd[idx + 1] == "on"
 
-    def test_flash_attn_ik_llama_bare_flag(self, manager, launcher_mock):
+    def test_flash_attn_ik_llama_checked_emits_on(self, manager, launcher_mock):
+        """ik_llama's --flash-attn requires a value (auto|on|off|0|1) — bare
+        flag errors out at startup. Both backends now emit `on` when checked."""
         launcher_mock.flash_attn.set(True)
         launcher_mock.backend_selection.set("ik_llama")
         cmd = manager.build_cmd()
-        # ik_llama uses bare --flash-attn (no "on" / "off" follower).
         idx = cmd.index("--flash-attn")
-        # Either we're at the end, or the next token is another flag.
-        if idx + 1 < len(cmd):
-            # Chained-comparison trap: `a in b is False` parses as
-            # `(a in b) and (b is False)` — always False. Use an explicit
-            # `not in` instead.
-            assert cmd[idx + 1] not in ("on", "off")
-            assert cmd[idx + 1].startswith("-")
+        assert cmd[idx + 1] == "on", (
+            "ik_llama --flash-attn must have a value follower; the binary "
+            "errors with 'invalid parameter for argument: --flash-attn' on "
+            "the bare form"
+        )
+
+    def test_flash_attn_ik_llama_unchecked_emits_off(self, manager, launcher_mock):
+        """ik_llama enables Flash Attention by default in the binary, so the
+        unticked checkbox MUST emit `--flash-attn off` to honor the user's
+        intent. Otherwise the binary's `default: on` silently overrides the
+        user's choice."""
+        launcher_mock.flash_attn.set(False)
+        launcher_mock.backend_selection.set("ik_llama")
+        cmd = manager.build_cmd()
+        assert "--flash-attn" in cmd
+        idx = cmd.index("--flash-attn")
+        assert cmd[idx + 1] == "off"
+
+    def test_flash_attn_llama_cpp_unchecked_emits_nothing(self, manager, launcher_mock):
+        """llama.cpp defaults to `auto`, so the unticked checkbox can safely
+        leave the flag off the command line. Adding `--flash-attn off`
+        unconditionally would override `auto` for users who actually want it."""
+        launcher_mock.flash_attn.set(False)
+        launcher_mock.backend_selection.set("llama.cpp")
+        cmd = manager.build_cmd()
+        assert "--flash-attn" not in cmd
 
     def test_cache_type_k_default_omitted(self, manager, launcher_mock):
         launcher_mock.cache_type_k.set("f16")

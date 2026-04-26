@@ -89,7 +89,7 @@ class ConfigManager:
             "n_predict":     "-1", # Llama.cpp default
             # Booleans that are flags (present if True, absent if False)
             "ignore_eos":    False, # Default for --ignore-eos flag
-            "flash_attn":    False, # Default for --flash-attn flag
+            "flash_attn":    True,  # Default ON: ik_llama defaults to on, llama.cpp benefits on most GPUs
             "no_mmap":       False, # Default for --no-mmap flag
             "mlock":         False, # Default for --mlock flag
             "no_kv_offload": False, # Default for --no-kv-offload flag
@@ -150,10 +150,10 @@ class ConfigManager:
             elif key == "ctx_size":
                  if current_val != default_val:
                       parts.append(f"ctx={current_val}")
-            # Special handling for Boolean flags (add if True and default is False)
+            # Special handling for Boolean flags (add a token whenever the
+            # user's value differs from the default, in either direction).
             elif isinstance(current_val, bool):
-                 if current_val is True and default_val is False:
-                      # Use a short name for the flag
+                 if current_val != default_val:
                       flag_name_map = {
                          "flash_attn": "fa",
                          "no_mmap": "no-mmap",
@@ -165,7 +165,10 @@ class ConfigManager:
                          "mmproj_enabled": "mmproj",
                          "jinja_enabled": "jinja",
                       }
-                      parts.append(flag_name_map.get(key, key.replace('_', '-'))) # Use mapped name or just key
+                      base = flag_name_map.get(key, key.replace('_', '-'))
+                      # Prefix "no-" when turning a True-by-default flag off.
+                      token = base if current_val else f"no-{base}"
+                      parts.append(token)
             # Handle other string parameters
             elif isinstance(current_val, str):
                  # Compare stripped strings. Handle empty string vs None default.
@@ -362,7 +365,7 @@ class ConfigManager:
         self.launcher.ctx_size.set(ctx)
         self.launcher._sync_ctx_display(ctx) # Manually sync display
         self.launcher.seed.set(cfg.get("seed","-1"))
-        self.launcher.flash_attn.set(cfg.get("flash_attn",False))
+        self.launcher.flash_attn.set(cfg.get("flash_attn", True))  # Default ON; see app default note
         self.launcher.tensor_split.set(cfg.get("tensor_split","").strip()) # Ensure strip on load too
         self.launcher.main_gpu.set(cfg.get("main_gpu","0"))
         self.launcher.mlock.set(cfg.get("mlock",False))
