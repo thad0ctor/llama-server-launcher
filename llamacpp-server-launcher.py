@@ -1242,7 +1242,7 @@ class LlamaCppLauncher:
         self.fit_enabled_check = ttk.Checkbutton(inner, text="Enable", variable=self.fit_enabled,
                                                   state=tk.NORMAL, command=self._update_fit_fields_state)
         self.fit_enabled_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (llama.cpp only)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (llama.cpp & ik_llama)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
         # Fit sub-options frame (indented)

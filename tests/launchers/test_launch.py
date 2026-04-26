@@ -10,9 +10,10 @@ Covers:
     error paths that return None (missing backend dir / missing model file /
     invalid backend dir / executable not found).
   - Argument gating rules: n-gpu-layers, host/port/ctx-size/seed default
-    omission, flash-attn backend differences, fit parameters only under
-    llama.cpp, KV cache type suppression when ik_llama uses -ctk/-ctv,
-    custom parameters, mmproj auto-detection, chat-template handling.
+    omission, flash-attn backend differences, fit parameters under both
+    llama.cpp and ik_llama, KV cache type suppression when ik_llama uses
+    -ctk/-ctv, custom parameters, mmproj auto-detection, chat-template
+    handling.
   - save_sh_script() / save_ps1_script() script content - path quoting
     (including spaces), exec bit, env vars, chat-template quoting,
     CUDA_VISIBLE_DEVICES emission, venv activation branches.
@@ -401,11 +402,26 @@ class TestBuildCmdHappyPath:
         assert "--fit" in cmd
         assert cmd[cmd.index("--fit") + 1] == "off"
 
-    def test_ik_llama_backend_skips_fit_flags(self, manager, launcher_mock, built_tree):
+    def test_ik_llama_backend_emits_fit_flags(self, manager, launcher_mock, built_tree):
+        """ik_llama added --fit support, so it should be emitted just like llama.cpp."""
         launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_ctx.set("8192")
+        launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()
         assert cmd is not None
-        assert "--fit" not in cmd, "ik_llama backend should not emit --fit"
+        assert "--fit" in cmd
+        assert cmd[cmd.index("--fit") + 1] == "on"
+        assert "--fit-ctx" in cmd and cmd[cmd.index("--fit-ctx") + 1] == "8192"
+        assert "--fit-target" in cmd and cmd[cmd.index("--fit-target") + 1] == "2048"
+
+    def test_ik_llama_backend_emits_fit_off_when_disabled(self, manager, launcher_mock, built_tree):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(False)
+        cmd = manager.build_cmd()
+        assert cmd is not None
+        assert "--fit" in cmd
+        assert cmd[cmd.index("--fit") + 1] == "off"
 
     def test_ctx_size_default_omitted(self, manager, launcher_mock):
         launcher_mock.ctx_size.set(2048)

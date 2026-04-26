@@ -231,26 +231,24 @@ class LaunchManager:
                 # llama.cpp --flash-attn requires a value (on|off|auto)
                 cmd.extend(["--flash-attn", "on"])
 
-        # --- Fit Parameters (llama.cpp only, not supported by ik_llama) ---
-        if backend != "ik_llama":
-            # Add --fit on/off based on checkbox state
-            if self.launcher.fit_enabled.get():
-                cmd.extend(["--fit", "on"])
-                print(f"DEBUG: Adding --fit on", file=sys.stderr)
-                # --fit-ctx: synced with ctx_size slider or manually set
-                fit_ctx_val = self.launcher.fit_ctx.get().strip()
-                # Only add if different from llama.cpp default of 4096
-                if fit_ctx_val and fit_ctx_val != "4096":
-                    cmd.extend(["--fit-ctx", fit_ctx_val])
-                    print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
-                # --fit-target: only add if non-default
-                fit_target_val = self.launcher.fit_target.get().strip()
-                if fit_target_val and fit_target_val != "1024":
-                    cmd.extend(["--fit-target", fit_target_val])
-                    print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
-            else:
-                cmd.extend(["--fit", "off"])
-                print(f"DEBUG: Adding --fit off", file=sys.stderr)
+        # --- Fit Parameters (supported by both llama.cpp and ik_llama) ---
+        if self.launcher.fit_enabled.get():
+            cmd.extend(["--fit", "on"])
+            print(f"DEBUG: Adding --fit on", file=sys.stderr)
+            # --fit-ctx: synced with ctx_size slider or manually set
+            fit_ctx_val = self.launcher.fit_ctx.get().strip()
+            # Only add if different from llama.cpp default of 4096
+            if fit_ctx_val and fit_ctx_val != "4096":
+                cmd.extend(["--fit-ctx", fit_ctx_val])
+                print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
+            # --fit-target: only add if non-default
+            fit_target_val = self.launcher.fit_target.get().strip()
+            if fit_target_val and fit_target_val != "1024":
+                cmd.extend(["--fit-target", fit_target_val])
+                print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
+        else:
+            cmd.extend(["--fit", "off"])
+            print(f"DEBUG: Adding --fit off", file=sys.stderr)
 
         # Memory options
         self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)
