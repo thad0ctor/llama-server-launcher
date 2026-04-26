@@ -441,6 +441,40 @@ class TestBackendSupportsFlag:
         )
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
 
+    def test_failure_is_not_cached_so_later_probe_can_succeed(
+        self, manager, monkeypatch
+    ):
+        """A transient timeout/OSError must not poison the cache. If the
+        first probe fails (load spike, momentarily-busy disk) but a later
+        probe would succeed, the second call must actually re-run subprocess
+        and return True. Caching False on transient failures would silently
+        disable the flag for the rest of the session."""
+        from unittest.mock import MagicMock as _MM
+        import subprocess as _sp
+
+        call_count = {"n": 0}
+
+        def _flaky_run(*a, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise _sp.TimeoutExpired(cmd="x", timeout=5)
+            r = _MM()
+            r.stdout = "  --fit on|off\n"
+            r.stderr = ""
+            return r
+
+        monkeypatch.setattr("modules.launch.subprocess.run", _flaky_run)
+
+        # First call hits the timeout — returns False, must NOT cache.
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is False
+        assert ("/fake/exe", "--fit") not in manager._feature_probe_cache, (
+            "transient probe failures must not be memoized"
+        )
+
+        # Second call re-runs subprocess and finds the flag.
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is True
+        assert call_count["n"] == 2, "second call should actually re-probe"
+
     def test_result_is_cached_per_exe_and_flag(self, manager, monkeypatch):
         calls = {"n": 0}
 
@@ -448,18 +482,33 @@ class TestBackendSupportsFlag:
             calls["n"] += 1
             from unittest.mock import MagicMock as _MM
             r = _MM()
-            r.stdout = "  --fit on|off\n"
+            # Echo a help line that contains every flag the test asks about,
+            # so each (exe, flag) probe resolves to True.
+            r.stdout = "  --fit on|off\n  --other-flag X\n"
             r.stderr = ""
             return r
 
         monkeypatch.setattr("modules.launch.subprocess.run", _counting_run)
+
+        # Same (exe, flag) repeated -> cached after first call.
         manager._backend_supports_flag("/fake/exe", "--fit")
         manager._backend_supports_flag("/fake/exe", "--fit")
         manager._backend_supports_flag("/fake/exe", "--fit")
         assert calls["n"] == 1, "subprocess.run should only be invoked once per (exe, flag)"
+
+        # Different flag on the same exe must re-probe — the cache key is
+        # (exe, flag), not exe alone. Without this, a build that supports
+        # --fit but not --fit-margin would be miscached as supporting both.
+        manager._backend_supports_flag("/fake/exe", "--other-flag")
+        assert calls["n"] == 2, (
+            "different flag on same exe must re-probe (cache key is per-flag)"
+        )
+        manager._backend_supports_flag("/fake/exe", "--other-flag")
+        assert calls["n"] == 2, "second call for same (exe, flag) should hit cache"
+
         # Different exe path → re-probes.
         manager._backend_supports_flag("/other/exe", "--fit")
-        assert calls["n"] == 2
+        assert calls["n"] == 3
 
 
 # ============================================================================
@@ -566,13 +615,14 @@ class TestBuildCmdHappyPath:
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
         """Older ik_llama builds whose --help omits --fit must not receive any
-        fit flag — emitting one would crash the server."""
+        fit flag — emitting one would crash the server. Only the launch flow
+        opts into probing (probe_backend=True)."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: False)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("8192")
         launcher_mock.fit_target.set("2048")
-        cmd = manager.build_cmd()
+        cmd = manager.build_cmd(probe_backend=True)
         assert "--fit" not in cmd
         assert "--fit-ctx" not in cmd
         assert "--fit-target" not in cmd
@@ -589,19 +639,67 @@ class TestBuildCmdHappyPath:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_target.set("2048")
-        cmd = manager.build_cmd()
+        cmd = manager.build_cmd(probe_backend=True)
         assert "--fit" in cmd
         assert "--fit-margin" not in cmd
 
     def test_llama_cpp_backend_does_not_probe_for_fit(
-        self, manager, launcher_mock, built_tree
+        self, manager, launcher_mock, built_tree, monkeypatch
     ):
         """llama.cpp has supported --fit for a long time; the probe should be
         skipped entirely so we don't pay subprocess cost on the common path."""
+        from unittest.mock import MagicMock
+        probe_spy = MagicMock(return_value=True)
+        monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
+        cmd = manager.build_cmd(probe_backend=True)
+        assert cmd is not None
+        probe_spy.assert_not_called()
+
+    def test_default_build_cmd_does_not_probe_ik_llama_backend(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """build_cmd() with default args (the save-script flow) must NOT
+        execute the backend binary. Save-script callers may be writing a
+        script for a different machine, and a 5s probe timeout would freeze
+        the UI on every save. The probe is opt-in via probe_backend=True."""
+        from unittest.mock import MagicMock
+        probe_spy = MagicMock(return_value=True)
+        monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_target.set("2048")
+        cmd = manager.build_cmd()  # default probe_backend=False
+        assert cmd is not None
+        probe_spy.assert_not_called(), (
+            "save-script flow must not invoke the runtime feature probe"
+        )
+
+    def test_default_build_cmd_emits_ik_llama_fit_optimistically(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """When probing is disabled (the save-script flow), trust the user's
+        UI selection and emit the flags they configured. The script writer
+        can't know whether the target host's ik_llama build supports --fit
+        or --fit-margin, but the user just toggled them on, so the saved
+        script should faithfully reflect that intent."""
+        # Even though we make the probe return False, the default-args call
+        # must not consult it — flags should still be emitted optimistically.
+        from unittest.mock import MagicMock
+        probe_spy = MagicMock(return_value=False)
+        monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_ctx.set("8192")
+        launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()
         assert cmd is not None
-        # Cache stays empty because llama.cpp branch never invokes the probe.
-        assert manager._feature_probe_cache == {}
+        assert "--fit" in cmd, "bare --fit should be emitted optimistically"
+        assert "--fit-margin" in cmd
+        assert cmd[cmd.index("--fit-margin") + 1] == "2048"
+        # Llama.cpp-spelled siblings must still never appear under ik_llama.
+        assert "--fit-target" not in cmd
+        assert "--fit-ctx" not in cmd
+        probe_spy.assert_not_called()
 
     def test_ctx_size_default_omitted(self, manager, launcher_mock):
         launcher_mock.ctx_size.set(2048)

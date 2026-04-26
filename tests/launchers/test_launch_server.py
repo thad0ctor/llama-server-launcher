@@ -365,6 +365,32 @@ class TestLaunchServerMacOS:
 # ============================================================================
 
 
+class TestLaunchServerProbingOptIn:
+    """launch_server() must opt into runtime feature probing
+    (probe_backend=True) so older ik_llama builds don't get unsupported
+    flags. The save-script paths intentionally omit this — see
+    tests/launchers/test_launch.py for those."""
+
+    def test_launch_server_passes_probe_backend_true_to_build_cmd(
+        self, manager, launcher_mock
+    ):
+        """Returning None from build_cmd causes launch_server to bail
+        immediately, so we don't need to mock subprocess/Popen — we just
+        need to verify the call signature."""
+        with patch.object(manager, "build_cmd", return_value=None) as bc:
+            manager.launch_server()
+
+        assert bc.called, "launch_server should invoke build_cmd"
+        # Accept either kwarg form or positional — what matters is the value.
+        kwargs = bc.call_args.kwargs
+        args = bc.call_args.args
+        probe_value = kwargs.get("probe_backend", args[0] if args else None)
+        assert probe_value is True, (
+            "launch_server must call build_cmd(probe_backend=True) so the "
+            f"runtime feature probe runs; got call_args={bc.call_args!r}"
+        )
+
+
 class TestCleanupThread:
     def test_cleanup_thread_is_daemon_on_windows(self, manager, launcher_mock, tmp_path):
         ps1_path = tmp_path / "launch.ps1"

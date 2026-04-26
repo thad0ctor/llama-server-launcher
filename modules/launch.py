@@ -62,12 +62,17 @@ class LaunchManager:
                 file=sys.stderr,
             )
         except Exception as e:
+            # Don't memoize transient failures. A timeout or OSError on one
+            # probe could be a one-off (load spike, momentarily-busy disk),
+            # and there's no invalidation path on this cache — caching False
+            # here would silently disable the flag for the rest of the
+            # session even if a later probe would succeed.
             print(
                 f"DEBUG: Feature probe failed for {exe_path} {flag}: {e!r}; "
-                f"assuming unsupported",
+                f"assuming unsupported for this call only (not cached)",
                 file=sys.stderr,
             )
-            supported = False
+            return False
 
         self._feature_probe_cache[cache_key] = supported
         return supported
@@ -90,13 +95,19 @@ class LaunchManager:
             cmd.extend(["--fit", "off"])
             print("DEBUG: Adding --fit off", file=sys.stderr)
 
-    def _build_ik_llama_fit_args(self, cmd, exe_path):
+    def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
         """Append ik_llama fit args, translating from the shared UI fields:
           - shared `fit_enabled` -> bare `--fit` flag (no on/off arg)
           - shared `fit_target`  -> `--fit-margin N` (closest equivalent)
           - shared `fit_ctx`     -> dropped (no equivalent in ik_llama)
-        Each flag is probed against `<exe> --help` so older builds that
-        predate ik_llama's fit support don't crash on an unknown arg.
+
+        ``probe`` controls whether to spawn ``<exe> --help`` to verify each
+        flag is advertised before emitting it:
+          - True  (launch flow): probe and skip flags an older build lacks.
+          - False (save-script flow): trust the user's UI selection and emit
+            optimistically. This avoids running the binary on the save
+            machine, which (a) may not even be the target host the script
+            will run on, and (b) would block the UI for up to 5s per probe.
         """
         if not self.launcher.fit_enabled.get():
             # ik_llama has no `--fit off` — fit is opt-in via the bare flag,
@@ -104,7 +115,8 @@ class LaunchManager:
             print("DEBUG: ik_llama fit disabled — omitting --fit flag", file=sys.stderr)
             return
 
-        if not self._backend_supports_flag(exe_path, "--fit"):
+        fit_supported = (not probe) or self._backend_supports_flag(exe_path, "--fit")
+        if not fit_supported:
             print(
                 f"DEBUG: ik_llama build at {exe_path} does not advertise --fit; "
                 f"skipping fit flags (upgrade ik_llama to use this feature)",
@@ -113,7 +125,10 @@ class LaunchManager:
             return
 
         cmd.append("--fit")
-        print("DEBUG: Adding --fit (ik_llama bare flag)", file=sys.stderr)
+        print(
+            f"DEBUG: Adding --fit (ik_llama bare flag, probed={probe})",
+            file=sys.stderr,
+        )
 
         if self.launcher.fit_ctx.get().strip():
             print(
@@ -124,11 +139,14 @@ class LaunchManager:
 
         fit_target_val = self.launcher.fit_target.get().strip()
         if fit_target_val and fit_target_val != "1024":
-            if self._backend_supports_flag(exe_path, "--fit-margin"):
+            margin_supported = (not probe) or self._backend_supports_flag(
+                exe_path, "--fit-margin"
+            )
+            if margin_supported:
                 cmd.extend(["--fit-margin", fit_target_val])
                 print(
                     f"DEBUG: Adding --fit-margin {fit_target_val} "
-                    f"(mapped from fit_target)",
+                    f"(mapped from fit_target, probed={probe})",
                     file=sys.stderr,
                 )
             else:
@@ -138,8 +156,15 @@ class LaunchManager:
                     file=sys.stderr,
                 )
 
-    def build_cmd(self):
-        """Builds the command list for the server based on selected backend."""
+    def build_cmd(self, probe_backend=False):
+        """Builds the command list for the server based on selected backend.
+
+        ``probe_backend`` (default False) controls whether we may run
+        ``<exe> --help`` to detect optional CLI flags (currently used only
+        for the ik_llama --fit / --fit-margin gate). The launch flow opts
+        in; save-script flows leave it off so writing a script never
+        executes the binary or hangs the UI on a probe timeout.
+        """
         # Get the backend selection and use appropriate directory
         backend = self.launcher.backend_selection.get()
 
@@ -352,7 +377,7 @@ class LaunchManager:
         # Both surfaces are runtime-probed so older builds that lack any of
         # these flags degrade gracefully instead of crashing on an unknown arg.
         if backend == "ik_llama":
-            self._build_ik_llama_fit_args(cmd, exe_path)
+            self._build_ik_llama_fit_args(cmd, exe_path, probe=probe_backend)
         else:
             self._build_llama_cpp_fit_args(cmd)
 
@@ -671,7 +696,10 @@ class LaunchManager:
 
     def launch_server(self):
         """Launch the llama-server with the configured settings."""
-        cmd_list = self.build_cmd()
+        # Opt into runtime feature probing — we're about to spawn the binary
+        # anyway, so the brief --help probe cost is acceptable here (and lets
+        # us drop unsupported flags before they crash the server).
+        cmd_list = self.build_cmd(probe_backend=True)
         if not cmd_list:
             # build_cmd already showed an error message
             return
