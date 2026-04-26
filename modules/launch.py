@@ -25,6 +25,52 @@ class LaunchManager:
     def __init__(self, launcher_instance):
         """Initialize with a reference to the main launcher instance."""
         self.launcher = launcher_instance
+        # Caches results of `<exe> --help` probes keyed by (exe_path, flag).
+        # Used to gracefully skip flags older builds don't recognize, e.g.
+        # --fit on ik_llama builds that predate fit support.
+        self._feature_probe_cache: dict[tuple[str, str], bool] = {}
+
+    def _backend_supports_flag(self, exe_path, flag):
+        """Return True if `exe_path --help` advertises `flag`.
+
+        Caches per (exe, flag) so repeated build_cmd() calls don't re-spawn
+        the help process. On any probe failure (timeout, non-zero exit,
+        OSError), assumes the flag is unsupported — safer than emitting an
+        unknown argument that would crash the server at startup.
+        """
+        cache_key = (str(exe_path), flag)
+        if cache_key in self._feature_probe_cache:
+            return self._feature_probe_cache[cache_key]
+
+        supported = False
+        try:
+            result = subprocess.run(
+                [str(exe_path), "--help"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            help_text = (result.stdout or "") + (result.stderr or "")
+            # Match the flag as a token: preceded by start-of-line/whitespace,
+            # followed by whitespace, comma, end-of-line, or '='.
+            pattern = rf"(?:^|\s){re.escape(flag)}(?:[\s,=]|$)"
+            supported = bool(re.search(pattern, help_text, re.MULTILINE))
+            print(
+                f"DEBUG: Feature probe — {Path(exe_path).name} {flag}: "
+                f"{'supported' if supported else 'not advertised'}",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"DEBUG: Feature probe failed for {exe_path} {flag}: {e!r}; "
+                f"assuming unsupported",
+                file=sys.stderr,
+            )
+            supported = False
+
+        self._feature_probe_cache[cache_key] = supported
+        return supported
 
     def build_cmd(self):
         """Builds the command list for the server based on selected backend."""
@@ -231,8 +277,18 @@ class LaunchManager:
                 # llama.cpp --flash-attn requires a value (on|off|auto)
                 cmd.extend(["--flash-attn", "on"])
 
-        # --- Fit Parameters (supported by both llama.cpp and ik_llama) ---
-        if self.launcher.fit_enabled.get():
+        # --- Fit Parameters ---
+        # llama.cpp has supported --fit for a long time, so emit unconditionally.
+        # ik_llama added --fit support recently; probe the binary's --help so
+        # older ik_llama builds don't crash on an unknown argument.
+        emit_fit = backend != "ik_llama" or self._backend_supports_flag(exe_path, "--fit")
+        if not emit_fit:
+            print(
+                f"DEBUG: ik_llama build at {exe_path} does not advertise --fit; "
+                f"skipping fit flags (upgrade ik_llama to use this feature)",
+                file=sys.stderr,
+            )
+        elif self.launcher.fit_enabled.get():
             cmd.extend(["--fit", "on"])
             print(f"DEBUG: Adding --fit on", file=sys.stderr)
             # --fit-ctx: synced with ctx_size slider or manually set

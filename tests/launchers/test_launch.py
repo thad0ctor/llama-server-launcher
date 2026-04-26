@@ -380,6 +380,89 @@ class TestLaunchersDir:
 
 
 # ============================================================================
+# _backend_supports_flag: runtime --help probe
+# ============================================================================
+
+
+class TestBackendSupportsFlag:
+    def _fake_run(self, stdout="", stderr="", raise_exc=None):
+        from unittest.mock import MagicMock as _MM
+        if raise_exc is not None:
+            def _runner(*a, **kw):
+                raise raise_exc
+            return _runner
+        result = _MM()
+        result.stdout = stdout
+        result.stderr = stderr
+        return lambda *a, **kw: result
+
+    def test_returns_true_when_flag_in_stdout(self, manager, monkeypatch):
+        monkeypatch.setattr(
+            "modules.launch.subprocess.run",
+            self._fake_run(stdout="usage: server [opts]\n  --fit on|off  fit memory\n"),
+        )
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is True
+
+    def test_returns_true_when_flag_in_stderr(self, manager, monkeypatch):
+        # Some servers print --help to stderr.
+        monkeypatch.setattr(
+            "modules.launch.subprocess.run",
+            self._fake_run(stderr="  --fit on|off\n"),
+        )
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is True
+
+    def test_returns_false_when_flag_absent(self, manager, monkeypatch):
+        monkeypatch.setattr(
+            "modules.launch.subprocess.run",
+            self._fake_run(stdout="usage: server [opts]\n  --threads N\n"),
+        )
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is False
+
+    def test_returns_false_on_subprocess_failure(self, manager, monkeypatch):
+        import subprocess as _sp
+        monkeypatch.setattr(
+            "modules.launch.subprocess.run",
+            self._fake_run(raise_exc=_sp.TimeoutExpired(cmd="x", timeout=5)),
+        )
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is False
+
+    def test_returns_false_on_oserror(self, manager, monkeypatch):
+        monkeypatch.setattr(
+            "modules.launch.subprocess.run",
+            self._fake_run(raise_exc=OSError("exec format error")),
+        )
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is False
+
+    def test_does_not_match_substring_of_other_flag(self, manager, monkeypatch):
+        # "--fitness" should not satisfy a probe for "--fit".
+        monkeypatch.setattr(
+            "modules.launch.subprocess.run",
+            self._fake_run(stdout="  --fitness foo\n"),
+        )
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is False
+
+    def test_result_is_cached_per_exe_and_flag(self, manager, monkeypatch):
+        calls = {"n": 0}
+
+        def _counting_run(*a, **kw):
+            calls["n"] += 1
+            from unittest.mock import MagicMock as _MM
+            r = _MM()
+            r.stdout = "  --fit on|off\n"
+            r.stderr = ""
+            return r
+
+        monkeypatch.setattr("modules.launch.subprocess.run", _counting_run)
+        manager._backend_supports_flag("/fake/exe", "--fit")
+        manager._backend_supports_flag("/fake/exe", "--fit")
+        manager._backend_supports_flag("/fake/exe", "--fit")
+        assert calls["n"] == 1, "subprocess.run should only be invoked once per (exe, flag)"
+        # Different exe path → re-probes.
+        manager._backend_supports_flag("/other/exe", "--fit")
+        assert calls["n"] == 2
+
+
+# ============================================================================
 # build_cmd: happy path + gating
 # ============================================================================
 
@@ -402,8 +485,12 @@ class TestBuildCmdHappyPath:
         assert "--fit" in cmd
         assert cmd[cmd.index("--fit") + 1] == "off"
 
-    def test_ik_llama_backend_emits_fit_flags(self, manager, launcher_mock, built_tree):
-        """ik_llama added --fit support, so it should be emitted just like llama.cpp."""
+    def test_ik_llama_backend_emits_fit_flags_when_supported(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """When the ik_llama binary's --help advertises --fit, all three fit
+        flags propagate exactly like under llama.cpp."""
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("8192")
@@ -415,13 +502,43 @@ class TestBuildCmdHappyPath:
         assert "--fit-ctx" in cmd and cmd[cmd.index("--fit-ctx") + 1] == "8192"
         assert "--fit-target" in cmd and cmd[cmd.index("--fit-target") + 1] == "2048"
 
-    def test_ik_llama_backend_emits_fit_off_when_disabled(self, manager, launcher_mock, built_tree):
+    def test_ik_llama_backend_emits_fit_off_when_supported_and_disabled(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(False)
         cmd = manager.build_cmd()
         assert cmd is not None
         assert "--fit" in cmd
         assert cmd[cmd.index("--fit") + 1] == "off"
+
+    def test_ik_llama_backend_skips_fit_when_unsupported(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """Older ik_llama builds whose --help omits --fit must not receive any
+        fit flag — emitting one would crash the server with an unknown-arg
+        error. The launcher should silently skip the block."""
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: False)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_ctx.set("8192")
+        launcher_mock.fit_target.set("2048")
+        cmd = manager.build_cmd()
+        assert cmd is not None
+        assert "--fit" not in cmd
+        assert "--fit-ctx" not in cmd
+        assert "--fit-target" not in cmd
+
+    def test_llama_cpp_backend_does_not_probe_for_fit(
+        self, manager, launcher_mock, built_tree
+    ):
+        """llama.cpp has supported --fit for a long time; the probe should be
+        skipped entirely so we don't pay subprocess cost on the common path."""
+        cmd = manager.build_cmd()
+        assert cmd is not None
+        # Cache stays empty because llama.cpp branch never invokes the probe.
+        assert manager._feature_probe_cache == {}
 
     def test_ctx_size_default_omitted(self, manager, launcher_mock):
         launcher_mock.ctx_size.set(2048)
