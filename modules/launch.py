@@ -25,9 +25,146 @@ class LaunchManager:
     def __init__(self, launcher_instance):
         """Initialize with a reference to the main launcher instance."""
         self.launcher = launcher_instance
+        # Caches results of `<exe> --help` probes keyed by (exe_path, flag).
+        # Used to gracefully skip flags older builds don't recognize, e.g.
+        # --fit on ik_llama builds that predate fit support.
+        self._feature_probe_cache: dict[tuple[str, str], bool] = {}
 
-    def build_cmd(self):
-        """Builds the command list for the server based on selected backend."""
+    def _backend_supports_flag(self, exe_path, flag):
+        """Return True if `exe_path --help` advertises `flag`.
+
+        Caches per (exe, flag) so repeated build_cmd() calls don't re-spawn
+        the help process. On any probe failure (timeout, non-zero exit,
+        OSError), assumes the flag is unsupported — safer than emitting an
+        unknown argument that would crash the server at startup.
+        """
+        cache_key = (str(exe_path), flag)
+        if cache_key in self._feature_probe_cache:
+            return self._feature_probe_cache[cache_key]
+
+        supported = False
+        try:
+            result = subprocess.run(
+                [str(exe_path), "--help"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            help_text = (result.stdout or "") + (result.stderr or "")
+            # Match the flag as a token: preceded by start-of-line/whitespace,
+            # followed by whitespace, comma, end-of-line, or '='.
+            pattern = rf"(?:^|\s){re.escape(flag)}(?:[\s,=]|$)"
+            supported = bool(re.search(pattern, help_text, re.MULTILINE))
+            print(
+                f"DEBUG: Feature probe — {Path(exe_path).name} {flag}: "
+                f"{'supported' if supported else 'not advertised'}",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            # Don't memoize transient failures. A timeout or OSError on one
+            # probe could be a one-off (load spike, momentarily-busy disk),
+            # and there's no invalidation path on this cache — caching False
+            # here would silently disable the flag for the rest of the
+            # session even if a later probe would succeed.
+            print(
+                f"DEBUG: Feature probe failed for {exe_path} {flag}: {e!r}; "
+                f"assuming unsupported for this call only (not cached)",
+                file=sys.stderr,
+            )
+            return False
+
+        self._feature_probe_cache[cache_key] = supported
+        return supported
+
+    def _build_llama_cpp_fit_args(self, cmd):
+        """Append upstream llama.cpp fit args: --fit on|off, --fit-ctx,
+        --fit-target."""
+        if self.launcher.fit_enabled.get():
+            cmd.extend(["--fit", "on"])
+            print("DEBUG: Adding --fit on", file=sys.stderr)
+            fit_ctx_val = self.launcher.fit_ctx.get().strip()
+            if fit_ctx_val and fit_ctx_val != "4096":
+                cmd.extend(["--fit-ctx", fit_ctx_val])
+                print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
+            fit_target_val = self.launcher.fit_target.get().strip()
+            if fit_target_val and fit_target_val != "1024":
+                cmd.extend(["--fit-target", fit_target_val])
+                print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
+        else:
+            cmd.extend(["--fit", "off"])
+            print("DEBUG: Adding --fit off", file=sys.stderr)
+
+    def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
+        """Append ik_llama fit args, translating from the shared UI fields:
+          - shared `fit_enabled` -> bare `--fit` flag (no on/off arg)
+          - shared `fit_target`  -> `--fit-margin N` (closest equivalent)
+          - shared `fit_ctx`     -> dropped (no equivalent in ik_llama)
+
+        ``probe`` controls whether to spawn ``<exe> --help`` to verify each
+        flag is advertised before emitting it:
+          - True  (launch flow): probe and skip flags an older build lacks.
+          - False (save-script flow): trust the user's UI selection and emit
+            optimistically. This avoids running the binary on the save
+            machine, which (a) may not even be the target host the script
+            will run on, and (b) would block the UI for up to 5s per probe.
+        """
+        if not self.launcher.fit_enabled.get():
+            # ik_llama has no `--fit off` — fit is opt-in via the bare flag,
+            # so leaving it unchecked just means emitting nothing.
+            print("DEBUG: ik_llama fit disabled — omitting --fit flag", file=sys.stderr)
+            return
+
+        fit_supported = (not probe) or self._backend_supports_flag(exe_path, "--fit")
+        if not fit_supported:
+            print(
+                f"DEBUG: ik_llama build at {exe_path} does not advertise --fit; "
+                f"skipping fit flags (upgrade ik_llama to use this feature)",
+                file=sys.stderr,
+            )
+            return
+
+        cmd.append("--fit")
+        print(
+            f"DEBUG: Adding --fit (ik_llama bare flag, probed={probe})",
+            file=sys.stderr,
+        )
+
+        if self.launcher.fit_ctx.get().strip():
+            print(
+                "DEBUG: ik_llama has no --fit-ctx equivalent; "
+                "ignoring fit_ctx value",
+                file=sys.stderr,
+            )
+
+        fit_target_val = self.launcher.fit_target.get().strip()
+        if fit_target_val and fit_target_val != "1024":
+            margin_supported = (not probe) or self._backend_supports_flag(
+                exe_path, "--fit-margin"
+            )
+            if margin_supported:
+                cmd.extend(["--fit-margin", fit_target_val])
+                print(
+                    f"DEBUG: Adding --fit-margin {fit_target_val} "
+                    f"(mapped from fit_target, probed={probe})",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"DEBUG: ik_llama build at {exe_path} does not advertise "
+                    f"--fit-margin; skipping fit_target mapping",
+                    file=sys.stderr,
+                )
+
+    def build_cmd(self, probe_backend=False):
+        """Builds the command list for the server based on selected backend.
+
+        ``probe_backend`` (default False) controls whether we may run
+        ``<exe> --help`` to detect optional CLI flags (currently used only
+        for the ik_llama --fit / --fit-margin gate). The launch flow opts
+        in; save-script flows leave it off so writing a script never
+        executes the binary or hangs the UI on a probe timeout.
+        """
         # Get the backend selection and use appropriate directory
         backend = self.launcher.backend_selection.get()
 
@@ -222,35 +359,31 @@ class LaunchManager:
         main_gpu_val = self.launcher.main_gpu.get().strip()
         self.add_arg(cmd, "--main-gpu", main_gpu_val, "0")
 
-        # Add --flash-attn flag if checked
+        # --- Flash Attention ---
+        # Both backends require a value after --flash-attn (bare flag errors
+        # on each: llama.cpp wants on|off|auto, ik_llama wants auto|on|off|0|1).
+        # Backend defaults differ — llama.cpp defaults to 'auto', ik_llama
+        # defaults to 'on' — so the unchecked-box semantics also differ:
+        #   ik_llama unchecked  -> emit --flash-attn off (must be explicit
+        #                          to override the binary's on default)
+        #   llama.cpp unchecked -> emit nothing (let the binary use 'auto')
         if self.launcher.flash_attn.get():
-            if backend == "ik_llama":
-                # ik_llama doesn't accept "on" after --flash-attn
-                cmd.append("--flash-attn")
-            else:
-                # llama.cpp --flash-attn requires a value (on|off|auto)
-                cmd.extend(["--flash-attn", "on"])
+            cmd.extend(["--flash-attn", "on"])
+        elif backend == "ik_llama":
+            cmd.extend(["--flash-attn", "off"])
 
-        # --- Fit Parameters (llama.cpp only, not supported by ik_llama) ---
-        if backend != "ik_llama":
-            # Add --fit on/off based on checkbox state
-            if self.launcher.fit_enabled.get():
-                cmd.extend(["--fit", "on"])
-                print(f"DEBUG: Adding --fit on", file=sys.stderr)
-                # --fit-ctx: synced with ctx_size slider or manually set
-                fit_ctx_val = self.launcher.fit_ctx.get().strip()
-                # Only add if different from llama.cpp default of 4096
-                if fit_ctx_val and fit_ctx_val != "4096":
-                    cmd.extend(["--fit-ctx", fit_ctx_val])
-                    print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
-                # --fit-target: only add if non-default
-                fit_target_val = self.launcher.fit_target.get().strip()
-                if fit_target_val and fit_target_val != "1024":
-                    cmd.extend(["--fit-target", fit_target_val])
-                    print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
-            else:
-                cmd.extend(["--fit", "off"])
-                print(f"DEBUG: Adding --fit off", file=sys.stderr)
+        # --- Fit Parameters ---
+        # llama.cpp and ik_llama both support --fit, but with different CLI
+        # surfaces:
+        #   llama.cpp: `--fit on|off`, `--fit-ctx N`, `--fit-target N`
+        #   ik_llama:  `--fit` (bare flag, no on/off), `--fit-margin N`
+        #              (no --fit-ctx equivalent)
+        # Both surfaces are runtime-probed so older builds that lack any of
+        # these flags degrade gracefully instead of crashing on an unknown arg.
+        if backend == "ik_llama":
+            self._build_ik_llama_fit_args(cmd, exe_path, probe=probe_backend)
+        else:
+            self._build_llama_cpp_fit_args(cmd)
 
         # Memory options
         self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)
@@ -567,7 +700,10 @@ class LaunchManager:
 
     def launch_server(self):
         """Launch the llama-server with the configured settings."""
-        cmd_list = self.build_cmd()
+        # Opt into runtime feature probing — we're about to spawn the binary
+        # anyway, so the brief --help probe cost is acceptable here (and lets
+        # us drop unsupported flags before they crash the server).
+        cmd_list = self.build_cmd(probe_backend=True)
         if not cmd_list:
             # build_cmd already showed an error message
             return

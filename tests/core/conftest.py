@@ -171,9 +171,14 @@ def build_rich_launcher_mock(
     ]:
         setattr(launcher, name, FakeVar(default))
 
-    for name in ("no_mmap", "flash_attn", "mlock", "no_kv_offload", "ignore_eos",
+    for name in ("no_mmap", "mlock", "no_kv_offload", "ignore_eos",
                  "cpu_moe", "mmproj_enabled", "fit_enabled", "jinja_enabled"):
         setattr(launcher, name, FakeVar(False))
+
+    # flash_attn defaults to True in the app (ik_llama enables it by default
+    # in the binary, llama.cpp benefits on most GPUs). Mirror that here so
+    # generate_default_config_name doesn't see every fixture as a deviation.
+    launcher.flash_attn = FakeVar(True)
 
     launcher.ctx_size = FakeVar(2048)
     launcher.n_gpu_layers_int = FakeVar(0)

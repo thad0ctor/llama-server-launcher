@@ -300,7 +300,15 @@ class LlamaCppLauncher:
         # Status/info next to layers control
         self.gpu_layers_status_var = tk.StringVar(value="Select model to see layer info")
 
-        self.flash_attn      = tk.BooleanVar(value=False)
+        # Default ON: ik_llama enables FA by default in the binary, llama.cpp
+        # benefits from it on most modern GPUs, and turning it on is the
+        # near-universal choice. Untick semantics differ per backend (see
+        # the FA emission block in modules/launch.py):
+        #   ik_llama unchecked  -> emits `--flash-attn off` (must be explicit
+        #                          to override the binary's `default: on`)
+        #   llama.cpp unchecked -> omits the flag entirely (let the binary
+        #                          fall back to its `default: auto`)
+        self.flash_attn      = tk.BooleanVar(value=True)
         # String for --tensor-split argument (e.g., "100,0,0" or device indices)
         self.tensor_split    = tk.StringVar(value="")
         self.main_gpu        = tk.StringVar(value="0") # String for --main-gpu entry (device index)
@@ -1232,7 +1240,7 @@ class LlamaCppLauncher:
         # Ensure checkbox is explicitly NORMAL
         self.flash_attn_check = ttk.Checkbutton(inner, variable=self.flash_attn, state=tk.NORMAL)
         self.flash_attn_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Use Flash Attention kernel (CUDA only, requires specific build)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="ON by default. Untick to force off (ik_llama defaults to on; this passes --flash-attn off)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
 
@@ -1242,7 +1250,7 @@ class LlamaCppLauncher:
         self.fit_enabled_check = ttk.Checkbutton(inner, text="Enable", variable=self.fit_enabled,
                                                   state=tk.NORMAL, command=self._update_fit_fields_state)
         self.fit_enabled_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (llama.cpp only)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (ik_llama: bare --fit, no min-ctx)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
         # Fit sub-options frame (indented)
@@ -1254,7 +1262,7 @@ class LlamaCppLauncher:
         self.fit_ctx_entry = ttk.Entry(fit_options_frame, textvariable=self.fit_ctx, width=8, state=tk.NORMAL)
         self.fit_ctx_entry.pack(side="left", padx=(0, 15))
 
-        ttk.Label(fit_options_frame, text="Target MiB (--fit-target):")\
+        ttk.Label(fit_options_frame, text="Target MiB (--fit-target / ik_llama: --fit-margin):")\
             .pack(side="left", padx=(0, 5))
         self.fit_target_entry = ttk.Entry(fit_options_frame, textvariable=self.fit_target, width=8, state=tk.NORMAL)
         self.fit_target_entry.pack(side="left", padx=(0, 10))
