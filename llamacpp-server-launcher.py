@@ -1242,7 +1242,7 @@ class LlamaCppLauncher:
         self.fit_enabled_check = ttk.Checkbutton(inner, text="Enable", variable=self.fit_enabled,
                                                   state=tk.NORMAL, command=self._update_fit_fields_state)
         self.fit_enabled_check.grid(column=1, row=r, sticky="w", padx=5, pady=3)
-        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (llama.cpp & ik_llama)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Auto-reduce params if device memory insufficient (ik_llama: bare --fit, no min-ctx)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
 
         # Fit sub-options frame (indented)
@@ -1254,7 +1254,7 @@ class LlamaCppLauncher:
         self.fit_ctx_entry = ttk.Entry(fit_options_frame, textvariable=self.fit_ctx, width=8, state=tk.NORMAL)
         self.fit_ctx_entry.pack(side="left", padx=(0, 15))
 
-        ttk.Label(fit_options_frame, text="Target MiB (--fit-target):")\
+        ttk.Label(fit_options_frame, text="Target MiB (--fit-target / ik_llama: --fit-margin):")\
             .pack(side="left", padx=(0, 5))
         self.fit_target_entry = ttk.Entry(fit_options_frame, textvariable=self.fit_target, width=8, state=tk.NORMAL)
         self.fit_target_entry.pack(side="left", padx=(0, 10))

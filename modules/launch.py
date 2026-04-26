@@ -72,6 +72,72 @@ class LaunchManager:
         self._feature_probe_cache[cache_key] = supported
         return supported
 
+    def _build_llama_cpp_fit_args(self, cmd):
+        """Append upstream llama.cpp fit args: --fit on|off, --fit-ctx,
+        --fit-target."""
+        if self.launcher.fit_enabled.get():
+            cmd.extend(["--fit", "on"])
+            print("DEBUG: Adding --fit on", file=sys.stderr)
+            fit_ctx_val = self.launcher.fit_ctx.get().strip()
+            if fit_ctx_val and fit_ctx_val != "4096":
+                cmd.extend(["--fit-ctx", fit_ctx_val])
+                print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
+            fit_target_val = self.launcher.fit_target.get().strip()
+            if fit_target_val and fit_target_val != "1024":
+                cmd.extend(["--fit-target", fit_target_val])
+                print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
+        else:
+            cmd.extend(["--fit", "off"])
+            print("DEBUG: Adding --fit off", file=sys.stderr)
+
+    def _build_ik_llama_fit_args(self, cmd, exe_path):
+        """Append ik_llama fit args, translating from the shared UI fields:
+          - shared `fit_enabled` -> bare `--fit` flag (no on/off arg)
+          - shared `fit_target`  -> `--fit-margin N` (closest equivalent)
+          - shared `fit_ctx`     -> dropped (no equivalent in ik_llama)
+        Each flag is probed against `<exe> --help` so older builds that
+        predate ik_llama's fit support don't crash on an unknown arg.
+        """
+        if not self.launcher.fit_enabled.get():
+            # ik_llama has no `--fit off` — fit is opt-in via the bare flag,
+            # so leaving it unchecked just means emitting nothing.
+            print("DEBUG: ik_llama fit disabled — omitting --fit flag", file=sys.stderr)
+            return
+
+        if not self._backend_supports_flag(exe_path, "--fit"):
+            print(
+                f"DEBUG: ik_llama build at {exe_path} does not advertise --fit; "
+                f"skipping fit flags (upgrade ik_llama to use this feature)",
+                file=sys.stderr,
+            )
+            return
+
+        cmd.append("--fit")
+        print("DEBUG: Adding --fit (ik_llama bare flag)", file=sys.stderr)
+
+        if self.launcher.fit_ctx.get().strip():
+            print(
+                "DEBUG: ik_llama has no --fit-ctx equivalent; "
+                "ignoring fit_ctx value",
+                file=sys.stderr,
+            )
+
+        fit_target_val = self.launcher.fit_target.get().strip()
+        if fit_target_val and fit_target_val != "1024":
+            if self._backend_supports_flag(exe_path, "--fit-margin"):
+                cmd.extend(["--fit-margin", fit_target_val])
+                print(
+                    f"DEBUG: Adding --fit-margin {fit_target_val} "
+                    f"(mapped from fit_target)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"DEBUG: ik_llama build at {exe_path} does not advertise "
+                    f"--fit-margin; skipping fit_target mapping",
+                    file=sys.stderr,
+                )
+
     def build_cmd(self):
         """Builds the command list for the server based on selected backend."""
         # Get the backend selection and use appropriate directory
@@ -278,33 +344,17 @@ class LaunchManager:
                 cmd.extend(["--flash-attn", "on"])
 
         # --- Fit Parameters ---
-        # llama.cpp has supported --fit for a long time, so emit unconditionally.
-        # ik_llama added --fit support recently; probe the binary's --help so
-        # older ik_llama builds don't crash on an unknown argument.
-        emit_fit = backend != "ik_llama" or self._backend_supports_flag(exe_path, "--fit")
-        if not emit_fit:
-            print(
-                f"DEBUG: ik_llama build at {exe_path} does not advertise --fit; "
-                f"skipping fit flags (upgrade ik_llama to use this feature)",
-                file=sys.stderr,
-            )
-        elif self.launcher.fit_enabled.get():
-            cmd.extend(["--fit", "on"])
-            print(f"DEBUG: Adding --fit on", file=sys.stderr)
-            # --fit-ctx: synced with ctx_size slider or manually set
-            fit_ctx_val = self.launcher.fit_ctx.get().strip()
-            # Only add if different from llama.cpp default of 4096
-            if fit_ctx_val and fit_ctx_val != "4096":
-                cmd.extend(["--fit-ctx", fit_ctx_val])
-                print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
-            # --fit-target: only add if non-default
-            fit_target_val = self.launcher.fit_target.get().strip()
-            if fit_target_val and fit_target_val != "1024":
-                cmd.extend(["--fit-target", fit_target_val])
-                print(f"DEBUG: Adding --fit-target {fit_target_val}", file=sys.stderr)
+        # llama.cpp and ik_llama both support --fit, but with different CLI
+        # surfaces:
+        #   llama.cpp: `--fit on|off`, `--fit-ctx N`, `--fit-target N`
+        #   ik_llama:  `--fit` (bare flag, no on/off), `--fit-margin N`
+        #              (no --fit-ctx equivalent)
+        # Both surfaces are runtime-probed so older builds that lack any of
+        # these flags degrade gracefully instead of crashing on an unknown arg.
+        if backend == "ik_llama":
+            self._build_ik_llama_fit_args(cmd, exe_path)
         else:
-            cmd.extend(["--fit", "off"])
-            print(f"DEBUG: Adding --fit off", file=sys.stderr)
+            self._build_llama_cpp_fit_args(cmd)
 
         # Memory options
         self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)

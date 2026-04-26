@@ -485,50 +485,113 @@ class TestBuildCmdHappyPath:
         assert "--fit" in cmd
         assert cmd[cmd.index("--fit") + 1] == "off"
 
-    def test_ik_llama_backend_emits_fit_flags_when_supported(
+    def test_ik_llama_emits_bare_fit_flag_when_supported(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
-        """When the ik_llama binary's --help advertises --fit, all three fit
-        flags propagate exactly like under llama.cpp."""
+        """ik_llama's --fit is a bare flag (no on/off arg). Sending `--fit on`
+        the way llama.cpp expects would either error or be misinterpreted as a
+        positional arg, so we must emit the bare form."""
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_ctx.set("")
+        launcher_mock.fit_target.set("")
+        cmd = manager.build_cmd()
+        assert cmd is not None
+        assert "--fit" in cmd
+        # The next token after --fit must NOT be "on" or "off" — it should be
+        # the next unrelated arg (or nothing if --fit is last).
+        idx = cmd.index("--fit")
+        if idx + 1 < len(cmd):
+            assert cmd[idx + 1] not in ("on", "off"), (
+                "ik_llama --fit is bare; emitting on/off after it would be wrong"
+            )
+
+    def test_ik_llama_maps_fit_target_to_fit_margin_when_supported(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """ik_llama uses --fit-margin instead of --fit-target. The shared
+        fit_target UI value should map onto --fit-margin if the binary
+        advertises it."""
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_target.set("2048")
+        cmd = manager.build_cmd()
+        assert "--fit-margin" in cmd
+        assert cmd[cmd.index("--fit-margin") + 1] == "2048"
+        # Must NEVER emit the llama.cpp-spelled flag against ik_llama.
+        assert "--fit-target" not in cmd
+
+    def test_ik_llama_omits_fit_margin_when_target_at_default(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """fit_target default of 1024 means 'don't override' — should not emit
+        --fit-margin even when ik_llama advertises it."""
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_target.set("1024")
+        cmd = manager.build_cmd()
+        assert "--fit-margin" not in cmd
+
+    def test_ik_llama_drops_fit_ctx_silently(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """ik_llama has no --fit-ctx equivalent. The shared UI value must be
+        dropped without ever appearing on the command line under either
+        spelling."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("8192")
-        launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()
-        assert cmd is not None
-        assert "--fit" in cmd
-        assert cmd[cmd.index("--fit") + 1] == "on"
-        assert "--fit-ctx" in cmd and cmd[cmd.index("--fit-ctx") + 1] == "8192"
-        assert "--fit-target" in cmd and cmd[cmd.index("--fit-target") + 1] == "2048"
+        assert "--fit-ctx" not in cmd
 
-    def test_ik_llama_backend_emits_fit_off_when_supported_and_disabled(
+    def test_ik_llama_emits_nothing_when_disabled(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
+        """ik_llama has no `--fit off` — disabling fit means the flag is
+        simply absent from the command line."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(False)
         cmd = manager.build_cmd()
-        assert cmd is not None
-        assert "--fit" in cmd
-        assert cmd[cmd.index("--fit") + 1] == "off"
+        assert "--fit" not in cmd
+        assert "--fit-margin" not in cmd
+        assert "--fit-ctx" not in cmd
+        assert "--fit-target" not in cmd
 
-    def test_ik_llama_backend_skips_fit_when_unsupported(
+    def test_ik_llama_skips_fit_when_probe_says_unsupported(
         self, manager, launcher_mock, built_tree, monkeypatch
     ):
         """Older ik_llama builds whose --help omits --fit must not receive any
-        fit flag — emitting one would crash the server with an unknown-arg
-        error. The launcher should silently skip the block."""
+        fit flag — emitting one would crash the server."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: False)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("8192")
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()
-        assert cmd is not None
         assert "--fit" not in cmd
         assert "--fit-ctx" not in cmd
         assert "--fit-target" not in cmd
+        assert "--fit-margin" not in cmd
+
+    def test_ik_llama_emits_fit_but_skips_margin_when_only_fit_supported(
+        self, manager, launcher_mock, built_tree, monkeypatch
+    ):
+        """Mid-vintage ik_llama builds may advertise --fit but not yet
+        --fit-margin. Emit the bare --fit, drop the margin silently."""
+        def _probe(exe_path, flag):
+            return flag == "--fit"
+        monkeypatch.setattr(manager, "_backend_supports_flag", _probe)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_target.set("2048")
+        cmd = manager.build_cmd()
+        assert "--fit" in cmd
+        assert "--fit-margin" not in cmd
 
     def test_llama_cpp_backend_does_not_probe_for_fit(
         self, manager, launcher_mock, built_tree
