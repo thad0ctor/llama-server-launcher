@@ -605,6 +605,94 @@ class LlamaCppLauncher:
         # Load backend selection
         self.backend_selection.set(self.app_settings.get("backend_selection", "llama.cpp"))
 
+        # Re-sync spec/reasoning/kvu Tk vars from the just-loaded app_settings.
+        # Order-of-init bug: the Tk vars on lines ~410-487 are initialized from
+        # ``self.app_settings`` BEFORE ``_load_saved_configs`` updates it from
+        # disk. Without this re-sync the Tk vars keep their constructor defaults,
+        # AND the very next ``_save_configs()`` (triggered by traces fired during
+        # ``env_vars_manager`` / ``ik_llama_tab`` load_from_config below) mirrors
+        # those defaults back into app_settings, silently wiping the disk values.
+        # Same issue affects ``selected_mmproj_path`` and ``mmproj_enabled``.
+        def _resync_bool(key, var):
+            raw = self.app_settings.get(key, None)
+            if raw is None:
+                return
+            try:
+                if isinstance(raw, bool):
+                    var.set(raw)
+                else:
+                    var.set(str(raw).lower() in ("1", "true", "yes"))
+            except Exception:
+                pass
+
+        def _resync_str(key, var, default=""):
+            raw = self.app_settings.get(key, None)
+            if raw is None:
+                return
+            try:
+                var.set(raw if isinstance(raw, str) else (str(raw) if raw is not None else default))
+            except Exception:
+                pass
+
+        # mmproj-related (pre-existing, same ordering bug).
+        _resync_str("selected_mmproj_path", self.selected_mmproj_path)
+        # MTP / Speculative Decoding.
+        _resync_bool("spec_enabled", self.spec_enabled)
+        # spec_type defaults to "none" so an empty stored value doesn't blank
+        # the var; the launch.py whitelist also re-validates before emission.
+        spec_type_loaded = self.app_settings.get("spec_type", None)
+        if spec_type_loaded not in (None, ""):
+            try:
+                self.spec_type.set(str(spec_type_loaded))
+            except Exception:
+                pass
+        for _key, _var in (
+            ("spec_draft_n_max", self.spec_draft_n_max),
+            ("spec_draft_n_min", self.spec_draft_n_min),
+            ("spec_draft_p_min", self.spec_draft_p_min),
+            ("spec_draft_p_split", self.spec_draft_p_split),
+            ("spec_draft_model", self.spec_draft_model),
+            ("spec_draft_ngl", self.spec_draft_ngl),
+            ("spec_draft_device", self.spec_draft_device),
+            ("spec_draft_ctk", self.spec_draft_ctk),
+            ("spec_draft_ctv", self.spec_draft_ctv),
+            ("spec_draft_n_cpu_moe", self.spec_draft_n_cpu_moe),
+            ("spec_ngram_simple_size_n", self.spec_ngram_simple_size_n),
+            ("spec_ngram_simple_size_m", self.spec_ngram_simple_size_m),
+            ("spec_ngram_simple_min_hits", self.spec_ngram_simple_min_hits),
+            ("spec_ngram_mapk_size_n", self.spec_ngram_mapk_size_n),
+            ("spec_ngram_mapk_size_m", self.spec_ngram_mapk_size_m),
+            ("spec_ngram_mapk_min_hits", self.spec_ngram_mapk_min_hits),
+            ("spec_ngram_mapk4v_size_n", self.spec_ngram_mapk4v_size_n),
+            ("spec_ngram_mapk4v_size_m", self.spec_ngram_mapk4v_size_m),
+            ("spec_ngram_mapk4v_min_hits", self.spec_ngram_mapk4v_min_hits),
+            ("spec_ngram_mod_n_min", self.spec_ngram_mod_n_min),
+            ("spec_ngram_mod_n_max", self.spec_ngram_mod_n_max),
+            ("spec_ngram_mod_n_match", self.spec_ngram_mod_n_match),
+            ("spec_ngram_size_n", self.spec_ngram_size_n),
+            ("spec_ngram_size_m", self.spec_ngram_size_m),
+            ("spec_ngram_min_hits", self.spec_ngram_min_hits),
+            ("spec_suffix_pattern_len", self.spec_suffix_pattern_len),
+            ("spec_suffix_max_depth", self.spec_suffix_max_depth),
+            ("spec_draft_params", self.spec_draft_params),
+            # Reasoning / Thinking.
+            ("reasoning_mode", self.reasoning_mode),
+            ("reasoning_format", self.reasoning_format),
+            ("reasoning_budget", self.reasoning_budget),
+            ("reasoning_budget_message", self.reasoning_budget_message),
+            ("chat_template_kwargs", self.chat_template_kwargs),
+            # KV Unification.
+            ("kv_unified_mode", self.kv_unified_mode),
+            ("cache_idle_slots_mode", self.cache_idle_slots_mode),
+        ):
+            _resync_str(_key, _var)
+        for _key, _var in (
+            ("spec_draft_cpu_moe", self.spec_draft_cpu_moe),
+            ("spec_autotune", self.spec_autotune),
+            ("no_mmproj", self.no_mmproj),
+        ):
+            _resync_bool(_key, _var)
+
         # Load environmental variables configuration
         self.env_vars_manager.load_from_config(self.app_settings)
 
@@ -2694,15 +2782,21 @@ class LlamaCppLauncher:
         except Exception:
             return
         spec_type = (self.spec_type.get() or "").strip()
+        # n_min=0 means "always try speculation" — the most generally useful
+        # baseline; users tuning further can raise it. n_max/p_min/p_split are
+        # spec-type specific (MTP is essentially free so n_max=3 is the
+        # benchmark-validated sweet spot; classical draft models gain from
+        # the binary's larger default of 16).
         if spec_type in ("draft-mtp", "mtp"):
-            defaults = {"n_max": "3", "p_min": "0.75", "p_split": "0.10"}
+            defaults = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
         elif spec_type in ("draft-simple", "draft-eagle3"):
-            defaults = {"n_max": "16", "p_min": "0.75", "p_split": "0.10"}
+            defaults = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
         else:
             # ngram-*, suffix, cache, none, or unknown — no defaults to pre-fill.
             return
         var_map = {
             "n_max": self.spec_draft_n_max,
+            "n_min": self.spec_draft_n_min,
             "p_min": self.spec_draft_p_min,
             "p_split": self.spec_draft_p_split,
         }

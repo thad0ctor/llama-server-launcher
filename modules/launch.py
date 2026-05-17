@@ -376,7 +376,7 @@ class LaunchManager:
                                         cmd.extend(["--model-draft", str(Path(mp).resolve())])
                                     else:
                                         print(
-                                            f"WARNING: draft model path {mp!r} is not a file; skipping --model-draft emission.",
+                                            f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
                                             file=sys.stderr,
                                         )
                             # ik_llama uses the same short-form draft offload flags.
@@ -477,7 +477,7 @@ class LaunchManager:
                                         cmd.extend(["--spec-draft-model", str(Path(mp).resolve())])
                                     else:
                                         print(
-                                            f"WARNING: draft model path {mp!r} is not a file; skipping --spec-draft-model emission.",
+                                            f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
                                             file=sys.stderr,
                                         )
                             for var_name, flag in [

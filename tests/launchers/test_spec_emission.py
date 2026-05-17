@@ -1468,12 +1468,13 @@ def entry_module():
 
 @pytest.fixture()
 def spec_defaults_stub(tk_root):
-    """Minimal SimpleNamespace stub exposing the four tk vars
+    """Minimal SimpleNamespace stub exposing the tk vars
     ``_apply_spec_defaults_if_blank`` reads/writes."""
     stub = SimpleNamespace()
     stub.spec_enabled = tk.BooleanVar(master=tk_root, value=True)
     stub.spec_type = tk.StringVar(master=tk_root, value="")
     stub.spec_draft_n_max = tk.StringVar(master=tk_root, value="")
+    stub.spec_draft_n_min = tk.StringVar(master=tk_root, value="")
     stub.spec_draft_p_min = tk.StringVar(master=tk_root, value="")
     stub.spec_draft_p_split = tk.StringVar(master=tk_root, value="")
     return stub
@@ -1490,15 +1491,18 @@ class TestSpecDefaultsPrefill:
         spec_defaults_stub.spec_type.set("draft-mtp")
         entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == ""
+        assert spec_defaults_stub.spec_draft_n_min.get() == ""
         assert spec_defaults_stub.spec_draft_p_min.get() == ""
         assert spec_defaults_stub.spec_draft_p_split.get() == ""
 
     def test_draft_mtp_prefills_n_max_3(self, spec_defaults_stub, entry_module):
-        """draft-mtp uses n_max=3 (MTP sweet spot, not the binary default of 16)."""
+        """draft-mtp uses n_max=3 (MTP sweet spot, not the binary default of 16).
+        n_min=0 means 'always speculate'."""
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("draft-mtp")
         entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == "3"
+        assert spec_defaults_stub.spec_draft_n_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
 
@@ -1509,6 +1513,7 @@ class TestSpecDefaultsPrefill:
         spec_defaults_stub.spec_type.set("mtp")
         entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == "3"
+        assert spec_defaults_stub.spec_draft_n_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
 
@@ -1518,6 +1523,7 @@ class TestSpecDefaultsPrefill:
         spec_defaults_stub.spec_type.set("draft-simple")
         entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == "16"
+        assert spec_defaults_stub.spec_draft_n_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
 
@@ -1528,6 +1534,7 @@ class TestSpecDefaultsPrefill:
         spec_defaults_stub.spec_type.set("ngram-simple")
         entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == ""
+        assert spec_defaults_stub.spec_draft_n_min.get() == ""
         assert spec_defaults_stub.spec_draft_p_min.get() == ""
         assert spec_defaults_stub.spec_draft_p_split.get() == ""
 
@@ -1537,9 +1544,11 @@ class TestSpecDefaultsPrefill:
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("draft-mtp")
         spec_defaults_stub.spec_draft_n_max.set("5")
+        spec_defaults_stub.spec_draft_n_min.set("2")
         entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
-        # User's 5 stays; the other two get default-filled because they're blank.
+        # User's typed values stay; the other two get default-filled because they're blank.
         assert spec_defaults_stub.spec_draft_n_max.get() == "5"
+        assert spec_defaults_stub.spec_draft_n_min.get() == "2"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
 
