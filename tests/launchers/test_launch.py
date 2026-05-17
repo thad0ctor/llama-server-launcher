@@ -36,6 +36,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Single source of truth for the new spec/reasoning/KVU Tk vars.
+from tests.launcher_var_registry import ALL_NEW_LAUNCHER_TK_VARS  # noqa: E402
+
+_TK_CLS = {
+    "StringVar":  tk.StringVar,
+    "BooleanVar": tk.BooleanVar,
+    "IntVar":     tk.IntVar,
+    "DoubleVar":  tk.DoubleVar,
+}
+
 
 # --- tk root bootstrap ------------------------------------------------------
 @pytest.fixture(scope="module")
@@ -101,6 +111,12 @@ def launcher_mock(tk_root, built_tree):
     m.model_path = _mk(tk.StringVar, str(paths["model"]))
     m.mmproj_enabled = _mk(tk.BooleanVar, False)
     m.selected_mmproj_path = _mk(tk.StringVar, "")
+
+    # MTP / Speculative decoding + Reasoning + KV-Unification Tk vars.
+    # Sourced from the single-source-of-truth registry so adding a new var
+    # to the launcher only requires editing tests/launcher_var_registry.py.
+    for _attr, _cls_name, _default in ALL_NEW_LAUNCHER_TK_VARS:
+        setattr(m, _attr, _mk(_TK_CLS[_cls_name], _default))
 
     # KV cache
     m.cache_type_k = _mk(tk.StringVar, "f16")

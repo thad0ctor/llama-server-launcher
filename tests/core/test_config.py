@@ -28,6 +28,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Single source of truth for the new spec/reasoning/KVU Tk vars.
+from tests.launcher_var_registry import ALL_NEW_LAUNCHER_TK_VARS  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Helpers / launcher-mock fixture
@@ -116,6 +119,14 @@ def _make_launcher_mock(config_path: Path, *, saved_configs=None, app_settings=N
     for name in ("no_mmap", "flash_attn", "mlock", "no_kv_offload", "ignore_eos",
                  "cpu_moe", "mmproj_enabled", "fit_enabled", "jinja_enabled"):
         setattr(launcher, name, _FakeVar(False))
+
+    # MTP / Speculative decoding + Reasoning + KV-Unification Tk vars.
+    # Sourced from the single-source-of-truth registry so adding a new var
+    # to the launcher only requires editing tests/launcher_var_registry.py.
+    # _FakeVar mirrors the get/set API of tk.*Var; the class hint in the
+    # registry is only consulted for documentation purposes here.
+    for _attr, _cls_name, _default in ALL_NEW_LAUNCHER_TK_VARS:
+        setattr(launcher, _attr, _FakeVar(_default))
 
     launcher.ctx_size = _FakeVar(2048)
 
@@ -474,6 +485,63 @@ def test_round_trip_handles_empty_configs(launcher_factory, tmp_path):
     cm2.load_saved_configs()
     assert launcher2.saved_configs == {}
     assert cm2.configs_loaded_successfully is True
+
+
+def test_round_trip_reasoning_and_kvu_vars(launcher_factory, tmp_path):
+    """All seven Reasoning + KV-Unification vars must survive a save -> load
+    cycle through app_settings (matching the spec_* persistence pattern)."""
+    from modules.config import ConfigManager
+    cfg_path = tmp_path / "cfg.json"
+
+    launcher1 = launcher_factory(cfg_path)
+    # Seed non-default values on every new var.
+    launcher1.reasoning_mode.set("on")
+    launcher1.reasoning_format.set("deepseek")
+    launcher1.reasoning_budget.set("2048")
+    launcher1.reasoning_budget_message.set("STOP")
+    launcher1.chat_template_kwargs.set('{"preserve_thinking":true}')
+    launcher1.kv_unified_mode.set("on")
+    launcher1.cache_idle_slots_mode.set("off")
+
+    cm1 = ConfigManager(launcher1)
+    cm1.save_configs()
+
+    # Fresh launcher reads from disk into app_settings.
+    launcher2 = launcher_factory(cfg_path)
+    cm2 = ConfigManager(launcher2)
+    cm2.load_saved_configs()
+
+    assert launcher2.app_settings["reasoning_mode"] == "on"
+    assert launcher2.app_settings["reasoning_format"] == "deepseek"
+    assert launcher2.app_settings["reasoning_budget"] == "2048"
+    assert launcher2.app_settings["reasoning_budget_message"] == "STOP"
+    assert launcher2.app_settings["chat_template_kwargs"] == '{"preserve_thinking":true}'
+    assert launcher2.app_settings["kv_unified_mode"] == "on"
+    assert launcher2.app_settings["cache_idle_slots_mode"] == "off"
+
+
+def test_round_trip_reasoning_and_kvu_blank_defaults(launcher_factory, tmp_path):
+    """Blank defaults must round-trip cleanly without coercion drift, so
+    fresh installs and existing users stay at zero-noise."""
+    from modules.config import ConfigManager
+    cfg_path = tmp_path / "cfg.json"
+
+    launcher1 = launcher_factory(cfg_path)
+    # All vars start as "" thanks to the fixture - just save and reload.
+    cm1 = ConfigManager(launcher1)
+    cm1.save_configs()
+
+    launcher2 = launcher_factory(cfg_path)
+    cm2 = ConfigManager(launcher2)
+    cm2.load_saved_configs()
+
+    for key in ("reasoning_mode", "reasoning_format", "reasoning_budget",
+                "reasoning_budget_message", "chat_template_kwargs",
+                "kv_unified_mode", "cache_idle_slots_mode"):
+        assert launcher2.app_settings.get(key, "") == "", (
+            f"Default for {key} must remain '' after round-trip; "
+            f"got {launcher2.app_settings.get(key)!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

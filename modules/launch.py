@@ -292,6 +292,286 @@ class LaunchManager:
             except Exception as e:
                 print(f"WARNING: Error scanning for mmproj files: {e}", file=sys.stderr)
 
+        # --- Speculative Decoding ---
+        # Master toggle pattern: only emit any --spec-*/--draft-* flag when
+        # spec_enabled is True AND a non-"none" spec_type is selected. Backend
+        # surfaces diverge significantly between mainline llama.cpp and
+        # ik_llama; the two branches below mirror the UI's per-backend gating.
+        try:
+            spec_enabled_var = getattr(self.launcher, "spec_enabled", None)
+            if spec_enabled_var is not None and spec_enabled_var.get():
+                spec_type_var = getattr(self.launcher, "spec_type", None)
+                spec_type = (spec_type_var.get().strip() if spec_type_var is not None else "")
+                if spec_type and spec_type != "none":
+                    if backend == "ik_llama":
+                        cmd.extend(["--spec-type", spec_type])
+                        # ik_llama draft tuning flags use --draft-max/--draft-min/--draft-p-min.
+                        for var_name, flag in [
+                            ("spec_draft_n_max", "--draft-max"),
+                            ("spec_draft_n_min", "--draft-min"),
+                            ("spec_draft_p_min", "--draft-p-min"),
+                        ]:
+                            var = getattr(self.launcher, var_name, None)
+                            if var is not None:
+                                v = var.get().strip()
+                                if v:
+                                    cmd.extend([flag, v])
+                        # Draft model file (rare for ik_llama, but supported via --model-draft).
+                        mp_var = getattr(self.launcher, "spec_draft_model", None)
+                        if mp_var is not None:
+                            mp = mp_var.get().strip()
+                            if mp:
+                                cmd.extend(["--model-draft", mp])
+                        # ik_llama uses the same short-form draft offload flags.
+                        for var_name, flag in [
+                            ("spec_draft_ngl", "-ngld"),
+                            ("spec_draft_device", "-devd"),
+                            ("spec_draft_ctk", "-ctkd"),
+                            ("spec_draft_ctv", "-ctvd"),
+                        ]:
+                            var = getattr(self.launcher, var_name, None)
+                            if var is not None:
+                                v = var.get().strip()
+                                if v:
+                                    cmd.extend([flag, v])
+                        # ngram: ik_llama has a single shared --spec-ngram-* set.
+                        if spec_type.startswith("ngram-"):
+                            for var_name, flag in [
+                                ("spec_ngram_size_n", "--spec-ngram-size-n"),
+                                ("spec_ngram_size_m", "--spec-ngram-size-m"),
+                                ("spec_ngram_min_hits", "--spec-ngram-min-hits"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                        # suffix
+                        if spec_type == "suffix":
+                            for var_name, flag in [
+                                ("spec_suffix_pattern_len", "--suffix-pattern-len"),
+                                ("spec_suffix_max_depth", "--suffix-max-depth"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                        # ik_llama extras.
+                        autotune_var = getattr(self.launcher, "spec_autotune", None)
+                        if autotune_var is not None and autotune_var.get():
+                            cmd.append("--spec-autotune")
+                        dp_var = getattr(self.launcher, "spec_draft_params", None)
+                        if dp_var is not None:
+                            dp = dp_var.get().strip()
+                            if dp:
+                                cmd.extend(["-draft", dp])
+                        # Warn (don't crash) if the user set llama.cpp-only knobs while ik_llama is active.
+                        for var_name, label in [
+                            ("spec_draft_p_split", "--spec-draft-p-split"),
+                            ("spec_draft_hf", "--spec-draft-hf"),
+                            ("spec_draft_cpu_moe", "--spec-draft-cpu-moe"),
+                            ("spec_draft_n_cpu_moe", "--spec-draft-n-cpu-moe"),
+                        ]:
+                            var = getattr(self.launcher, var_name, None)
+                            if var is None:
+                                continue
+                            try:
+                                raw = var.get()
+                            except Exception:
+                                raw = None
+                            if isinstance(raw, bool):
+                                if raw:
+                                    print(f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                            elif isinstance(raw, str) and raw.strip():
+                                print(f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                    else:
+                        # llama.cpp (mainline) branch.
+                        cmd.extend(["--spec-type", spec_type])
+                        for var_name, flag in [
+                            ("spec_draft_n_max", "--spec-draft-n-max"),
+                            ("spec_draft_n_min", "--spec-draft-n-min"),
+                            ("spec_draft_p_min", "--spec-draft-p-min"),
+                            ("spec_draft_p_split", "--spec-draft-p-split"),
+                        ]:
+                            var = getattr(self.launcher, var_name, None)
+                            if var is not None:
+                                v = var.get().strip()
+                                if v:
+                                    cmd.extend([flag, v])
+                        mp_var = getattr(self.launcher, "spec_draft_model", None)
+                        if mp_var is not None:
+                            mp = mp_var.get().strip()
+                            if mp:
+                                cmd.extend(["--spec-draft-model", mp])
+                        hf_var = getattr(self.launcher, "spec_draft_hf", None)
+                        if hf_var is not None:
+                            hf = hf_var.get().strip()
+                            if hf:
+                                cmd.extend(["--spec-draft-hf", hf])
+                        for var_name, flag in [
+                            ("spec_draft_ngl", "--spec-draft-ngl"),
+                            ("spec_draft_device", "--spec-draft-device"),
+                            ("spec_draft_ctk", "--spec-draft-type-k"),
+                            ("spec_draft_ctv", "--spec-draft-type-v"),
+                        ]:
+                            var = getattr(self.launcher, var_name, None)
+                            if var is not None:
+                                v = var.get().strip()
+                                if v:
+                                    cmd.extend([flag, v])
+                        cpu_moe_var = getattr(self.launcher, "spec_draft_cpu_moe", None)
+                        if cpu_moe_var is not None and cpu_moe_var.get():
+                            cmd.append("--spec-draft-cpu-moe")
+                        ncm_var = getattr(self.launcher, "spec_draft_n_cpu_moe", None)
+                        if ncm_var is not None:
+                            ncm = ncm_var.get().strip()
+                            if ncm:
+                                cmd.extend(["--spec-draft-n-cpu-moe", ncm])
+                        # llama.cpp has per-ngram-variant size knobs.
+                        if spec_type == "ngram-simple":
+                            for var_name, flag in [
+                                ("spec_ngram_simple_size_n", "--spec-ngram-simple-size-n"),
+                                ("spec_ngram_simple_size_m", "--spec-ngram-simple-size-m"),
+                                ("spec_ngram_simple_min_hits", "--spec-ngram-simple-min-hits"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                        elif spec_type == "ngram-map-k":
+                            for var_name, flag in [
+                                ("spec_ngram_mapk_size_n", "--spec-ngram-map-k-size-n"),
+                                ("spec_ngram_mapk_size_m", "--spec-ngram-map-k-size-m"),
+                                ("spec_ngram_mapk_min_hits", "--spec-ngram-map-k-min-hits"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                        elif spec_type == "ngram-map-k4v":
+                            for var_name, flag in [
+                                ("spec_ngram_mapk4v_size_n", "--spec-ngram-map-k4v-size-n"),
+                                ("spec_ngram_mapk4v_size_m", "--spec-ngram-map-k4v-size-m"),
+                                ("spec_ngram_mapk4v_min_hits", "--spec-ngram-map-k4v-min-hits"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                        elif spec_type == "ngram-mod":
+                            for var_name, flag in [
+                                ("spec_ngram_mod_n_min", "--spec-ngram-mod-n-min"),
+                                ("spec_ngram_mod_n_max", "--spec-ngram-mod-n-max"),
+                                ("spec_ngram_mod_n_match", "--spec-ngram-mod-n-match"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                        # ngram-cache has no extra knobs.
+                        # Warn (don't crash) if ik_llama-only knobs are set while llama.cpp is active.
+                        for var_name, label in [
+                            ("spec_autotune", "--spec-autotune"),
+                            ("spec_draft_params", "-draft"),
+                            ("spec_suffix_pattern_len", "--suffix-pattern-len"),
+                            ("spec_suffix_max_depth", "--suffix-max-depth"),
+                        ]:
+                            var = getattr(self.launcher, var_name, None)
+                            if var is None:
+                                continue
+                            try:
+                                raw = var.get()
+                            except Exception:
+                                raw = None
+                            if isinstance(raw, bool):
+                                if raw:
+                                    print(f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr)
+                            elif isinstance(raw, str) and raw.strip():
+                                print(f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr)
+        except Exception as exc:
+            # Never let a UI mis-state crash the launch flow - log and continue.
+            print(f"WARNING: speculative-decoding block raised: {exc}", file=sys.stderr)
+
+        # --- Reasoning / Chat-Template KWargs (both backends) ---
+        # Independent of spec_enabled - emit unconditionally based on per-var values.
+        # All five flags are accepted by mainline llama.cpp and ik_llama.
+        try:
+            rm_var = getattr(self.launcher, "reasoning_mode", None)
+            if rm_var is not None:
+                rm = rm_var.get().strip()
+                if rm and rm in ("on", "off", "auto"):
+                    cmd.extend(["--reasoning", rm])
+            rf_var = getattr(self.launcher, "reasoning_format", None)
+            if rf_var is not None:
+                rf = rf_var.get().strip()
+                if rf:
+                    cmd.extend(["--reasoning-format", rf])
+            rb_var = getattr(self.launcher, "reasoning_budget", None)
+            if rb_var is not None:
+                rb = rb_var.get().strip()
+                if rb:
+                    # Defend against a stale non-integer value persisted from a
+                    # pre-validation config. The Entry validator blocks new
+                    # bad input; this catches anything that slipped through.
+                    try:
+                        int(rb)
+                        cmd.extend(["--reasoning-budget", rb])
+                    except ValueError:
+                        print(f"WARNING: --reasoning-budget value {rb!r} is not an integer; skipping.", file=sys.stderr)
+            rbm_var = getattr(self.launcher, "reasoning_budget_message", None)
+            if rbm_var is not None:
+                rbm = rbm_var.get().strip()
+                if rbm:
+                    cmd.extend(["--reasoning-budget-message", rbm])
+            ctk_var = getattr(self.launcher, "chat_template_kwargs", None)
+            if ctk_var is not None:
+                ctk = ctk_var.get().strip()
+                if ctk:
+                    cmd.extend(["--chat-template-kwargs", ctk])
+        except Exception as exc:
+            print(f"WARNING: reasoning/chat-template emission raised: {exc}", file=sys.stderr)
+
+        # --- KV Unification + cache-idle-slots (llama.cpp only) ---
+        # ik_llama does NOT support these flags (verified absent from common.cpp).
+        # Warn and skip when ik_llama is active; emit explicit on/off otherwise.
+        try:
+            kvu_var = getattr(self.launcher, "kv_unified_mode", None)
+            cis_var = getattr(self.launcher, "cache_idle_slots_mode", None)
+            kvu = kvu_var.get().strip() if kvu_var is not None else ""
+            cis = cis_var.get().strip() if cis_var is not None else ""
+            if backend == "ik_llama":
+                if kvu in ("on", "off") or cis in ("on", "off"):
+                    print("WARNING: --kv-unified / --cache-idle-slots are llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+            else:
+                if kvu == "on":
+                    cmd.append("--kv-unified")
+                elif kvu == "off":
+                    cmd.append("--no-kv-unified")
+                if cis == "on":
+                    cmd.append("--cache-idle-slots")
+                elif cis == "off":
+                    cmd.append("--no-cache-idle-slots")
+        except Exception as exc:
+            print(f"WARNING: kv-unified/cache-idle-slots emission raised: {exc}", file=sys.stderr)
+
+        # --- --no-mmproj (llama.cpp only) ---
+        # Independent of spec_enabled: --no-mmproj is useful on its own when a
+        # base GGUF embeds a vision projector that the user wants suppressed.
+        try:
+            no_mmproj_var = getattr(self.launcher, "no_mmproj", None)
+            if no_mmproj_var is not None and no_mmproj_var.get():
+                if backend == "ik_llama":
+                    print("WARNING: --no-mmproj is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                else:
+                    cmd.append("--no-mmproj")
+        except Exception as exc:
+            print(f"WARNING: --no-mmproj emission raised: {exc}", file=sys.stderr)
+
         # --- Other Arguments ---
         # --- KV Cache Type ---
         # Check if ik_llama backend is using -ctk or -ctv flags

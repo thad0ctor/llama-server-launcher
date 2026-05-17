@@ -198,6 +198,50 @@ class LlamaCppLauncher:
             "ui_theme_name":       "",
             "ui_font_family":      "",
             "ui_font_size":        0,
+            # MTP / Speculative decoding defaults. Master off, no type.
+            "spec_enabled":        False,
+            "spec_type":           "none",
+            "spec_draft_n_max":    "",
+            "spec_draft_n_min":    "",
+            "spec_draft_p_min":    "",
+            "spec_draft_p_split":  "",
+            "spec_draft_model":    "",
+            "spec_draft_hf":       "",
+            "spec_draft_ngl":      "",
+            "spec_draft_device":   "",
+            "spec_draft_ctk":      "",
+            "spec_draft_ctv":      "",
+            "spec_draft_cpu_moe":  False,
+            "spec_draft_n_cpu_moe":"",
+            "spec_ngram_simple_size_n":   "",
+            "spec_ngram_simple_size_m":   "",
+            "spec_ngram_simple_min_hits": "",
+            "spec_ngram_mapk_size_n":     "",
+            "spec_ngram_mapk_size_m":     "",
+            "spec_ngram_mapk_min_hits":   "",
+            "spec_ngram_mapk4v_size_n":   "",
+            "spec_ngram_mapk4v_size_m":   "",
+            "spec_ngram_mapk4v_min_hits": "",
+            "spec_ngram_mod_n_min":       "",
+            "spec_ngram_mod_n_max":       "",
+            "spec_ngram_mod_n_match":     "",
+            "spec_ngram_size_n":          "",
+            "spec_ngram_size_m":          "",
+            "spec_ngram_min_hits":        "",
+            "spec_suffix_pattern_len":    "",
+            "spec_suffix_max_depth":      "",
+            "spec_autotune":              False,
+            "spec_draft_params":          "",
+            "no_mmproj":                  False,
+            # Reasoning / Thinking defaults (both backends). Empty = "don't emit".
+            "reasoning_mode":             "",
+            "reasoning_format":           "",
+            "reasoning_budget":           "",
+            "reasoning_budget_message":   "",
+            "chat_template_kwargs":       "",
+            # KV unification + cache-idle-slots (llama.cpp only). Empty = "don't emit".
+            "kv_unified_mode":            "",
+            "cache_idle_slots_mode":      "",
         }
         # List to store custom parameters entered by the user (strings)
         self.custom_parameters_list = [] # <-- New attribute for custom parameters
@@ -363,6 +407,74 @@ class LlamaCppLauncher:
         self.selected_mmproj_path = tk.StringVar(value=self.app_settings.get("selected_mmproj_path", ""))
         self.mmproj_selector_var = tk.StringVar(value="")
         self.mmproj_status_var = tk.StringVar(value="")
+
+        # --- MTP / Speculative Decoding ---
+        # Master toggle: when False, no --spec-* / --draft-* flags are emitted.
+        # Initial values are sourced from app_settings so they persist across
+        # sessions (same pattern as mmproj/selected_mmproj_path).
+        def _spec_init_bool(key):
+            v = self.app_settings.get(key, False)
+            return bool(v) if isinstance(v, bool) else (str(v).lower() in ("1", "true", "yes"))
+        def _spec_init_str(key, default=""):
+            v = self.app_settings.get(key, default)
+            return v if isinstance(v, str) else (str(v) if v is not None else default)
+
+        self.spec_enabled        = tk.BooleanVar(value=_spec_init_bool("spec_enabled"))
+        self.spec_type           = tk.StringVar(value=_spec_init_str("spec_type", "none") or "none")
+        # Common draft controls (numeric entries; blank = use binary default).
+        self.spec_draft_n_max    = tk.StringVar(value=_spec_init_str("spec_draft_n_max"))
+        self.spec_draft_n_min    = tk.StringVar(value=_spec_init_str("spec_draft_n_min"))
+        self.spec_draft_p_min    = tk.StringVar(value=_spec_init_str("spec_draft_p_min"))
+        self.spec_draft_p_split  = tk.StringVar(value=_spec_init_str("spec_draft_p_split"))   # llama.cpp only
+        # Draft model selection.
+        self.spec_draft_model    = tk.StringVar(value=_spec_init_str("spec_draft_model"))    # -md path
+        self.spec_draft_hf       = tk.StringVar(value=_spec_init_str("spec_draft_hf"))       # -hfd repo (llama.cpp only)
+        self.spec_draft_ngl      = tk.StringVar(value=_spec_init_str("spec_draft_ngl"))
+        self.spec_draft_device   = tk.StringVar(value=_spec_init_str("spec_draft_device"))
+        self.spec_draft_ctk      = tk.StringVar(value=_spec_init_str("spec_draft_ctk"))
+        self.spec_draft_ctv      = tk.StringVar(value=_spec_init_str("spec_draft_ctv"))
+        self.spec_draft_cpu_moe  = tk.BooleanVar(value=_spec_init_bool("spec_draft_cpu_moe"))  # llama.cpp only
+        self.spec_draft_n_cpu_moe= tk.StringVar(value=_spec_init_str("spec_draft_n_cpu_moe"))  # llama.cpp only
+        # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
+        self.spec_ngram_simple_size_n   = tk.StringVar(value=_spec_init_str("spec_ngram_simple_size_n"))
+        self.spec_ngram_simple_size_m   = tk.StringVar(value=_spec_init_str("spec_ngram_simple_size_m"))
+        self.spec_ngram_simple_min_hits = tk.StringVar(value=_spec_init_str("spec_ngram_simple_min_hits"))
+        self.spec_ngram_mapk_size_n     = tk.StringVar(value=_spec_init_str("spec_ngram_mapk_size_n"))
+        self.spec_ngram_mapk_size_m     = tk.StringVar(value=_spec_init_str("spec_ngram_mapk_size_m"))
+        self.spec_ngram_mapk_min_hits   = tk.StringVar(value=_spec_init_str("spec_ngram_mapk_min_hits"))
+        self.spec_ngram_mapk4v_size_n   = tk.StringVar(value=_spec_init_str("spec_ngram_mapk4v_size_n"))
+        self.spec_ngram_mapk4v_size_m   = tk.StringVar(value=_spec_init_str("spec_ngram_mapk4v_size_m"))
+        self.spec_ngram_mapk4v_min_hits = tk.StringVar(value=_spec_init_str("spec_ngram_mapk4v_min_hits"))
+        self.spec_ngram_mod_n_min       = tk.StringVar(value=_spec_init_str("spec_ngram_mod_n_min"))
+        self.spec_ngram_mod_n_max       = tk.StringVar(value=_spec_init_str("spec_ngram_mod_n_max"))
+        self.spec_ngram_mod_n_match     = tk.StringVar(value=_spec_init_str("spec_ngram_mod_n_match"))
+        # Shared single ngram set used by ik_llama (one --spec-ngram-* set).
+        self.spec_ngram_size_n          = tk.StringVar(value=_spec_init_str("spec_ngram_size_n"))
+        self.spec_ngram_size_m          = tk.StringVar(value=_spec_init_str("spec_ngram_size_m"))
+        self.spec_ngram_min_hits        = tk.StringVar(value=_spec_init_str("spec_ngram_min_hits"))
+        # Suffix tuning (ik_llama only).
+        self.spec_suffix_pattern_len    = tk.StringVar(value=_spec_init_str("spec_suffix_pattern_len"))
+        self.spec_suffix_max_depth      = tk.StringVar(value=_spec_init_str("spec_suffix_max_depth"))
+        # ik_llama extras.
+        self.spec_autotune              = tk.BooleanVar(value=_spec_init_bool("spec_autotune"))
+        self.spec_draft_params          = tk.StringVar(value=_spec_init_str("spec_draft_params"))  # -draft "k=v,k=v"
+        # llama.cpp vision toggle.
+        self.no_mmproj                  = tk.BooleanVar(value=_spec_init_bool("no_mmproj"))  # --no-mmproj
+
+        # --- Reasoning / Thinking (both backends) ---
+        # Blank string for any of these means "don't emit the flag". The combobox
+        # values are whitelisted in launch.py before emission.
+        self.reasoning_mode             = tk.StringVar(value=_spec_init_str("reasoning_mode"))            # "", "on", "off", "auto"
+        self.reasoning_format           = tk.StringVar(value=_spec_init_str("reasoning_format"))          # "", "none", "deepseek", "deepseek-legacy", "auto"
+        self.reasoning_budget           = tk.StringVar(value=_spec_init_str("reasoning_budget"))          # integer string; "" = don't emit
+        self.reasoning_budget_message   = tk.StringVar(value=_spec_init_str("reasoning_budget_message"))
+        self.chat_template_kwargs       = tk.StringVar(value=_spec_init_str("chat_template_kwargs"))      # advanced JSON string
+
+        # --- KV Unification + cache-idle-slots (llama.cpp only) ---
+        # "" = don't emit, "on" -> --kv-unified / --cache-idle-slots,
+        # "off" -> --no-kv-unified / --no-cache-idle-slots.
+        self.kv_unified_mode            = tk.StringVar(value=_spec_init_str("kv_unified_mode"))
+        self.cache_idle_slots_mode      = tk.StringVar(value=_spec_init_str("cache_idle_slots_mode"))
 
         # --- Fit Parameters (memory fitting) ---
         self.fit_enabled     = tk.BooleanVar(value=True)   # --fit on/off (default: on)
@@ -576,6 +688,10 @@ class LlamaCppLauncher:
         # Trace on custom entry variable to update the displayed template string (only when in custom mode)
         self.custom_template_string.trace_add("write", lambda *args: self._update_effective_template_display())
 
+        # --- MTP / Spec traces: refresh visibility/enabled state when relevant vars change.
+        self.spec_enabled.trace_add("write", lambda *a: self._refresh_spec_tab_state())
+        self.spec_type.trace_add("write", lambda *a: self._refresh_spec_tab_state())
+
 
         # Populate model directories listbox
         self._update_model_dirs_listbox()
@@ -630,11 +746,14 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main Settings")
         nb.add(adv_frame,  text="Advanced Settings")
         nb.add(chat_frame, text="Chat Template") # Add the new tab
         nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
+        # MTP / Speculative decoding tab - always visible (both backends support spec).
+        nb.add(mtp_spec_frame, text="MTP / Spec")
+        self.mtp_spec_frame = mtp_spec_frame
         # ik_llama tab will be added conditionally
         self.ik_llama_frame = ik_llama_frame
         nb.add(cfg_frame,  text="Configurations")
@@ -646,6 +765,7 @@ class LlamaCppLauncher:
         self._setup_advanced_tab(adv_frame)
         self._setup_chat_template_tab(chat_frame) # Setup the new tab
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
+        self._setup_mtp_spec_tab(mtp_spec_frame) # Setup the MTP / Spec tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_config_tab(cfg_frame)
         self._setup_settings_tab(settings_frame) # UI settings tab
@@ -653,6 +773,16 @@ class LlamaCppLauncher:
 
         # Update ik_llama tab visibility based on current backend selection
         self._update_ik_llama_tab_visibility()
+        # Initial refresh of MTP/Spec tab state based on current backend + type.
+        try:
+            self._refresh_spec_tab_state()
+        except Exception as exc:
+            print(f"DEBUG: initial _refresh_spec_tab_state failed: {exc}", file=sys.stderr)
+        # Initial refresh of KV-unification combobox gating.
+        try:
+            self._refresh_kv_unify_state()
+        except Exception as exc:
+            print(f"DEBUG: initial _refresh_kv_unify_state failed: {exc}", file=sys.stderr)
 
         bar = ttk.Frame(self.root); bar.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(bar, text="Launch Server",   command=self.launch_manager.launch_server).pack(side="left",  padx=5)
@@ -1317,6 +1447,39 @@ class LlamaCppLauncher:
         ttk.Label(inner, text="Keep KV cache in CPU RAM even with GPU layers", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3); # Re-grid label
 
+        # --- KV Cache Unification (llama.cpp only) ---
+        # Two tri-state comboboxes: "" = don't emit, "on"/"off" -> explicit flag.
+        # cache-idle-slots requires unified KV, so it's only enabled when kv_unified_mode == "on".
+        # Both are disabled entirely when backend == "ik_llama".
+        ttk.Label(inner, text="KV Cache Unification (llama.cpp only)", font=("TkDefaultFont", 11, "bold"))\
+            .grid(column=0, row=r, columnspan=4, sticky="w", padx=10, pady=(15, 3)); r += 1
+
+        ttk.Label(inner, text="Unified KV (--kv-unified):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        self.kv_unified_mode_combo = ttk.Combobox(inner, textvariable=self.kv_unified_mode,
+                                                  values=("", "on", "off"),
+                                                  state="readonly", width=8)
+        self.kv_unified_mode_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        self.kv_unified_backend_label = ttk.Label(inner, text="", font=("TkSmallCaptionFont"), foreground="gray")
+        self.kv_unified_backend_label.grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+        ttk.Label(inner, text="Blank = don't emit. 'on' enables --kv-unified; 'off' emits --no-kv-unified.", font=("TkSmallCaptionFont"))\
+            .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 3)); r += 1
+
+        ttk.Label(inner, text="Cache Idle Slots (--cache-idle-slots):")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=3)
+        self.cache_idle_slots_mode_combo = ttk.Combobox(inner, textvariable=self.cache_idle_slots_mode,
+                                                        values=("", "on", "off"),
+                                                        state="readonly", width=8)
+        self.cache_idle_slots_mode_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        self.cache_idle_slots_warn_label = ttk.Label(inner, text="Requires --kv-unified to be 'on'.",
+                                                     font=("TkSmallCaptionFont"), foreground="gray")
+        self.cache_idle_slots_warn_label.grid(column=2, row=r, columnspan=2, sticky="w", padx=5, pady=3); r += 1
+
+        # Live state-gating: respond to both kv_unified_mode and backend_selection changes.
+        self.kv_unified_mode.trace_add("write", lambda *a: self._refresh_kv_unify_state())
+        # backend_selection already has a trace in __init__; _on_backend_selection_changed
+        # will call _refresh_kv_unify_state. Initial state is set after widgets exist.
+
 
         # --- Performance (Batching & Threading) ---
         ttk.Label(inner, text="Performance Settings", font=("TkDefaultFont", 12, "bold"))\
@@ -1565,6 +1728,67 @@ class LlamaCppLauncher:
              .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
 
 
+        # --- Reasoning / Thinking section ---
+        # Supported by BOTH backends (llama.cpp mainline & ik_llama). No per-backend
+        # gating: every flag below is accepted by both binaries. Blank = "don't emit".
+        ttk.Separator(frame, orient='horizontal').grid(column=0, row=r, columnspan=3, sticky='ew', padx=5, pady=10); r += 1
+        ttk.Label(frame, text="Reasoning / Thinking", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 5)); r += 1
+        ttk.Label(frame, text="Controls --reasoning / --reasoning-format / --reasoning-budget. Leave blank to emit nothing.", font=("TkSmallCaptionFont"))\
+            .grid(column=0, row=r, columnspan=3, sticky="w", padx=5, pady=(0, 5)); r += 1
+
+        # --reasoning {on,off,auto}
+        ttk.Label(frame, text="Reasoning Mode (--reasoning):")\
+            .grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        self.reasoning_mode_combo = ttk.Combobox(frame, textvariable=self.reasoning_mode,
+                                                 values=("", "auto", "on", "off"),
+                                                 state="readonly", width=15)
+        self.reasoning_mode_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(frame, text="Blank = don't emit. 'auto' is server default.", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, sticky="w", padx=5, pady=3); r += 1
+
+        # --reasoning-format
+        ttk.Label(frame, text="Reasoning Format (--reasoning-format):")\
+            .grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        # state="normal" so users can type a custom value not in the dropdown.
+        self.reasoning_format_combo = ttk.Combobox(frame, textvariable=self.reasoning_format,
+                                                   values=("", "auto", "none", "deepseek", "deepseek-legacy"),
+                                                   state="normal", width=20)
+        self.reasoning_format_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(frame, text="Server default: auto.", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, sticky="w", padx=5, pady=3); r += 1
+
+        # --reasoning-budget
+        ttk.Label(frame, text="Reasoning Budget (--reasoning-budget):")\
+            .grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        # Restrict typed input to optional sign + digits so a stray "abc" can't
+        # be saved into the config and crash the server at launch time.
+        vcmd = (self.root.register(self._validate_int_or_blank), "%P")
+        self.reasoning_budget_entry = ttk.Entry(frame, textvariable=self.reasoning_budget, width=15,
+                                                validate="key", validatecommand=vcmd)
+        self.reasoning_budget_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        ttk.Label(frame, text="Integer. -1 = unlimited (default), 0 = end immediately, N > 0 = token budget.", font=("TkSmallCaptionFont"))\
+            .grid(column=2, row=r, sticky="w", padx=5, pady=3); r += 1
+
+        # --reasoning-budget-message
+        ttk.Label(frame, text="Reasoning Budget Message (--reasoning-budget-message):")\
+            .grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        self.reasoning_budget_message_entry = ttk.Entry(frame, textvariable=self.reasoning_budget_message)
+        self.reasoning_budget_message_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2); r += 1
+
+        # --chat-template-kwargs
+        ttk.Label(frame, text="Chat Template KWargs (--chat-template-kwargs):")\
+            .grid(column=0, row=r, sticky="w", padx=5, pady=3)
+        self.chat_template_kwargs_entry = ttk.Entry(frame, textvariable=self.chat_template_kwargs)
+        self.chat_template_kwargs_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2); r += 1
+        ttk.Label(frame, text="(advanced: JSON string)", font=("TkSmallCaptionFont"), foreground="gray")\
+            .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        ttk.Label(frame,
+                  text="Use --reasoning on/off instead of --chat-template-kwargs '{\"preserve_thinking\":true}'",
+                  font=("TkSmallCaptionFont"), foreground="gray")\
+            .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+
+
         # Initial state update based on self.template_source (called in __init__)
 
 
@@ -1758,6 +1982,470 @@ class LlamaCppLauncher:
         """Set up the ik_llama configuration tab using the IkLlamaTab class."""
         # Create the ik_llama tab using the dedicated class
         self.ik_llama_tab.create_tab(parent)
+
+    # ░░░░░ MTP / SPECULATIVE DECODING TAB ░░░░░
+    # Backend-aware: most knobs differ between llama.cpp (mainline) and ik_llama.
+    # The single source of truth for spec-type values is _SPEC_TYPES_LLAMA_CPP /
+    # _SPEC_TYPES_IK_LLAMA, mirrored by the launch.py emission block.
+    _SPEC_TYPES_LLAMA_CPP = (
+        "none",
+        "draft-simple",
+        "draft-eagle3",
+        "draft-mtp",
+        "ngram-simple",
+        "ngram-map-k",
+        "ngram-map-k4v",
+        "ngram-mod",
+        "ngram-cache",
+    )
+    _SPEC_TYPES_IK_LLAMA = (
+        "none",
+        "mtp",
+        "ngram-cache",
+        "ngram-simple",
+        "ngram-map-k",
+        "ngram-map-k4v",
+        "ngram-mod",
+        "suffix",
+    )
+
+    def _setup_mtp_spec_tab(self, parent):
+        """Set up the MTP / Speculative Decoding tab.
+
+        Always visible regardless of backend selection — both llama.cpp and
+        ik_llama expose `--spec-type`, but their flag surfaces differ. UI
+        widgets that only apply to one backend are disabled (not hidden) when
+        the other backend is active so the user can see what's not available.
+        """
+        # Scrolling canvas pattern (matches _setup_advanced_tab).
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        vs = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind(
+            "<Configure>",
+            lambda e: canvas.configure(yscrollcommand=vs.set, scrollregion=canvas.bbox("all")),
+        )
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+        canvas.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+
+        inner.columnconfigure(1, weight=1)
+
+        # Tracked widgets are kept on self for _refresh_spec_tab_state() to
+        # enable/disable and show/hide based on backend + spec_type + master toggle.
+        self._spec_widgets = {}
+        # Sections we hide/show wholesale.
+        self._spec_sections = {}
+
+        r = 0
+
+        # --- Header / master toggle ---
+        ttk.Label(inner, text="MTP / Speculative Decoding", font=("TkDefaultFont", 12, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4); r += 1
+        ttk.Separator(inner, orient="horizontal")\
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+
+        master_cb = ttk.Checkbutton(
+            inner,
+            text="Enable speculative decoding",
+            variable=self.spec_enabled,
+        )
+        master_cb.grid(column=0, row=r, sticky="w", padx=10, pady=4, columnspan=4); r += 1
+        self._spec_widgets["master_cb"] = master_cb
+
+        self.spec_status_var = tk.StringVar(value="")
+        ttk.Label(inner, textvariable=self.spec_status_var, foreground="gray")\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4); r += 1
+
+        # --- Speculative type ---
+        ttk.Label(inner, text="Speculative type:", font=("TkDefaultFont", 10, "bold"))\
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4); r += 1
+        type_combo = ttk.Combobox(
+            inner,
+            textvariable=self.spec_type,
+            values=list(self._SPEC_TYPES_LLAMA_CPP),
+            state="readonly",
+            width=28,
+        )
+        type_combo.grid(column=0, row=r, sticky="w", padx=10, pady=2)
+        self._spec_widgets["type_combo"] = type_combo
+        ttk.Label(
+            inner,
+            text="(values depend on backend; 'none' = no spec flags)",
+            foreground="gray",
+        ).grid(column=1, row=r, sticky="w", padx=5, pady=2, columnspan=3)
+        r += 1
+
+        # --- Common draft controls section ---
+        sec = ttk.LabelFrame(inner, text="Common draft controls")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=(10, 4))
+        sec.columnconfigure(1, weight=1)
+        sec.columnconfigure(3, weight=1)
+        self._spec_sections["common"] = sec
+        r += 1
+
+        sr = 0
+        ttk.Label(sec, text="n-max:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_nmax = ttk.Entry(sec, textvariable=self.spec_draft_n_max, width=10)
+        e_nmax.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["n_max"] = e_nmax
+        ttk.Label(sec, text="n-min:").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
+        e_nmin = ttk.Entry(sec, textvariable=self.spec_draft_n_min, width=10)
+        e_nmin.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["n_min"] = e_nmin
+        sr += 1
+
+        ttk.Label(sec, text="p-min:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_pmin = ttk.Entry(sec, textvariable=self.spec_draft_p_min, width=10)
+        e_pmin.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["p_min"] = e_pmin
+        self.spec_pmin_hint_var = tk.StringVar(value="")
+        ttk.Label(sec, textvariable=self.spec_pmin_hint_var, foreground="gray")\
+            .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
+
+        sr += 1
+        ttk.Label(sec, text="p-split:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_psplit = ttk.Entry(sec, textvariable=self.spec_draft_p_split, width=10)
+        e_psplit.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["p_split"] = e_psplit
+        self.spec_psplit_hint_var = tk.StringVar(value="(llama.cpp only)")
+        ttk.Label(sec, textvariable=self.spec_psplit_hint_var, foreground="gray")\
+            .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
+
+        # --- Draft model section ---
+        sec = ttk.LabelFrame(inner, text="Draft model")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
+        sec.columnconfigure(1, weight=1)
+        self._spec_sections["draft_model"] = sec
+        r += 1
+
+        sr = 0
+        ttk.Label(sec, text="Draft GGUF file:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_dm = ttk.Entry(sec, textvariable=self.spec_draft_model)
+        e_dm.grid(column=1, row=sr, sticky="ew", padx=4, pady=2)
+        self._spec_widgets["draft_model_entry"] = e_dm
+        b_dm = ttk.Button(sec, text="Browse...", command=self._browse_spec_draft_model)
+        b_dm.grid(column=2, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_model_browse"] = b_dm
+        sr += 1
+
+        ttk.Label(sec, text="HF repo (-hfd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_hf = ttk.Entry(sec, textvariable=self.spec_draft_hf)
+        e_hf.grid(column=1, row=sr, sticky="ew", padx=4, pady=2, columnspan=2)
+        self._spec_widgets["draft_hf"] = e_hf
+        sr += 1
+
+        ttk.Label(sec, text="Draft GPU layers (-ngld):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_ngld = ttk.Entry(sec, textvariable=self.spec_draft_ngl, width=12)
+        e_ngld.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_ngl"] = e_ngld
+        sr += 1
+
+        ttk.Label(sec, text="Draft devices (-devd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_devd = ttk.Entry(sec, textvariable=self.spec_draft_device)
+        e_devd.grid(column=1, row=sr, sticky="ew", padx=4, pady=2, columnspan=2)
+        self._spec_widgets["draft_device"] = e_devd
+        sr += 1
+
+        ttk.Label(sec, text="Draft K cache type (-ctkd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        e_ctkd = ttk.Entry(sec, textvariable=self.spec_draft_ctk, width=12)
+        e_ctkd.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_ctk"] = e_ctkd
+        ttk.Label(sec, text="Draft V cache type (-ctvd):").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
+        e_ctvd = ttk.Entry(sec, textvariable=self.spec_draft_ctv, width=12)
+        e_ctvd.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_ctv"] = e_ctvd
+        sr += 1
+
+        cb_cmoed = ttk.Checkbutton(
+            sec,
+            text="Offload draft MoE to CPU (--spec-draft-cpu-moe)",
+            variable=self.spec_draft_cpu_moe,
+        )
+        cb_cmoed.grid(column=0, row=sr, sticky="w", padx=6, pady=2, columnspan=2)
+        self._spec_widgets["draft_cpu_moe"] = cb_cmoed
+        ttk.Label(sec, text="n-cpu-moe:").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
+        e_ncm = ttk.Entry(sec, textvariable=self.spec_draft_n_cpu_moe, width=10)
+        e_ncm.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_n_cpu_moe"] = e_ncm
+
+        # --- Ngram tuning (llama.cpp per-variant; ik_llama shared) ---
+        # Per-variant simple/mapk/mapk4v/mod groups for llama.cpp:
+        for key, label, vars_triplet in [
+            ("ngram_simple", "Ngram simple (--spec-ngram-simple-*)",
+             (self.spec_ngram_simple_size_n, self.spec_ngram_simple_size_m, self.spec_ngram_simple_min_hits)),
+            ("ngram_mapk", "Ngram map-k (--spec-ngram-map-k-*)",
+             (self.spec_ngram_mapk_size_n, self.spec_ngram_mapk_size_m, self.spec_ngram_mapk_min_hits)),
+            ("ngram_mapk4v", "Ngram map-k4v (--spec-ngram-map-k4v-*)",
+             (self.spec_ngram_mapk4v_size_n, self.spec_ngram_mapk4v_size_m, self.spec_ngram_mapk4v_min_hits)),
+        ]:
+            sec = ttk.LabelFrame(inner, text=label)
+            sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
+            sec.columnconfigure(1, weight=1)
+            sec.columnconfigure(3, weight=1)
+            self._spec_sections[key] = sec
+            r += 1
+            v_sn, v_sm, v_mh = vars_triplet
+            ttk.Label(sec, text="size-n:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
+            ttk.Entry(sec, textvariable=v_sn, width=10).grid(column=1, row=0, sticky="w", padx=4, pady=2)
+            ttk.Label(sec, text="size-m:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
+            ttk.Entry(sec, textvariable=v_sm, width=10).grid(column=3, row=0, sticky="w", padx=4, pady=2)
+            ttk.Label(sec, text="min-hits:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
+            ttk.Entry(sec, textvariable=v_mh, width=10).grid(column=1, row=1, sticky="w", padx=4, pady=2)
+
+        # Ngram mod (n-min, n-max, n-match) for llama.cpp:
+        sec = ttk.LabelFrame(inner, text="Ngram mod (--spec-ngram-mod-*)")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
+        sec.columnconfigure(1, weight=1)
+        sec.columnconfigure(3, weight=1)
+        self._spec_sections["ngram_mod"] = sec
+        r += 1
+        ttk.Label(sec, text="n-min:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_min, width=10)\
+            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Label(sec, text="n-max:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_max, width=10)\
+            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Label(sec, text="n-match:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_match, width=10)\
+            .grid(column=1, row=1, sticky="w", padx=4, pady=2)
+
+        # Shared ngram set (ik_llama uses a single set across all ngram types):
+        sec = ttk.LabelFrame(inner, text="Ngram tuning (--spec-ngram-*)")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
+        sec.columnconfigure(1, weight=1)
+        sec.columnconfigure(3, weight=1)
+        self._spec_sections["ngram_shared"] = sec
+        r += 1
+        ttk.Label(sec, text="size-n:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_size_n, width=10)\
+            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Label(sec, text="size-m:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_size_m, width=10)\
+            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Label(sec, text="min-hits:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_min_hits, width=10)\
+            .grid(column=1, row=1, sticky="w", padx=4, pady=2)
+
+        # --- Suffix (ik_llama only) ---
+        sec = ttk.LabelFrame(inner, text="Suffix tuning (ik_llama, --suffix-*)")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
+        sec.columnconfigure(1, weight=1)
+        self._spec_sections["suffix"] = sec
+        r += 1
+        ttk.Label(sec, text="pattern-len:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_suffix_pattern_len, width=10)\
+            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Label(sec, text="max-depth:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_suffix_max_depth, width=10)\
+            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+
+        # --- ik_llama extras ---
+        sec = ttk.LabelFrame(inner, text="ik_llama extras")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
+        sec.columnconfigure(1, weight=1)
+        self._spec_sections["ik_extras"] = sec
+        r += 1
+        ttk.Checkbutton(
+            sec,
+            text="Enable spec autotune (--spec-autotune)",
+            variable=self.spec_autotune,
+        ).grid(column=0, row=0, sticky="w", padx=6, pady=2, columnspan=2)
+        ttk.Label(sec, text="Draft params (-draft):").grid(column=0, row=1, sticky="w", padx=6, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_draft_params)\
+            .grid(column=1, row=1, sticky="ew", padx=4, pady=2, columnspan=2)
+        ttk.Label(
+            sec,
+            text='Free-form comma list, e.g. "k=v,k=v"',
+            foreground="gray",
+        ).grid(column=0, row=2, sticky="w", padx=6, pady=(0, 4), columnspan=3)
+
+        # --- Vision (llama.cpp only) ---
+        sec = ttk.LabelFrame(inner, text="Vision (llama.cpp)")
+        sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=(4, 10))
+        self._spec_sections["vision"] = sec
+        r += 1
+        ttk.Checkbutton(
+            sec,
+            text="Disable embedded mmproj at launch (--no-mmproj)",
+            variable=self.no_mmproj,
+        ).grid(column=0, row=0, sticky="w", padx=6, pady=2)
+        ttk.Label(
+            sec,
+            text="Useful for MTP GGUFs that embed a vision projector you don't need.",
+            foreground="gray",
+        ).grid(column=0, row=1, sticky="w", padx=6, pady=(0, 4))
+
+    def _browse_spec_draft_model(self):
+        """File dialog for selecting the draft GGUF model (-md / --model-draft)."""
+        current = self.spec_draft_model.get().strip()
+        initial_dir = ""
+        if current:
+            try:
+                p = Path(current).expanduser()
+                if p.parent.is_dir():
+                    initial_dir = str(p.parent)
+            except Exception:
+                pass
+        if not initial_dir and self.model_dirs:
+            try:
+                initial_dir = str(self.model_dirs[-1])
+            except Exception:
+                initial_dir = ""
+        path = filedialog.askopenfilename(
+            title="Select draft GGUF model",
+            initialdir=initial_dir or str(Path.home()),
+            filetypes=[("GGUF models", "*.gguf"), ("All files", "*.*")],
+        )
+        if path:
+            self.spec_draft_model.set(path)
+
+    def _refresh_spec_tab_state(self):
+        """Recompute visibility/enabled state for MTP/Spec tab widgets.
+
+        Called from traces on backend_selection, spec_enabled, and spec_type,
+        plus once on tab creation and once on _on_backend_selection_changed.
+        Safe to call before widgets exist (no-ops gracefully).
+        """
+        # The tab may not be built yet during early init — bail quietly.
+        if not hasattr(self, "_spec_widgets") or not hasattr(self, "_spec_sections"):
+            return
+
+        backend = self.backend_selection.get() if hasattr(self, "backend_selection") else "llama.cpp"
+        is_ik = (backend == "ik_llama")
+        enabled = bool(self.spec_enabled.get())
+        spec_type = (self.spec_type.get() or "none").strip()
+
+        # 1) Refresh the spec_type combobox values for the active backend.
+        combo = self._spec_widgets.get("type_combo")
+        if combo is not None:
+            allowed = list(self._SPEC_TYPES_IK_LLAMA if is_ik else self._SPEC_TYPES_LLAMA_CPP)
+            try:
+                combo["values"] = allowed
+            except tk.TclError:
+                pass
+            if spec_type not in allowed:
+                # Reset to "none" so we don't emit a flag the active backend rejects.
+                # Setting the var here re-triggers this method, but the recursion
+                # terminates because spec_type will then be "none" (in `allowed`).
+                self.spec_type.set("none")
+                spec_type = "none"
+
+        # 2) Master enable state: when off, everything except the master checkbox
+        # is disabled. When on, all *visible* widgets default to enabled and the
+        # per-backend/per-type rules below trim further.
+        def _set_state(widget, state):
+            try:
+                # Combobox needs explicit "readonly" rather than "normal".
+                if isinstance(widget, ttk.Combobox) and state == "normal":
+                    widget.configure(state="readonly")
+                else:
+                    widget.configure(state=state)
+            except (tk.TclError, AttributeError):
+                pass
+
+        # Iterate all child widgets in each section and set state uniformly.
+        def _set_section_state(section_name, state):
+            sec = self._spec_sections.get(section_name)
+            if sec is None:
+                return
+            for child in sec.winfo_children():
+                _set_state(child, state)
+
+        type_combo_target_state = "normal" if enabled else "disabled"
+        _set_state(combo, type_combo_target_state)
+
+        # 3) Section visibility based on backend + spec_type.
+        all_sections = set(self._spec_sections.keys())
+        # Determine which sections to show.
+        visible = set()
+        if enabled:
+            # "Common draft controls" is shown for any non-none type (draft/mtp/ngram/suffix
+            # all benefit from n-max/n-min/p-min knobs; backend-specific gating handles
+            # p-split disable on ik_llama).
+            if spec_type and spec_type != "none":
+                visible.add("common")
+            # Draft model section: only for non-mtp draft-* types on llama.cpp,
+            # and for nothing on ik_llama mtp (legacy ik_llama doesn't have a
+            # draft-model concept beyond `--model-draft`, which is rare). We
+            # show it whenever a "draft" style type is selected so the user has
+            # a place for the file picker.
+            if spec_type in ("draft-simple", "draft-eagle3"):
+                visible.add("draft_model")
+            # Ngram sections - mainline has per-variant; ik_llama has shared.
+            if spec_type.startswith("ngram-"):
+                if is_ik:
+                    visible.add("ngram_shared")
+                else:
+                    if spec_type == "ngram-simple":
+                        visible.add("ngram_simple")
+                    elif spec_type == "ngram-map-k":
+                        visible.add("ngram_mapk")
+                    elif spec_type == "ngram-map-k4v":
+                        visible.add("ngram_mapk4v")
+                    elif spec_type == "ngram-mod":
+                        visible.add("ngram_mod")
+                    # ngram-cache has no extra knobs - no section to show.
+            # Suffix only on ik_llama.
+            if is_ik and spec_type == "suffix":
+                visible.add("suffix")
+            # ik_llama extras shown whenever ik_llama is active and master is on.
+            if is_ik:
+                visible.add("ik_extras")
+            # Vision (--no-mmproj) only on llama.cpp.
+            if not is_ik:
+                visible.add("vision")
+
+        for name in all_sections:
+            sec = self._spec_sections[name]
+            try:
+                if name in visible:
+                    sec.grid()
+                else:
+                    sec.grid_remove()
+            except tk.TclError:
+                pass
+
+        # 4) Per-widget enable/disable inside visible sections.
+        if enabled:
+            for name in visible:
+                _set_section_state(name, "normal")
+            # p-split is llama.cpp only - if ik_llama is active, disable it.
+            psplit_w = self._spec_widgets.get("p_split")
+            if psplit_w is not None and "common" in visible:
+                if is_ik:
+                    _set_state(psplit_w, "disabled")
+                    self.spec_psplit_hint_var.set("(disabled: ik_llama does not support --spec-draft-p-split)")
+                else:
+                    _set_state(psplit_w, "normal")
+                    self.spec_psplit_hint_var.set("(llama.cpp only)")
+            # p-min on draft-mtp: leave editable but warn the user via hint label.
+            if "common" in visible:
+                if spec_type == "draft-mtp":
+                    self.spec_pmin_hint_var.set("Note: currently disabled for MTP in mainline (post-merge TODO).")
+                else:
+                    self.spec_pmin_hint_var.set("")
+            # HF repo / cpu-moe knobs are llama.cpp-only when the draft_model section is visible.
+            if "draft_model" in visible:
+                for k in ("draft_hf", "draft_cpu_moe", "draft_n_cpu_moe"):
+                    w = self._spec_widgets.get(k)
+                    if w is not None:
+                        _set_state(w, "disabled" if is_ik else "normal")
+        else:
+            # Master off: disable everything except the master checkbox.
+            for name in all_sections:
+                _set_section_state(name, "disabled")
+            self.spec_pmin_hint_var.set("")
+
+        # 5) Status label so users know what's emitted.
+        if not enabled:
+            self.spec_status_var.set("Disabled - no --spec-* / --draft-* flags will be emitted.")
+        elif spec_type in ("", "none"):
+            self.spec_status_var.set("Enabled, but type is 'none' - no spec flags will be emitted.")
+        else:
+            backend_label = "ik_llama" if is_ik else "llama.cpp"
+            self.spec_status_var.set(f"Active: type={spec_type} (backend: {backend_label}).")
 
     def _setup_settings_tab(self, parent):
         """Set up the Settings (UI appearance) tab."""
@@ -3377,7 +4065,84 @@ class LlamaCppLauncher:
         self.app_settings["backend_selection"] = selected_backend
         self._update_root_directory_labels()  # Update the labels
         self._update_ik_llama_tab_visibility()  # Update ik_llama tab visibility
+        # Refresh the MTP/Spec tab so backend-specific knobs/values track the active backend.
+        try:
+            self._refresh_spec_tab_state()
+        except Exception as exc:
+            print(f"DEBUG: _refresh_spec_tab_state failed in _on_backend_selection_changed: {exc}", file=sys.stderr)
+        # Refresh the KV-unification combobox gating (disabled on ik_llama).
+        try:
+            self._refresh_kv_unify_state()
+        except Exception as exc:
+            print(f"DEBUG: _refresh_kv_unify_state failed in _on_backend_selection_changed: {exc}", file=sys.stderr)
         self._save_configs()
+
+    @staticmethod
+    def _validate_int_or_blank(proposed):
+        """Tk validatecommand: allow empty, a bare '-', or a signed integer."""
+        if proposed == "" or proposed == "-":
+            return True
+        try:
+            int(proposed)
+            return True
+        except ValueError:
+            return False
+
+    def _refresh_kv_unify_state(self, *args):
+        """Enable/disable the kv-unified and cache-idle-slots combos.
+
+        ik_llama: both disabled (binary doesn't accept these flags).
+        llama.cpp: kv-unified is always enabled; cache-idle-slots is enabled
+                   only when kv-unified is "on".
+        """
+        try:
+            backend = self.backend_selection.get()
+        except Exception:
+            backend = "llama.cpp"
+
+        # Both widgets may not exist yet during __init__ ordering.
+        kvu_combo = getattr(self, "kv_unified_mode_combo", None)
+        cis_combo = getattr(self, "cache_idle_slots_mode_combo", None)
+        backend_label = getattr(self, "kv_unified_backend_label", None)
+        warn_label = getattr(self, "cache_idle_slots_warn_label", None)
+
+        if backend == "ik_llama":
+            # Disable both, show the "not supported" note next to kv-unified.
+            if kvu_combo is not None and kvu_combo.winfo_exists():
+                kvu_combo.config(state=tk.DISABLED)
+            if cis_combo is not None and cis_combo.winfo_exists():
+                cis_combo.config(state=tk.DISABLED)
+            if backend_label is not None and backend_label.winfo_exists():
+                backend_label.config(text="(not supported by ik_llama)")
+            if warn_label is not None and warn_label.winfo_exists():
+                warn_label.config(text="(not supported by ik_llama)")
+        else:
+            # llama.cpp: kv-unified always available; cache-idle-slots depends on it.
+            if kvu_combo is not None and kvu_combo.winfo_exists():
+                kvu_combo.config(state="readonly")
+            if backend_label is not None and backend_label.winfo_exists():
+                backend_label.config(text="")
+            if cis_combo is not None and cis_combo.winfo_exists():
+                try:
+                    kvu_val = self.kv_unified_mode.get().strip()
+                except Exception:
+                    kvu_val = ""
+                if kvu_val == "on":
+                    cis_combo.config(state="readonly")
+                    if warn_label is not None and warn_label.winfo_exists():
+                        warn_label.config(text="Requires --kv-unified to be 'on'.")
+                else:
+                    cis_combo.config(state=tk.DISABLED)
+                    # Clear stale value so the launcher doesn't emit
+                    # --cache-idle-slots without --kv-unified (server warns
+                    # and disables it anyway, producing log noise).
+                    try:
+                        if self.cache_idle_slots_mode.get().strip():
+                            self.cache_idle_slots_mode.set("")
+                    except Exception:
+                        pass
+                    if warn_label is not None and warn_label.winfo_exists():
+                        warn_label.config(text="Requires --kv-unified to be 'on'.")
 
     def _update_ik_llama_tab_visibility(self):
         """Show or hide the ik_llama tab based on backend selection."""

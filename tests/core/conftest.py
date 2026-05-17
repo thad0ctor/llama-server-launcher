@@ -19,6 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Single source of truth for the new spec/reasoning/KVU Tk vars.
+from tests.launcher_var_registry import ALL_NEW_LAUNCHER_TK_VARS  # noqa: E402
+
 
 class FakeVar:
     """Minimal stand-in for ``tk.StringVar`` / ``tk.BooleanVar``.
@@ -174,6 +177,14 @@ def build_rich_launcher_mock(
     for name in ("no_mmap", "mlock", "no_kv_offload", "ignore_eos",
                  "cpu_moe", "mmproj_enabled", "fit_enabled", "jinja_enabled"):
         setattr(launcher, name, FakeVar(False))
+
+    # MTP / Speculative decoding + Reasoning + KV-Unification Tk vars.
+    # Sourced from the single-source-of-truth registry so adding a new var
+    # to the launcher only requires editing tests/launcher_var_registry.py.
+    # FakeVar mirrors the get/set API of tk.*Var; the class hint in the
+    # registry is only consulted for documentation purposes here.
+    for _attr, _cls_name, _default in ALL_NEW_LAUNCHER_TK_VARS:
+        setattr(launcher, _attr, FakeVar(_default))
 
     # flash_attn defaults to True in the app (ik_llama enables it by default
     # in the binary, llama.cpp benefits on most GPUs). Mirror that here so

@@ -35,6 +35,16 @@ if str(REPO_ROOT) not in sys.path:
 
 ENTRY_PATH = REPO_ROOT / "llamacpp-server-launcher.py"
 
+# Single source of truth for the new spec/reasoning/KVU Tk vars.
+from tests.launcher_var_registry import ALL_NEW_LAUNCHER_TK_VARS  # noqa: E402
+
+_TK_CLS = {
+    "StringVar":  tk.StringVar,
+    "BooleanVar": tk.BooleanVar,
+    "IntVar":     tk.IntVar,
+    "DoubleVar":  tk.DoubleVar,
+}
+
 
 # ---------------------------------------------------------------------------
 # Load the hyphenated entry module so we can exercise
@@ -206,6 +216,12 @@ def launcher_mock(tk_root, built_tree):
     m.model_path = _mk(tk_root, tk.StringVar, str(built_tree["model"]))
     m.mmproj_enabled = _mk(tk_root, tk.BooleanVar, False)
     m.selected_mmproj_path = _mk(tk_root, tk.StringVar, "")
+
+    # MTP / Speculative decoding + Reasoning + KV-Unification Tk vars.
+    # Sourced from the single-source-of-truth registry so adding a new var
+    # to the launcher only requires editing tests/launcher_var_registry.py.
+    for _attr, _cls_name, _default in ALL_NEW_LAUNCHER_TK_VARS:
+        setattr(m, _attr, _mk(tk_root, _TK_CLS[_cls_name], _default))
     m.cache_type_k = _mk(tk_root, tk.StringVar, "f16")
     m.cache_type_v = _mk(tk_root, tk.StringVar, "f16")
     m.threads = _mk(tk_root, tk.StringVar, "")
