@@ -1767,6 +1767,16 @@ class LlamaCppLauncher:
         self.reasoning_budget_entry = ttk.Entry(frame, textvariable=self.reasoning_budget, width=15,
                                                 validate="key", validatecommand=vcmd)
         self.reasoning_budget_entry.grid(column=1, row=r, sticky="w", padx=5, pady=3)
+        # Normalize a final bare '-' to blank on focus-out: the validator
+        # allows it during typing (so users can type "-1") but a lone '-'
+        # is not a valid integer and would otherwise persist into the
+        # config and be silently dropped at emission.
+        self.reasoning_budget_entry.bind(
+            "<FocusOut>",
+            lambda _e: (self.reasoning_budget.set("")
+                        if self.reasoning_budget.get().strip() == "-"
+                        else None),
+        )
         ttk.Label(frame, text="Integer. -1 = unlimited (default), 0 = end immediately, N > 0 = token budget.", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, sticky="w", padx=5, pady=3); r += 1
 
@@ -2318,19 +2328,22 @@ class LlamaCppLauncher:
         spec_type = (self.spec_type.get() or "none").strip()
 
         # 1) Refresh the spec_type combobox values for the active backend.
+        # ``effective_spec_type`` is what drives this tab's visibility/state for
+        # the *current* backend. The stored ``self.spec_type`` is left alone so
+        # a user who flips backends to inspect the other side, then flips back,
+        # doesn't silently lose their previously-selected value (e.g. a
+        # ``draft-mtp`` setting under llama.cpp survives a brief ik_llama
+        # excursion). build_cmd() independently re-validates against the per-
+        # backend whitelist, so emission is safe regardless.
         combo = self._spec_widgets.get("type_combo")
+        allowed = list(self._SPEC_TYPES_IK_LLAMA if is_ik else self._SPEC_TYPES_LLAMA_CPP)
         if combo is not None:
-            allowed = list(self._SPEC_TYPES_IK_LLAMA if is_ik else self._SPEC_TYPES_LLAMA_CPP)
             try:
                 combo["values"] = allowed
             except tk.TclError:
                 pass
-            if spec_type not in allowed:
-                # Reset to "none" so we don't emit a flag the active backend rejects.
-                # Setting the var here re-triggers this method, but the recursion
-                # terminates because spec_type will then be "none" (in `allowed`).
-                self.spec_type.set("none")
-                spec_type = "none"
+        spec_type_is_valid_for_backend = spec_type in allowed
+        effective_spec_type = spec_type if spec_type_is_valid_for_backend else "none"
 
         # 2) Master enable state: when off, everything except the master checkbox
         # is disabled. When on, all *visible* widgets default to enabled and the
@@ -2366,33 +2379,37 @@ class LlamaCppLauncher:
         if not is_ik:
             visible.add("vision")
         if enabled:
+            # Below uses ``effective_spec_type`` so a stored value that's
+            # invalid for the active backend (e.g. ``draft-mtp`` while ik_llama
+            # is active) collapses to "none" for visibility/state purposes
+            # without mutating the stored ``self.spec_type``.
             # "Common draft controls" is shown for any non-none type (draft/mtp/ngram/suffix
             # all benefit from n-max/n-min/p-min knobs; backend-specific gating handles
             # p-split disable on ik_llama).
-            if spec_type and spec_type != "none":
+            if effective_spec_type and effective_spec_type != "none":
                 visible.add("common")
             # Draft model section: shown for the spec_types that actually use
             # a separate draft model. On llama.cpp this means draft-simple /
             # draft-eagle3 (draft-mtp shares the base GGUF). On ik_llama, the
             # legacy --model-draft FNAME flag is also supported for mtp mode.
-            if spec_type in ("draft-simple", "draft-eagle3") or (is_ik and spec_type == "mtp"):
+            if effective_spec_type in ("draft-simple", "draft-eagle3") or (is_ik and effective_spec_type == "mtp"):
                 visible.add("draft_model")
             # Ngram sections - mainline has per-variant; ik_llama has shared.
-            if spec_type.startswith("ngram-"):
+            if effective_spec_type.startswith("ngram-"):
                 if is_ik:
                     visible.add("ngram_shared")
                 else:
-                    if spec_type == "ngram-simple":
+                    if effective_spec_type == "ngram-simple":
                         visible.add("ngram_simple")
-                    elif spec_type == "ngram-map-k":
+                    elif effective_spec_type == "ngram-map-k":
                         visible.add("ngram_mapk")
-                    elif spec_type == "ngram-map-k4v":
+                    elif effective_spec_type == "ngram-map-k4v":
                         visible.add("ngram_mapk4v")
-                    elif spec_type == "ngram-mod":
+                    elif effective_spec_type == "ngram-mod":
                         visible.add("ngram_mod")
                     # ngram-cache has no extra knobs - no section to show.
             # Suffix only on ik_llama.
-            if is_ik and spec_type == "suffix":
+            if is_ik and effective_spec_type == "suffix":
                 visible.add("suffix")
             # ik_llama extras shown whenever ik_llama is active and master is on.
             if is_ik:
@@ -2423,7 +2440,7 @@ class LlamaCppLauncher:
                     self.spec_psplit_hint_var.set("(llama.cpp only)")
             # p-min on draft-mtp: leave editable but warn the user via hint label.
             if "common" in visible:
-                if spec_type == "draft-mtp":
+                if effective_spec_type == "draft-mtp":
                     self.spec_pmin_hint_var.set("Note: currently disabled for MTP in mainline (post-merge TODO).")
                 else:
                     self.spec_pmin_hint_var.set("")
@@ -2442,14 +2459,21 @@ class LlamaCppLauncher:
                 _set_section_state("vision", "normal")
             self.spec_pmin_hint_var.set("")
 
-        # 5) Status label so users know what's emitted.
+        # 5) Status label so users know what's emitted. Surface the
+        # "stored but inactive on this backend" case explicitly so a user
+        # who flipped backends knows their setting is preserved.
+        backend_label = "ik_llama" if is_ik else "llama.cpp"
         if not enabled:
             self.spec_status_var.set("Disabled - no --spec-* / --draft-* flags will be emitted.")
-        elif spec_type in ("", "none"):
+        elif not spec_type_is_valid_for_backend and spec_type not in ("", "none"):
+            self.spec_status_var.set(
+                f"Stored type '{spec_type}' is not valid for {backend_label} - inactive on this "
+                f"backend (value preserved). Pick a valid type or switch backend to use it."
+            )
+        elif effective_spec_type in ("", "none"):
             self.spec_status_var.set("Enabled, but type is 'none' - no spec flags will be emitted.")
         else:
-            backend_label = "ik_llama" if is_ik else "llama.cpp"
-            self.spec_status_var.set(f"Active: type={spec_type} (backend: {backend_label}).")
+            self.spec_status_var.set(f"Active: type={effective_spec_type} (backend: {backend_label}).")
 
     def _setup_settings_tab(self, parent):
         """Set up the Settings (UI appearance) tab."""

@@ -271,6 +271,11 @@ class TestKvUnifiedEmission:
         for flag in ("--kv-unified", "--no-kv-unified",
                      "--cache-idle-slots", "--no-cache-idle-slots"):
             assert flag not in cmd
+        # The test name promises a warning — assert it actually fires.
+        captured = capsys.readouterr()
+        assert "ik_llama" in captured.err.lower()
+        assert ("kv-unified" in captured.err.lower()
+                or "cache-idle-slots" in captured.err.lower())
 
     def test_ik_llama_blank_values_emit_no_warning(
         self, manager, launcher_mock, capsys
@@ -484,3 +489,90 @@ class TestValidateIntOrBlank:
     @pytest.mark.parametrize("value", ["abc", "1.5", "1e3", "1,000", "--1", "0x10"])
     def test_rejects_invalid(self, value, entry_module):
         assert entry_module.LlamaCppLauncher._validate_int_or_blank(value) is False
+
+
+# ============================================================================
+# CR regression: _refresh_spec_tab_state must NOT mutate self.spec_type when
+# the stored value isn't valid for the active backend. The stored setting is
+# preserved across backend toggles so flipping ik_llama <-> llama.cpp doesn't
+# silently destroy a user's previously-chosen draft-mtp / mtp value.
+# ============================================================================
+
+
+@pytest.fixture()
+def spec_tab_stub(tk_root, entry_module):
+    """Stub with the attributes `_refresh_spec_tab_state` reads. Real Tk vars
+    for ``backend_selection``, ``spec_enabled``, ``spec_type``, and the three
+    hint vars so set()/get() works. Widget/section dicts are empty — the
+    method tolerates missing widgets via ``self._spec_widgets.get(...)`` and
+    iterates an empty section set if ``_spec_sections`` is empty."""
+    stub = SimpleNamespace()
+    stub.backend_selection = tk.StringVar(master=tk_root, value="llama.cpp")
+    stub.spec_enabled = tk.BooleanVar(master=tk_root, value=True)
+    stub.spec_type = tk.StringVar(master=tk_root, value="none")
+    stub.spec_pmin_hint_var = tk.StringVar(master=tk_root, value="")
+    stub.spec_psplit_hint_var = tk.StringVar(master=tk_root, value="")
+    stub.spec_status_var = tk.StringVar(master=tk_root, value="")
+    stub._spec_widgets = {}
+    stub._spec_sections = {}
+    # Mirror the class constants so the method's per-backend whitelist works.
+    stub._SPEC_TYPES_LLAMA_CPP = entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP
+    stub._SPEC_TYPES_IK_LLAMA = entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA
+    return stub
+
+
+class TestRefreshSpecTabStatePreservesSpecType:
+    """Backend toggles must NOT clobber a stored spec_type that's invalid for
+    the new backend. The user may be inspecting the other backend briefly and
+    intend to flip back; silently resetting their setting is a UX regression."""
+
+    def test_draft_mtp_under_ik_llama_preserves_value(self, spec_tab_stub, entry_module):
+        """User has draft-mtp (mainline) selected, then flips to ik_llama.
+        Stored value must remain 'draft-mtp' — only the effective behavior
+        changes (no flags emit while ik_llama is active)."""
+        spec_tab_stub.spec_type.set("draft-mtp")
+        spec_tab_stub.backend_selection.set("ik_llama")
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        assert spec_tab_stub.spec_type.get() == "draft-mtp"
+
+    def test_mtp_under_llama_cpp_preserves_value(self, spec_tab_stub, entry_module):
+        """And the inverse: ik_llama 'mtp' survives a flip to llama.cpp."""
+        spec_tab_stub.spec_type.set("mtp")
+        spec_tab_stub.backend_selection.set("llama.cpp")
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        assert spec_tab_stub.spec_type.get() == "mtp"
+
+    def test_round_trip_backend_flip_keeps_value(self, spec_tab_stub, entry_module):
+        """Full round-trip: llama.cpp -> ik_llama -> back to llama.cpp.
+        The stored draft-mtp value should still be there at the end."""
+        spec_tab_stub.spec_type.set("draft-mtp")
+        # llama.cpp active — value is valid here
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        assert spec_tab_stub.spec_type.get() == "draft-mtp"
+        # Flip to ik_llama — value invalid for this backend
+        spec_tab_stub.backend_selection.set("ik_llama")
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        assert spec_tab_stub.spec_type.get() == "draft-mtp"
+        # Flip back to llama.cpp — value still there
+        spec_tab_stub.backend_selection.set("llama.cpp")
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        assert spec_tab_stub.spec_type.get() == "draft-mtp"
+
+    def test_status_label_explains_inactive_state(self, spec_tab_stub, entry_module):
+        """User-facing surface for the preservation: status label tells the
+        user the stored value isn't valid on this backend but is preserved."""
+        spec_tab_stub.spec_type.set("draft-mtp")
+        spec_tab_stub.backend_selection.set("ik_llama")
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        status = spec_tab_stub.spec_status_var.get().lower()
+        assert "draft-mtp" in status
+        assert "ik_llama" in status or "not valid" in status or "inactive" in status
+
+    def test_valid_spec_type_still_works(self, spec_tab_stub, entry_module):
+        """Sanity: a valid spec_type for the current backend stays valid and
+        the status label reports 'Active'."""
+        spec_tab_stub.spec_type.set("draft-mtp")
+        spec_tab_stub.backend_selection.set("llama.cpp")
+        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        assert spec_tab_stub.spec_type.get() == "draft-mtp"
+        assert "active" in spec_tab_stub.spec_status_var.get().lower()
