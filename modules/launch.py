@@ -19,6 +19,23 @@ from tkinter import messagebox, filedialog
 from threading import Thread
 
 
+# Per-backend allowed values for `--spec-type`. Used to validate spec_type
+# coming from saved/imported configs before emission; an unknown string can
+# crash the server at startup, so reject it with a stderr warning instead.
+# Sets mirror the UI's per-backend dropdown choices.
+_ALLOWED_SPEC_TYPES_LLAMA_CPP = frozenset({
+    "none",
+    "draft-simple", "draft-eagle3", "draft-mtp",
+    "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache",
+})
+_ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset({
+    "none",
+    "mtp",
+    "ngram-cache", "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod",
+    "suffix",
+})
+
+
 class LaunchManager:
     """Manages command building and server launching functionality."""
 
@@ -302,6 +319,20 @@ class LaunchManager:
             if spec_enabled_var is not None and spec_enabled_var.get():
                 spec_type_var = getattr(self.launcher, "spec_type", None)
                 spec_type = (spec_type_var.get().strip() if spec_type_var is not None else "")
+                # Reject unknown spec_type values before forwarding them — a
+                # stale/hand-edited config can otherwise emit a garbage value
+                # and crash the server at startup. Per-backend whitelists
+                # match the UI dropdown choices.
+                if spec_type and spec_type != "none":
+                    allowed = (_ALLOWED_SPEC_TYPES_IK_LLAMA if backend == "ik_llama"
+                               else _ALLOWED_SPEC_TYPES_LLAMA_CPP)
+                    if spec_type not in allowed:
+                        print(
+                            f"WARNING: spec_type {spec_type!r} is not valid for backend "
+                            f"{backend!r}; skipping --spec-type emission.",
+                            file=sys.stderr,
+                        )
+                        spec_type = "none"
                 if spec_type and spec_type != "none":
                     if backend == "ik_llama":
                         cmd.extend(["--spec-type", spec_type])
@@ -548,14 +579,30 @@ class LaunchManager:
                 if kvu in ("on", "off") or cis in ("on", "off"):
                     print("WARNING: --kv-unified / --cache-idle-slots are llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
             else:
+                # --cache-idle-slots requires --kv-unified to be on (the
+                # server itself warns and disables otherwise). Enforce the
+                # dependency at emission as a last line of defense against
+                # stale/imported configs that survived the UI gating.
                 if kvu == "on":
                     cmd.append("--kv-unified")
+                    if cis == "on":
+                        cmd.append("--cache-idle-slots")
+                    elif cis == "off":
+                        cmd.append("--no-cache-idle-slots")
                 elif kvu == "off":
                     cmd.append("--no-kv-unified")
-                if cis == "on":
-                    cmd.append("--cache-idle-slots")
-                elif cis == "off":
-                    cmd.append("--no-cache-idle-slots")
+                    if cis in ("on", "off"):
+                        print(
+                            "WARNING: --cache-idle-slots requires --kv-unified=on; "
+                            "skipping (kv_unified_mode is 'off').",
+                            file=sys.stderr,
+                        )
+                elif cis in ("on", "off"):
+                    print(
+                        "WARNING: --cache-idle-slots requires --kv-unified=on; "
+                        "skipping (kv_unified_mode is unset).",
+                        file=sys.stderr,
+                    )
         except Exception as exc:
             print(f"WARNING: kv-unified/cache-idle-slots emission raised: {exc}", file=sys.stderr)
 

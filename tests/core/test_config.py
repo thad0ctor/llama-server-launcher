@@ -538,9 +538,12 @@ def test_round_trip_reasoning_and_kvu_blank_defaults(launcher_factory, tmp_path)
     for key in ("reasoning_mode", "reasoning_format", "reasoning_budget",
                 "reasoning_budget_message", "chat_template_kwargs",
                 "kv_unified_mode", "cache_idle_slots_mode"):
-        assert launcher2.app_settings.get(key, "") == "", (
+        assert key in launcher2.app_settings, (
+            f"Missing expected key after round-trip: {key}"
+        )
+        assert launcher2.app_settings[key] == "", (
             f"Default for {key} must remain '' after round-trip; "
-            f"got {launcher2.app_settings.get(key)!r}"
+            f"got {launcher2.app_settings[key]!r}"
         )
 
 

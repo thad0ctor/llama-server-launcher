@@ -924,3 +924,77 @@ class TestNoMmprojEmission:
         launcher_mock.no_mmproj.set(True)
         cmd = manager.build_cmd()
         assert "--no-mmproj" in cmd
+
+
+# ============================================================================
+# Per-backend spec_type whitelist (CR review): a stale/imported config
+# can hold a spec_type value that isn't valid for the active backend.
+# build_cmd() must reject it with a stderr warning, not forward it verbatim
+# to the server.
+# ============================================================================
+
+
+class TestSpecTypeWhitelist:
+    """Reject unknown / cross-backend spec_type values before they reach
+    the server. Mirrors the per-backend dropdown choices in the UI."""
+
+    @pytest.mark.parametrize("bad_value", [
+        "draft-mtp",  # mainline-only, invalid for ik_llama
+        "draft-simple",  # mainline-only
+        "draft-eagle3",  # mainline-only
+        "garbage",  # nonsense
+        "DRAFT-MTP",  # case-sensitive
+    ])
+    def test_invalid_spec_type_under_ik_llama_skips_and_warns(
+        self, manager, launcher_mock, capsys, bad_value
+    ):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(bad_value)
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+        captured = capsys.readouterr()
+        assert "spec_type" in captured.err.lower()
+        assert bad_value in captured.err
+
+    @pytest.mark.parametrize("bad_value", [
+        "mtp",  # ik_llama-only (mainline uses 'draft-mtp'), invalid for llama.cpp
+        "suffix",  # ik_llama-only
+        "garbage",
+        "MTP",  # case-sensitive
+    ])
+    def test_invalid_spec_type_under_llama_cpp_skips_and_warns(
+        self, manager, launcher_mock, capsys, bad_value
+    ):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(bad_value)
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+        captured = capsys.readouterr()
+        assert "spec_type" in captured.err.lower()
+        assert bad_value in captured.err
+
+    def test_invalid_spec_type_also_suppresses_dependent_flags(
+        self, manager, launcher_mock, capsys
+    ):
+        """If spec_type is rejected, downstream draft tuning flags must
+        also be suppressed — they only make sense in the context of a
+        valid spec_type."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")  # invalid for ik_llama
+        launcher_mock.spec_draft_n_max.set("3")
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+        assert "--draft-max" not in cmd
+        assert "--spec-draft-n-max" not in cmd
+
+    def test_valid_spec_type_still_emits(self, manager, launcher_mock):
+        """Sanity: every UI-valid value still passes the whitelist."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        cmd = manager.build_cmd()
+        assert "--spec-type" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"

@@ -138,24 +138,26 @@ class TestReasoningEmission:
         launcher_mock.reasoning_budget_message.set("END")
         launcher_mock.chat_template_kwargs.set('{"preserve_thinking":true}')
         cmd = manager.build_cmd()
-        assert ["--reasoning", "on"] == [cmd[cmd.index("--reasoning")],
-                                          cmd[cmd.index("--reasoning") + 1]]
-        assert ["--reasoning-format", "deepseek"] == [
+        assert [
+            cmd[cmd.index("--reasoning")],
+            cmd[cmd.index("--reasoning") + 1],
+        ] == ["--reasoning", "on"]
+        assert [
             cmd[cmd.index("--reasoning-format")],
             cmd[cmd.index("--reasoning-format") + 1],
-        ]
-        assert ["--reasoning-budget", "4096"] == [
+        ] == ["--reasoning-format", "deepseek"]
+        assert [
             cmd[cmd.index("--reasoning-budget")],
             cmd[cmd.index("--reasoning-budget") + 1],
-        ]
-        assert ["--reasoning-budget-message", "END"] == [
+        ] == ["--reasoning-budget", "4096"]
+        assert [
             cmd[cmd.index("--reasoning-budget-message")],
             cmd[cmd.index("--reasoning-budget-message") + 1],
-        ]
-        assert ["--chat-template-kwargs", '{"preserve_thinking":true}'] == [
+        ] == ["--reasoning-budget-message", "END"]
+        assert [
             cmd[cmd.index("--chat-template-kwargs")],
             cmd[cmd.index("--chat-template-kwargs") + 1],
-        ]
+        ] == ["--chat-template-kwargs", '{"preserve_thinking":true}']
 
     def test_no_reasoning_flags_emitted_by_default(self, manager, launcher_mock):
         """Zero-noise default: none of the five reasoning flags appear when
@@ -198,14 +200,19 @@ class TestKvUnifiedEmission:
         assert "--no-kv-unified" not in cmd
 
     def test_cache_idle_slots_on_emits_flag(self, manager, launcher_mock):
+        """Happy path: --cache-idle-slots emits only when --kv-unified=on."""
         launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.kv_unified_mode.set("on")
         launcher_mock.cache_idle_slots_mode.set("on")
         cmd = manager.build_cmd()
         assert "--cache-idle-slots" in cmd
         assert "--no-cache-idle-slots" not in cmd
 
     def test_cache_idle_slots_off_emits_no_flag(self, manager, launcher_mock):
+        """--no-cache-idle-slots requires --kv-unified=on too — emission is
+        gated as the last line of defense against stale configs."""
         launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.kv_unified_mode.set("on")
         launcher_mock.cache_idle_slots_mode.set("off")
         cmd = manager.build_cmd()
         assert "--no-cache-idle-slots" in cmd
@@ -323,39 +330,63 @@ class TestReasoningBudgetIntegerEmission:
 
 
 # ============================================================================
-# Stale cache-idle-slots: emission still trusts the stored value (which is
-# why the UI-level _refresh_kv_unify_state must clear it). These tests
-# pin that emission-side behavior so we notice if it ever changes.
+# --cache-idle-slots dependency: emission requires --kv-unified=on.
+# The UI clears cache_idle_slots_mode on transitions, but build_cmd() also
+# enforces the dependency as a last line of defense against stale or
+# hand-edited configs.
 # ============================================================================
 
 
-class TestCacheIdleSlotsStaleStateEmissionBehavior:
-    """The launch wiring intentionally emits whatever's stored — the UI
-    resets cache_idle_slots_mode when kv_unified_mode leaves 'on' so the
-    stored value is never inconsistent in practice. These tests document
-    that contract from the emission side."""
+class TestCacheIdleSlotsRequiresKvUnified:
+    """``--cache-idle-slots`` and ``--no-cache-idle-slots`` are only emitted
+    when ``--kv-unified=on`` is also being emitted. The server requires
+    unified KV for cache-idle-slots; emitting it alone would just produce
+    a server-side warning and silent disable."""
 
-    def test_cache_idle_on_without_kvu_emits_flag(self, manager, launcher_mock):
-        """When both vars are explicitly set, the launcher trusts them.
-        UI gating is what prevents this combination in normal use."""
+    def test_cis_on_without_kvu_is_skipped_with_warning(
+        self, manager, launcher_mock, capsys
+    ):
+        """kv_unified_mode='' + cache_idle_slots_mode='on' must NOT emit
+        --cache-idle-slots, and must warn to stderr."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.kv_unified_mode.set("")
         launcher_mock.cache_idle_slots_mode.set("on")
         cmd = manager.build_cmd()
-        # Documented behavior: launcher emits it; the server warns.
-        assert "--cache-idle-slots" in cmd
+        assert "--cache-idle-slots" not in cmd
+        assert "--no-cache-idle-slots" not in cmd
         assert "--kv-unified" not in cmd
+        captured = capsys.readouterr()
+        assert "cache-idle-slots" in captured.err.lower()
+        assert "kv-unified" in captured.err.lower()
 
-    def test_cache_idle_on_with_kvu_off_emits_inconsistent_pair(
-        self, manager, launcher_mock
+    def test_cis_on_with_kvu_off_emits_only_no_kvu_with_warning(
+        self, manager, launcher_mock, capsys
     ):
-        """Same idea with the 'off' variant — emission is verbatim."""
+        """kv_unified=off + cis=on: --no-kv-unified emits, --cache-idle-slots
+        is skipped with a warning."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.kv_unified_mode.set("off")
         launcher_mock.cache_idle_slots_mode.set("on")
         cmd = manager.build_cmd()
-        assert "--cache-idle-slots" in cmd
         assert "--no-kv-unified" in cmd
+        assert "--cache-idle-slots" not in cmd
+        assert "--no-cache-idle-slots" not in cmd
+        captured = capsys.readouterr()
+        assert "cache-idle-slots" in captured.err.lower()
+
+    def test_cis_off_without_kvu_is_skipped_with_warning(
+        self, manager, launcher_mock, capsys
+    ):
+        """The negative ('off') value is gated the same way — without
+        --kv-unified=on, neither variant emits."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.kv_unified_mode.set("")
+        launcher_mock.cache_idle_slots_mode.set("off")
+        cmd = manager.build_cmd()
+        assert "--cache-idle-slots" not in cmd
+        assert "--no-cache-idle-slots" not in cmd
+        captured = capsys.readouterr()
+        assert "cache-idle-slots" in captured.err.lower()
 
 
 # ============================================================================

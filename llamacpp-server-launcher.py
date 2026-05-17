@@ -2360,18 +2360,22 @@ class LlamaCppLauncher:
         all_sections = set(self._spec_sections.keys())
         # Determine which sections to show.
         visible = set()
+        # Vision (--no-mmproj) is independent of spec_enabled: a user may want
+        # to suppress an embedded mmproj projector regardless of speculative
+        # decoding. Always visible on llama.cpp.
+        if not is_ik:
+            visible.add("vision")
         if enabled:
             # "Common draft controls" is shown for any non-none type (draft/mtp/ngram/suffix
             # all benefit from n-max/n-min/p-min knobs; backend-specific gating handles
             # p-split disable on ik_llama).
             if spec_type and spec_type != "none":
                 visible.add("common")
-            # Draft model section: only for non-mtp draft-* types on llama.cpp,
-            # and for nothing on ik_llama mtp (legacy ik_llama doesn't have a
-            # draft-model concept beyond `--model-draft`, which is rare). We
-            # show it whenever a "draft" style type is selected so the user has
-            # a place for the file picker.
-            if spec_type in ("draft-simple", "draft-eagle3"):
+            # Draft model section: shown for the spec_types that actually use
+            # a separate draft model. On llama.cpp this means draft-simple /
+            # draft-eagle3 (draft-mtp shares the base GGUF). On ik_llama, the
+            # legacy --model-draft FNAME flag is also supported for mtp mode.
+            if spec_type in ("draft-simple", "draft-eagle3") or (is_ik and spec_type == "mtp"):
                 visible.add("draft_model")
             # Ngram sections - mainline has per-variant; ik_llama has shared.
             if spec_type.startswith("ngram-"):
@@ -2393,9 +2397,6 @@ class LlamaCppLauncher:
             # ik_llama extras shown whenever ik_llama is active and master is on.
             if is_ik:
                 visible.add("ik_extras")
-            # Vision (--no-mmproj) only on llama.cpp.
-            if not is_ik:
-                visible.add("vision")
 
         for name in all_sections:
             sec = self._spec_sections[name]
@@ -2433,9 +2434,12 @@ class LlamaCppLauncher:
                     if w is not None:
                         _set_state(w, "disabled" if is_ik else "normal")
         else:
-            # Master off: disable everything except the master checkbox.
+            # Master off: disable everything except the master checkbox AND
+            # the vision section (--no-mmproj is independent of spec_enabled).
             for name in all_sections:
                 _set_section_state(name, "disabled")
+            if "vision" in visible:
+                _set_section_state("vision", "normal")
             self.spec_pmin_hint_var.set("")
 
         # 5) Status label so users know what's emitted.
@@ -4080,7 +4084,7 @@ class LlamaCppLauncher:
     @staticmethod
     def _validate_int_or_blank(proposed):
         """Tk validatecommand: allow empty, a bare '-', or a signed integer."""
-        if proposed == "" or proposed == "-":
+        if proposed in ("", "-"):
             return True
         try:
             int(proposed)
