@@ -212,6 +212,10 @@ class LlamaCppLauncher:
             "spec_draft_ctv":      "",
             "spec_draft_cpu_moe":  False,
             "spec_draft_n_cpu_moe":"",
+            # Indices (relative to detected CUDA devices) of GPUs selected for
+            # the draft/MTP model. Drives the new draft GPU checkbox grid and
+            # is converted to a "CUDA0,CUDA1,..." string in spec_draft_device.
+            "spec_draft_selected_gpus": [],
             "spec_ngram_simple_size_n":   "",
             "spec_ngram_simple_size_m":   "",
             "spec_ngram_simple_min_hits": "",
@@ -433,6 +437,14 @@ class LlamaCppLauncher:
         self.spec_draft_ctv      = tk.StringVar(value=_spec_init_str("spec_draft_ctv"))
         self.spec_draft_cpu_moe  = tk.BooleanVar(value=_spec_init_bool("spec_draft_cpu_moe"))  # llama.cpp only
         self.spec_draft_n_cpu_moe= tk.StringVar(value=_spec_init_str("spec_draft_n_cpu_moe"))  # llama.cpp only
+        # Derived/UI state for the draft model's GPU layer slider + status (mirrors
+        # self.n_gpu_layers_int / self.max_gpu_layers / self.gpu_layers_status_var
+        # for the main model). Not persisted directly — set after draft GGUF
+        # analysis succeeds and consumed only by the slider widget + status label.
+        self.spec_draft_ngl_int           = tk.IntVar(value=0)
+        self.max_spec_draft_gpu_layers    = tk.IntVar(value=0)
+        self.spec_draft_layers_status_var = tk.StringVar(value="Select draft model to see layer info")
+        self.current_spec_draft_analysis  = {}  # mirrors self.current_model_analysis
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
         self.spec_ngram_simple_size_n   = tk.StringVar(value=_spec_init_str("spec_ngram_simple_size_n"))
         self.spec_ngram_simple_size_m   = tk.StringVar(value=_spec_init_str("spec_ngram_simple_size_m"))
@@ -773,6 +785,16 @@ class LlamaCppLauncher:
 
         # Update ik_llama tab visibility based on current backend selection
         self._update_ik_llama_tab_visibility()
+        # Initial population of the draft GPU checkbox grid so it shows whatever
+        # device list we have at startup (typically the "Detecting..." state;
+        # real detection runs async and will re-trigger _update_gpu_checkboxes).
+        try:
+            self._update_spec_draft_gpu_checkboxes()
+        except Exception as exc:
+            print(
+                f"DEBUG: initial _update_spec_draft_gpu_checkboxes failed: {exc}",
+                file=sys.stderr,
+            )
         # Initial refresh of MTP/Spec tab state based on current backend + type.
         try:
             self._refresh_spec_tab_state()
@@ -2171,26 +2193,85 @@ class LlamaCppLauncher:
         self._spec_widgets["draft_path_display"] = path_lbl
         sr += 1
 
+        # --- Draft GPU layers (Entry + Slider + Status, mirrors main model) ---
         ttk.Label(sec, text="Draft GPU layers (-ngld):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
-        e_ngld = ttk.Entry(sec, textvariable=self.spec_draft_ngl, width=12)
-        e_ngld.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
-        self._spec_widgets["draft_ngl"] = e_ngld
+        draft_ngl_frame = ttk.Frame(sec)
+        draft_ngl_frame.grid(column=1, row=sr, columnspan=3, sticky="ew", padx=4, pady=2)
+        draft_ngl_frame.columnconfigure(1, weight=1)
+
+        # Entry stays NORMAL so the user can type a value even before analysis.
+        self.spec_draft_ngl_entry = ttk.Entry(
+            draft_ngl_frame, textvariable=self.spec_draft_ngl, width=6, state=tk.NORMAL,
+        )
+        self.spec_draft_ngl_entry.grid(column=0, row=0, sticky="w", padx=(0, 10))
+
+        # Slider is DISABLED until draft analysis succeeds and provides a max.
+        self.spec_draft_ngl_slider = ttk.Scale(
+            draft_ngl_frame,
+            from_=0,
+            to=self.max_spec_draft_gpu_layers.get(),
+            orient="horizontal",
+            variable=self.spec_draft_ngl_int,
+            command=self._sync_spec_draft_gpu_layers_from_slider,
+            state=tk.DISABLED,
+        )
+        self.spec_draft_ngl_slider.grid(column=1, row=0, sticky="ew", padx=5)
+
+        self.spec_draft_layers_status_label = ttk.Label(
+            draft_ngl_frame,
+            textvariable=self.spec_draft_layers_status_var,
+            width=35,
+            anchor="w",
+        )
+        self.spec_draft_layers_status_label.grid(column=2, row=0, sticky="w", padx=(10, 0))
+
+        # Validation + sync bindings, mirroring the main model entry.
+        try:
+            vcmd_draft = (self.root.register(self._validate_spec_draft_gpu_layers_entry), "%P")
+            self.spec_draft_ngl_entry.config(validate="key", validatecommand=vcmd_draft)
+        except tk.TclError:
+            pass
+        self.spec_draft_ngl_entry.bind("<FocusOut>", self._sync_spec_draft_gpu_layers_from_entry)
+        self.spec_draft_ngl_entry.bind("<Return>", self._sync_spec_draft_gpu_layers_from_entry)
+
+        # Track the entry as the "draft_ngl" widget so _refresh_spec_tab_state
+        # can toggle just the entry's NORMAL/DISABLED state alongside the rest
+        # of the section. Slider state is governed by analysis success, not by
+        # the spec master toggle.
+        self._spec_widgets["draft_ngl"] = self.spec_draft_ngl_entry
+        self._spec_widgets["draft_ngl_slider"] = self.spec_draft_ngl_slider
         sr += 1
 
-        ttk.Label(sec, text="Draft devices (-devd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
-        e_devd = ttk.Entry(sec, textvariable=self.spec_draft_device)
-        e_devd.grid(column=1, row=sr, sticky="ew", padx=4, pady=2, columnspan=2)
-        self._spec_widgets["draft_device"] = e_devd
+        # --- Draft devices: checkbox grid (mirrors main GPU checkboxes) ---
+        ttk.Label(sec, text="Draft devices (-devd):").grid(column=0, row=sr, sticky="nw", padx=6, pady=2)
+        self.spec_draft_gpu_checkbox_frame = ttk.Frame(sec)
+        self.spec_draft_gpu_checkbox_frame.grid(
+            column=1, row=sr, columnspan=3, sticky="ew", padx=4, pady=2,
+        )
+        self.spec_draft_gpu_vars = []
+        # Register the parent frame so _refresh_spec_tab_state's enable/disable
+        # rules can propagate to every checkbox child.
+        self._spec_widgets["draft_gpu_frame"] = self.spec_draft_gpu_checkbox_frame
         sr += 1
 
+        # --- Draft KV cache types: comboboxes (blank = use server default) ---
+        # Blank value lets the user pick "don't emit the flag"; emission code
+        # already treats "" as omission so behavior is unchanged.
+        _draft_cache_values = ("", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k")
         ttk.Label(sec, text="Draft K cache type (-ctkd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
-        e_ctkd = ttk.Entry(sec, textvariable=self.spec_draft_ctk, width=12)
-        e_ctkd.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
-        self._spec_widgets["draft_ctk"] = e_ctkd
+        self.spec_draft_ctk_combo = ttk.Combobox(
+            sec, textvariable=self.spec_draft_ctk, width=10,
+            values=_draft_cache_values, state="readonly",
+        )
+        self.spec_draft_ctk_combo.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_ctk"] = self.spec_draft_ctk_combo
         ttk.Label(sec, text="Draft V cache type (-ctvd):").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
-        e_ctvd = ttk.Entry(sec, textvariable=self.spec_draft_ctv, width=12)
-        e_ctvd.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
-        self._spec_widgets["draft_ctv"] = e_ctvd
+        self.spec_draft_ctv_combo = ttk.Combobox(
+            sec, textvariable=self.spec_draft_ctv, width=10,
+            values=_draft_cache_values, state="readonly",
+        )
+        self.spec_draft_ctv_combo.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
+        self._spec_widgets["draft_ctv"] = self.spec_draft_ctv_combo
         sr += 1
 
         cb_cmoed = ttk.Checkbutton(
@@ -2318,7 +2399,8 @@ class LlamaCppLauncher:
         Resolves the selected display name against ``self.found_models``
         (populated by the main model scan) and writes the absolute path into
         ``self.spec_draft_model``. Also refreshes the read-only path label
-        so the user can see the full path of what they picked.
+        so the user can see the full path of what they picked, and kicks off
+        a background GGUF analysis to populate the draft GPU-layer slider.
         """
         try:
             lb = getattr(self, "spec_draft_listbox", None)
@@ -2331,9 +2413,30 @@ class LlamaCppLauncher:
             full_path = getattr(self, "found_models", {}).get(display_name)
             if full_path is None:
                 return
-            self.spec_draft_model.set(str(full_path))
+            full_path_str = str(full_path)
+            self.spec_draft_model.set(full_path_str)
             if hasattr(self, "spec_draft_path_display_var"):
-                self.spec_draft_path_display_var.set(str(full_path))
+                self.spec_draft_path_display_var.set(full_path_str)
+            # Kick off a background analysis so the slider can be enabled with
+            # a sensible max. Reuse main-model analysis when the user picked
+            # the same GGUF for both — saves a redundant header parse.
+            main_analysis = getattr(self, "current_model_analysis", None) or {}
+            if main_analysis.get("path") == full_path_str and main_analysis.get("n_layers") is not None:
+                self._update_ui_after_spec_draft_analysis(main_analysis)
+            else:
+                self.spec_draft_layers_status_var.set("Analyzing draft model...")
+                if (
+                    hasattr(self, "spec_draft_ngl_slider")
+                    and self.spec_draft_ngl_slider.winfo_exists()
+                ):
+                    self.spec_draft_ngl_slider.config(state=tk.DISABLED)
+                self.current_spec_draft_analysis = {}
+                t = Thread(
+                    target=self._run_spec_draft_gguf_analysis,
+                    args=(full_path_str,),
+                    daemon=True,
+                )
+                t.start()
         except Exception as e:
             print(f"WARN: _on_spec_draft_model_selected failed: {e}", file=sys.stderr)
 
@@ -2347,6 +2450,237 @@ class LlamaCppLauncher:
             if lb is not None and lb.winfo_exists():
                 lb.selection_clear(0, tk.END)
         except (tk.TclError, AttributeError):
+            pass
+        # Wipe derived layer state so a stale "Max Layers" status from the
+        # previous draft model doesn't linger after the user clears it.
+        self.current_spec_draft_analysis = {}
+        try:
+            self.max_spec_draft_gpu_layers.set(0)
+            self.spec_draft_layers_status_var.set("Select draft model to see layer info")
+            if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
+                self.spec_draft_ngl_slider.config(to=0, state=tk.DISABLED)
+        except (tk.TclError, AttributeError):
+            pass
+
+    # -- Draft GPU-layer sync helpers (mirror main _set_gpu_layers et al.) --
+
+    def _set_spec_draft_gpu_layers(self, input_value, from_slider=False):
+        """Helper that updates the draft model's IntVar based on user input.
+
+        Mirrors ``_set_gpu_layers`` exactly:
+        * ``input_value == -1`` -> map to ``max_spec_draft_gpu_layers`` if known.
+        * Slider input is clamped to the max; entry input is allowed to exceed
+          max (so a user with manual knowledge can set a higher value).
+        """
+        max_layers = self.max_spec_draft_gpu_layers.get()
+        int_val = 0
+        if input_value == -1:
+            int_val = max_layers if max_layers > 0 else 0
+        elif input_value >= 0:
+            if from_slider and max_layers > 0:
+                int_val = min(input_value, max_layers)
+            else:
+                int_val = input_value
+        try:
+            if self.spec_draft_ngl_int.get() != int_val:
+                self.spec_draft_ngl_int.set(int_val)
+        except tk.TclError:
+            pass
+
+    def _sync_spec_draft_gpu_layers_from_slider(self, value_str):
+        """Slider callback for the draft layers control."""
+        if (
+            not hasattr(self, "spec_draft_ngl_entry")
+            or not self.spec_draft_ngl_entry.winfo_exists()
+        ):
+            return
+        try:
+            value = int(float(value_str))
+            self._set_spec_draft_gpu_layers(value, from_slider=True)
+            canonical_str = str(value)
+            if self.spec_draft_ngl.get() != canonical_str:
+                self.spec_draft_ngl.set(canonical_str)
+        except ValueError:
+            pass
+
+    def _sync_spec_draft_gpu_layers_from_entry(self, event=None):
+        """FocusOut/Return callback for the draft layers entry."""
+        if (
+            not hasattr(self, "spec_draft_ngl_entry")
+            or not self.spec_draft_ngl_entry.winfo_exists()
+        ):
+            return
+        current_str = self.spec_draft_ngl.get().strip()
+        if current_str == "":
+            current_str = "0"
+        try:
+            value = int(current_str)
+            self._set_spec_draft_gpu_layers(value)
+            if self.spec_draft_ngl.get() != current_str:
+                self.spec_draft_ngl.set(current_str)
+        except ValueError:
+            try:
+                current_int_value = self.spec_draft_ngl_int.get()
+            except tk.TclError:
+                current_int_value = 0
+            self.spec_draft_ngl.set(str(current_int_value))
+
+    def _validate_spec_draft_gpu_layers_entry(self, proposed_value):
+        """Validation for the draft-layers entry. Same rules as the main one:
+        allow blank/just-dash mid-typing, allow -1, allow non-negative ints.
+        """
+        if not hasattr(self, "max_spec_draft_gpu_layers"):
+            return True
+        pv = proposed_value.strip()
+        if pv in ("", "-"):
+            return True
+        try:
+            value = int(pv)
+            if value == -1:
+                return True
+            if value < -1:
+                return False
+            return value >= 0
+        except ValueError:
+            return False
+
+    # -- Draft device checkbox grid (mirror _update_gpu_checkboxes simpler form) --
+
+    def _update_spec_draft_gpu_checkboxes(self):
+        """Build the draft device checkbox grid from detected CUDA devices.
+
+        Simpler than ``_update_gpu_checkboxes`` because we only support the
+        detected-GPU mode for the draft section. The launcher's GPU detection
+        is CUDA-only, so device names are hardcoded to ``CUDA<i>``.
+        Persistence lives in ``app_settings["spec_draft_selected_gpus"]`` and
+        the resulting comma-joined string is written to ``self.spec_draft_device``
+        so the existing emission block in ``modules/launch.py`` picks it up
+        unchanged.
+        """
+        if (
+            not hasattr(self, "spec_draft_gpu_checkbox_frame")
+            or not self.spec_draft_gpu_checkbox_frame.winfo_exists()
+        ):
+            return
+        for w in self.spec_draft_gpu_checkbox_frame.winfo_children():
+            w.destroy()
+        self.spec_draft_gpu_vars = []
+
+        count = self.gpu_info.get("device_count", 0) if isinstance(self.gpu_info, dict) else 0
+        loaded_selected = set(self.app_settings.get("spec_draft_selected_gpus", []) or [])
+
+        if count > 0:
+            MAX_GPUS_PER_ROW = 3
+            for i in range(count):
+                gpu_details = (
+                    self.detected_gpu_devices[i]
+                    if i < len(self.detected_gpu_devices)
+                    else {}
+                )
+                v = tk.BooleanVar(value=(i in loaded_selected))
+                gpu_name_display = f"GPU {i}"
+                if gpu_details and gpu_details.get("name"):
+                    gpu_name_display += f": {gpu_details['name']}"
+                row = i // MAX_GPUS_PER_ROW
+                col = i % MAX_GPUS_PER_ROW
+                cb = ttk.Checkbutton(
+                    self.spec_draft_gpu_checkbox_frame,
+                    text=gpu_name_display,
+                    variable=v,
+                )
+                cb.grid(row=row, column=col, sticky="w", padx=3, pady=2)
+                v.trace_add(
+                    "write",
+                    lambda *args, index=i: self._on_spec_draft_gpu_selection_changed(index),
+                )
+                self.spec_draft_gpu_vars.append(v)
+        else:
+            ttk.Label(
+                self.spec_draft_gpu_checkbox_frame,
+                text="No CUDA devices detected.",
+                foreground="orange",
+            ).grid(row=0, column=0, sticky="w", padx=5, pady=3)
+
+        # Re-apply enable/disable rules now that children exist. Safe to call
+        # before _spec_sections is populated (the method short-circuits).
+        try:
+            self._refresh_spec_tab_state()
+        except Exception:
+            pass
+
+    def _on_spec_draft_gpu_selection_changed(self, index):
+        """Trace callback when a draft GPU checkbox flips.
+
+        Recomputes the selected-index list, persists it, then builds the
+        ``"CUDA0,CUDA2,..."`` device-name string the llama.cpp / ik_llama
+        emission blocks consume. CUDA prefix is hardcoded because the
+        launcher's GPU detection is CUDA-only.
+        """
+        try:
+            selected_indices = [
+                i for i, v in enumerate(self.spec_draft_gpu_vars) if v.get()
+            ]
+            self.app_settings["spec_draft_selected_gpus"] = selected_indices
+            device_str = ",".join(f"CUDA{i}" for i in selected_indices)
+            if self.spec_draft_device.get() != device_str:
+                self.spec_draft_device.set(device_str)
+            try:
+                self._save_configs()
+            except Exception:
+                pass
+        except Exception as e:
+            print(
+                f"WARN: _on_spec_draft_gpu_selection_changed failed: {e}",
+                file=sys.stderr,
+            )
+
+    # -- Draft GGUF analysis (mirrors _on_model_selected/_run_gguf_analysis) --
+
+    def _run_spec_draft_gguf_analysis(self, draft_path_str):
+        """Background worker that parses the draft GGUF and dispatches the
+        result back onto the Tk thread."""
+        try:
+            if self.spec_draft_model.get() != draft_path_str:
+                return  # selection changed before we even started
+            analysis_result = parse_gguf_header_simple(draft_path_str)
+            if self.spec_draft_model.get() == draft_path_str:
+                self.root.after(0, self._update_ui_after_spec_draft_analysis, analysis_result)
+        except Exception as e:
+            print(f"WARN: spec draft GGUF analysis failed: {e}", file=sys.stderr)
+
+    def _update_ui_after_spec_draft_analysis(self, analysis_result):
+        """Apply analysis result to the draft slider/status (Tk thread)."""
+        # Stale result guard.
+        if self.spec_draft_model.get() != analysis_result.get("path"):
+            return
+        self.current_spec_draft_analysis = analysis_result
+        error = analysis_result.get("error")
+        n_layers = analysis_result.get("n_layers")
+        if error or n_layers is None or n_layers <= 0:
+            msg = error if error else "Could not determine layers"
+            self.spec_draft_layers_status_var.set(f"{msg} (manual entry available)")
+            self.max_spec_draft_gpu_layers.set(0)
+            if (
+                hasattr(self, "spec_draft_ngl_slider")
+                and self.spec_draft_ngl_slider.winfo_exists()
+            ):
+                self.spec_draft_ngl_slider.config(to=0, state=tk.DISABLED)
+            return
+        # Success: enable slider and update status. Mirrors main +1 for output.
+        max_offloadable = n_layers + 1
+        self.max_spec_draft_gpu_layers.set(max_offloadable)
+        self.spec_draft_layers_status_var.set(
+            f"Max Layers: {max_offloadable} ({n_layers} blocks + output)"
+        )
+        if (
+            hasattr(self, "spec_draft_ngl_slider")
+            and self.spec_draft_ngl_slider.winfo_exists()
+        ):
+            self.spec_draft_ngl_slider.config(to=max_offloadable, state=tk.NORMAL)
+        # Re-sync entry -> int so the slider reflects the entry's current value.
+        try:
+            self._sync_spec_draft_gpu_layers_from_entry()
+        except Exception:
             pass
 
     def _apply_spec_defaults_if_blank(self):
@@ -2449,12 +2783,22 @@ class LlamaCppLauncher:
                 pass
 
         # Iterate all child widgets in each section and set state uniformly.
+        # Recurses into nested frames so the draft device checkbox grid (which
+        # lives inside its own ttk.Frame) and the draft GPU-layers frame
+        # (Entry + Slider + status Label) also pick up the right state. Frames
+        # themselves don't accept a "state" so we skip them and recurse.
         def _set_section_state(section_name, state):
             sec = self._spec_sections.get(section_name)
             if sec is None:
                 return
-            for child in sec.winfo_children():
-                _set_state(child, state)
+
+            def _walk(parent):
+                for child in parent.winfo_children():
+                    if isinstance(child, (ttk.Frame, tk.Frame, ttk.LabelFrame)):
+                        _walk(child)
+                        continue
+                    _set_state(child, state)
+            _walk(sec)
 
         type_combo_target_state = "normal" if enabled else "disabled"
         _set_state(combo, type_combo_target_state)
@@ -2540,6 +2884,18 @@ class LlamaCppLauncher:
                     w = self._spec_widgets.get(k)
                     if w is not None:
                         _set_state(w, "disabled" if is_ik else "normal")
+                # Draft GPU-layer slider must remain DISABLED until draft model
+                # analysis succeeds (mirrors how the main slider only goes NORMAL
+                # after analysis populates max_gpu_layers). The section walk
+                # above would otherwise flip it to "normal" while the analysis
+                # hasn't run.
+                slider_w = self._spec_widgets.get("draft_ngl_slider")
+                if slider_w is not None:
+                    try:
+                        max_draft = self.max_spec_draft_gpu_layers.get()
+                    except (tk.TclError, AttributeError):
+                        max_draft = 0
+                    _set_state(slider_w, "normal" if max_draft > 0 else "disabled")
         else:
             # Master off: disable everything except the master checkbox AND
             # the vision section (--no-mmproj is independent of spec_enabled).
@@ -3675,6 +4031,16 @@ class LlamaCppLauncher:
         # Trigger immediate update of GPU order listbox and recommendations
         self._update_gpu_order_listbox()
         self._update_recommendations()
+
+        # Refresh the draft GPU checkbox grid in lockstep so newly-detected (or
+        # removed) GPUs propagate to the MTP/Spec tab without a full restart.
+        try:
+            self._update_spec_draft_gpu_checkboxes()
+        except Exception as exc:
+            print(
+                f"WARN: _update_spec_draft_gpu_checkboxes from _update_gpu_checkboxes failed: {exc}",
+                file=sys.stderr,
+            )
 
     def _refresh_vram_display(self):
         """Helper method to refresh VRAM display if it exists."""

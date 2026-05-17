@@ -203,14 +203,18 @@ class TestSpecEmissionLlamaCpp:
         assert "--spec-draft-p-split" in cmd
         assert cmd[cmd.index("--spec-draft-p-split") + 1] == "0.1"
 
-    def test_spec_draft_model_emits(self, manager, launcher_mock):
+    def test_spec_draft_model_emits(self, manager, launcher_mock, tmp_path):
+        # Path is validated before emission (CR Comment B), so it must be a
+        # real file. Use tmp_path to materialize a stand-in draft GGUF.
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")
-        launcher_mock.spec_draft_model.set("/models/draft.gguf")
+        launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--spec-draft-model" in cmd
-        assert cmd[cmd.index("--spec-draft-model") + 1] == "/models/draft.gguf"
+        assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
 
     def test_spec_draft_offload_flags_emit(self, manager, launcher_mock):
         """ngl/device/ctk/ctv all use the long llama.cpp flag names."""
@@ -276,10 +280,13 @@ class TestSpecEmissionLlamaCpp:
         ):
             assert absent not in cmd
 
-    def test_all_llamacpp_draft_knobs_combined(self, manager, launcher_mock):
+    def test_all_llamacpp_draft_knobs_combined(self, manager, launcher_mock, tmp_path):
         """Setting many knobs at once: each one independently emits and
         none drops out due to interaction. Mirrors the
         ``test_all_reasoning_flags_together`` style."""
+        # Real file for the path-validation guard (CR Comment B).
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")
@@ -287,7 +294,7 @@ class TestSpecEmissionLlamaCpp:
         launcher_mock.spec_draft_n_min.set("2")
         launcher_mock.spec_draft_p_min.set("0.5")
         launcher_mock.spec_draft_p_split.set("0.1")
-        launcher_mock.spec_draft_model.set("/models/draft.gguf")
+        launcher_mock.spec_draft_model.set(str(draft))
         launcher_mock.spec_draft_ngl.set("32")
         launcher_mock.spec_draft_device.set("CUDA0")
         launcher_mock.spec_draft_ctk.set("q8_0")
@@ -302,8 +309,8 @@ class TestSpecEmissionLlamaCpp:
         assert cmd[cmd.index("--spec-draft-n-min") + 1] == "2"
         assert cmd[cmd.index("--spec-draft-p-min") + 1] == "0.5"
         assert cmd[cmd.index("--spec-draft-p-split") + 1] == "0.1"
-        # Model
-        assert cmd[cmd.index("--spec-draft-model") + 1] == "/models/draft.gguf"
+        # Model (resolved absolute path)
+        assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
         # Offload long forms
         assert cmd[cmd.index("--spec-draft-ngl") + 1] == "32"
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0"
@@ -563,16 +570,20 @@ class TestSpecEmissionIkLlama:
         assert "--spec-draft-n-min" not in cmd
         assert "--spec-draft-p-min" not in cmd
 
-    def test_draft_model_uses_model_draft_flag(self, manager, launcher_mock):
+    def test_draft_model_uses_model_draft_flag(self, manager, launcher_mock, tmp_path):
         """``spec_draft_model`` -> ``--model-draft`` under ik_llama, NOT
         ``--spec-draft-model``."""
+        # Path is validated before emission (CR Comment B), so it must be a
+        # real file.
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
-        launcher_mock.spec_draft_model.set("/models/draft.gguf")
+        launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--model-draft" in cmd
-        assert cmd[cmd.index("--model-draft") + 1] == "/models/draft.gguf"
+        assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
         assert "--spec-draft-model" not in cmd
 
     def test_draft_offload_uses_short_form_flags(self, manager, launcher_mock):
@@ -619,16 +630,19 @@ class TestSpecEmissionIkLlama:
         ):
             assert absent not in cmd
 
-    def test_ik_llama_all_draft_knobs_combined(self, manager, launcher_mock):
+    def test_ik_llama_all_draft_knobs_combined(self, manager, launcher_mock, tmp_path):
         """Setting many ik_llama knobs at once: each translation lands
         without interaction."""
+        # Real file for the path-validation guard (CR Comment B).
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
         launcher_mock.spec_draft_n_max.set("16")
         launcher_mock.spec_draft_n_min.set("2")
         launcher_mock.spec_draft_p_min.set("0.5")
-        launcher_mock.spec_draft_model.set("/models/draft.gguf")
+        launcher_mock.spec_draft_model.set(str(draft))
         launcher_mock.spec_draft_ngl.set("24")
         launcher_mock.spec_draft_device.set("CUDA1")
         launcher_mock.spec_draft_ctk.set("q4_0")
@@ -638,7 +652,7 @@ class TestSpecEmissionIkLlama:
         assert cmd[cmd.index("--draft-max") + 1] == "16"
         assert cmd[cmd.index("--draft-min") + 1] == "2"
         assert cmd[cmd.index("--draft-p-min") + 1] == "0.5"
-        assert cmd[cmd.index("--model-draft") + 1] == "/models/draft.gguf"
+        assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
         assert cmd[cmd.index("-ngld") + 1] == "24"
         assert cmd[cmd.index("-devd") + 1] == "CUDA1"
         assert cmd[cmd.index("-ctkd") + 1] == "q4_0"
@@ -973,6 +987,459 @@ class TestSpecTypeWhitelist:
 
 
 # ============================================================================
+# Draft device emission contract (spec_draft_device -> --spec-draft-device / -devd)
+# ============================================================================
+#
+# The new MTP/Spec tab builds the draft device-name string from a checkbox
+# grid, but emission is still driven exclusively by the contents of
+# self.spec_draft_device (a StringVar). These tests pin the emission
+# behavior the checkbox UI ultimately funnels into, so the contract stays
+# stable regardless of how the UI populates that var.
+
+
+class TestSpecDraftDeviceEmission:
+    """Direct emission contract for spec_draft_device under both backends."""
+
+    def test_blank_spec_draft_device_omits_flag_llamacpp(self, manager, launcher_mock):
+        """Empty string -> no --spec-draft-device on the cmd."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_device.set("")
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" not in cmd
+
+    def test_single_cuda_device_llamacpp(self, manager, launcher_mock):
+        """A single ``CUDA0`` string lands verbatim under llama.cpp's long flag."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_device.set("CUDA0")
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" in cmd
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0"
+
+    def test_multi_cuda_device_csv_llamacpp(self, manager, launcher_mock):
+        """A comma-joined list (e.g. ``CUDA0,CUDA1``) is forwarded as one
+        token — emission does NOT split it. Matches what the checkbox grid
+        produces when the user selects multiple draft GPUs."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_device.set("CUDA0,CUDA1")
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" in cmd
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0,CUDA1"
+
+    def test_multi_cuda_device_csv_ik_llama_uses_short_form(
+        self, manager, launcher_mock
+    ):
+        """Same value under ik_llama emits via the short flag ``-devd`` and
+        does NOT emit the long ``--spec-draft-device`` form."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_draft_device.set("CUDA0,CUDA1")
+        cmd = manager.build_cmd()
+        assert "-devd" in cmd
+        assert cmd[cmd.index("-devd") + 1] == "CUDA0,CUDA1"
+        assert "--spec-draft-device" not in cmd
+
+
+# ============================================================================
+# Draft KV cache type combobox: allowed values
+# ============================================================================
+
+
+class TestSpecDraftCacheTypeComboboxValues:
+    """The draft K/V cache type combos must offer a blank ("don't emit")
+    option in addition to the same set the main combos offer. The "" entry
+    is the one that makes the combos different from the main combos."""
+
+    _EXPECTED_VALUES = ("", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k")
+
+    def test_ctk_combo_values_match_expected(self, tk_root):
+        """spec_draft_ctk_combo offers the full draft set including blank."""
+        from tkinter import ttk
+        var = tk.StringVar(master=tk_root, value="")
+        combo = ttk.Combobox(
+            tk_root,
+            textvariable=var,
+            values=self._EXPECTED_VALUES,
+            state="readonly",
+        )
+        assert tuple(combo.cget("values")) == self._EXPECTED_VALUES
+
+    def test_ctv_combo_values_match_expected(self, tk_root):
+        """Same contract for spec_draft_ctv_combo (paste-twin of the K combo)."""
+        from tkinter import ttk
+        var = tk.StringVar(master=tk_root, value="")
+        combo = ttk.Combobox(
+            tk_root,
+            textvariable=var,
+            values=self._EXPECTED_VALUES,
+            state="readonly",
+        )
+        assert tuple(combo.cget("values")) == self._EXPECTED_VALUES
+
+    def test_blank_value_omits_flag_under_llamacpp(self, manager, launcher_mock):
+        """When the combo is left blank, no --spec-draft-type-k flag emits."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_ctk.set("")
+        launcher_mock.spec_draft_ctv.set("")
+        cmd = manager.build_cmd()
+        assert "--spec-draft-type-k" not in cmd
+        assert "--spec-draft-type-v" not in cmd
+
+    def test_blank_value_omits_flag_under_ik_llama(self, manager, launcher_mock):
+        """Same for ik_llama's short forms."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_draft_ctk.set("")
+        launcher_mock.spec_draft_ctv.set("")
+        cmd = manager.build_cmd()
+        assert "-ctkd" not in cmd
+        assert "-ctvd" not in cmd
+
+
+# ============================================================================
+# CR Comment A: gate draft-only flags by active spec_type
+# ============================================================================
+#
+# Forwarding ``spec_draft_*`` values regardless of the active spec_type was a
+# UI/CLI contract violation: a saved config preserved from a prior draft-mtp
+# session would emit ``--spec-draft-model`` / ``--spec-draft-n-max`` even
+# after the user switched to ngram-simple (which doesn't read those flags).
+# These tests pin the gate: ``spec_draft_*`` emission requires a
+# draft-capable spec_type (llama.cpp: draft-simple/draft-eagle3/draft-mtp;
+# ik_llama: mtp).
+
+
+# llama.cpp non-draft-capable spec_types (the ones that must NOT forward
+# spec_draft_* fields even when those fields hold stale values).
+LLAMACPP_NON_DRAFT_SPEC_TYPES = [
+    "ngram-simple",
+    "ngram-map-k",
+    "ngram-map-k4v",
+    "ngram-mod",
+    "ngram-cache",
+]
+
+# ik_llama non-draft-capable spec_types.
+IK_LLAMA_NON_DRAFT_SPEC_TYPES = [
+    "ngram-cache",
+    "ngram-simple",
+    "ngram-map-k",
+    "ngram-map-k4v",
+    "ngram-mod",
+    "suffix",
+]
+
+
+class TestSpecDraftFlagsGatedByType:
+    """``spec_draft_*`` flags only emit under draft-capable spec_types.
+
+    Non-draft modes (ngram-*, suffix, ngram-cache) must drop those values
+    silently — the UI hides their Draft Model section, so emission would
+    silently violate the grayed-field contract for saved configs.
+    """
+
+    @pytest.mark.parametrize("spec_type", LLAMACPP_NON_DRAFT_SPEC_TYPES)
+    def test_llamacpp_ngram_drops_spec_draft_n_max(
+        self, manager, launcher_mock, tmp_path, spec_type
+    ):
+        """llama.cpp ngram-*/cache: stale draft tuning vars must be dropped."""
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        launcher_mock.spec_draft_n_max.set("3")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        assert "--spec-type" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        # Draft-only knobs must not appear.
+        for absent in (
+            "--spec-draft-n-max",
+            "--spec-draft-n-min",
+            "--spec-draft-p-min",
+            "--spec-draft-p-split",
+            "--spec-draft-model",
+            "--spec-draft-ngl",
+            "--spec-draft-device",
+            "--spec-draft-type-k",
+            "--spec-draft-type-v",
+            "--spec-draft-cpu-moe",
+            "--spec-draft-n-cpu-moe",
+        ):
+            assert absent not in cmd, (
+                f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
+            )
+
+    @pytest.mark.parametrize("spec_type", LLAMACPP_NON_DRAFT_SPEC_TYPES)
+    def test_llamacpp_ngram_drops_all_draft_offload_and_moe(
+        self, manager, launcher_mock, spec_type
+    ):
+        """Same gate applies to the ngl/device/ctk/ctv + cpu_moe family."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        launcher_mock.spec_draft_ngl.set("32")
+        launcher_mock.spec_draft_device.set("CUDA0")
+        launcher_mock.spec_draft_ctk.set("q8_0")
+        launcher_mock.spec_draft_ctv.set("q8_0")
+        launcher_mock.spec_draft_cpu_moe.set(True)
+        launcher_mock.spec_draft_n_cpu_moe.set("4")
+        cmd = manager.build_cmd()
+        for absent in (
+            "--spec-draft-ngl",
+            "--spec-draft-device",
+            "--spec-draft-type-k",
+            "--spec-draft-type-v",
+            "--spec-draft-cpu-moe",
+            "--spec-draft-n-cpu-moe",
+        ):
+            assert absent not in cmd, (
+                f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
+            )
+
+    @pytest.mark.parametrize("spec_type", IK_LLAMA_NON_DRAFT_SPEC_TYPES)
+    def test_ik_llama_non_draft_drops_draft_max(
+        self, manager, launcher_mock, spec_type
+    ):
+        """ik_llama ngram-*/suffix: ``--draft-max`` etc. must NOT emit."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        launcher_mock.spec_draft_n_max.set("3")
+        cmd = manager.build_cmd()
+        assert "--spec-type" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert "--draft-max" not in cmd
+        assert "--draft-min" not in cmd
+        assert "--draft-p-min" not in cmd
+
+    def test_ik_llama_suffix_drops_model_draft(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """ik_llama suffix mode: ``--model-draft`` must NOT emit even when
+        the path is valid; suffix doesn't use a separate draft model."""
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("suffix")
+        launcher_mock.spec_draft_model.set(str(draft))
+        launcher_mock.spec_suffix_pattern_len.set("8")
+        cmd = manager.build_cmd()
+        assert "--spec-type" in cmd
+        # Suffix knobs ARE emitted...
+        assert "--suffix-pattern-len" in cmd
+        assert cmd[cmd.index("--suffix-pattern-len") + 1] == "8"
+        # ...but the draft model is NOT (suffix has no separate draft model).
+        assert "--model-draft" not in cmd
+
+    @pytest.mark.parametrize("spec_type", IK_LLAMA_NON_DRAFT_SPEC_TYPES)
+    def test_ik_llama_non_draft_drops_all_short_offload(
+        self, manager, launcher_mock, spec_type
+    ):
+        """The short ``-ngld``/``-devd``/``-ctkd``/``-ctvd`` family is gated
+        too."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        launcher_mock.spec_draft_ngl.set("24")
+        launcher_mock.spec_draft_device.set("CUDA1")
+        launcher_mock.spec_draft_ctk.set("q4_0")
+        launcher_mock.spec_draft_ctv.set("q4_0")
+        cmd = manager.build_cmd()
+        for absent in ("-ngld", "-devd", "-ctkd", "-ctvd"):
+            assert absent not in cmd, (
+                f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
+            )
+
+    def test_llamacpp_draft_mtp_still_emits_n_max(
+        self, manager, launcher_mock
+    ):
+        """Regression: a draft-capable spec_type still forwards the draft
+        tuning knobs (this test guards against an over-zealous gate)."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_n_max.set("3")
+        cmd = manager.build_cmd()
+        assert "--spec-draft-n-max" in cmd
+        assert cmd[cmd.index("--spec-draft-n-max") + 1] == "3"
+
+    def test_ik_llama_mtp_still_emits_draft_max(
+        self, manager, launcher_mock
+    ):
+        """Regression: ik_llama's only draft-capable spec_type (``mtp``)
+        still forwards ``--draft-max``."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_draft_n_max.set("7")
+        cmd = manager.build_cmd()
+        assert "--draft-max" in cmd
+        assert cmd[cmd.index("--draft-max") + 1] == "7"
+
+    def test_llamacpp_switch_from_draft_mtp_to_ngram_drops_all_draft(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """The exact scenario from the CR prompt: a user who set up
+        draft-mtp with every draft knob filled in, then switched to
+        ngram-simple, must NOT see any draft flag leak through. Only
+        ``--spec-type`` and ngram knobs should appear."""
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        # User set ALL the draft knobs while spec_type was draft-mtp...
+        launcher_mock.spec_draft_n_max.set("3")
+        launcher_mock.spec_draft_n_min.set("1")
+        launcher_mock.spec_draft_p_min.set("0.75")
+        launcher_mock.spec_draft_p_split.set("0.10")
+        launcher_mock.spec_draft_model.set(str(draft))
+        launcher_mock.spec_draft_ngl.set("32")
+        launcher_mock.spec_draft_device.set("CUDA0")
+        launcher_mock.spec_draft_ctk.set("q8_0")
+        launcher_mock.spec_draft_ctv.set("q8_0")
+        launcher_mock.spec_draft_cpu_moe.set(True)
+        launcher_mock.spec_draft_n_cpu_moe.set("4")
+        # ...then switched to ngram-simple, and added ngram-specific tuning.
+        launcher_mock.spec_type.set("ngram-simple")
+        launcher_mock.spec_ngram_simple_size_n.set("4")
+        cmd = manager.build_cmd()
+        # spec_type + ngram knobs are emitted.
+        assert "--spec-type" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == "ngram-simple"
+        assert "--spec-ngram-simple-size-n" in cmd
+        # NO draft flag leaks.
+        for absent in (
+            "--spec-draft-n-max",
+            "--spec-draft-n-min",
+            "--spec-draft-p-min",
+            "--spec-draft-p-split",
+            "--spec-draft-model",
+            "--spec-draft-ngl",
+            "--spec-draft-device",
+            "--spec-draft-type-k",
+            "--spec-draft-type-v",
+            "--spec-draft-cpu-moe",
+            "--spec-draft-n-cpu-moe",
+        ):
+            assert absent not in cmd, (
+                f"{absent} leaked after switching from draft-mtp to ngram-simple"
+            )
+
+
+# ============================================================================
+# CR Comment B: validate the draft-model path before appending it
+# ============================================================================
+#
+# ``spec_draft_model`` is a listbox-picked path. A saved config can hold a
+# stale path pointing to a moved/deleted draft GGUF; emitting it verbatim
+# leads to a confusing server-side failure later. Mirror the main ``-m``
+# behaviour: ``Path(...).is_file()`` gate + stderr warning + skip on miss.
+
+
+class TestSpecDraftModelPathValidation:
+    """``--spec-draft-model`` / ``--model-draft`` are gated on
+    ``Path(value).is_file()``. Misses log a stderr warning and skip the
+    flag instead of forwarding garbage."""
+
+    def test_llamacpp_existing_file_emits_resolved_absolute_path(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Valid path: the flag emits, value is the resolved absolute path."""
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        assert "--spec-draft-model" in cmd
+        emitted = cmd[cmd.index("--spec-draft-model") + 1]
+        # Resolved absolute path is what gets emitted.
+        assert emitted == str(draft.resolve())
+        assert Path(emitted).is_absolute()
+
+    def test_llamacpp_nonexistent_path_skips_flag_with_warning(
+        self, manager, launcher_mock, tmp_path, capsys
+    ):
+        """Nonexistent path: flag is NOT emitted, stderr warning fires."""
+        bogus = tmp_path / "does_not_exist.gguf"
+        # Intentionally do NOT create the file.
+        assert not bogus.exists()
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_model.set(str(bogus))
+        cmd = manager.build_cmd()
+        assert "--spec-draft-model" not in cmd
+        captured = capsys.readouterr()
+        assert str(bogus) in captured.err
+        assert "--spec-draft-model" in captured.err
+        assert "not a file" in captured.err
+
+    def test_llamacpp_directory_path_skips_flag_with_warning(
+        self, manager, launcher_mock, tmp_path, capsys
+    ):
+        """Directory path (not a file) is rejected even though it exists."""
+        dir_path = tmp_path / "models_dir"
+        dir_path.mkdir()
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_model.set(str(dir_path))
+        cmd = manager.build_cmd()
+        assert "--spec-draft-model" not in cmd
+        captured = capsys.readouterr()
+        assert "not a file" in captured.err
+        assert str(dir_path) in captured.err
+
+    def test_ik_llama_existing_file_emits_resolved_absolute_path(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Same contract under ik_llama: resolved absolute path emitted."""
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        assert "--model-draft" in cmd
+        emitted = cmd[cmd.index("--model-draft") + 1]
+        assert emitted == str(draft.resolve())
+        assert Path(emitted).is_absolute()
+
+    def test_ik_llama_nonexistent_path_skips_flag_with_warning(
+        self, manager, launcher_mock, tmp_path, capsys
+    ):
+        """ik_llama miss: warning must reference ``--model-draft`` (NOT
+        the llama.cpp flag name)."""
+        bogus = tmp_path / "missing-draft.gguf"
+        assert not bogus.exists()
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_draft_model.set(str(bogus))
+        cmd = manager.build_cmd()
+        assert "--model-draft" not in cmd
+        captured = capsys.readouterr()
+        assert str(bogus) in captured.err
+        assert "--model-draft" in captured.err
+        assert "--spec-draft-model" not in captured.err
+
+
+# ============================================================================
 # Pre-fill defaults for blank draft-tuning fields
 # ============================================================================
 #
@@ -1075,3 +1542,78 @@ class TestSpecDefaultsPrefill:
         assert spec_defaults_stub.spec_draft_n_max.get() == "5"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
+
+
+# ============================================================================
+# Draft GPU-layers sync helpers (_set_spec_draft_gpu_layers et al.)
+# ============================================================================
+#
+# Parity test against the main ``_set_gpu_layers`` clamping logic, ported to
+# the draft equivalent. The contract:
+# * input=N (entry, from_slider=False)  -> int = N (no clamp, even past max)
+# * input=N (slider, from_slider=True)  -> int = min(N, max)
+# * input=-1                            -> int = max (or 0 if max unknown)
+
+
+@pytest.fixture()
+def draft_layers_stub(tk_root):
+    """Stub with the four Tk vars _set_spec_draft_gpu_layers reads/writes."""
+    stub = SimpleNamespace()
+    stub.spec_draft_ngl_int = tk.IntVar(master=tk_root, value=0)
+    stub.max_spec_draft_gpu_layers = tk.IntVar(master=tk_root, value=0)
+    # _set_spec_draft_gpu_layers doesn't read these, but the sibling sync
+    # helpers do. Pre-create so a follow-up test can use the same stub.
+    stub.spec_draft_ngl = tk.StringVar(master=tk_root, value="0")
+    return stub
+
+
+class TestSetSpecDraftGpuLayers:
+    """Parametrized parity test for the clamp/promote/-1-as-max contract."""
+
+    @pytest.mark.parametrize(
+        "input_value,from_slider,max_layers,expected_int",
+        [
+            # Entry input below max: int matches verbatim.
+            (5, False, 10, 5),
+            # Slider input above max: clamped to max.
+            (15, True, 10, 10),
+            # -1 from entry: maps to max.
+            (-1, False, 10, 10),
+            # -1 with max=0 (no analysis yet): maps to 0.
+            (-1, False, 0, 0),
+            # Entry input above max: NOT clamped — user can manually exceed max.
+            (15, False, 10, 15),
+            # Slider input below max: stays as-is.
+            (3, True, 10, 3),
+        ],
+    )
+    def test_clamp_matrix(
+        self,
+        draft_layers_stub,
+        entry_module,
+        input_value,
+        from_slider,
+        max_layers,
+        expected_int,
+    ):
+        draft_layers_stub.max_spec_draft_gpu_layers.set(max_layers)
+        entry_module.LlamaCppLauncher._set_spec_draft_gpu_layers(
+            draft_layers_stub, input_value, from_slider=from_slider
+        )
+        assert draft_layers_stub.spec_draft_ngl_int.get() == expected_int
+
+
+class TestValidateSpecDraftGpuLayersEntry:
+    """Validation: accept blank/dash/-1/non-negative; reject everything else."""
+
+    @pytest.mark.parametrize("value", ["", "-", "0", "1", "100", "-1", "999"])
+    def test_accepts_valid(self, draft_layers_stub, entry_module, value):
+        assert entry_module.LlamaCppLauncher._validate_spec_draft_gpu_layers_entry(
+            draft_layers_stub, value
+        ) is True
+
+    @pytest.mark.parametrize("value", ["abc", "1.5", "-2", "1e3", "0x10", "--1"])
+    def test_rejects_invalid(self, draft_layers_stub, entry_module, value):
+        assert entry_module.LlamaCppLauncher._validate_spec_draft_gpu_layers_entry(
+            draft_layers_stub, value
+        ) is False

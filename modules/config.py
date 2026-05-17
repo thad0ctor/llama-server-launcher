@@ -367,6 +367,14 @@ class ConfigManager:
         cfg["gpu_indices"] = self.launcher.app_settings.get("selected_gpus", [])
         # Save GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
         cfg["gpu_order"] = self.launcher.app_settings.get("gpu_order", [])
+        # Mirror the draft-GPU checkbox indices into the per-config dict so
+        # named-config save/load reinstates the visual checkbox state, not
+        # just the comma-joined ``spec_draft_device`` string. Same pattern as
+        # ``gpu_indices`` above — redundant with app_settings but keeps the
+        # named-config self-contained.
+        cfg["spec_draft_selected_gpus"] = list(
+            self.launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+        )
 
         # Add environmental variables configuration
         cfg.update(self.launcher.env_vars_manager.save_to_config())
@@ -542,8 +550,37 @@ class ConfigManager:
                 loaded_gpu_order.append(g)
         self.launcher.app_settings["gpu_order"] = loaded_gpu_order
 
+        # Load draft-GPU checkbox indices the same way. Fall back to the
+        # current app_settings value (which itself round-trips via
+        # save_configs/load_saved_configs) so an older named-config without
+        # this key keeps the previously-saved checkbox state.
+        loaded_draft_gpus = cfg.get(
+            "spec_draft_selected_gpus",
+            self.launcher.app_settings.get("spec_draft_selected_gpus", []),
+        )
+        # Coerce defensively — same shape as the load_saved_configs validation.
+        if not isinstance(loaded_draft_gpus, list):
+            loaded_draft_gpus = []
+        else:
+            cleaned = []
+            for entry in loaded_draft_gpus:
+                if isinstance(entry, bool):
+                    continue
+                if isinstance(entry, int):
+                    cleaned.append(entry)
+                else:
+                    try:
+                        cleaned.append(int(entry))
+                    except (TypeError, ValueError):
+                        continue
+            loaded_draft_gpus = cleaned
+        self.launcher.app_settings["spec_draft_selected_gpus"] = loaded_draft_gpus
+
         self.launcher._update_gpu_checkboxes() # This will set the checkboxes according to self.launcher.app_settings["selected_gpus"]
         # _update_gpu_checkboxes also triggers _update_recommendations and updates the GPU order listbox
+        # _update_gpu_checkboxes already cascades to
+        # _update_spec_draft_gpu_checkboxes at its tail, so the draft checkbox
+        # grid will be refreshed with the loaded indices. No second call needed.
 
 
         # Load n_gpu_layers - This interacts with model analysis results
@@ -944,6 +981,26 @@ class ConfigManager:
             # Ensure selected_gpus is a list
             if not isinstance(self.launcher.app_settings.get("selected_gpus"), list):
                  self.launcher.app_settings["selected_gpus"] = []
+            # Validate spec_draft_selected_gpus: must be a list of ints; coerce
+            # anything else to [] so legacy/garbage configs can't corrupt the
+            # checkbox grid.
+            raw_spec_gpus = self.launcher.app_settings.get("spec_draft_selected_gpus", [])
+            if not isinstance(raw_spec_gpus, list):
+                self.launcher.app_settings["spec_draft_selected_gpus"] = []
+            else:
+                cleaned = []
+                for entry in raw_spec_gpus:
+                    if isinstance(entry, bool):
+                        # bool is a subclass of int but doesn't make sense as a GPU id
+                        continue
+                    if isinstance(entry, int):
+                        cleaned.append(entry)
+                    else:
+                        try:
+                            cleaned.append(int(entry))
+                        except (TypeError, ValueError):
+                            continue
+                self.launcher.app_settings["spec_draft_selected_gpus"] = cleaned
             # Ensure custom_parameters is a list
             if not isinstance(self.launcher.app_settings.get("custom_parameters"), list):
                  self.launcher.app_settings["custom_parameters"] = []
@@ -1009,6 +1066,11 @@ class ConfigManager:
             # Filter selected_gpus to only include indices of currently detected GPUs
             valid_gpu_indices = {gpu['id'] for gpu in self.launcher.detected_gpu_devices}
             self.launcher.app_settings["selected_gpus"] = [idx for idx in self.launcher.app_settings["selected_gpus"] if idx in valid_gpu_indices]
+            # Same filter for the draft GPU selection.
+            self.launcher.app_settings["spec_draft_selected_gpus"] = [
+                idx for idx in self.launcher.app_settings.get("spec_draft_selected_gpus", [])
+                if idx in valid_gpu_indices
+            ]
             # Filter gpu_order the same way and append any newly-selected GPUs that were missing
             selected_set = set(self.launcher.app_settings["selected_gpus"])
             gpu_order = [idx for idx in self.launcher.app_settings.get("gpu_order", []) if idx in selected_set]

@@ -35,6 +35,14 @@ _ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset({
     "suffix",
 })
 
+# Per-backend subsets of spec_types that use a separate draft model + the
+# associated draft-tuning/offload knobs. Non-draft-capable spec_types
+# (ngram-*, suffix, etc.) reuse the main model and don't read these flags;
+# emitting them anyway produces nonsensical CLI combos from saved configs
+# where the user toggled spec_type without clearing prior draft fields.
+_DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3", "draft-mtp"})
+_DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
+
 
 class LaunchManager:
     """Manages command building and server launching functionality."""
@@ -336,35 +344,53 @@ class LaunchManager:
                 if spec_type and spec_type != "none":
                     if backend == "ik_llama":
                         cmd.extend(["--spec-type", spec_type])
-                        # ik_llama draft tuning flags use --draft-max/--draft-min/--draft-p-min.
-                        for var_name, flag in [
-                            ("spec_draft_n_max", "--draft-max"),
-                            ("spec_draft_n_min", "--draft-min"),
-                            ("spec_draft_p_min", "--draft-p-min"),
-                        ]:
-                            var = getattr(self.launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
-                        # Draft model file (rare for ik_llama, but supported via --model-draft).
-                        mp_var = getattr(self.launcher, "spec_draft_model", None)
-                        if mp_var is not None:
-                            mp = mp_var.get().strip()
-                            if mp:
-                                cmd.extend(["--model-draft", mp])
-                        # ik_llama uses the same short-form draft offload flags.
-                        for var_name, flag in [
-                            ("spec_draft_ngl", "-ngld"),
-                            ("spec_draft_device", "-devd"),
-                            ("spec_draft_ctk", "-ctkd"),
-                            ("spec_draft_ctv", "-ctvd"),
-                        ]:
-                            var = getattr(self.launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                        # Only draft-capable spec_types (ik_llama: "mtp")
+                        # use a separate draft model + the matching
+                        # tuning/offload knobs. For ngram-*/suffix, the
+                        # draft fields are stale state from a prior session
+                        # and must NOT be forwarded — the UI hides them in
+                        # those modes, so emission would silently violate
+                        # the grayed-field contract.
+                        is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
+                        if is_draft_capable:
+                            # ik_llama draft tuning flags use --draft-max/--draft-min/--draft-p-min.
+                            for var_name, flag in [
+                                ("spec_draft_n_max", "--draft-max"),
+                                ("spec_draft_n_min", "--draft-min"),
+                                ("spec_draft_p_min", "--draft-p-min"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                            # Draft model file (rare for ik_llama, but supported via --model-draft).
+                            # Validate the path before emitting — a saved config can hold a
+                            # stale path to a moved/deleted draft GGUF; mirror the main -m
+                            # behaviour of resolving + skipping with a stderr warning.
+                            mp_var = getattr(self.launcher, "spec_draft_model", None)
+                            if mp_var is not None:
+                                mp = mp_var.get().strip()
+                                if mp:
+                                    if Path(mp).is_file():
+                                        cmd.extend(["--model-draft", str(Path(mp).resolve())])
+                                    else:
+                                        print(
+                                            f"WARNING: draft model path {mp!r} is not a file; skipping --model-draft emission.",
+                                            file=sys.stderr,
+                                        )
+                            # ik_llama uses the same short-form draft offload flags.
+                            for var_name, flag in [
+                                ("spec_draft_ngl", "-ngld"),
+                                ("spec_draft_device", "-devd"),
+                                ("spec_draft_ctk", "-ctkd"),
+                                ("spec_draft_ctv", "-ctvd"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
                         # ngram: ik_llama has a single shared --spec-ngram-* set.
                         if spec_type.startswith("ngram-"):
                             for var_name, flag in [
@@ -418,41 +444,61 @@ class LaunchManager:
                     else:
                         # llama.cpp (mainline) branch.
                         cmd.extend(["--spec-type", spec_type])
-                        for var_name, flag in [
-                            ("spec_draft_n_max", "--spec-draft-n-max"),
-                            ("spec_draft_n_min", "--spec-draft-n-min"),
-                            ("spec_draft_p_min", "--spec-draft-p-min"),
-                            ("spec_draft_p_split", "--spec-draft-p-split"),
-                        ]:
-                            var = getattr(self.launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
-                        mp_var = getattr(self.launcher, "spec_draft_model", None)
-                        if mp_var is not None:
-                            mp = mp_var.get().strip()
-                            if mp:
-                                cmd.extend(["--spec-draft-model", mp])
-                        for var_name, flag in [
-                            ("spec_draft_ngl", "--spec-draft-ngl"),
-                            ("spec_draft_device", "--spec-draft-device"),
-                            ("spec_draft_ctk", "--spec-draft-type-k"),
-                            ("spec_draft_ctv", "--spec-draft-type-v"),
-                        ]:
-                            var = getattr(self.launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
-                        cpu_moe_var = getattr(self.launcher, "spec_draft_cpu_moe", None)
-                        if cpu_moe_var is not None and cpu_moe_var.get():
-                            cmd.append("--spec-draft-cpu-moe")
-                        ncm_var = getattr(self.launcher, "spec_draft_n_cpu_moe", None)
-                        if ncm_var is not None:
-                            ncm = ncm_var.get().strip()
-                            if ncm:
-                                cmd.extend(["--spec-draft-n-cpu-moe", ncm])
+                        # Only draft-capable spec_types (llama.cpp:
+                        # draft-simple/draft-eagle3/draft-mtp) read a
+                        # separate draft model + the matching tuning/offload
+                        # knobs. ngram-*/cache types reuse the main model;
+                        # forwarding stale draft fields from a prior
+                        # session would silently break the UI's
+                        # grayed-field contract.
+                        is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP
+                        if is_draft_capable:
+                            for var_name, flag in [
+                                ("spec_draft_n_max", "--spec-draft-n-max"),
+                                ("spec_draft_n_min", "--spec-draft-n-min"),
+                                ("spec_draft_p_min", "--spec-draft-p-min"),
+                                ("spec_draft_p_split", "--spec-draft-p-split"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                            # Validate the draft model path before emitting —
+                            # a saved config can hold a stale path to a
+                            # moved/deleted draft GGUF; mirror the main -m
+                            # behaviour of resolving + skipping with a
+                            # stderr warning.
+                            mp_var = getattr(self.launcher, "spec_draft_model", None)
+                            if mp_var is not None:
+                                mp = mp_var.get().strip()
+                                if mp:
+                                    if Path(mp).is_file():
+                                        cmd.extend(["--spec-draft-model", str(Path(mp).resolve())])
+                                    else:
+                                        print(
+                                            f"WARNING: draft model path {mp!r} is not a file; skipping --spec-draft-model emission.",
+                                            file=sys.stderr,
+                                        )
+                            for var_name, flag in [
+                                ("spec_draft_ngl", "--spec-draft-ngl"),
+                                ("spec_draft_device", "--spec-draft-device"),
+                                ("spec_draft_ctk", "--spec-draft-type-k"),
+                                ("spec_draft_ctv", "--spec-draft-type-v"),
+                            ]:
+                                var = getattr(self.launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                            cpu_moe_var = getattr(self.launcher, "spec_draft_cpu_moe", None)
+                            if cpu_moe_var is not None and cpu_moe_var.get():
+                                cmd.append("--spec-draft-cpu-moe")
+                            ncm_var = getattr(self.launcher, "spec_draft_n_cpu_moe", None)
+                            if ncm_var is not None:
+                                ncm = ncm_var.get().strip()
+                                if ncm:
+                                    cmd.extend(["--spec-draft-n-cpu-moe", ncm])
                         # llama.cpp has per-ngram-variant size knobs.
                         if spec_type == "ngram-simple":
                             for var_name, flag in [
