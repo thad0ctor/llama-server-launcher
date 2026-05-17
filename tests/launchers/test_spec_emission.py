@@ -115,7 +115,6 @@ class TestSpecMasterToggle:
             "--spec-draft-p-min",
             "--spec-draft-p-split",
             "--spec-draft-model",
-            "--spec-draft-hf",
             "--spec-draft-ngl",
             "--spec-draft-device",
             "--spec-draft-type-k",
@@ -213,15 +212,6 @@ class TestSpecEmissionLlamaCpp:
         assert "--spec-draft-model" in cmd
         assert cmd[cmd.index("--spec-draft-model") + 1] == "/models/draft.gguf"
 
-    def test_spec_draft_hf_emits(self, manager, launcher_mock):
-        launcher_mock.backend_selection.set("llama.cpp")
-        launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
-        launcher_mock.spec_draft_hf.set("org/repo:Q4_K_M")
-        cmd = manager.build_cmd()
-        assert "--spec-draft-hf" in cmd
-        assert cmd[cmd.index("--spec-draft-hf") + 1] == "org/repo:Q4_K_M"
-
     def test_spec_draft_offload_flags_emit(self, manager, launcher_mock):
         """ngl/device/ctk/ctv all use the long llama.cpp flag names."""
         launcher_mock.backend_selection.set("llama.cpp")
@@ -277,7 +267,6 @@ class TestSpecEmissionLlamaCpp:
             "--spec-draft-p-min",
             "--spec-draft-p-split",
             "--spec-draft-model",
-            "--spec-draft-hf",
             "--spec-draft-ngl",
             "--spec-draft-device",
             "--spec-draft-type-k",
@@ -299,7 +288,6 @@ class TestSpecEmissionLlamaCpp:
         launcher_mock.spec_draft_p_min.set("0.5")
         launcher_mock.spec_draft_p_split.set("0.1")
         launcher_mock.spec_draft_model.set("/models/draft.gguf")
-        launcher_mock.spec_draft_hf.set("org/repo:Q4_K_M")
         launcher_mock.spec_draft_ngl.set("32")
         launcher_mock.spec_draft_device.set("CUDA0")
         launcher_mock.spec_draft_ctk.set("q8_0")
@@ -314,9 +302,8 @@ class TestSpecEmissionLlamaCpp:
         assert cmd[cmd.index("--spec-draft-n-min") + 1] == "2"
         assert cmd[cmd.index("--spec-draft-p-min") + 1] == "0.5"
         assert cmd[cmd.index("--spec-draft-p-split") + 1] == "0.1"
-        # Model/HF
+        # Model
         assert cmd[cmd.index("--spec-draft-model") + 1] == "/models/draft.gguf"
-        assert cmd[cmd.index("--spec-draft-hf") + 1] == "org/repo:Q4_K_M"
         # Offload long forms
         assert cmd[cmd.index("--spec-draft-ngl") + 1] == "32"
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0"
@@ -832,21 +819,6 @@ class TestSpecCrossBackendWarningsIkLlama:
         assert "p-split" in captured.err.lower()
         assert "llama.cpp" in captured.err.lower()
 
-    def test_spec_draft_hf_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
-        launcher_mock.backend_selection.set("ik_llama")
-        launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("mtp")
-        launcher_mock.spec_draft_hf.set("org/repo:Q4_K_M")
-        cmd = manager.build_cmd()
-        assert "--spec-draft-hf" not in cmd
-        # Value must not appear in cmd either.
-        assert "org/repo:Q4_K_M" not in cmd
-        captured = capsys.readouterr()
-        assert "hf" in captured.err.lower()
-        assert "llama.cpp" in captured.err.lower()
-
     def test_spec_draft_cpu_moe_warns_and_skips(
         self, manager, launcher_mock, capsys
     ):
@@ -998,3 +970,108 @@ class TestSpecTypeWhitelist:
         cmd = manager.build_cmd()
         assert "--spec-type" in cmd
         assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"
+
+
+# ============================================================================
+# Pre-fill defaults for blank draft-tuning fields
+# ============================================================================
+#
+# Exercises ``LlamaCppLauncher._apply_spec_defaults_if_blank`` via the
+# ``entry_module`` import pattern (see test_reasoning_and_kvu.py's
+# kvu_stub fixture for prior art). The method only touches three vars
+# (spec_draft_n_max, spec_draft_p_min, spec_draft_p_split) and only when
+# they're blank — user-typed values must persist.
+
+
+import importlib.util  # noqa: E402
+import tkinter as tk  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+ENTRY_PATH = REPO_ROOT / "llamacpp-server-launcher.py"
+
+
+@pytest.fixture(scope="module")
+def entry_module():
+    spec = importlib.util.spec_from_file_location("entry_module_spec_defaults", ENTRY_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["entry_module_spec_defaults"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def spec_defaults_stub(tk_root):
+    """Minimal SimpleNamespace stub exposing the four tk vars
+    ``_apply_spec_defaults_if_blank`` reads/writes."""
+    stub = SimpleNamespace()
+    stub.spec_enabled = tk.BooleanVar(master=tk_root, value=True)
+    stub.spec_type = tk.StringVar(master=tk_root, value="")
+    stub.spec_draft_n_max = tk.StringVar(master=tk_root, value="")
+    stub.spec_draft_p_min = tk.StringVar(master=tk_root, value="")
+    stub.spec_draft_p_split = tk.StringVar(master=tk_root, value="")
+    return stub
+
+
+class TestSpecDefaultsPrefill:
+    """Verify the spec-defaults prefill helper only fills blanks and only
+    for spec_types that benefit from defaults."""
+
+    def test_spec_disabled_is_noop(self, spec_defaults_stub, entry_module):
+        """When the master is off, nothing must be written even if the
+        spec_type would otherwise trigger defaults."""
+        spec_defaults_stub.spec_enabled.set(False)
+        spec_defaults_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == ""
+        assert spec_defaults_stub.spec_draft_p_min.get() == ""
+        assert spec_defaults_stub.spec_draft_p_split.get() == ""
+
+    def test_draft_mtp_prefills_n_max_3(self, spec_defaults_stub, entry_module):
+        """draft-mtp uses n_max=3 (MTP sweet spot, not the binary default of 16)."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "3"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+        assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
+
+    def test_mtp_ik_llama_prefills_same_as_draft_mtp(self, spec_defaults_stub, entry_module):
+        """ik_llama's ``mtp`` spec_type shares the same defaults — p-split
+        is still set even though ik_llama skips it at emission (warns)."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("mtp")
+        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "3"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+        assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
+
+    def test_draft_simple_prefills_n_max_16(self, spec_defaults_stub, entry_module):
+        """draft-simple / draft-eagle3 use the binary default of n_max=16."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-simple")
+        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "16"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+        assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
+
+    def test_ngram_simple_no_prefill(self, spec_defaults_stub, entry_module):
+        """ngram-* types don't use the draft tuning knobs and must not be
+        autofilled (would clutter the UI for users picking ngram)."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("ngram-simple")
+        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == ""
+        assert spec_defaults_stub.spec_draft_p_min.get() == ""
+        assert spec_defaults_stub.spec_draft_p_split.get() == ""
+
+    def test_user_typed_value_persists(self, spec_defaults_stub, entry_module):
+        """If the user has already typed a value, prefill must NOT overwrite
+        it — only blank fields are filled."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-mtp")
+        spec_defaults_stub.spec_draft_n_max.set("5")
+        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        # User's 5 stays; the other two get default-filled because they're blank.
+        assert spec_defaults_stub.spec_draft_n_max.get() == "5"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+        assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"

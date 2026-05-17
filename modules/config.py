@@ -311,7 +311,6 @@ class ConfigManager:
             "spec_draft_p_min":           self.launcher.spec_draft_p_min.get(),
             "spec_draft_p_split":         self.launcher.spec_draft_p_split.get(),
             "spec_draft_model":           self.launcher.spec_draft_model.get(),
-            "spec_draft_hf":              self.launcher.spec_draft_hf.get(),
             "spec_draft_ngl":             self.launcher.spec_draft_ngl.get(),
             "spec_draft_device":          self.launcher.spec_draft_device.get(),
             "spec_draft_ctk":             self.launcher.spec_draft_ctk.get(),
@@ -450,7 +449,6 @@ class ConfigManager:
         self.launcher.spec_draft_p_min.set(_spec_str("spec_draft_p_min"))
         self.launcher.spec_draft_p_split.set(_spec_str("spec_draft_p_split"))
         self.launcher.spec_draft_model.set(_spec_str("spec_draft_model"))
-        self.launcher.spec_draft_hf.set(_spec_str("spec_draft_hf"))
         self.launcher.spec_draft_ngl.set(_spec_str("spec_draft_ngl"))
         self.launcher.spec_draft_device.set(_spec_str("spec_draft_device"))
         self.launcher.spec_draft_ctk.set(_spec_str("spec_draft_ctk"))
@@ -981,7 +979,7 @@ class ConfigManager:
             _spec_str_keys = (
                 "spec_type",
                 "spec_draft_n_max", "spec_draft_n_min", "spec_draft_p_min", "spec_draft_p_split",
-                "spec_draft_model", "spec_draft_hf", "spec_draft_ngl", "spec_draft_device",
+                "spec_draft_model", "spec_draft_ngl", "spec_draft_device",
                 "spec_draft_ctk", "spec_draft_ctv", "spec_draft_n_cpu_moe",
                 "spec_ngram_simple_size_n", "spec_ngram_simple_size_m", "spec_ngram_simple_min_hits",
                 "spec_ngram_mapk_size_n", "spec_ngram_mapk_size_m", "spec_ngram_mapk_min_hits",
@@ -1130,7 +1128,6 @@ class ConfigManager:
             ("spec_draft_p_min", self.launcher.spec_draft_p_min),
             ("spec_draft_p_split", self.launcher.spec_draft_p_split),
             ("spec_draft_model", self.launcher.spec_draft_model),
-            ("spec_draft_hf", self.launcher.spec_draft_hf),
             ("spec_draft_ngl", self.launcher.spec_draft_ngl),
             ("spec_draft_device", self.launcher.spec_draft_device),
             ("spec_draft_ctk", self.launcher.spec_draft_ctk),

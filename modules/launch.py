@@ -400,7 +400,6 @@ class LaunchManager:
                         # Warn (don't crash) if the user set llama.cpp-only knobs while ik_llama is active.
                         for var_name, label in [
                             ("spec_draft_p_split", "--spec-draft-p-split"),
-                            ("spec_draft_hf", "--spec-draft-hf"),
                             ("spec_draft_cpu_moe", "--spec-draft-cpu-moe"),
                             ("spec_draft_n_cpu_moe", "--spec-draft-n-cpu-moe"),
                         ]:
@@ -435,11 +434,6 @@ class LaunchManager:
                             mp = mp_var.get().strip()
                             if mp:
                                 cmd.extend(["--spec-draft-model", mp])
-                        hf_var = getattr(self.launcher, "spec_draft_hf", None)
-                        if hf_var is not None:
-                            hf = hf_var.get().strip()
-                            if hf:
-                                cmd.extend(["--spec-draft-hf", hf])
                         for var_name, flag in [
                             ("spec_draft_ngl", "--spec-draft-ngl"),
                             ("spec_draft_device", "--spec-draft-device"),

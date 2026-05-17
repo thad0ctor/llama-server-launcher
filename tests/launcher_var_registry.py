@@ -35,7 +35,6 @@ SPEC_TK_VARS = [
     ("spec_draft_p_split",          "StringVar",  ""),
     # Draft model selection
     ("spec_draft_model",            "StringVar",  ""),
-    ("spec_draft_hf",               "StringVar",  ""),
     ("spec_draft_ngl",              "StringVar",  ""),
     ("spec_draft_device",           "StringVar",  ""),
     ("spec_draft_ctk",              "StringVar",  ""),

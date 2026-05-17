@@ -206,7 +206,6 @@ class LlamaCppLauncher:
             "spec_draft_p_min":    "",
             "spec_draft_p_split":  "",
             "spec_draft_model":    "",
-            "spec_draft_hf":       "",
             "spec_draft_ngl":      "",
             "spec_draft_device":   "",
             "spec_draft_ctk":      "",
@@ -428,7 +427,6 @@ class LlamaCppLauncher:
         self.spec_draft_p_split  = tk.StringVar(value=_spec_init_str("spec_draft_p_split"))   # llama.cpp only
         # Draft model selection.
         self.spec_draft_model    = tk.StringVar(value=_spec_init_str("spec_draft_model"))    # -md path
-        self.spec_draft_hf       = tk.StringVar(value=_spec_init_str("spec_draft_hf"))       # -hfd repo (llama.cpp only)
         self.spec_draft_ngl      = tk.StringVar(value=_spec_init_str("spec_draft_ngl"))
         self.spec_draft_device   = tk.StringVar(value=_spec_init_str("spec_draft_device"))
         self.spec_draft_ctk      = tk.StringVar(value=_spec_init_str("spec_draft_ctk"))
@@ -689,8 +687,10 @@ class LlamaCppLauncher:
         self.custom_template_string.trace_add("write", lambda *args: self._update_effective_template_display())
 
         # --- MTP / Spec traces: refresh visibility/enabled state when relevant vars change.
-        self.spec_enabled.trace_add("write", lambda *a: self._refresh_spec_tab_state())
-        self.spec_type.trace_add("write", lambda *a: self._refresh_spec_tab_state())
+        # Both also pre-fill draft-tuning defaults (n-max / p-min / p-split) when the
+        # current spec_type benefits from them and the user hasn't typed values.
+        self.spec_enabled.trace_add("write", lambda *a: self._on_spec_enabled_changed())
+        self.spec_type.trace_add("write", lambda *a: self._on_spec_type_changed())
 
 
         # Populate model directories listbox
@@ -2124,6 +2124,10 @@ class LlamaCppLauncher:
             .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
 
         # --- Draft model section ---
+        # Picks the draft GGUF from the same scanned-models pool as the
+        # main model listbox. The HF-repo entry was removed: users either
+        # have the draft GGUF locally (and it shows up in the listbox) or
+        # they don't use it. A "Clear" button reverts to "use base GGUF".
         sec = ttk.LabelFrame(inner, text="Draft model")
         sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
         sec.columnconfigure(1, weight=1)
@@ -2131,19 +2135,40 @@ class LlamaCppLauncher:
         r += 1
 
         sr = 0
-        ttk.Label(sec, text="Draft GGUF file:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
-        e_dm = ttk.Entry(sec, textvariable=self.spec_draft_model)
-        e_dm.grid(column=1, row=sr, sticky="ew", padx=4, pady=2)
-        self._spec_widgets["draft_model_entry"] = e_dm
-        b_dm = ttk.Button(sec, text="Browse...", command=self._browse_spec_draft_model)
-        b_dm.grid(column=2, row=sr, sticky="w", padx=4, pady=2)
-        self._spec_widgets["draft_model_browse"] = b_dm
+        ttk.Label(sec, text="Select draft GGUF:").grid(column=0, row=sr, sticky="nw", padx=6, pady=2)
+        draft_list_frame = ttk.Frame(sec)
+        draft_list_frame.grid(column=1, row=sr, columnspan=2, sticky="nsew", padx=4, pady=2)
+        sec.columnconfigure(1, weight=1)
+        draft_list_sb = ttk.Scrollbar(draft_list_frame, orient=tk.VERTICAL)
+        self.spec_draft_listbox = tk.Listbox(
+            draft_list_frame,
+            height=6,
+            width=48,
+            yscrollcommand=draft_list_sb.set,
+            exportselection=False,
+            state=tk.DISABLED,
+        )
+        draft_list_sb.config(command=self.spec_draft_listbox.yview)
+        self.spec_draft_listbox.bind("<<ListboxSelect>>", self._on_spec_draft_model_selected)
+        draft_list_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.spec_draft_listbox.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._spec_widgets["draft_listbox"] = self.spec_draft_listbox
+        b_clear = ttk.Button(sec, text="Clear", command=self._clear_spec_draft_model)
+        b_clear.grid(column=3, row=sr, sticky="nw", padx=4, pady=2)
+        self._spec_widgets["draft_clear_btn"] = b_clear
         sr += 1
 
-        ttk.Label(sec, text="HF repo (-hfd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
-        e_hf = ttk.Entry(sec, textvariable=self.spec_draft_hf)
-        e_hf.grid(column=1, row=sr, sticky="ew", padx=4, pady=2, columnspan=2)
-        self._spec_widgets["draft_hf"] = e_hf
+        ttk.Label(sec, text="Selected path:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
+        self.spec_draft_path_display_var = tk.StringVar(
+            value=self.spec_draft_model.get() or "(none — uses base GGUF for MTP)"
+        )
+        path_lbl = ttk.Label(
+            sec,
+            textvariable=self.spec_draft_path_display_var,
+            foreground="gray",
+        )
+        path_lbl.grid(column=1, row=sr, columnspan=3, sticky="ew", padx=4, pady=2)
+        self._spec_widgets["draft_path_display"] = path_lbl
         sr += 1
 
         ttk.Label(sec, text="Draft GPU layers (-ngld):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
@@ -2287,29 +2312,94 @@ class LlamaCppLauncher:
             foreground="gray",
         ).grid(column=0, row=1, sticky="w", padx=6, pady=(0, 4))
 
-    def _browse_spec_draft_model(self):
-        """File dialog for selecting the draft GGUF model (-md / --model-draft)."""
-        current = self.spec_draft_model.get().strip()
-        initial_dir = ""
-        if current:
+    def _on_spec_draft_model_selected(self, event=None):
+        """Listbox <<ListboxSelect>> handler for the draft GGUF picker.
+
+        Resolves the selected display name against ``self.found_models``
+        (populated by the main model scan) and writes the absolute path into
+        ``self.spec_draft_model``. Also refreshes the read-only path label
+        so the user can see the full path of what they picked.
+        """
+        try:
+            lb = getattr(self, "spec_draft_listbox", None)
+            if lb is None:
+                return
+            sel = lb.curselection()
+            if not sel:
+                return
+            display_name = lb.get(sel[0])
+            full_path = getattr(self, "found_models", {}).get(display_name)
+            if full_path is None:
+                return
+            self.spec_draft_model.set(str(full_path))
+            if hasattr(self, "spec_draft_path_display_var"):
+                self.spec_draft_path_display_var.set(str(full_path))
+        except Exception as e:
+            print(f"WARN: _on_spec_draft_model_selected failed: {e}", file=sys.stderr)
+
+    def _clear_spec_draft_model(self):
+        """Reset the draft model selection (no -md / --model-draft will be emitted)."""
+        self.spec_draft_model.set("")
+        if hasattr(self, "spec_draft_path_display_var"):
+            self.spec_draft_path_display_var.set("(none — uses base GGUF for MTP)")
+        try:
+            lb = getattr(self, "spec_draft_listbox", None)
+            if lb is not None and lb.winfo_exists():
+                lb.selection_clear(0, tk.END)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _apply_spec_defaults_if_blank(self):
+        """Pre-fill blank draft-tuning fields with sensible defaults based on
+        the current spec_type. Only fills *blank* fields — user input is never
+        overwritten. Called on spec_enabled and spec_type changes."""
+        # No-op when speculative decoding is disabled.
+        try:
+            if not self.spec_enabled.get():
+                return
+        except Exception:
+            return
+        spec_type = (self.spec_type.get() or "").strip()
+        if spec_type in ("draft-mtp", "mtp"):
+            defaults = {"n_max": "3", "p_min": "0.75", "p_split": "0.10"}
+        elif spec_type in ("draft-simple", "draft-eagle3"):
+            defaults = {"n_max": "16", "p_min": "0.75", "p_split": "0.10"}
+        else:
+            # ngram-*, suffix, cache, none, or unknown — no defaults to pre-fill.
+            return
+        var_map = {
+            "n_max": self.spec_draft_n_max,
+            "p_min": self.spec_draft_p_min,
+            "p_split": self.spec_draft_p_split,
+        }
+        for key, default_value in defaults.items():
+            var = var_map.get(key)
+            if var is None:
+                continue
             try:
-                p = Path(current).expanduser()
-                if p.parent.is_dir():
-                    initial_dir = str(p.parent)
+                if not var.get().strip():
+                    var.set(default_value)
             except Exception:
                 pass
-        if not initial_dir and self.model_dirs:
-            try:
-                initial_dir = str(self.model_dirs[-1])
-            except Exception:
-                initial_dir = ""
-        path = filedialog.askopenfilename(
-            title="Select draft GGUF model",
-            initialdir=initial_dir or str(Path.home()),
-            filetypes=[("GGUF models", "*.gguf"), ("All files", "*.*")],
-        )
-        if path:
-            self.spec_draft_model.set(path)
+
+    def _on_spec_enabled_changed(self):
+        """Trace callback chained after ``spec_enabled`` writes.
+
+        Refreshes tab visibility/enabled state and pre-fills the draft
+        tuning fields when the master toggle flips to True with a
+        spec_type that has defaults.
+        """
+        self._refresh_spec_tab_state()
+        self._apply_spec_defaults_if_blank()
+
+    def _on_spec_type_changed(self):
+        """Trace callback chained after ``spec_type`` writes.
+
+        Same shape as ``_on_spec_enabled_changed`` — refresh visibility,
+        then top up blank draft tuning fields with the per-type defaults.
+        """
+        self._refresh_spec_tab_state()
+        self._apply_spec_defaults_if_blank()
 
     def _refresh_spec_tab_state(self):
         """Recompute visibility/enabled state for MTP/Spec tab widgets.
@@ -2444,9 +2534,9 @@ class LlamaCppLauncher:
                     self.spec_pmin_hint_var.set("Note: currently disabled for MTP in mainline (post-merge TODO).")
                 else:
                     self.spec_pmin_hint_var.set("")
-            # HF repo / cpu-moe knobs are llama.cpp-only when the draft_model section is visible.
+            # cpu-moe knobs are llama.cpp-only when the draft_model section is visible.
             if "draft_model" in visible:
-                for k in ("draft_hf", "draft_cpu_moe", "draft_n_cpu_moe"):
+                for k in ("draft_cpu_moe", "draft_n_cpu_moe"):
                     w = self._spec_widgets.get(k)
                     if w is not None:
                         _set_state(w, "disabled" if is_ik else "normal")
@@ -2739,6 +2829,39 @@ class LlamaCppLauncher:
         for name in model_names:
             self.model_listbox.insert(tk.END, name)
         self.root.update_idletasks()
+
+        # Mirror the population into the MTP/Spec tab's draft-model listbox so
+        # the user can pick the draft GGUF from the same pool. State is
+        # forced to NORMAL while inserting; _refresh_spec_tab_state() at the
+        # end restores the per-backend/per-spec_type enable/disable rules.
+        if hasattr(self, "spec_draft_listbox") and self.spec_draft_listbox.winfo_exists():
+            self.spec_draft_listbox.config(state=tk.NORMAL)
+            self.spec_draft_listbox.delete(0, tk.END)
+            for name in model_names:
+                self.spec_draft_listbox.insert(tk.END, name)
+            # Restore the user's prior draft selection if its path still exists.
+            saved_draft = (self.spec_draft_model.get() or "").strip()
+            if saved_draft:
+                try:
+                    saved_path = Path(saved_draft).resolve()
+                    for idx, display_name in enumerate(model_names):
+                        full_path = self.found_models.get(display_name)
+                        if full_path is not None and full_path == saved_path:
+                            self.spec_draft_listbox.selection_clear(0, tk.END)
+                            self.spec_draft_listbox.selection_set(idx)
+                            self.spec_draft_listbox.see(idx)
+                            break
+                except (ValueError, OSError):
+                    pass
+            # Keep the path display label in sync with the (possibly cleared)
+            # stored draft model value.
+            if hasattr(self, "spec_draft_path_display_var"):
+                cur = (self.spec_draft_model.get() or "").strip()
+                self.spec_draft_path_display_var.set(cur or "(none — uses base GGUF for MTP)")
+            try:
+                self._refresh_spec_tab_state()
+            except Exception:
+                pass
 
         # Re-enable Add/Remove buttons after scan
         if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
