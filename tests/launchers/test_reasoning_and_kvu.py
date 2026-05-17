@@ -512,6 +512,7 @@ def spec_tab_stub(tk_root, entry_module):
     stub.spec_type = tk.StringVar(master=tk_root, value="none")
     stub.spec_pmin_hint_var = tk.StringVar(master=tk_root, value="")
     stub.spec_psplit_hint_var = tk.StringVar(master=tk_root, value="")
+    stub.spec_parallel_hint_var = tk.StringVar(master=tk_root, value="")
     stub.spec_status_var = tk.StringVar(master=tk_root, value="")
     stub._spec_widgets = {}
     stub._spec_sections = {}

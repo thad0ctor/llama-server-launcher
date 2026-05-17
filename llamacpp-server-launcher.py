@@ -2233,6 +2233,15 @@ class LlamaCppLauncher:
         ttk.Label(sec, textvariable=self.spec_psplit_hint_var, foreground="gray")\
             .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
 
+        # MTP requires --parallel 1 (single-slot operation). The trace
+        # callbacks force this when MTP is selected, but show the hint
+        # so users understand what's happening and can verify.
+        sr += 1
+        self.spec_parallel_hint_var = tk.StringVar(value="")
+        ttk.Label(sec, textvariable=self.spec_parallel_hint_var,
+                  foreground="#888888", font=("TkSmallCaptionFont"))\
+            .grid(column=0, row=sr, columnspan=4, sticky="w", padx=6, pady=(4, 2))
+
         # --- Draft model section ---
         # Picks the draft GGUF from the same scanned-models pool as the
         # main model listbox. The HF-repo entry was removed: users either
@@ -2810,6 +2819,30 @@ class LlamaCppLauncher:
             except Exception:
                 pass
 
+    def _apply_mtp_parallel_default(self):
+        """When MTP mode is active, force ``--parallel`` to 1.
+
+        MTP currently requires single-slot operation (-np 1). Unlike the
+        soft prefill in ``_apply_spec_defaults_if_blank``, this is a hard
+        constraint of the MTP implementation upstream, so we OVERWRITE
+        whatever value is in ``self.parallel`` rather than only filling
+        blanks. Users can still type a different value afterwards; the
+        launch block will emit a stderr warning in that case.
+        """
+        try:
+            if not self.spec_enabled.get():
+                return
+        except Exception:
+            return
+        spec_type = (self.spec_type.get() or "").strip()
+        if spec_type not in ("draft-mtp", "mtp"):
+            return
+        try:
+            if self.parallel.get().strip() != "1":
+                self.parallel.set("1")
+        except Exception:
+            pass
+
     def _on_spec_enabled_changed(self):
         """Trace callback chained after ``spec_enabled`` writes.
 
@@ -2819,6 +2852,7 @@ class LlamaCppLauncher:
         """
         self._refresh_spec_tab_state()
         self._apply_spec_defaults_if_blank()
+        self._apply_mtp_parallel_default()
 
     def _on_spec_type_changed(self):
         """Trace callback chained after ``spec_type`` writes.
@@ -2828,6 +2862,7 @@ class LlamaCppLauncher:
         """
         self._refresh_spec_tab_state()
         self._apply_spec_defaults_if_blank()
+        self._apply_mtp_parallel_default()
 
     def _refresh_spec_tab_state(self):
         """Recompute visibility/enabled state for MTP/Spec tab widgets.
@@ -2972,6 +3007,15 @@ class LlamaCppLauncher:
                     self.spec_pmin_hint_var.set("Note: currently disabled for MTP in mainline (post-merge TODO).")
                 else:
                     self.spec_pmin_hint_var.set("")
+                # MTP constraint hint: surface the --parallel 1 requirement.
+                if effective_spec_type in ("draft-mtp", "mtp"):
+                    self.spec_parallel_hint_var.set(
+                        "Note: MTP requires --parallel 1 (single-slot). The launcher "
+                        "auto-sets and enforces this at launch — overrides from elsewhere "
+                        "are ignored while MTP is active."
+                    )
+                else:
+                    self.spec_parallel_hint_var.set("")
             # cpu-moe knobs are llama.cpp-only when the draft_model section is visible.
             if "draft_model" in visible:
                 for k in ("draft_cpu_moe", "draft_n_cpu_moe"):
@@ -2998,6 +3042,10 @@ class LlamaCppLauncher:
             if "vision" in visible:
                 _set_section_state("vision", "normal")
             self.spec_pmin_hint_var.set("")
+            try:
+                self.spec_parallel_hint_var.set("")
+            except (AttributeError, tk.TclError):
+                pass
 
         # 5) Status label so users know what's emitted. Surface the
         # "stored but inactive on this backend" case explicitly so a user

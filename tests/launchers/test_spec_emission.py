@@ -1626,3 +1626,145 @@ class TestValidateSpecDraftGpuLayersEntry:
         assert entry_module.LlamaCppLauncher._validate_spec_draft_gpu_layers_entry(
             draft_layers_stub, value
         ) is False
+
+
+# ============================================================================
+# MTP enforces --parallel 1 (single-slot operation).
+# Two layers of defense:
+#   1) The UI auto-sets self.parallel = "1" when MTP is selected
+#      (covered by tests/launchers/test_reasoning_and_kvu.py for the Tk side
+#       and in this file by TestMtpParallelDefault below for the helper).
+#   2) build_cmd() overrides any non-"1" value at emission and warns. This
+#      is the authoritative last line of defense regardless of what other
+#      UI surface set --parallel.
+# ============================================================================
+
+
+class TestMtpParallelDefault:
+    """The MTP/Spec trace callback ``_apply_mtp_parallel_default`` forces
+    ``self.parallel`` to "1" whenever MTP mode is active, overwriting any
+    pre-existing value."""
+
+    @pytest.fixture
+    def mtp_parallel_stub(self, tk_root, entry_module):
+        stub = SimpleNamespace()
+        stub.spec_enabled = tk.BooleanVar(master=tk_root, value=True)
+        stub.spec_type = tk.StringVar(master=tk_root, value="")
+        stub.parallel = tk.StringVar(master=tk_root, value="1")
+        return stub
+
+    def test_draft_mtp_forces_parallel_to_1(self, mtp_parallel_stub, entry_module):
+        mtp_parallel_stub.parallel.set("8")
+        mtp_parallel_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "1"
+
+    def test_ik_llama_mtp_forces_parallel_to_1(self, mtp_parallel_stub, entry_module):
+        mtp_parallel_stub.parallel.set("4")
+        mtp_parallel_stub.spec_type.set("mtp")
+        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "1"
+
+    def test_overwrites_even_if_user_typed_value(self, mtp_parallel_stub, entry_module):
+        """Unlike soft prefills, this is a hard constraint — user input is
+        OVERWRITTEN, not preserved."""
+        mtp_parallel_stub.parallel.set("16")
+        mtp_parallel_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "1"
+
+    def test_non_mtp_spec_type_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
+        mtp_parallel_stub.parallel.set("8")
+        mtp_parallel_stub.spec_type.set("ngram-simple")
+        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "8"
+
+    def test_spec_disabled_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
+        """When master is off, no enforcement should happen even if spec_type
+        happens to be draft-mtp."""
+        mtp_parallel_stub.spec_enabled.set(False)
+        mtp_parallel_stub.parallel.set("8")
+        mtp_parallel_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "8"
+
+    def test_already_1_is_idempotent(self, mtp_parallel_stub, entry_module):
+        mtp_parallel_stub.parallel.set("1")
+        mtp_parallel_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "1"
+
+
+class TestMtpParallelEmissionOverride:
+    """build_cmd() forces --parallel 1 (omitted because it matches default)
+    whenever MTP is active, even if launcher.parallel still says something
+    else. This is the authoritative last line of defense — protects against
+    any future UI surface setting --parallel without coordinating with the
+    MTP/Spec tab."""
+
+    def test_mtp_active_with_parallel_8_overrides_to_1_and_warns(
+        self, manager, launcher_mock, capsys
+    ):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.parallel.set("8")
+        cmd = manager.build_cmd()
+        # --parallel 1 is the binary default so it's omitted from argv,
+        # but the wrong value (8) must NOT appear.
+        assert "--parallel" not in cmd
+        # Specifically: no "8" right after a --parallel token.
+        captured = capsys.readouterr()
+        assert "MTP requires --parallel 1" in captured.err
+        assert "'8'" in captured.err
+
+    def test_mtp_active_with_parallel_1_emits_nothing_no_warning(
+        self, manager, launcher_mock, capsys
+    ):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.parallel.set("1")
+        cmd = manager.build_cmd()
+        assert "--parallel" not in cmd  # matches default, omitted
+        captured = capsys.readouterr()
+        assert "MTP requires --parallel" not in captured.err
+
+    def test_mtp_inactive_with_parallel_8_emits_normally(
+        self, manager, launcher_mock, capsys
+    ):
+        """When MTP is NOT active, the multi-slot value passes through."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(False)
+        launcher_mock.parallel.set("8")
+        cmd = manager.build_cmd()
+        assert "--parallel" in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "8"
+        captured = capsys.readouterr()
+        assert "MTP requires --parallel" not in captured.err
+
+    def test_ngram_with_parallel_8_does_not_override(self, manager, launcher_mock, capsys):
+        """spec_type=ngram-simple is not MTP — no override should fire."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("ngram-simple")
+        launcher_mock.parallel.set("8")
+        cmd = manager.build_cmd()
+        assert "--parallel" in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "8"
+        captured = capsys.readouterr()
+        assert "MTP requires --parallel" not in captured.err
+
+    def test_ik_llama_mtp_with_parallel_4_also_overrides(
+        self, manager, launcher_mock, capsys
+    ):
+        """ik_llama's 'mtp' spec_type triggers the same override."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--parallel" not in cmd
+        captured = capsys.readouterr()
+        assert "MTP requires --parallel 1" in captured.err
+        assert "'4'" in captured.err

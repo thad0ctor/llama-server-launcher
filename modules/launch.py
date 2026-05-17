@@ -759,7 +759,33 @@ class LaunchManager:
 
         # Performance options
         self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0") # Omit if 0 (default)
-        self.add_arg(cmd, "--parallel", self.launcher.parallel.get(), "1") # Omit if 1 (default)
+
+        # MTP enforces single-slot operation (-np 1) — OVERRIDES whatever the
+        # user (or another UI surface like the Advanced tab) set, since MTP
+        # upstream simply does not work with multi-slot. Decide the effective
+        # parallel value here, BEFORE calling add_arg, so the wrong value can
+        # never make it into argv. The MTP/Spec tab also auto-sets parallel
+        # to "1" when MTP is selected, but this guard is the authoritative
+        # last line of defense regardless of where parallel was set from.
+        parallel_val = self.launcher.parallel.get()
+        try:
+            spec_enabled_var = getattr(self.launcher, "spec_enabled", None)
+            spec_type_var = getattr(self.launcher, "spec_type", None)
+            mtp_active = (
+                spec_enabled_var is not None
+                and spec_enabled_var.get()
+                and spec_type_var is not None
+                and (spec_type_var.get() or "").strip() in ("draft-mtp", "mtp")
+            )
+        except Exception:
+            mtp_active = False
+        if mtp_active and (parallel_val or "").strip() != "1":
+            print(
+                f"WARNING: MTP requires --parallel 1; overriding '{parallel_val}' -> '1'.",
+                file=sys.stderr,
+            )
+            parallel_val = "1"
+        self.add_arg(cmd, "--parallel", parallel_val, "1") # Omit if 1 (default)
 
         # --- MoE CPU options ---
         self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
