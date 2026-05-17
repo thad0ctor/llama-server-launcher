@@ -2242,6 +2242,18 @@ class LlamaCppLauncher:
                   foreground="#888888", font=("TkSmallCaptionFont"))\
             .grid(column=0, row=sr, columnspan=4, sticky="w", padx=6, pady=(4, 2))
 
+        # Reset-to-default button: overwrites all four common controls with
+        # the recommended values for the current spec_type. For ngram/suffix
+        # types (which have no recommended defaults), clears the fields.
+        sr += 1
+        reset_btn = ttk.Button(sec, text="Reset to defaults",
+                               command=self._reset_spec_defaults)
+        reset_btn.grid(column=0, row=sr, sticky="w", padx=6, pady=(6, 4))
+        self._spec_widgets["reset_defaults_btn"] = reset_btn
+        ttk.Label(sec, text="Overwrites n-max / n-min / p-min / p-split with the recommended defaults for the active type.",
+                  foreground="#888888", font=("TkSmallCaptionFont"))\
+            .grid(column=1, row=sr, columnspan=3, sticky="w", padx=4, pady=(6, 4))
+
         # --- Draft model section ---
         # Picks the draft GGUF from the same scanned-models pool as the
         # main model listbox. The HF-repo entry was removed: users either
@@ -2816,6 +2828,38 @@ class LlamaCppLauncher:
             try:
                 if not var.get().strip():
                     var.set(default_value)
+            except Exception:
+                pass
+
+    def _reset_spec_defaults(self):
+        """Button handler: OVERWRITE all four common draft controls with
+        the recommended values for the current spec_type. Unlike
+        ``_apply_spec_defaults_if_blank`` (which only fills blanks), this
+        ignores existing values — it's the explicit user action to revert
+        to known-good settings. For spec_types without recommended
+        defaults (ngram-*, suffix, ngram-cache, none), all four fields
+        are cleared.
+        """
+        spec_type = (self.spec_type.get() or "").strip()
+        if spec_type in ("draft-mtp", "mtp"):
+            values = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+        elif spec_type in ("draft-simple", "draft-eagle3"):
+            values = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+        else:
+            # ngram-*, suffix, cache, none, blank — clear to "use binary default".
+            values = {"n_max": "", "n_min": "", "p_min": "", "p_split": ""}
+        var_map = {
+            "n_max": self.spec_draft_n_max,
+            "n_min": self.spec_draft_n_min,
+            "p_min": self.spec_draft_p_min,
+            "p_split": self.spec_draft_p_split,
+        }
+        for key, value in values.items():
+            var = var_map.get(key)
+            if var is None:
+                continue
+            try:
+                var.set(value)
             except Exception:
                 pass
 

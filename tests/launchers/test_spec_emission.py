@@ -1768,3 +1768,91 @@ class TestMtpParallelEmissionOverride:
         captured = capsys.readouterr()
         assert "MTP requires --parallel 1" in captured.err
         assert "'4'" in captured.err
+
+
+# ============================================================================
+# "Reset to defaults" button — OVERWRITES the four common controls with the
+# recommended values for the active spec_type. Unlike the soft prefill that
+# only fills blanks, this is an explicit user action that ignores any
+# existing values. For spec_types without recommended defaults (ngram-*,
+# suffix, ngram-cache, none) the fields are cleared.
+# ============================================================================
+
+
+class TestResetSpecDefaults:
+    """``_reset_spec_defaults`` is the click handler for the "Reset to
+    defaults" button on the Common draft controls section."""
+
+    @pytest.fixture
+    def reset_stub(self, tk_root):
+        stub = SimpleNamespace()
+        stub.spec_type = tk.StringVar(master=tk_root, value="")
+        stub.spec_draft_n_max = tk.StringVar(master=tk_root, value="")
+        stub.spec_draft_n_min = tk.StringVar(master=tk_root, value="")
+        stub.spec_draft_p_min = tk.StringVar(master=tk_root, value="")
+        stub.spec_draft_p_split = tk.StringVar(master=tk_root, value="")
+        return stub
+
+    def test_draft_mtp_overwrites_to_mtp_defaults(self, reset_stub, entry_module):
+        """Even if the user has typed values, draft-mtp reset wipes them
+        to the MTP-recommended set (n_max=3, n_min=0, p_min=0.75, p_split=0.10)."""
+        reset_stub.spec_draft_n_max.set("999")
+        reset_stub.spec_draft_n_min.set("42")
+        reset_stub.spec_draft_p_min.set("0.01")
+        reset_stub.spec_draft_p_split.set("0.99")
+        reset_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        assert reset_stub.spec_draft_n_max.get() == "3"
+        assert reset_stub.spec_draft_n_min.get() == "0"
+        assert reset_stub.spec_draft_p_min.get() == "0.75"
+        assert reset_stub.spec_draft_p_split.get() == "0.10"
+
+    def test_mtp_ik_llama_overwrites_to_mtp_defaults(self, reset_stub, entry_module):
+        reset_stub.spec_draft_n_max.set("999")
+        reset_stub.spec_type.set("mtp")
+        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        assert reset_stub.spec_draft_n_max.get() == "3"
+        assert reset_stub.spec_draft_n_min.get() == "0"
+        assert reset_stub.spec_draft_p_min.get() == "0.75"
+        assert reset_stub.spec_draft_p_split.get() == "0.10"
+
+    @pytest.mark.parametrize("draft_type", ["draft-simple", "draft-eagle3"])
+    def test_classical_draft_overwrites_to_n_max_16(self, reset_stub, entry_module, draft_type):
+        reset_stub.spec_draft_n_max.set("999")
+        reset_stub.spec_type.set(draft_type)
+        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        assert reset_stub.spec_draft_n_max.get() == "16"
+        assert reset_stub.spec_draft_n_min.get() == "0"
+        assert reset_stub.spec_draft_p_min.get() == "0.75"
+        assert reset_stub.spec_draft_p_split.get() == "0.10"
+
+    @pytest.mark.parametrize("spec_type", [
+        "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache",
+        "suffix", "none", "",
+    ])
+    def test_no_recommended_defaults_clears_all_fields(
+        self, reset_stub, entry_module, spec_type
+    ):
+        """For spec_types without recommended defaults, reset clears the
+        fields to blank (= use binary defaults)."""
+        reset_stub.spec_draft_n_max.set("999")
+        reset_stub.spec_draft_n_min.set("42")
+        reset_stub.spec_draft_p_min.set("0.01")
+        reset_stub.spec_draft_p_split.set("0.99")
+        reset_stub.spec_type.set(spec_type)
+        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        assert reset_stub.spec_draft_n_max.get() == ""
+        assert reset_stub.spec_draft_n_min.get() == ""
+        assert reset_stub.spec_draft_p_min.get() == ""
+        assert reset_stub.spec_draft_p_split.get() == ""
+
+    def test_reset_is_idempotent(self, reset_stub, entry_module):
+        """Calling reset twice produces the same result as calling it once."""
+        reset_stub.spec_type.set("draft-mtp")
+        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        first = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
+                 reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
+        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        second = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
+                  reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
+        assert first == second
