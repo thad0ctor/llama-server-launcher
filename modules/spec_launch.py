@@ -47,27 +47,118 @@ _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3",
 _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
 
 
+def _is_draft_capable_for_backend(spec_type, backend):
+    """Return True iff ``spec_type`` is a draft-capable variant for ``backend``.
+
+    Mirrors the per-branch ``is_draft_capable`` checks inside ``emit_spec_args``
+    so the GPU-union helper below can apply the same gating without re-deriving
+    the rule (and silently drifting from emission).
+    """
+    if not spec_type or spec_type == "none":
+        return False
+    if backend == "ik_llama":
+        return spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
+    return spec_type in _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP
+
+
+def get_effective_visible_gpu_indices(launcher):
+    """Return the ordered list of physical GPU indices that should appear in
+    ``CUDA_VISIBLE_DEVICES`` — the union of the user's main GPU selection
+    and the draft GPU selection (only when spec is enabled and the active
+    spec_type is draft-capable for the active backend).
+
+    Ordering contract:
+        - Main GPUs first, in the user-specified order from
+          ``get_ordered_selected_gpus()`` (which honours drag-reorder).
+        - Then draft-only GPUs (those NOT already in main) appended in
+          numeric order — picked deterministically so the post-filter
+          CUDA<i> remap is reproducible across launches.
+
+    This is the single source of truth for both
+    ``LaunchManager._resolve_cuda_visible_devices_action`` (which exports
+    the env var) and ``_resolve_draft_device_value`` (which remaps draft
+    indices to post-filter CUDA<i>). Keeping them in lock-step prevents the
+    failure mode where the binary's reindexed device list and the
+    launcher's --spec-draft-device value disagree.
+
+    Gating rules:
+        - Spec disabled, or spec_type non-draft-capable for the active
+          backend → return main_ordered only (no union).
+        - Empty draft_indices → main_ordered only.
+        - All other cases → ordered union as described above.
+
+    Returns a list of ints (possibly empty). Never raises — defensive
+    ``except Exception`` falls back to main_ordered so launch flow can't
+    crash on a UI mis-state.
+    """
+    try:
+        main_ordered = list(launcher.get_ordered_selected_gpus())
+    except Exception:
+        main_ordered = []
+    # Resolve gating up front so we can early-return main-only.
+    spec_enabled = False
+    try:
+        spec_enabled_var = getattr(launcher, "spec_enabled", None)
+        spec_enabled = bool(spec_enabled_var is not None and spec_enabled_var.get())
+    except Exception:
+        spec_enabled = False
+    if not spec_enabled:
+        return main_ordered
+    try:
+        spec_type_var = getattr(launcher, "spec_type", None)
+        spec_type = (spec_type_var.get() or "").strip() if spec_type_var is not None else ""
+    except Exception:
+        spec_type = ""
+    try:
+        backend = launcher.backend_selection.get()
+    except Exception:
+        backend = ""
+    if not _is_draft_capable_for_backend(spec_type, backend):
+        return main_ordered
+    try:
+        draft_indices = list(
+            launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+        )
+    except Exception:
+        draft_indices = []
+    if not draft_indices:
+        return main_ordered
+    # Don't auto-create a CUDA_VISIBLE_DEVICES filter when the user hasn't
+    # selected any main GPUs explicitly. Empty main means "no restriction"
+    # (the binary's default device discovery is in charge) — adding only
+    # draft GPUs would silently restrict the device set, which is the
+    # opposite of what the user asked for. Pass through unchanged so the
+    # caller's no-filter branch handles it.
+    if not main_ordered:
+        return main_ordered
+    main_set = set(main_ordered)
+    extras = sorted({d for d in draft_indices if d not in main_set})
+    return main_ordered + extras
+
+
 def _resolve_draft_device_value(launcher):
     """Return the correctly-remapped value for ``--spec-draft-device``
-    given the user's draft GPU selection and the main GPU selection.
+    given the user's draft GPU selection and the effective visible-GPU set.
 
-    The launch script applies ``CUDA_VISIBLE_DEVICES=<main_ordered>`` to
-    restrict GPUs the server can see — and that filter REINDEXES the
-    devices the binary then knows about. So when the main selection is
-    ``[2, 5]`` the binary sees only ``CUDA0`` (physical 2) and ``CUDA1``
-    (physical 5); a raw ``CUDA4`` reference (the user's launcher-side
-    draft selection on physical GPU 4) does not exist post-filter and
-    the binary aborts with "invalid device".
+    The launch script applies
+    ``CUDA_VISIBLE_DEVICES=<effective_visible_indices>`` to restrict the
+    GPUs the server can see — and that filter REINDEXES the devices the
+    binary then knows about. The "effective visible" set is the ordered
+    UNION of the user's main GPU selection and the draft GPU selection
+    (see ``get_effective_visible_gpu_indices``); this guarantees that
+    every draft GPU is visible to the binary, while still honouring the
+    user-specified main ordering for tensor-split.
 
-    Mapping rules:
-        - No main subset selected (CUDA_VISIBLE_DEVICES not set):
+    Mapping rules (all post-union):
+        - No effective subset selected (CUDA_VISIBLE_DEVICES not set):
           launcher index N == binary CUDA<N>. Pass through.
-        - Main subset = ordered list (e.g. ``[5, 2]``):
-          binary CUDA<i> corresponds to ``ordered[i]``. Each draft
-          launcher index ``d`` is remapped to ``CUDA<ordered.index(d)>``.
-        - Draft selection includes an index that's NOT in the main
-          selection: that GPU is invisible to the binary. Warn and skip
-          the offending index (rest of the selection still emits).
+        - Effective subset = ordered list (e.g. ``[1, 2, 5, 7]``):
+          binary CUDA<i> corresponds to ``effective[i]``. Each draft
+          launcher index ``d`` is remapped to ``CUDA<effective.index(d)>``.
+        - Draft selection includes an index that — astonishingly —
+          is NOT in the effective set (shouldn't happen since the
+          helper unions draft into effective, but defended for safety):
+          warn and skip the offending index.
 
     Returns the comma-joined CUDA string, or "" when the result is
     empty (no flag should be emitted). Falls back to the launcher's
@@ -81,11 +172,11 @@ def _resolve_draft_device_value(launcher):
             return launcher.spec_draft_device.get().strip()
         except Exception:
             return ""
-    # Main subset gating
-    try:
-        main_ordered = launcher.get_ordered_selected_gpus()
-    except Exception:
-        main_ordered = []
+    # Effective visible GPU list (main ∪ draft). Single source of truth
+    # shared with LaunchManager._resolve_cuda_visible_devices_action so
+    # the env var the script exports and the indices emitted here can't
+    # disagree.
+    effective_ordered = get_effective_visible_gpu_indices(launcher)
     detected_count = 0
     try:
         gpu_info = getattr(launcher, "gpu_info", {})
@@ -93,28 +184,34 @@ def _resolve_draft_device_value(launcher):
             detected_count = int(gpu_info.get("device_count", 0) or 0)
     except Exception:
         detected_count = 0
-    # If the user has selected every detected GPU (or none), no CUDA_VISIBLE_DEVICES
-    # filter is in effect → launcher indices == binary indices.
-    no_filter = (not main_ordered) or (
-        detected_count > 0 and len(main_ordered) == detected_count
+    # If no filter is in effect (no selection at all, or the user selected
+    # every detected GPU), launcher indices pass through unchanged.
+    no_filter = (not effective_ordered) or (
+        detected_count > 0 and len(effective_ordered) == detected_count
     )
     parts = []
     if no_filter:
         for d in draft_indices:
             parts.append(f"CUDA{d}")
     else:
-        main_set = set(main_ordered)
+        effective_set = set(effective_ordered)
         for d in draft_indices:
-            if d not in main_set:
+            if d not in effective_set:
+                # Defensive: under Option C this should never happen because
+                # get_effective_visible_gpu_indices unions draft in. But
+                # if a future change opts out of the union (e.g. ngram
+                # spec_type stops being draft-capable), the warning is
+                # the user-facing signal that the index was dropped.
                 print(
-                    f"WARNING: draft GPU index {d} is not in the main GPU selection "
-                    f"{sorted(main_set)}; --spec-draft-device entry for that GPU is "
-                    f"skipped (would be filtered out by CUDA_VISIBLE_DEVICES).",
+                    f"WARNING: draft GPU index {d} is not in the effective visible "
+                    f"GPU set {sorted(effective_set)}; --spec-draft-device entry "
+                    f"for that GPU is skipped (would be filtered out by "
+                    f"CUDA_VISIBLE_DEVICES).",
                     file=sys.stderr,
                 )
                 continue
             try:
-                pos = main_ordered.index(d)
+                pos = effective_ordered.index(d)
             except ValueError:
                 continue
             parts.append(f"CUDA{pos}")

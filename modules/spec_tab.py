@@ -759,13 +759,14 @@ class SpecTab:
             ).grid(row=0, column=0, sticky="w", padx=5, pady=3)
 
         # Mirror the sanitized selection back into app_settings + spec_draft_device
-        # so the next save flushes a consistent state and emission can't drift.
-        # ONLY clobber spec_draft_device when we actually rendered checkboxes
-        # (i.e. real GPUs detected, non-manual mode) — otherwise we'd wipe a
-        # legitimately-persisted free-text value during init on machines
-        # without detected CUDA hardware (and break test environments).
-        self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+        # ONLY when we actually rendered real checkboxes (count > 0 + non-manual).
+        # When count == 0 we don't have enough information to sanitize: GPU
+        # detection may still be in flight (async SystemInfoManager run), and
+        # wiping spec_draft_selected_gpus here would destroy the user's stored
+        # selection BEFORE it has a chance to be applied. Same reasoning for
+        # spec_draft_device on machines/tests without detected CUDA hardware.
         if count > 0 and not manual_mode:
+            self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
             try:
                 self.spec_draft_device.set(
                     ",".join(f"CUDA{i}" for i in valid_selected)

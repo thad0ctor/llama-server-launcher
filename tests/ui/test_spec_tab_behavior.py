@@ -329,6 +329,97 @@ class TestDraftGpuCheckboxes:
         assert launcher.spec_draft_device.get() == "CUDA2"
 
 
+class TestDraftGpuSelectionWipeRegression:
+    """Locks the count=0 initial-render bug: when
+    ``_update_spec_draft_gpu_checkboxes`` is called before the async
+    SystemInfoManager has detected GPUs (i.e. ``gpu_info["device_count"]==0``),
+    the method MUST NOT wipe ``app_settings["spec_draft_selected_gpus"]`` —
+    that destroys a legitimately-persisted selection (e.g. user picked
+    [2, 5] last session, saved, restarted; the first call happens during
+    UI build BEFORE detection completes).
+
+    Pre-fix: ``valid_selected = []`` was written back unconditionally, so
+    [2, 5] became [] before the user even saw the tab. After detection
+    completed and the checkbox grid rebuilt, the selection was already
+    gone — the user's --spec-draft-device fell back to defaults and the
+    draft model ended up on the wrong GPU.
+
+    Post-fix: the mirror-back only happens when ``count > 0 and not
+    manual_mode``, so the count=0 path preserves whatever was loaded.
+    """
+
+    def test_count_zero_preserves_loaded_selection(self, real_launcher):
+        """The exact regression: simulate the initial-build state (no GPUs
+        detected yet) and assert the loaded selection survives the call."""
+        launcher, _ = real_launcher
+        # Simulate "async detection hasn't completed yet" — the initial UI
+        # build state on machines where GPU probing is slow or absent.
+        launcher.gpu_info = {"available": False, "device_count": 0, "devices": []}
+        launcher.detected_gpu_devices = []
+        # Simulate a previously-saved selection that load_saved_configs
+        # would have stuffed into app_settings before the UI built.
+        launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        launcher._update_spec_draft_gpu_checkboxes()
+        assert launcher.app_settings["spec_draft_selected_gpus"] == [2, 5], (
+            f"selection wiped during count=0 init; got "
+            f"{launcher.app_settings['spec_draft_selected_gpus']!r}"
+        )
+
+    def test_count_zero_does_not_clobber_spec_draft_device(self, real_launcher):
+        """A persisted free-text ``spec_draft_device`` value (e.g. ``"Vulkan0"``
+        for a non-CUDA backend) must also survive the count=0 init — the
+        old code wrote ``""`` back into the Tk var when count==0, wiping a
+        legitimate override."""
+        launcher, _ = real_launcher
+        launcher.gpu_info = {"available": False, "device_count": 0, "devices": []}
+        launcher.detected_gpu_devices = []
+        launcher.spec_draft_device.set("Vulkan0")
+        launcher._update_spec_draft_gpu_checkboxes()
+        assert launcher.spec_draft_device.get() == "Vulkan0"
+
+    def test_async_detection_sequence_preserves_then_validates(self, real_launcher):
+        """Full end-to-end: first call with count=0 preserves the loaded
+        selection; the SECOND call (post-detection, count=N) THEN sanitises
+        the selection against the now-known device list. This is the
+        contract we need: deferred sanitisation, not eager wipe."""
+        launcher, _ = real_launcher
+        # Stage 1: initial UI build, no detection yet.
+        launcher.gpu_info = {"available": False, "device_count": 0, "devices": []}
+        launcher.detected_gpu_devices = []
+        launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        launcher._update_spec_draft_gpu_checkboxes()
+        # Selection still intact, ready for the async re-trigger.
+        assert launcher.app_settings["spec_draft_selected_gpus"] == [2, 5]
+        # Stage 2: SystemInfoManager finishes, count=8, all GPUs valid.
+        launcher.gpu_info = {"available": True, "device_count": 8, "devices": []}
+        launcher.detected_gpu_devices = [{"id": i, "name": f"GPU {i}"} for i in range(8)]
+        launcher._update_spec_draft_gpu_checkboxes()
+        # Now sanitisation runs: 2 and 5 are valid indices on an 8-GPU host.
+        assert launcher.app_settings["spec_draft_selected_gpus"] == [2, 5]
+        # And the spec_draft_device Tk var is rebuilt to match.
+        assert launcher.spec_draft_device.get() == "CUDA2,CUDA5"
+
+    def test_count_zero_with_manual_mode_also_preserves(self, real_launcher):
+        """Manual GPU mode + count==0 is another path through the early
+        branch. The mirror-back guard ``count > 0 and not manual_mode``
+        must skip both. Verify by toggling manual mode on with no
+        detection completed."""
+        launcher, _ = real_launcher
+        launcher.gpu_info = {
+            "available": True, "device_count": 0, "devices": [], "manual_mode": True,
+        }
+        launcher.detected_gpu_devices = []
+        try:
+            launcher.manual_gpu_mode.set(True)
+        except Exception:
+            # Older launcher build: skip silently — the guard still works
+            # because count==0.
+            pass
+        launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        launcher._update_spec_draft_gpu_checkboxes()
+        assert launcher.app_settings["spec_draft_selected_gpus"] == [2, 5]
+
+
 # ---------------------------------------------------------------------------
 # Focus 2 — Real persistence round-trip
 # ---------------------------------------------------------------------------

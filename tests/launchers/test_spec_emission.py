@@ -1928,21 +1928,35 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA1"
 
-    def test_main_subset_2_5_draft_on_4_skips_with_warning(
+    def test_main_subset_2_5_draft_on_4_unions_into_visible_set(
         self, manager, remap_launcher, capsys
     ):
-        """The user's actual error case: draft on a GPU NOT in the main
-        selection. The bad index must be skipped with a warning, not
-        emitted as a phantom CUDA4."""
+        """Option C contract: draft on a GPU NOT in the main selection is
+        unioned into the effective CUDA_VISIBLE_DEVICES list (rather than
+        skipped with a warning, the pre-Option-C behaviour). With
+        main=[2,5] + draft=[4], effective visible = [2,5,4] so the
+        binary sees CUDA0=physical2, CUDA1=physical5, CUDA2=physical4 —
+        and the draft index remaps to CUDA2. This fixes the user-reported
+        OOM where the draft was silently dropping to CUDA0 because GPU 4
+        was being filtered out of the binary's view.
+
+        A spill-over advisory is printed so the user understands the
+        main model may bleed onto the draft GPU unless they pin layers
+        via --tensor-split."""
         remap_launcher.app_settings["selected_gpus"] = [2, 5]
         remap_launcher.app_settings["gpu_order"] = [2, 5]
         remap_launcher.app_settings["spec_draft_selected_gpus"] = [4]
         cmd = manager.build_cmd()
-        assert "--spec-draft-device" not in cmd
-        assert "CUDA4" not in cmd
+        assert "--spec-draft-device" in cmd
+        # Draft GPU 4 was union'd in: effective = [2, 5, 4] → CUDA2.
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA2"
+        # The spill-over advisory must explicitly call out the draft-only
+        # GPUs and recommend --tensor-split. The user's stderr is the
+        # canonical channel for this; suppressing it would silently bury
+        # the tradeoff Option C trades for the auto-fix.
         captured = capsys.readouterr()
-        assert "draft GPU index 4" in captured.err
-        assert "main GPU selection" in captured.err
+        assert "[4]" in captured.err
+        assert "--tensor-split" in captured.err
 
     def test_main_subset_5_2_reverse_order_remaps_correctly(
         self, manager, remap_launcher
@@ -2004,3 +2018,232 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         cmd = manager.build_cmd()
         assert "-devd" in cmd
         assert cmd[cmd.index("-devd") + 1] == "CUDA1"
+
+
+# ============================================================================
+# Option-C auto-union of draft GPUs into CUDA_VISIBLE_DEVICES.
+# Reproduces the user-reported OOM scenario where draft GPUs not present in
+# the main selection were silently filtered out of the binary's device view,
+# making the draft model fall back onto CUDA0 (= the first main GPU) which
+# was already holding most of the main model. The fix: union draft into the
+# exported CUDA_VISIBLE_DEVICES value so the binary CAN see the draft GPUs,
+# then remap --spec-draft-device through that combined ordering.
+# ============================================================================
+
+
+class TestDraftGpuUnionWithCudaVisibleDevices:
+    """The user's exact failure shape: main=[1,7], draft=[2,5].
+
+    Pre-fix:
+        - CUDA_VISIBLE_DEVICES=1,7 → binary sees CUDA0=physical1, CUDA1=physical7.
+        - Draft selection [2, 5] is invisible to the binary; --spec-draft-device
+          is silently omitted; draft falls back to CUDA0 and OOMs.
+
+    Post-fix (Option C):
+        - Effective visible = [1, 7, 2, 5] (main first in user order, then
+          draft-only GPUs sorted by index).
+        - CUDA_VISIBLE_DEVICES=1,7,2,5 → binary CUDA0/1/2/3 map to
+          physical 1/7/2/5.
+        - --spec-draft-device CUDA2,CUDA3 (positions of 2 and 5 in effective).
+        - A spill-over advisory is printed so the user knows the main model
+          may bleed onto the draft GPUs unless they constrain it via
+          --tensor-split.
+    """
+
+    @pytest.fixture
+    def union_launcher(self, launcher_mock):
+        """Reuses the TestSpecDraftDeviceCudaVisibleRemap fixture shape but
+        seeds 8 detected GPUs and a real ``get_ordered_selected_gpus`` that
+        reads from app_settings. The default backend is llama.cpp + draft-mtp
+        (draft-capable, so the union helper takes effect)."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.app_settings = {
+            "selected_gpus": [],
+            "gpu_order": [],
+            "spec_draft_selected_gpus": [],
+        }
+        launcher_mock.gpu_info = {"device_count": 8, "available": True, "devices": []}
+
+        def _ordered():
+            order = launcher_mock.app_settings.get("gpu_order", [])
+            sel = set(launcher_mock.app_settings.get("selected_gpus", []))
+            seen = set()
+            out = []
+            for g in order:
+                if g in sel and g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            for g in sorted(sel):
+                if g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            return out
+
+        launcher_mock.get_ordered_selected_gpus = _ordered
+        return launcher_mock
+
+    def test_user_reported_main_1_7_draft_2_5_unions_and_remaps(
+        self, manager, union_launcher
+    ):
+        """The exact failure case from the bug report.
+
+        Main=[1,7], draft=[2,5] → effective=[1,7,2,5] →
+        CUDA_VISIBLE_DEVICES=1,7,2,5 and --spec-draft-device CUDA2,CUDA3.
+        """
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        # Verify CUDA_VISIBLE_DEVICES action reflects the union.
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7,2,5", (
+            f"expected union 1,7,2,5; got {value!r}"
+        )
+        # Verify --spec-draft-device emits the post-filter positions.
+        # Effective=[1,7,2,5] → CUDA0=1, CUDA1=7, CUDA2=2, CUDA3=5.
+        # Draft selection [2,5] remaps to CUDA2,CUDA3.
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" in cmd
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA2,CUDA3"
+
+    def test_union_emits_spill_over_advisory(
+        self, manager, union_launcher, capsys
+    ):
+        """When draft GPUs are union'd in, the user must see a stderr hint
+        about the main model spilling onto the draft GPUs unless they use
+        --tensor-split. This is the explicit Option C tradeoff — silencing
+        it would bury the most important caveat of the auto-fix."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        manager.build_cmd()
+        err = capsys.readouterr().err
+        # The advisory must call out the specific draft-only GPUs and
+        # recommend --tensor-split.
+        assert "[2, 5]" in err
+        assert "--tensor-split" in err
+
+    def test_no_advisory_when_draft_subset_of_main(
+        self, manager, union_launcher, capsys
+    ):
+        """When the draft selection is a SUBSET of the main selection no
+        GPUs need to be union'd in — the advisory must not print (it would
+        be misleading)."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [7]
+        manager.build_cmd()
+        err = capsys.readouterr().err
+        assert "INFO: GPUs" not in err
+
+    def test_spec_disabled_no_union(self, manager, union_launcher):
+        """Spec disabled → draft selection ignored entirely. Main alone
+        determines CUDA_VISIBLE_DEVICES."""
+        union_launcher.spec_enabled.set(False)
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7"
+
+    def test_non_draft_capable_spec_type_no_union(self, manager, union_launcher):
+        """ngram-* / suffix don't use a draft model → draft selection is
+        stale state from a prior session; never union it in."""
+        union_launcher.spec_type.set("ngram-simple")
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7"
+
+    def test_ik_llama_non_draft_capable_no_union(self, manager, union_launcher):
+        """ik_llama: spec_type='ngram-cache' (non-draft-capable) → no union."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set("ngram-cache")
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7"
+
+    def test_ik_llama_mtp_unions(self, manager, union_launcher):
+        """ik_llama + mtp (draft-capable) → union works the same way."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set("mtp")
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7,2,5"
+        cmd = manager.build_cmd()
+        # ik_llama uses the -devd short form.
+        assert "-devd" in cmd
+        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+
+    def test_manual_gpu_mode_no_union_export(self, manager, union_launcher):
+        """Manual GPU mode unsets CUDA_VISIBLE_DEVICES regardless of the
+        draft selection (synthetic indices have no relation to physical
+        hardware, so unioning them would still be wrong)."""
+        union_launcher.gpu_info = {
+            "device_count": 4, "available": True, "manual_mode": True,
+        }
+        union_launcher.app_settings["selected_gpus"] = [0, 1]
+        union_launcher.app_settings["gpu_order"] = [0, 1]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 3]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "unset"
+        assert value is None
+
+    def test_empty_main_with_draft_does_not_create_filter(
+        self, manager, union_launcher
+    ):
+        """When the user has NOT selected any main GPUs (= 'use all detected
+        by default'), a draft-only selection must NOT silently create a
+        filtered CUDA_VISIBLE_DEVICES. The pre-Option-C semantics for
+        empty main are preserved: no filter, draft passes through to
+        whatever launcher index it points to."""
+        union_launcher.app_settings["selected_gpus"] = []
+        union_launcher.app_settings["gpu_order"] = []
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [3]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        # device_count > 0 with no selection → 'unset' (real GPUs detected
+        # but user deselected all; preserved from before the union change).
+        assert action == "unset"
+        # And --spec-draft-device still passes through as CUDA3.
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA3"
+
+    def test_draft_selection_order_is_sorted_numerically(
+        self, manager, union_launcher
+    ):
+        """Union appends draft-only GPUs in numeric order regardless of
+        the order they appear in spec_draft_selected_gpus. This makes the
+        post-filter CUDA<i> remap reproducible across launches (the
+        checkbox toggle order is not stable)."""
+        union_launcher.app_settings["selected_gpus"] = [0]
+        union_launcher.app_settings["gpu_order"] = [0]
+        # Toggle order [5, 2] should still produce sorted appends [2, 5].
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [5, 2]
+        _, value = manager._resolve_cuda_visible_devices_action()
+        assert value == "0,2,5"
+
+    def test_no_extra_advisory_when_full_main_no_draft_only(
+        self, manager, union_launcher, capsys
+    ):
+        """Subset main warning still fires, but the draft-only INFO line
+        does not when there are no draft-only additions."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = []
+        manager.build_cmd()
+        err = capsys.readouterr().err
+        # Generic subset warning should appear.
+        assert "Specific GPUs (1,7)" in err
+        # Draft-only advisory should NOT appear.
+        assert "added to CUDA_VISIBLE_DEVICES for the draft model" not in err
