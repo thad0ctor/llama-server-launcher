@@ -43,6 +43,8 @@ EVENT_DONE = "done"           # ("done", exit_code)
 EVENT_CANCELLED = "cancelled" # ("cancelled", None)
 EVENT_ERROR = "error"         # ("error", message)
 
+EVENT_QUEUE_MAXSIZE = 4000
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Repos managed by the build tab
@@ -177,11 +179,16 @@ class BuildRunner:
     """Single-job pipeline runner. Reuse one instance for the tab lifetime."""
 
     def __init__(self) -> None:
-        self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        # Bounded so a very noisy compiler/linker cannot grow Python memory
+        # without limit if the Tk console falls behind. Line events may be
+        # dropped under sustained pressure; terminal events block until the UI
+        # drains space so completion/cancel state is still delivered.
+        self.events: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
         self._cancel = threading.Event()
         self._lock = threading.Lock()
+        self._dropped_output_lines = 0
 
     # ---------------------------------------------------------------- state
     @property
@@ -241,10 +248,36 @@ class BuildRunner:
 
     # ---------------------------------------------------------------- events
     def _emit_line(self, text: str) -> None:
-        self.events.put((EVENT_LINE, text))
+        if self._dropped_output_lines:
+            dropped = self._dropped_output_lines
+            notice = (
+                f"[launcher skipped {dropped} build output line(s) "
+                "while the UI caught up]"
+            )
+            try:
+                self.events.put_nowait((EVENT_LINE, notice))
+                self._dropped_output_lines = 0
+            except queue.Full:
+                self._dropped_output_lines += 1
+                return
+        try:
+            self.events.put_nowait((EVENT_LINE, text))
+        except queue.Full:
+            self._dropped_output_lines += 1
+
+    def _emit_event(self, kind: str, payload: object) -> None:
+        if self._dropped_output_lines:
+            dropped = self._dropped_output_lines
+            self._dropped_output_lines = 0
+            self.events.put((
+                EVENT_LINE,
+                f"[launcher skipped {dropped} build output line(s) "
+                "while the UI caught up]",
+            ))
+        self.events.put((kind, payload))
 
     def _emit_stage(self, name: str) -> None:
-        self.events.put((EVENT_STAGE, name))
+        self._emit_event(EVENT_STAGE, name)
         self._emit_line(f"\n══ {name} ══")
 
     # ---------------------------------------------------------------- pipeline
@@ -261,15 +294,15 @@ class BuildRunner:
                 build_resolved = build.resolve(strict=False)
                 src_resolved = src.resolve(strict=False)
             except Exception as exc:
-                self.events.put((EVENT_ERROR, f"Could not resolve paths: {exc}"))
+                self._emit_event(EVENT_ERROR, f"Could not resolve paths: {exc}")
                 return
             if not str(plan.build_dir).strip():
-                self.events.put((EVENT_ERROR, "build_dir is empty; refusing to operate."))
+                self._emit_event(EVENT_ERROR, "build_dir is empty; refusing to operate.")
                 return
             if build_resolved == src_resolved or build_resolved in src_resolved.parents:
-                self.events.put((EVENT_ERROR,
+                self._emit_event(EVENT_ERROR,
                     f"Refusing unsafe build dir {build_resolved!s} "
-                    f"(would target the source dir or an ancestor)."))
+                    f"(would target the source dir or an ancestor).")
                 return
             build = build_resolved
             src = src_resolved
@@ -277,10 +310,10 @@ class BuildRunner:
             # Stage: clone if needed
             if not src.exists():
                 if not plan.git_clone_if_missing:
-                    self.events.put((EVENT_ERROR, f"Source dir does not exist: {src}"))
+                    self._emit_event(EVENT_ERROR, f"Source dir does not exist: {src}")
                     return
                 if not plan.upstream_url:
-                    self.events.put((EVENT_ERROR, f"No upstream URL known for backend {plan.backend!r}"))
+                    self._emit_event(EVENT_ERROR, f"No upstream URL known for backend {plan.backend!r}")
                     return
                 src.parent.mkdir(parents=True, exist_ok=True)
                 self._emit_stage(f"git clone {plan.upstream_url} → {src}")
@@ -289,16 +322,16 @@ class BuildRunner:
                     cwd=str(src.parent),
                 )
                 if self._cancel.is_set():
-                    self.events.put((EVENT_CANCELLED, None))
+                    self._emit_event(EVENT_CANCELLED, None)
                     return
                 if rc != 0:
-                    self.events.put((EVENT_DONE, rc))
+                    self._emit_event(EVENT_DONE, rc)
                     return
             elif plan.git_pull_before_build:
                 self._emit_stage("git pull --ff-only")
                 rc = self._stream(["git", "pull", "--ff-only"], cwd=str(src))
                 if self._cancel.is_set():
-                    self.events.put((EVENT_CANCELLED, None))
+                    self._emit_event(EVENT_CANCELLED, None)
                     return
                 if rc != 0:
                     self._emit_line(f"git pull exited {rc}; continuing with current checkout")
@@ -308,19 +341,19 @@ class BuildRunner:
                 self._emit_stage(f"git checkout {plan.git_ref}")
                 rc = self._stream(["git", "checkout", plan.git_ref], cwd=str(src))
                 if self._cancel.is_set():
-                    self.events.put((EVENT_CANCELLED, None))
+                    self._emit_event(EVENT_CANCELLED, None)
                     return
                 if rc != 0:
-                    self.events.put((EVENT_DONE, rc))
+                    self._emit_event(EVENT_DONE, rc)
                     return
                 rc = self._stream(["git", "submodule", "update", "--init", "--recursive"], cwd=str(src))
                 if self._cancel.is_set():
-                    self.events.put((EVENT_CANCELLED, None))
+                    self._emit_event(EVENT_CANCELLED, None)
                     return
                 if rc != 0:
                     # Submodules not fetched cleanly — surfacing this is much
                     # nicer than letting cmake fail later on a missing header.
-                    self.events.put((EVENT_DONE, rc))
+                    self._emit_event(EVENT_DONE, rc)
                     return
 
             # Stage: clean
@@ -329,7 +362,7 @@ class BuildRunner:
                 try:
                     shutil.rmtree(build)
                 except Exception as exc:
-                    self.events.put((EVENT_ERROR, f"Failed to clean build dir: {exc}"))
+                    self._emit_event(EVENT_ERROR, f"Failed to clean build dir: {exc}")
                     return
 
             build.mkdir(parents=True, exist_ok=True)
@@ -345,10 +378,10 @@ class BuildRunner:
             self._emit_line("$ " + " ".join(shlex.quote(x) for x in cfg_cmd))
             rc = self._stream(cfg_cmd, cwd=str(src), env=env)
             if self._cancel.is_set():
-                self.events.put((EVENT_CANCELLED, None))
+                self._emit_event(EVENT_CANCELLED, None)
                 return
             if rc != 0:
-                self.events.put((EVENT_DONE, rc))
+                self._emit_event(EVENT_DONE, rc)
                 return
 
             # Stage: build
@@ -360,11 +393,11 @@ class BuildRunner:
             self._emit_line("$ " + " ".join(shlex.quote(x) for x in build_cmd))
             rc = self._stream(build_cmd, cwd=str(src), env=env)
             if self._cancel.is_set():
-                self.events.put((EVENT_CANCELLED, None))
+                self._emit_event(EVENT_CANCELLED, None)
                 return
-            self.events.put((EVENT_DONE, rc))
+            self._emit_event(EVENT_DONE, rc)
         except Exception as exc:
-            self.events.put((EVENT_ERROR, f"{type(exc).__name__}: {exc}"))
+            self._emit_event(EVENT_ERROR, f"{type(exc).__name__}: {exc}")
 
     # ---------------------------------------------------------------- exec
     def _stream(

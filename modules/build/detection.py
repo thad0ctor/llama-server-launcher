@@ -621,11 +621,13 @@ class JobRecommendation:
 
 
 def recommend_jobs() -> JobRecommendation:
-    """Pick a build-jobs count balancing nproc against RAM headroom.
+    """Pick an interactive-safe build-jobs count.
 
-    NVCC peak memory per parallel job can hit ~2 GB for heavy CUDA TUs,
-    so we cap jobs at floor(total_ram_gb / 2) when CUDA is in play. The
-    user can always override in the UI.
+    A CMake/Ninja build can make the whole desktop feel frozen if it uses
+    every logical CPU, and NVCC peak memory per parallel job can be several
+    GB for heavy CUDA translation units. Prefer physical cores, reserve a
+    little CPU for the shell/desktop, and cap the default at 16 jobs. The
+    user can still override this in the UI.
     """
     cpu_count = os.cpu_count() or 1
     physical: int | None = None
@@ -638,19 +640,19 @@ def recommend_jobs() -> JobRecommendation:
     except Exception:
         pass
 
-    suggested = cpu_count
-    reason = f"nproc={cpu_count}"
+    cpu_cap = max(1, cpu_count - 2)
+    if physical:
+        cpu_cap = min(cpu_cap, physical)
+    default_cap = 16
+    suggested = min(cpu_cap, default_cap)
+    caps = [f"interactive CPU cap={cpu_cap}", f"default max={default_cap}"]
 
     if ram_gb is not None:
-        ram_cap = max(1, int(ram_gb // 2))
+        ram_cap = max(1, int(ram_gb // 4))
         if ram_cap < suggested:
             suggested = ram_cap
-            reason = (
-                f"capped at {ram_cap} (≈2 GB/job × {ram_cap} ≤ "
-                f"{ram_gb:.0f} GB RAM)"
-            )
-        else:
-            reason = f"nproc={cpu_count}, RAM={ram_gb:.0f} GB (headroom OK)"
+        caps.append(f"RAM cap={ram_cap} (≈4 GB/job)")
+    reason = ", ".join(caps)
 
     return JobRecommendation(
         suggested=suggested,

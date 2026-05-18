@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -70,6 +71,10 @@ def parse_cli_args(argv=None):
 
 # Debug logging control
 DEBUG_VERBOSE = os.getenv('LLAMA_LAUNCHER_DEBUG', '').lower() in ('1', 'true', 'yes')
+MODEL_SCAN_POLL_MS = 100
+ANALYSIS_POLL_MS = 80
+LISTBOX_INSERT_CHUNK = 1000
+SYSTEM_INFO_POLL_MS = 100
 
 def debug_print(message, force=False):
     """Print debug message only if verbose debug is enabled or force=True."""
@@ -219,7 +224,7 @@ class LlamaCppLauncher:
         # (via WM_DELETE_WINDOW protocol and a <Destroy> binding) so any
         # late-completing worker becomes a no-op rather than racing into a
         # dead Tcl interpreter and corrupting the next launcher's UI
-        # threading state. See ``_safe_after_destroy`` / ``_mark_tk_dead``.
+        # threading state. See ``_mark_tk_dead``.
         import threading as _threading_local
         self._tk_alive = _threading_local.Event()
         self._tk_alive.set()
@@ -641,6 +646,13 @@ class LlamaCppLauncher:
         self.mmproj_display_to_path = {} # {display_value: path_string}
         self.current_model_analysis = {} # Holds the result of the last GGUF analysis
         self.analysis_thread = None
+        self._analysis_generation = 0
+        self._analysis_results_queue = queue.Queue()
+        self._analysis_after_id = None
+        self._scan_in_progress = False
+        self._scan_generation = 0
+        self._scan_results_queue = queue.Queue()
+        self._scan_after_id = None
         # detected_gpu_devices is populated by SystemInfoManager
         self.detected_gpu_devices = [] # List of detected GPU info dicts
         # logical_cores and physical_cores are populated by SystemInfoManager
@@ -654,6 +666,9 @@ class LlamaCppLauncher:
         # --- Detection Progress Flag ---
         # Flag to prevent multiple simultaneous GPU detection threads
         self._detection_in_progress = False
+        self._system_info_queue = queue.Queue()
+        self._system_info_after_id = None
+        self._system_info_thread = None
 
 
         # --- System Info Initialization ---
@@ -840,9 +855,7 @@ class LlamaCppLauncher:
 
         # Perform initial scan (in background) if dirs exist
         if self.model_dirs:
-            self.scan_status_var.set("Scanning on startup...")
-            scan_thread = Thread(target=self._scan_model_dirs, daemon=True)
-            scan_thread.start()
+            self._start_model_scan("Scanning on startup...", clear_ui=False)
         else:
              self.scan_status_var.set("Add directories and scan for models.")
 
@@ -2301,32 +2314,70 @@ class LlamaCppLauncher:
 
     def _trigger_scan(self):
         """Initiates model scanning in a background thread."""
-        self.scan_status_var.set("Scanning...")
-        self.model_listbox.config(state=tk.NORMAL)
-        self.model_listbox.delete(0, tk.END)
-        self.model_path.set("")
-        self._reset_gpu_layer_controls()
-        self._reset_model_info_display()
-        self.current_model_analysis = {} # Clear analysis result
-        self._update_recommendations() # Update recommendations display
-        # Disable Add/Remove buttons during scan to prevent modifying the list while scanning
-        # Need to find the buttons - assuming they are in the dir_btn_frame
+        self._start_model_scan("Scanning...", clear_ui=True)
+
+    def _start_model_scan(self, status_text, *, clear_ui):
+        """Start one background scan using a main-thread snapshot of paths."""
+        if self._scan_in_progress:
+            self.scan_status_var.set("Scan already running...")
+            return
+
+        self._scan_in_progress = True
+        self._scan_generation += 1
+        scan_id = self._scan_generation
+        self.scan_status_var.set(status_text)
+
+        if clear_ui:
+            self.model_listbox.config(state=tk.NORMAL)
+            self.model_listbox.delete(0, tk.END)
+            self.model_path.set("")
+            self._reset_gpu_layer_controls()
+            self._reset_model_info_display()
+            self.current_model_analysis = {} # Clear analysis result
+            self._update_recommendations() # Update recommendations display
+
+        # Disable Add/Remove buttons during scan to prevent modifying the list while scanning.
         if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
              for child in self.dir_btn_frame.winfo_children():
                  if isinstance(child, ttk.Button):
                       child.config(state=tk.DISABLED)
 
-        # Ensure self.model_dirs contains Path objects before scanning
-        # It should already contain Path objects from _update_model_dirs_listbox, but double check
-        self.model_dirs = [Path(d) for d in [str(p) for p in self.model_dirs] if d] # Re-create list of Paths
+        # Snapshot paths on the Tk thread. The worker must not read self.model_dirs
+        # while the UI can mutate it.
+        self.model_dirs = [Path(d) for d in [str(p) for p in self.model_dirs] if d]
+        model_dirs_snapshot = list(self.model_dirs)
 
-
-        scan_thread = Thread(target=self._scan_model_dirs, daemon=True)
+        scan_thread = Thread(
+            target=self._scan_model_dirs,
+            args=(scan_id, model_dirs_snapshot),
+            daemon=True,
+        )
         scan_thread.start()
+        if self._scan_after_id is None:
+            self._scan_after_id = self.root.after(MODEL_SCAN_POLL_MS, self._drain_model_scan_results)
 
-    def _scan_model_dirs(self):
+    @staticmethod
+    def _iter_gguf_candidates(model_dir):
+        """Yield candidate GGUF paths without stat'ing every non-matching file."""
+        def onerror(exc):
+            print(f"ERROR: Error scanning directory {model_dir}: {exc}", file=sys.stderr)
+
+        for dirpath, _dirnames, filenames in os.walk(model_dir, onerror=onerror):
+            for filename in filenames:
+                filename_l = filename.lower()
+                if not re.search(r"\.gguf(?:\.part\d+of\d+)?$", filename_l):
+                    continue
+                if "mmproj" in filename_l or filename_l.endswith(".bin.gguf"):
+                    continue
+                yield Path(dirpath) / filename
+
+    def _scan_model_dirs(self, scan_id=None, model_dirs_snapshot=None):
         """Scans configured directories for GGUF models (runs in background thread)."""
-        print("DEBUG: _scan_model_dirs thread started", file=sys.stderr)
+        debug_print("_scan_model_dirs thread started")
+        if scan_id is None:
+            scan_id = self._scan_generation
+        if model_dirs_snapshot is None:
+            model_dirs_snapshot = list(self.model_dirs)
         found = {} # {display_name: full_path_obj}
         # Pattern to match multi-part files
         # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
@@ -2338,64 +2389,98 @@ class LlamaCppLauncher:
         re_first2 = re.compile(r"^(.*?)\.gguf\.part0*1of\d+$", re.I)
 
         # Two-pass approach to handle multi-part files correctly
-        all_gguf_files = []
-        for model_dir in self.model_dirs:
-            # Skip invalid or non-existent directories silently during scan
-            if not isinstance(model_dir, Path) or not model_dir.is_dir(): continue
-            print(f"DEBUG: Scanning directory: {model_dir}", file=sys.stderr)
-            try:
-                # Collect GGUF model files with case-insensitive matching, including *.gguf.partXofY.
-                for gguf_path in model_dir.rglob('*'):
-                    if not gguf_path.is_file():
-                        continue
-                    filename_l = gguf_path.name.lower()
-                    if not re.search(r"\.gguf(?:\.part\d+of\d+)?$", filename_l):
-                        continue
-                    # Skip non-model GGUF files often found with models
-                    if "mmproj" in filename_l or filename_l.endswith(".bin.gguf"):
-                        continue
-                    all_gguf_files.append(gguf_path)
-            except Exception as e:
-                print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
+        try:
+            all_gguf_files = []
+            for model_dir in model_dirs_snapshot:
+                # Skip invalid or non-existent directories silently during scan.
+                if not isinstance(model_dir, Path) or not model_dir.is_dir():
+                    continue
+                debug_print(f"Scanning directory: {model_dir}")
+                try:
+                    all_gguf_files.extend(self._iter_gguf_candidates(model_dir))
+                except Exception as e:
+                    print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
 
-        # First pass: find all first parts of multi-part files
-        processed_multipart_bases = set()
-        for gguf_path in all_gguf_files:
-            filename = gguf_path.name
-            first_part_match = re_first1.match(filename) or re_first2.match(filename)
-            if first_part_match:
-                base_name = first_part_match.group(1)
-                if base_name not in processed_multipart_bases:
+            # First pass: find all first parts of multi-part files.
+            processed_multipart_bases = set()
+            for gguf_path in all_gguf_files:
+                filename = gguf_path.name
+                first_part_match = re_first1.match(filename) or re_first2.match(filename)
+                if first_part_match:
+                    base_name = first_part_match.group(1)
+                    if base_name not in processed_multipart_bases:
+                        try:
+                            resolved_gguf_path = gguf_path.resolve()
+                            found[base_name] = resolved_gguf_path
+                            processed_multipart_bases.add(base_name)
+                            debug_print(f"Found multi-part model: {base_name}")
+                        except Exception as resolve_exc:
+                            print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+
+            # Second pass: find single-part files that aren't part of multi-part sets.
+            for gguf_path in all_gguf_files:
+                filename = gguf_path.name
+
+                # Skip if this is any part of a multi-part file.
+                if re_multi1.match(filename) or re_multi2.match(filename):
+                    continue
+
+                # Handle single-part files.
+                if filename.lower().endswith(".gguf"):
+                    display_name = gguf_path.stem
+                    if display_name not in processed_multipart_bases and display_name not in found:
+                        try:
+                            resolved_gguf_path = gguf_path.resolve()
+                            found[display_name] = resolved_gguf_path
+                            debug_print(f"Found single-part model: {display_name}")
+                        except Exception as resolve_exc:
+                            print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+
+            debug_print(f"Scan completed, found {len(found)} models")
+            self._scan_results_queue.put((scan_id, found, ""))
+        except Exception as exc:
+            self._scan_results_queue.put((scan_id, found, str(exc)))
+
+    def _drain_model_scan_results(self):
+        self._scan_after_id = None
+        try:
+            while True:
+                scan_id, found, error = self._scan_results_queue.get_nowait()
+                if scan_id != self._scan_generation:
+                    continue
+                self._scan_in_progress = False
+                if error:
+                    self.scan_status_var.set(f"Scan failed: {error}")
+                    self._reenable_model_dir_buttons()
+                    return
+                self._update_model_listbox_after_scan(found)
+                return
+        except queue.Empty:
+            pass
+        if self._scan_in_progress:
+            self._scan_after_id = self.root.after(MODEL_SCAN_POLL_MS, self._drain_model_scan_results)
+
+    def _reenable_model_dir_buttons(self):
+        if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
+            for child in self.dir_btn_frame.winfo_children():
+                if isinstance(child, ttk.Button):
                     try:
-                        resolved_gguf_path = gguf_path.resolve()
-                        found[base_name] = resolved_gguf_path
-                        processed_multipart_bases.add(base_name)
-                        print(f"DEBUG: Found multi-part model: {base_name}", file=sys.stderr)
-                    except Exception as resolve_exc:
-                        print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+                        child.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
 
-        # Second pass: find single-part files that aren't part of multi-part sets
-        for gguf_path in all_gguf_files:
-            filename = gguf_path.name
-
-            # Skip if this is any part of a multi-part file
-            if re_multi1.match(filename) or re_multi2.match(filename):
-                continue
-
-            # Handle single-part files
-            if filename.lower().endswith(".gguf"):
-                display_name = gguf_path.stem
-                if display_name not in processed_multipart_bases and display_name not in found:
-                    try:
-                        resolved_gguf_path = gguf_path.resolve()
-                        found[display_name] = resolved_gguf_path
-                        print(f"DEBUG: Found single-part model: {display_name}", file=sys.stderr)
-                    except Exception as resolve_exc:
-                        print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
-
-        print(f"DEBUG: Scan completed, found {len(found)} models", file=sys.stderr)
-        self.root.after(0, self._update_model_listbox_after_scan, found)
+    @staticmethod
+    def _replace_listbox_items(listbox, items):
+        listbox.delete(0, tk.END)
+        for start in range(0, len(items), LISTBOX_INSERT_CHUNK):
+            chunk = items[start:start + LISTBOX_INSERT_CHUNK]
+            if chunk:
+                try:
+                    listbox.insert(tk.END, *chunk)
+                except TypeError:
+                    for item in chunk:
+                        listbox.insert(tk.END, item)
 
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis
@@ -2403,15 +2488,13 @@ class LlamaCppLauncher:
 
     def _update_model_listbox_after_scan(self, found_models_dict):
         """Populates the model listbox AFTER scan and handles selection restoration."""
-        # Store found models with their resolved paths
-        self.found_models = {name: path.resolve() for name, path in found_models_dict.items() if path.is_file()}
+        # Store resolved paths produced by the worker. Avoid filesystem stat/resolve
+        # work here; this method runs on the Tk thread.
+        self.found_models = dict(found_models_dict)
         model_names = sorted(list(self.found_models.keys()))
 
         self.model_listbox.config(state=tk.NORMAL)
-        self.model_listbox.delete(0, tk.END)
-        for name in model_names:
-            self.model_listbox.insert(tk.END, name)
-        self.root.update_idletasks()
+        self._replace_listbox_items(self.model_listbox, model_names)
 
         # Mirror the population into the MTP/Spec tab's draft-model listbox so
         # the user can pick the draft GGUF from the same pool. State is
@@ -2419,9 +2502,7 @@ class LlamaCppLauncher:
         # end restores the per-backend/per-spec_type enable/disable rules.
         if hasattr(self, "spec_draft_listbox") and self.spec_draft_listbox.winfo_exists():
             self.spec_draft_listbox.config(state=tk.NORMAL)
-            self.spec_draft_listbox.delete(0, tk.END)
-            for name in model_names:
-                self.spec_draft_listbox.insert(tk.END, name)
+            self._replace_listbox_items(self.spec_draft_listbox, model_names)
             # Restore the user's prior draft selection if its path still exists.
             saved_draft = (self.spec_draft_model.get() or "").strip()
             restored_draft_selection = False
@@ -2695,16 +2776,7 @@ class LlamaCppLauncher:
             self.current_model_analysis = {}  # Clear old analysis
             self._update_recommendations()  # Update recommendations display based on no analysis yet
 
-            # Start analysis thread
-            if self.analysis_thread and self.analysis_thread.is_alive():
-                print("DEBUG: Previous analysis thread is still running, cancelling old analysis.", file=sys.stderr)
-                # Ideally, you'd have a way to signal the thread to stop.
-                # For simplicity here, we just let the old thread finish and ignore its result
-                # if a new analysis starts, by checking self.model_path in _update_ui_after_analysis.
-                pass  # No explicit cancel mechanism here
-
-            self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
-            self.analysis_thread.start()
+            self._start_gguf_analysis(full_path_str)
 
 
         else:
@@ -2719,25 +2791,6 @@ class LlamaCppLauncher:
             self._update_recommendations() # Update based on no model
             self._generate_default_config_name() # Generate default name for no model state
             self._update_manual_model_visibility() # Update manual model section visibility
-
-
-    def _run_gguf_analysis(self, model_path_str):
-        """Worker function for background GGUF analysis using built-in GGUF parser."""
-        print(f"Analyzing GGUF in background: {model_path_str}", file=sys.stderr)
-        # Check if the currently selected model in the GUI still matches the one being analyzed
-        # This prevents updating the UI with stale results if the user quickly selects another model
-        if self.model_path.get() == model_path_str:
-            # Use the built-in GGUF parser directly
-            analysis_result = parse_gguf_header_simple(model_path_str)
-
-            # Only update UI if the model path hasn't changed while analyzing
-            if self.model_path.get() == model_path_str:
-                self.root.after(0, self._update_ui_after_analysis, analysis_result)
-            else:
-                print(f"DEBUG: Analysis for {model_path_str} finished, but model selection changed. Discarding result.", file=sys.stderr)
-        else:
-            print(f"DEBUG: Analysis started for {model_path_str}, but model selection changed before analysis began. Skipping.", file=sys.stderr)
-
 
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis - Updated Handler
@@ -2778,13 +2831,50 @@ class LlamaCppLauncher:
         self.current_model_analysis = {}
         self._update_recommendations()
 
-        # Cancel any existing analysis
-        if self.analysis_thread and self.analysis_thread.is_alive():
-            print("DEBUG: Cancelling previous analysis thread for force analysis.", file=sys.stderr)
+        self._start_gguf_analysis(model_path_str)
 
-        # Start new analysis thread
-        self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(model_path_str,), daemon=True)
+    def _start_gguf_analysis(self, model_path_str):
+        """Start GGUF header parsing and drain results from the Tk thread."""
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            debug_print("Previous analysis thread is still running; its result will be ignored if stale.")
+        self._analysis_generation += 1
+        analysis_id = self._analysis_generation
+        self.analysis_thread = Thread(
+            target=self._run_gguf_analysis,
+            args=(model_path_str, analysis_id),
+            daemon=True,
+        )
         self.analysis_thread.start()
+        if self._analysis_after_id is None:
+            self._analysis_after_id = self.root.after(ANALYSIS_POLL_MS, self._drain_gguf_analysis_results)
+
+    def _run_gguf_analysis(self, model_path_str, analysis_id=None):
+        """Worker function for background GGUF analysis using built-in GGUF parser."""
+        debug_print(f"Analyzing GGUF in background: {model_path_str}")
+        if analysis_id is None:
+            analysis_id = self._analysis_generation
+        try:
+            analysis_result = parse_gguf_header_simple(model_path_str)
+        except Exception as exc:
+            analysis_result = {"path": model_path_str, "error": str(exc)}
+        self._analysis_results_queue.put((analysis_id, analysis_result))
+
+    def _drain_gguf_analysis_results(self):
+        self._analysis_after_id = None
+        try:
+            while True:
+                analysis_id, analysis_result = self._analysis_results_queue.get_nowait()
+                if analysis_id != self._analysis_generation:
+                    continue
+                if self.model_path.get() != analysis_result.get("path"):
+                    debug_print("_drain_gguf_analysis_results received stale model result; ignoring.")
+                    continue
+                self._update_ui_after_analysis(analysis_result)
+                return
+        except queue.Empty:
+            pass
+        if (self.analysis_thread and self.analysis_thread.is_alive()) or not self._analysis_results_queue.empty():
+            self._analysis_after_id = self.root.after(ANALYSIS_POLL_MS, self._drain_gguf_analysis_results)
 
     def _update_ui_after_analysis(self, analysis_result):
         """Updates controls based on GGUF analysis results (runs in main thread)."""
@@ -4044,14 +4134,9 @@ class LlamaCppLauncher:
     def _start_system_info_detection(self):
         """Start system info detection in a background thread.
 
-        Reads the venv path on the *main* thread before forking — touching
-        a ``tk.StringVar`` from a worker thread after the root has been
-        destroyed (e.g. during pytest teardown between UI cases) raises
-        ``RuntimeError: main thread is not in main loop`` and corrupts
-        Tcl's threading state on Python 3.13, which then deadlocks the
-        next ``ttk.Notebook.add()``. The worker only consumes the captured
-        string and dispatches Tk-mutating work back through ``.after(...)``
-        wrapped in ``_safe_after_destroy``.
+        Reads the venv path on the *main* thread before forking. The worker
+        consumes only captured plain strings and posts completion into a
+        Python queue; the Tk thread polls that queue and applies Tk vars.
         """
         # Prevent multiple simultaneous detection threads
         if hasattr(self, '_detection_in_progress') and self._detection_in_progress:
@@ -4081,53 +4166,35 @@ class LlamaCppLauncher:
                 )
                 print("DEBUG: Background system info detection completed.", file=sys.stderr)
 
-                # Schedule UI update on main thread (flag will be cleared there)
-                self._safe_after_destroy(0, self._on_system_info_detection_complete)
+                self._system_info_queue.put((None,))
             except Exception as e:
                 print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-                # Capture the message eagerly. ``except ... as e`` unbinds ``e``
-                # when the block exits, and Tk's ``.after(0, ...)`` runs the
-                # callback later on the main thread — so a naive ``lambda:
-                # ... error=str(e)`` raises NameError at callback time.
-                error_message = str(e)
-                self._safe_after_destroy(
-                    0,
-                    lambda: self._on_system_info_detection_complete(error=error_message),
-                )
+                self._system_info_queue.put((str(e),))
 
         # Start detection in background thread
-        detection_thread = Thread(target=detect_system_info, daemon=True)
-        detection_thread.start()
+        self._system_info_thread = Thread(target=detect_system_info, daemon=True)
+        self._system_info_thread.start()
+        self._schedule_system_info_drain()
 
-    def _safe_after_destroy(self, delay, callback):
-        """``self.root.after(delay, callback)`` that swallows post-destroy
-        races. Background threads that complete after the launcher root
-        has been destroyed (common during test teardown) would otherwise
-        raise ``RuntimeError: main thread is not in main loop`` from deep
-        inside Tcl, and on Python 3.13 that error corrupts the global
-        interpreter state and deadlocks the next root's UI calls.
+    def _schedule_system_info_drain(self):
+        if self._system_info_after_id is None and self._tk_alive.is_set():
+            self._system_info_after_id = self.root.after(
+                SYSTEM_INFO_POLL_MS,
+                self._drain_system_info_queue,
+            )
 
-        Uses a Python-level ``threading.Event`` flag (``_tk_alive``) so
-        the check itself never touches Tcl from the worker thread —
-        ``root.winfo_exists()`` would raise ``RuntimeError`` from a
-        non-main thread on Python 3.13 and the raise itself wedges the
-        global Tcl interpreter, blocking any subsequent ``ttk`` call on
-        the next root. The flag is cleared in ``_mark_tk_dead`` which
-        every teardown path (on_exit, root.destroy via Tk's WM_DELETE
-        protocol, test fixtures) must call.
-        """
-        if not getattr(self, "_tk_alive", None) or not self._tk_alive.is_set():
-            return
-        root = getattr(self, "root", None)
-        if root is None:
+    def _drain_system_info_queue(self):
+        self._system_info_after_id = None
+        if not self._tk_alive.is_set():
             return
         try:
-            root.after(delay, callback)
-        except (tk.TclError, RuntimeError):
-            # Final fence: even with the Python flag, the root could
-            # have been destroyed between the flag check and the call.
-            pass
+            (error_message,) = self._system_info_queue.get_nowait()
+        except queue.Empty:
+            if self._system_info_thread is not None and self._system_info_thread.is_alive():
+                self._schedule_system_info_drain()
+            return
+        self._on_system_info_detection_complete(error=error_message)
 
     def _mark_tk_dead(self):
         """Clear the ``_tk_alive`` flag so worker threads stop dispatching
