@@ -684,16 +684,24 @@ class BuildTab:
         self._populate_flag_groups()
 
     def _populate_flag_groups(self) -> None:
-        """Build (or rebuild) the group frames inside ``self._flags_label_frame``
-        for the currently-selected backend. Cheap to call repeatedly — used
-        by backend switches to avoid rebuilding the whole tab."""
+        """Build widgets for EVERY flag across EVERY group, regardless of
+        backend. Called once at construction (and again on full-rebuild).
+
+        Backend switches no longer rebuild widgets — they just toggle
+        visibility via :meth:`_apply_all_flag_visibilities`. Building once
+        eliminates the per-swap widget destruction/creation that was the
+        primary source of the multi-second freeze users were seeing
+        (≈100 widgets × ~5-10ms each = 1-2s of pure Tk churn per swap).
+        """
         lf = self._flags_label_frame
         if lf is None or not lf.winfo_exists():
             return
-        # Clear out any existing per-backend group frames.
+        # Clear out any existing per-group frames (full rebuild path).
         for child in lf.winfo_children():
             child.destroy()
         self._flag_widgets = {}
+        self._flag_help_widgets: dict[str, tk.Widget] = {}
+        self._flag_label_widgets: dict[str, tk.Widget] = {}
         self._group_frames = {}
 
         # Ensure every flag has a Tk var bound (created once, reused on rebuilds).
@@ -711,67 +719,130 @@ class BuildTab:
                           self._on_flag_changed(k, v))
             self._flag_vars[flag.key] = var
 
-        # Build group frames for the *current* backend.
-        backend = self.var_backend.get()
-        for group_name, flags in cf.groups_for_backend(backend):
+        # Group flags by group name across ALL backends so each widget gets
+        # built exactly once. We use cf.GROUPS_ORDER for stable display order.
+        flags_by_group: dict[str, list[cf.CMakeFlag]] = {}
+        for flag in cf.FLAGS:
+            flags_by_group.setdefault(flag.group, []).append(flag)
+        ordered_groups = [g for g in cf.GROUPS_ORDER if g in flags_by_group]
+        # Any group that wasn't in GROUPS_ORDER, append in catalogue order.
+        for g in flags_by_group:
+            if g not in ordered_groups:
+                ordered_groups.append(g)
+
+        for group_name in ordered_groups:
+            flags = flags_by_group[group_name]
             grp = ttk.LabelFrame(lf, text=group_name)
             grp.pack(fill="x", padx=4, pady=4)
             grp.columnconfigure(1, weight=1)
             self._group_frames[group_name] = grp
             for i, flag in enumerate(flags):
                 self._build_flag_widget(grp, flag, i)
-        # Apply visibility once at the end rather than per-widget — otherwise
-        # each visible_when flag triggers a full var-dict snapshot, producing
-        # O(N_visible × N) cost (≈2200 var.get() calls per rebuild). One
-        # snapshot here is O(N).
+        # Apply backend filter + visibility predicates at the end.
         self._apply_all_flag_visibilities()
 
     def _apply_all_flag_visibilities(self) -> None:
-        """Single-pass visibility refresh shared by all visible_when flags.
-        Computes the values dict once and reuses it for every predicate
-        evaluation."""
+        """Single-pass widget visibility refresh.
+
+        Handles two filters in one O(N) sweep:
+          * Backend applicability — hide widgets whose ``flag.backends`` set
+            doesn't include the currently-selected backend.
+          * ``visible_when`` predicates — disable widgets whose dependency
+            isn't satisfied (e.g. CUDA tuning knobs when GGML_CUDA=OFF).
+
+        Also hides group LabelFrames whose flags are entirely backend-
+        incompatible so the user doesn't see empty "HIP / ROCm options"
+        when targeting ik_llama on a non-HIP system.
+
+        Uses ``grid_remove``/``grid``/``pack_forget``/``pack`` to toggle —
+        no widget destruction. This is what makes backend swap feel
+        instant: ~100 grid operations vs ~200 widget create+destroy.
+        """
         try:
             values = self._current_flag_values_dict()
         except Exception as exc:
             print(f"WARN: could not build flag-values snapshot: {exc}",
                   file=sys.stderr)
             return
+        backend = self.var_backend.get()
+        # Track which groups still have at least one visible flag.
+        group_has_visible: dict[str, bool] = {g: False for g in self._group_frames}
+
         for flag in cf.FLAGS:
             w = self._flag_widgets.get(flag.key)
             if w is None:
                 continue
-            visible = True
+            applies = flag.applies_to(backend)
+            predicate_ok = True
             if flag.visible_when:
                 try:
-                    visible = flag.visible_when(values)
+                    predicate_ok = bool(flag.visible_when(values))
                 except Exception as exc:
                     print(f"WARN: visible_when predicate for {flag.key!r} raised: {exc}",
                           file=sys.stderr)
-                    visible = True
+                    predicate_ok = True
+            should_show = applies and predicate_ok
+            help_w = self._flag_help_widgets.get(flag.key)
+            label_w = self._flag_label_widgets.get(flag.key)
             try:
-                if w.winfo_exists():
-                    w.configure(state="normal" if visible else "disabled")
+                if not w.winfo_exists():
+                    continue
+                if applies:
+                    # Backend applies — show widget; let visible_when control
+                    # enabled/disabled state.
+                    w.grid()
+                    if help_w is not None:
+                        help_w.grid()
+                    if label_w is not None:
+                        label_w.grid()
+                    state = "normal" if predicate_ok else "disabled"
+                    w.configure(state=state)
+                    group_has_visible[flag.group] = True
+                else:
+                    # Backend doesn't apply — hide widget entirely.
+                    w.grid_remove()
+                    if help_w is not None:
+                        help_w.grid_remove()
+                    if label_w is not None:
+                        label_w.grid_remove()
+            except Exception:
+                pass
+
+        # Hide groups that have no applicable flags for the current backend.
+        for group_name, grp in self._group_frames.items():
+            try:
+                if not grp.winfo_exists():
+                    continue
+                if group_has_visible.get(group_name, False):
+                    grp.pack(fill="x", padx=4, pady=4)
+                else:
+                    grp.pack_forget()
             except Exception:
                 pass
 
     def _build_flag_widget(self, parent: ttk.LabelFrame, flag: cf.CMakeFlag, row: int) -> None:
+        """Create the main widget + companion help label + (for non-BOOL flags)
+        a name label. Stash references so :meth:`_apply_all_flag_visibilities`
+        can hide/show them together on backend swap.
+        """
         var = self._flag_vars[flag.key]
+        name_lbl: tk.Widget | None = None
         if flag.type == cf.BOOL:
             w = ttk.Checkbutton(parent, text=flag.label, variable=var)
             w.grid(row=row, column=0, sticky="w", padx=6, pady=2)
             help_lbl = ttk.Label(parent, text=flag.help, font=("TkSmallCaptionFont",))
             help_lbl.grid(row=row, column=1, sticky="w", padx=8, pady=2)
         elif flag.type == cf.ENUM:
-            ttk.Label(parent, text=flag.label + ":") \
-                .grid(row=row, column=0, sticky="w", padx=6, pady=2)
+            name_lbl = ttk.Label(parent, text=flag.label + ":")
+            name_lbl.grid(row=row, column=0, sticky="w", padx=6, pady=2)
             w = ttk.Combobox(parent, textvariable=var,
                              values=flag.choices or [], state="readonly", width=14)
             w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
             help_lbl = ttk.Label(parent, text=flag.help, font=("TkSmallCaptionFont",))
             help_lbl.grid(row=row, column=2, sticky="w", padx=8, pady=2)
         else:
-            ttk.Label(parent, text=flag.label + ":") \
-                .grid(row=row, column=0, sticky="w", padx=6, pady=2)
+            name_lbl = ttk.Label(parent, text=flag.label + ":")
+            name_lbl.grid(row=row, column=0, sticky="w", padx=6, pady=2)
             w = ttk.Entry(parent, textvariable=var, width=24)
             w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
             hint = flag.help
@@ -780,6 +851,9 @@ class BuildTab:
             help_lbl = ttk.Label(parent, text=hint, font=("TkSmallCaptionFont",))
             help_lbl.grid(row=row, column=2, sticky="w", padx=8, pady=2)
         self._flag_widgets[flag.key] = w
+        self._flag_help_widgets[flag.key] = help_lbl
+        if name_lbl is not None:
+            self._flag_label_widgets[flag.key] = name_lbl
         # Visibility is applied in a single pass at the end of
         # _populate_flag_groups, not per-widget — see _apply_all_flag_visibilities.
 
@@ -917,15 +991,21 @@ class BuildTab:
             self._do_rebuild()
 
     def _do_rebuild(self) -> None:
-        """Lightweight rebuild for backend switches. Only repaints the
-        flag-section LabelFrame contents (~100 widgets) rather than tearing
-        down the entire tab (~349 widgets). The static sections — source,
-        env/CUDA picker, preview, console, action bar — stay intact, which
-        also avoids destroying the canvas/scrollable Frame and the pending
-        Configure events that come with it.
+        """Lightweight backend swap. No widget destruction or creation —
+        all 112 flag widgets exist permanently in the DOM after the first
+        construction. We just:
 
-        For detach/reattach (which legitimately needs the whole UI built in
-        a new parent), use ``_full_rebuild()``.
+          1. Update flag values for the new backend's defaults
+             (suspended traces, so no per-write cascade).
+          2. Toggle widget visibility via grid/grid_remove based on which
+             flags apply to the new backend.
+
+        This is the fix for the multi-second freeze users were seeing.
+        Previous implementation destroyed and re-created ~100 widgets
+        each swap (~500ms-2s of pure Tk churn). This path is ~10-50ms.
+
+        For detach/reattach (legitimately needs widgets in a new parent),
+        see ``_full_rebuild``.
         """
         self._rebuild_pending = False
         try:
@@ -938,8 +1018,9 @@ class BuildTab:
             src = self.var_source_dir.get()
             if not os.path.isdir(src):
                 self.var_source_dir.set(self._initial_source_dir(self.var_backend.get()))
-            # Narrow rebuild: just the flag groups.
-            self._populate_flag_groups()
+            # The cheap part: just re-evaluate per-flag visibility against
+            # the new backend. No destroy/create.
+            self._apply_all_flag_visibilities()
             self._schedule_preview_refresh()
             if self.var_auto_check_updates.get():
                 self.check_for_updates(do_fetch=False)
