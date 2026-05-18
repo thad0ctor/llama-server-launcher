@@ -11,9 +11,11 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 *   **Intuitive GUI:** Easy-to-use Tkinter interface with tabbed sections for:
     *   Main Settings (paths, model selection, basic parameters)
     *   Advanced Settings (GPU, memory, cache, performance, generation)
-    *   Chat Templates (select predefined, use model default, or provide custom)
+    *   Chat Template (select predefined, use model default, custom Jinja, plus reasoning / thinking controls)
     *   Environment Variables (manage CUDA and custom variables)
+    *   MTP / Speculative Decoding (draft model picker, cross-backend draft controls)
     *   Configurations (save/load/import/export launch setups)
+    *   Settings (theme, fonts, Windows high-DPI scaling)
 
 <details>
 <summary><h3>📸 View Advanced Settings Screenshot</h3></summary>
@@ -26,12 +28,14 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   **Model Management:** Scan directories for GGUF models, automatic model analysis (layers, architecture, size) with fallbacks, manual model info entry.
     *   **Vision/mmproj Handling:** Automatic `mmproj` detection, with an `mmproj` dropdown shown when multiple projector files are found for the selected model.
     *   **Core Parameters:** Threads (main & batch), context size, batch sizes (prompt & ubatch), sampling (temperature, min_p, seed).
-    *   **GPU Offloading:** GPU layers, tensor split (with VRAM-based recommendations), main GPU selection, Flash Attention toggle.
-    *   **Memory & Cache:** KV cache types (K & V), mmap, mlock, no KV offload.
+    *   **GPU Offloading:** GPU layers (with override), tensor split (with VRAM-based recommendations), user-orderable GPU list, main GPU selection, Flash Attention toggle.
+    *   **MoE Offload:** `--cpu-moe` / `--n-cpu-moe` controls for offloading expert layers to CPU on both backends.
+    *   **Context Fit:** `--fit` (auto-size context to available VRAM) and `--parallel` slot configuration.
+    *   **Memory & Cache:** KV cache types (K & V, including Q6_K), mmap, mlock, no KV offload.
     *   **Network:** Host IP and port configuration.
     *   **Generation:** Ignore EOS, n_predict (max tokens).
     *   **Custom Arguments:** Pass any additional `llama.cpp` server parameters.
-    *   **ik_llama Support:** Added support for ik_lamma with seperate parameters tab (6/15/2025)
+    *   **ik_llama Support:** Dedicated parameters tab for ik_llama-specific options.
     <details>
     <summary><h3>📸 View ik_llama Screenshot</h3></summary>
 
@@ -55,6 +59,22 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   Load predefined chat templates from `config/chat_templates.json`.
     *   Option to let `llama.cpp` decide the template based on model metadata.
     *   Provide your own custom Jinja2 template string.
+    *   `--jinja` toggle for Jinja template rendering (required by many modern instruction-tuned GGUFs).
+    *   **Reasoning / Thinking controls:** `--reasoning` (on / off / auto), `--reasoning-format` (none / deepseek / deepseek-legacy / auto), `--reasoning-budget`, `--reasoning-budget-message`, and advanced `--chat-template-kwargs` passthrough.
+
+<details>
+<summary><h3>📸 View MTP / Speculative Decoding Screenshot</h3></summary>
+
+![MTP / Speculative Decoding](images/mtp-spec.png)
+
+</details>
+
+*   **MTP / Speculative Decoding:**
+    *   Enable speculative decoding with cross-backend support (llama.cpp and ik_llama).
+    *   Speculative type selector (e.g., `draft-simple`, `draft-mtp`) with sensible default prefill per type.
+    *   Common draft controls: `n-max`, `n-min`, `p-min`, `p-split`, plus a one-click **Reset to defaults**.
+    *   Draft model GGUF picker with smart draft GPU controls (`-ngld`, per-device `-devd` selection, draft K/V cache types, `--spec-draft-cpu-moe` / `n-cpu-moe`).
+    *   MTP enforces `--parallel 1` automatically; optional `--no-mmproj` for MTP GGUFs that embed an unused vision projector.
 
 <details>
 <summary><h3>📸 View Environment Variables Screenshot</h3></summary>
@@ -86,11 +106,21 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 *   **Dependency Awareness:**
     *   Checks for optional but recommended dependencies for GPU detection and model information
 
+## 🆕 Recent Features
+
+*   **May 2026** — MTP / Speculative Decoding tab with full cross-backend support: draft GGUF picker, spec-type-aware default prefill, smart draft GPU controls, and auto `--parallel 1` for MTP. Reasoning / Thinking controls added to the Chat Template tab (`--reasoning`, `--reasoning-format`, `--reasoning-budget`, `--chat-template-kwargs`) plus a `--jinja` toggle.
+*   **April 2026** — Settings tab (theme/font controls, Windows high-DPI); user-orderable GPU list and `mmproj` selector dropdown; modular project layout (`modules/`, `config/`, `launchers/`); automated test suite + CI workflow.
+*   **January 2026** — `--fit` (auto-fit context to VRAM) and `--parallel` slot options; improved GGUF parser.
+*   **December 2025** — GPU layer override; Flash Attention updated for newest llama.cpp API; `--cpu-moe` works with ik_llama.
+*   **August 2025** — MoE offload options (`--cpu-moe`, llama.cpp PR 15077); `mmproj` command-line wiring; checkbox to toggle `mmproj` scanning for faster directory loads.
+*   **July 2025** — Q6_K KV cache option; model search box and configuration name/handling improvements.
+*   **June 2025** — ik_llama backend with dedicated parameters tab.
+
 ## 📋 Dependencies
 
 ### Required
-*   **Python 3.7+** with tkinter support (typically included with Python)
-*   **llama.cpp** built with server support (`llama-server and ik_llama` executable)
+*   **Python 3.10+** with tkinter support (typically included with Python). CI tests on 3.10 / 3.11 / 3.12.
+*   **llama.cpp** or **ik_llama** built with server support (`llama-server` executable from either backend)
 *   **requests** - Required for version checking and updates
     *   Install with: `pip install requests`
 
@@ -99,10 +129,6 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   Install in your virtual environment: `pip install torch`
     *   Without PyTorch, you can still manually configure GPU settings
     *   Enables automatic CUDA device detection and system resource information
-*   **llama-cpp-python** - **Optional fallback for GGUF model analysis**
-    *   Install in your virtual environment: `pip install llama-cpp-python`
-    *   Provides enhanced model analysis when llama.cpp tools are unavailable
-    *   The launcher works without it using built-in GGUF parsing and llama.cpp tools
 *   **psutil** - **Optional for enhanced system information**
     *   Provides detailed CPU and RAM information across platforms
     *   Install with: `pip install psutil`
@@ -117,7 +143,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Option 2: Install dependencies individually
-pip install requests torch llama-cpp-python psutil
+pip install requests torch psutil
 ```
 
 ## 🛠️ Installation & Setup
@@ -173,7 +199,7 @@ make -j$(nproc)
 
 ### 4. Configure the Launcher
 1. Run the launcher: `python llamacpp-server-launcher.py`
-2. In the **Main** tab, set the **"llama.cpp Directory"** to your llama.cpp build folder
+2. In the **Main** tab, set the **"LLaMa.cpp Root Directory"** (or **"ik_llama Root Directory"** when the ik_llama backend is selected) to your build folder
 3. The launcher will automatically find the `llama-server` executable
 
 &nbsp;
