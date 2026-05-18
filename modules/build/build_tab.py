@@ -58,6 +58,10 @@ from .build_runner import (
 CONSOLE_MAX_LINES = 5000
 PREVIEW_REFRESH_DEBOUNCE_MS = 120
 RUNNER_POLL_MS = 60
+RUNNER_CATCHUP_POLL_MS = 5
+RUNNER_MAX_EVENTS_PER_POLL = 250
+RUNNER_MAX_CHARS_PER_POLL = 128 * 1024
+PULL_DRAIN_MS = 80
 
 
 def _truthy_flag_str(v: Any) -> bool:
@@ -97,11 +101,13 @@ class BuildTab:
         self._poll_after_id: str | None = None
         self._preview_after_id: str | None = None
         self._drain_after_id: str | None = None
+        self._pull_drain_after_id: str | None = None
 
         # Update-banner state.
         self._upstream_status = UpstreamStatus()
         self._upstream_check_in_flight = False
         self._pending_status: queue.Queue[UpstreamStatus] = queue.Queue()
+        self._pending_pull_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         # Notebook integration. Detach-to-Toplevel was removed because the
         # rebuild involved in re-parenting the heavy widget tree caused
@@ -115,6 +121,7 @@ class BuildTab:
         self._toolchain_refresh_in_flight = False
         self._toolchain_refresh_queue: queue.Queue = queue.Queue()
         self._toolchain_refresh_after_id: str | None = None
+        self._pull_only_in_flight = False
 
         # Re-entry / scheduling guards: _build_ui destroys its parent's
         # children, so we must NEVER call it synchronously from a widget's
@@ -281,6 +288,17 @@ class BuildTab:
         except Exception:
             pass
         self.var_cuda_pick.set(f"Custom · {nvcc}")
+
+    @staticmethod
+    def _safe_int(var: tk.Variable, default: int = 0, minimum: int = 0) -> int:
+        """Read an IntVar/StringVar as int, falling back to ``default`` on bad
+        input and clamping to ``minimum``. Used for Spinbox-bound vars where
+        a user could type non-numeric text and crash the build path."""
+        try:
+            v = int(var.get() or 0)
+        except (TypeError, ValueError, tk.TclError):
+            return default
+        return max(minimum, v)
 
     def _refresh_jobs_hint(self) -> None:
         reco = detection.recommend_jobs()
@@ -584,7 +602,13 @@ class BuildTab:
         # Jobs
         ttk.Label(lf, text="Parallel jobs:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         jobs_frame = ttk.Frame(lf); jobs_frame.grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Spinbox(jobs_frame, from_=1, to=512, textvariable=self.var_jobs, width=6) \
+        # validate="key" + validatecommand restricts the Spinbox to digit-only
+        # keystrokes so var_jobs (IntVar) cannot be coerced to non-numeric text.
+        # The lambda accepts "" (intermediate empty state while editing) plus
+        # any digit string; everything else is rejected at the keystroke level.
+        vcmd = (self.root.register(lambda P: P == "" or P.isdigit()), "%P")
+        ttk.Spinbox(jobs_frame, from_=1, to=512, textvariable=self.var_jobs, width=6,
+                    validate="key", validatecommand=vcmd) \
             .pack(side="left")
         ttk.Label(jobs_frame, textvariable=self.var_jobs_hint,
                   font=("TkSmallCaptionFont",)).pack(side="left", padx=8)
@@ -1642,7 +1666,7 @@ class BuildTab:
             git_ref=self.var_git_ref.get().strip(),
             git_pull_before_build=self.var_git_pull.get(),
             clean_build=self.var_clean_build.get(),
-            jobs=int(self.var_jobs.get() or 0),
+            jobs=self._safe_int(self.var_jobs, default=0, minimum=0),
             cuda_archs=self.var_cuda_archs.get().strip(),
             env=self._current_env_dict(),
             flag_values=self._current_flag_values_dict(),
@@ -1809,14 +1833,28 @@ class BuildTab:
         src = self.var_source_dir.get().strip()
         if not src:
             return
+        if self._pull_only_in_flight:
+            self._append_console(
+                "git pull already running, ignoring duplicate request.\n",
+                tag="stage",
+            )
+            return
+        if self.runner.is_running:
+            self._append_console(
+                "build is running, cannot pull simultaneously.\n",
+                tag="stage",
+            )
+            return
+        self._pull_only_in_flight = True
         self._append_console("\n══ git pull --ff-only ══\n", tag="stage")
         # git pull can stall on network/disk for many seconds — run it off
-        # the Tk main thread and trampoline output back via root.after so
-        # we don't freeze the launcher during the pull.
+        # the Tk main thread. Output is queued and drained by the Tk mainloop;
+        # worker threads must not call Tk directly.
         threading.Thread(
             target=self._run_pull_only_worker, args=(src,),
             name="PullOnlyWorker", daemon=True,
         ).start()
+        self._schedule_pull_drain()
 
     def _run_pull_only_worker(self, src: str) -> None:
         import subprocess
@@ -1828,23 +1866,68 @@ class BuildTab:
             )
             assert proc.stdout is not None
             for line in proc.stdout:
-                line_to_emit = line.rstrip("\n") + "\n"
-                self.root.after(0, lambda txt=line_to_emit: self._append_console(txt))
+                self._pending_pull_events.put(("line", line.rstrip("\n") + "\n"))
             rc = proc.wait()
-            if rc != 0:
-                self.root.after(
-                    0,
-                    lambda: self._append_console(f"git pull exited {rc}\n", tag="error"),
-                )
+            self._pending_pull_events.put(("done", rc))
         except Exception as exc:
-            self.root.after(
-                0,
-                lambda exc=exc: self._append_console(f"git pull failed: {exc}\n", tag="error"),
-            )
-        finally:
-            self.root.after(0, lambda: self.check_for_updates(do_fetch=True))
+            self._pending_pull_events.put(("error", str(exc)))
+
+    def _schedule_pull_drain(self) -> None:
+        if self._pull_drain_after_id is None:
+            self._pull_drain_after_id = self.root.after(PULL_DRAIN_MS, self._drain_pull_only)
+
+    def _drain_pull_only(self) -> None:
+        self._pull_drain_after_id = None
+        line_parts: list[str] = []
+        line_chars = 0
+
+        def flush_lines() -> None:
+            nonlocal line_parts, line_chars
+            if line_parts:
+                self._append_console("".join(line_parts))
+                line_parts = []
+                line_chars = 0
+
+        finished = False
+        for _ in range(RUNNER_MAX_EVENTS_PER_POLL):
+            try:
+                kind, payload = self._pending_pull_events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "line":
+                text = str(payload)
+                line_parts.append(text)
+                line_chars += len(text)
+                if line_chars >= RUNNER_MAX_CHARS_PER_POLL:
+                    break
+            elif kind == "done":
+                flush_lines()
+                rc = int(payload or 0)
+                if rc != 0:
+                    self._append_console(f"git pull exited {rc}\n", tag="error")
+                finished = True
+                break
+            elif kind == "error":
+                flush_lines()
+                self._append_console(f"git pull failed: {payload}\n", tag="error")
+                finished = True
+                break
+
+        flush_lines()
+        if finished:
+            self._pull_only_in_flight = False
+            self.check_for_updates(do_fetch=True)
+            return
+        if self._pull_only_in_flight or not self._pending_pull_events.empty():
+            self._schedule_pull_drain()
 
     def _on_pull_and_rebuild(self) -> None:
+        if self._pull_only_in_flight:
+            self._append_console(
+                "git pull already running, ignoring pull-and-rebuild request.\n",
+                tag="stage",
+            )
+            return
         self.var_git_pull.set(True)
         self._on_start_build()
 
@@ -1887,39 +1970,61 @@ class BuildTab:
 
     def _poll_runner(self) -> None:
         drained_any = False
-        try:
-            while True:
-                kind, payload = self.runner.events.get_nowait()
-                drained_any = True
-                if kind == EVENT_LINE:
-                    self._append_console(str(payload) + "\n")
-                elif kind == EVENT_STAGE:
-                    self.var_status.set(str(payload))
-                elif kind == EVENT_DONE:
-                    rc = int(payload or 0)
-                    if rc == 0:
-                        self.var_status.set("Done ✓")
-                        self._append_console("\nBuild succeeded.\n", tag="ok")
-                    else:
-                        self.var_status.set(f"Failed (rc={rc})")
-                        self._append_console(f"\nBuild failed with exit {rc}.\n", tag="error")
-                    self._on_build_finished()
-                    return
-                elif kind == EVENT_CANCELLED:
-                    self.var_status.set("Cancelled")
-                    self._append_console("\nBuild cancelled.\n", tag="error")
-                    self._on_build_finished()
-                    return
-                elif kind == EVENT_ERROR:
-                    self.var_status.set("Error")
-                    self._append_console(f"\nError: {payload}\n", tag="error")
-                    self._on_build_finished()
-                    return
-        except queue.Empty:
-            pass
+        line_parts: list[str] = []
+        line_chars = 0
 
-        if self.runner.is_running:
-            self._poll_after_id = self.root.after(RUNNER_POLL_MS, self._poll_runner)
+        def flush_lines() -> None:
+            nonlocal line_parts, line_chars
+            if line_parts:
+                self._append_console("".join(line_parts))
+                line_parts = []
+                line_chars = 0
+
+        for _ in range(RUNNER_MAX_EVENTS_PER_POLL):
+            try:
+                kind, payload = self.runner.events.get_nowait()
+            except queue.Empty:
+                break
+            drained_any = True
+            if kind == EVENT_LINE:
+                text = str(payload) + "\n"
+                line_parts.append(text)
+                line_chars += len(text)
+                if line_chars >= RUNNER_MAX_CHARS_PER_POLL:
+                    break
+            elif kind == EVENT_STAGE:
+                flush_lines()
+                self.var_status.set(str(payload))
+            elif kind == EVENT_DONE:
+                flush_lines()
+                rc = int(payload or 0)
+                if rc == 0:
+                    self.var_status.set("Done ✓")
+                    self._append_console("\nBuild succeeded.\n", tag="ok")
+                else:
+                    self.var_status.set(f"Failed (rc={rc})")
+                    self._append_console(f"\nBuild failed with exit {rc}.\n", tag="error")
+                self._on_build_finished()
+                return
+            elif kind == EVENT_CANCELLED:
+                flush_lines()
+                self.var_status.set("Cancelled")
+                self._append_console("\nBuild cancelled.\n", tag="error")
+                self._on_build_finished()
+                return
+            elif kind == EVENT_ERROR:
+                flush_lines()
+                self.var_status.set("Error")
+                self._append_console(f"\nError: {payload}\n", tag="error")
+                self._on_build_finished()
+                return
+
+        flush_lines()
+        if self.runner.is_running or not self.runner.events.empty():
+            delay = RUNNER_CATCHUP_POLL_MS if drained_any else RUNNER_POLL_MS
+            self._poll_after_id = self.root.after(delay, self._poll_runner)
+        else:
+            self._poll_after_id = None
 
     def _on_build_finished(self) -> None:
         self._poll_after_id = None
@@ -2026,14 +2131,18 @@ class BuildTab:
         # makes the value explicit in the build artifacts.
         cuda_root = self.var_cuda_root.get().strip()
         if cuda_root and _truthy_flag_str(values.get("GGML_CUDA")):
-            args.append(f"-DCMAKE_CUDA_COMPILER_TOOLKIT_ROOT={cuda_root}")
+            # CUDAToolkit_ROOT is the documented user-facing variable that
+            # FindCUDAToolkit consumes (CMake 3.17+); the legacy CMAKE_CUDA_
+            # COMPILER_TOOLKIT_ROOT spelling is an internal cache variable
+            # and isn't reliable for steering CMake's CUDA discovery.
+            args.append(f"-DCUDAToolkit_ROOT={cuda_root}")
         return BuildPlan(
             backend=backend,
             source_dir=self.var_source_dir.get().strip(),
             build_dir=self._resolved_build_dir(),
             cmake_args=args,
             cmake_env=self._current_env_dict(),
-            jobs=int(self.var_jobs.get() or 0),
+            jobs=self._safe_int(self.var_jobs, default=0, minimum=0),
             git_clone_if_missing=True,
             git_ref=self.var_git_ref.get().strip(),
             git_pull_before_build=self.var_git_pull.get(),
@@ -2045,11 +2154,17 @@ class BuildTab:
         # Mirror to buffer so detach/reattach can replay history.
         for line in text.splitlines() or [""]:
             self._console_buffer.append(line)
+        # Track how many lines we need to trim from the on-screen Text widget
+        # *before* we clamp the buffer, so the widget shrinks in lockstep
+        # with the buffer and can't grow unboundedly across long builds.
+        overflow = len(self._console_buffer) - CONSOLE_MAX_LINES
         if len(self._console_buffer) > CONSOLE_MAX_LINES:
             self._console_buffer[:] = self._console_buffer[-CONSOLE_MAX_LINES:]
         if not hasattr(self, "_console") or not self._console.winfo_exists():
             return
         self._console.configure(state="normal")
+        if overflow > 0:
+            self._console.delete("1.0", f"{overflow + 1}.0")
         if tag:
             self._console.insert("end", text, tag)
         else:
