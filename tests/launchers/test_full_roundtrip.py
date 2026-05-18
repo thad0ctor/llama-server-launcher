@@ -403,7 +403,11 @@ LLAMA_CPP_DRAFT_MTP_FLAGS_EXPECTED = [
     # modules/spec_launch.py + TestDraftMtpSuppressesSeparateModel for
     # the contract test).
     "--spec-draft-ngl",
-    "--spec-draft-device",
+    # NOTE: --spec-draft-device is intentionally NOT in this list — MTP
+    # variants (draft-mtp on llama.cpp, mtp on ik_llama) share the main
+    # GGUF and run on the main GPUs, so the launcher suppresses the
+    # device flag. See _uses_separate_draft_gpus in modules/spec_launch.py
+    # and TestMtpDoesNotUnionDraftGpus in test_spec_emission.py.
     "--spec-draft-type-k",
     "--spec-draft-type-v",
     "--spec-draft-cpu-moe",
@@ -427,7 +431,10 @@ IK_LLAMA_MTP_FLAGS_EXPECTED = [
     "--draft-p-min",
     "--model-draft",
     "-ngld",
-    "-devd",
+    # NOTE: -devd is intentionally NOT in this list — ik_llama's only
+    # draft-capable type is `mtp` (MTP head embedded in main GGUF), which
+    # shares main's GPUs. See _uses_separate_draft_gpus in
+    # modules/spec_launch.py.
     "-ctkd",
     "-ctvd",
     "--spec-autotune",
