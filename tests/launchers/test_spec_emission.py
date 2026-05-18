@@ -221,10 +221,12 @@ class TestSpecEmissionLlamaCpp:
         assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
 
     def test_spec_draft_offload_flags_emit(self, manager, launcher_mock):
-        """ngl/device/ctk/ctv all use the long llama.cpp flag names."""
+        """ngl/device/ctk/ctv all use the long llama.cpp flag names.
+        Uses draft-simple because MTP variants share main GPUs (no
+        --spec-draft-device)."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_ngl.set("32")
         launcher_mock.spec_draft_device.set("CUDA0")
         launcher_mock.spec_draft_ctk.set("q8_0")
@@ -596,22 +598,24 @@ class TestSpecEmissionIkLlama:
         assert "--spec-draft-model" not in cmd
 
     def test_draft_offload_uses_short_form_flags(self, manager, launcher_mock):
-        """``-ngld``, ``-devd``, ``-ctkd``, ``-ctvd`` instead of the long
-        ``--spec-draft-*`` names."""
+        """``-ngld``, ``-ctkd``, ``-ctvd`` instead of the long
+        ``--spec-draft-*`` names. ``-devd`` is NOT emitted for ik_llama+mtp
+        because MTP shares the main GPUs (no separate draft device)."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
         launcher_mock.spec_draft_ngl.set("24")
-        launcher_mock.spec_draft_device.set("CUDA1")
+        launcher_mock.spec_draft_device.set("CUDA1")  # stale, suppressed
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
-        # Short forms present.
+        # Short forms present (except -devd, see below).
         assert cmd[cmd.index("-ngld") + 1] == "24"
-        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
         assert cmd[cmd.index("-ctkd") + 1] == "q4_0"
         assert cmd[cmd.index("-ctvd") + 1] == "q4_0"
-        # Long forms absent.
+        # -devd must NOT appear for MTP (the MTP head shares main GPUs).
+        assert "-devd" not in cmd
+        # Long forms also absent on ik_llama.
         for absent in (
             "--spec-draft-ngl",
             "--spec-draft-device",
@@ -641,7 +645,8 @@ class TestSpecEmissionIkLlama:
 
     def test_ik_llama_all_draft_knobs_combined(self, manager, launcher_mock, tmp_path):
         """Setting many ik_llama knobs at once: each translation lands
-        without interaction."""
+        without interaction. ``-devd`` is suppressed because MTP shares
+        the main GPUs."""
         # Real file for the path-validation guard (CR Comment B).
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
@@ -653,7 +658,7 @@ class TestSpecEmissionIkLlama:
         launcher_mock.spec_draft_p_min.set("0.5")
         launcher_mock.spec_draft_model.set(str(draft))
         launcher_mock.spec_draft_ngl.set("24")
-        launcher_mock.spec_draft_device.set("CUDA1")
+        launcher_mock.spec_draft_device.set("CUDA1")  # stale, suppressed
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
@@ -663,7 +668,7 @@ class TestSpecEmissionIkLlama:
         assert cmd[cmd.index("--draft-p-min") + 1] == "0.5"
         assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
         assert cmd[cmd.index("-ngld") + 1] == "24"
-        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
+        assert "-devd" not in cmd  # MTP shares main GPUs
         assert cmd[cmd.index("-ctkd") + 1] == "q4_0"
         assert cmd[cmd.index("-ctvd") + 1] == "q4_0"
         # Long forms still absent.
@@ -1019,10 +1024,11 @@ class TestSpecDraftDeviceEmission:
         assert "--spec-draft-device" not in cmd
 
     def test_single_cuda_device_llamacpp(self, manager, launcher_mock):
-        """A single ``CUDA0`` string lands verbatim under llama.cpp's long flag."""
+        """A single ``CUDA0`` string lands verbatim under llama.cpp's long flag.
+        Uses draft-simple because draft-mtp doesn't emit --spec-draft-device."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_device.set("CUDA0")
         cmd = manager.build_cmd()
         assert "--spec-draft-device" in cmd
@@ -1031,27 +1037,29 @@ class TestSpecDraftDeviceEmission:
     def test_multi_cuda_device_csv_llamacpp(self, manager, launcher_mock):
         """A comma-joined list (e.g. ``CUDA0,CUDA1``) is forwarded as one
         token — emission does NOT split it. Matches what the checkbox grid
-        produces when the user selects multiple draft GPUs."""
+        produces when the user selects multiple draft GPUs. Uses draft-simple
+        because MTP variants share main GPUs."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_device.set("CUDA0,CUDA1")
         cmd = manager.build_cmd()
         assert "--spec-draft-device" in cmd
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0,CUDA1"
 
-    def test_multi_cuda_device_csv_ik_llama_uses_short_form(
+    def test_multi_cuda_device_csv_ik_llama_mtp_suppresses_devd(
         self, manager, launcher_mock
     ):
-        """Same value under ik_llama emits via the short flag ``-devd`` and
-        does NOT emit the long ``--spec-draft-device`` form."""
+        """ik_llama's only draft-capable type is ``mtp``, and MTP shares
+        the main GGUF's GPUs — so ``-devd`` is NEVER emitted for ik_llama.
+        Even a free-text ``spec_draft_device`` value is suppressed."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
         launcher_mock.spec_draft_device.set("CUDA0,CUDA1")
         cmd = manager.build_cmd()
-        assert "-devd" in cmd
-        assert cmd[cmd.index("-devd") + 1] == "CUDA0,CUDA1"
+        assert "-devd" not in cmd
+        # Long form also absent (it's llama.cpp-specific anyway).
         assert "--spec-draft-device" not in cmd
 
 
@@ -2001,10 +2009,14 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         (so ``__setitem__`` works but ``get()`` returns a MagicMock, not a
         list), so swap in a real dict and rebind
         ``get_ordered_selected_gpus`` to a callable that reads from it
-        — mirroring the real launcher's behavior."""
+        — mirroring the real launcher's behavior.
+
+        Uses ``draft-simple`` because MTP variants do NOT emit
+        ``--spec-draft-device`` (the MTP head shares main GPUs).
+        """
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.app_settings = {
             "selected_gpus": [],
             "gpu_order": [],
@@ -2129,16 +2141,17 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--spec-draft-device") + 1] == "Vulkan0"
 
-    def test_ik_llama_uses_devd_short_form(self, manager, remap_launcher):
-        """ik_llama emits the same remapped value but under -devd."""
+    def test_ik_llama_mtp_does_not_emit_devd(self, manager, remap_launcher):
+        """ik_llama's only draft-capable type is ``mtp``, and MTP shares
+        the main GGUF's GPUs. ``-devd`` is never emitted regardless of
+        ``spec_draft_selected_gpus``."""
         remap_launcher.backend_selection.set("ik_llama")
         remap_launcher.spec_type.set("mtp")
         remap_launcher.app_settings["selected_gpus"] = [2, 5]
         remap_launcher.app_settings["gpu_order"] = [2, 5]
         remap_launcher.app_settings["spec_draft_selected_gpus"] = [5]
         cmd = manager.build_cmd()
-        assert "-devd" in cmd
-        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
+        assert "-devd" not in cmd
 
 
 # ============================================================================
@@ -2175,11 +2188,12 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
     def union_launcher(self, launcher_mock):
         """Reuses the TestSpecDraftDeviceCudaVisibleRemap fixture shape but
         seeds 8 detected GPUs and a real ``get_ordered_selected_gpus`` that
-        reads from app_settings. The default backend is llama.cpp + draft-mtp
-        (draft-capable, so the union helper takes effect)."""
+        reads from app_settings. The default backend is llama.cpp +
+        ``draft-simple`` because MTP variants do NOT union (the MTP head
+        is embedded in the main GGUF and shares main's GPUs)."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.app_settings = {
             "selected_gpus": [],
             "gpu_order": [],
@@ -2292,8 +2306,15 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         assert action == "export"
         assert value == "1,7"
 
-    def test_ik_llama_mtp_unions(self, manager, union_launcher):
-        """ik_llama + mtp (draft-capable) → union works the same way."""
+    def test_ik_llama_mtp_does_NOT_union(self, manager, union_launcher):
+        """ik_llama + mtp (MTP head embedded in main GGUF) → no union and
+        no -devd. The MTP head shares the main GPUs.
+
+        Updated contract (was: union'd like draft-simple): MTP variants on
+        either backend never widen CUDA_VISIBLE_DEVICES from the draft
+        selection — that would silently absorb stale checkbox state from a
+        prior draft-simple session into MTP launches.
+        """
         union_launcher.backend_selection.set("ik_llama")
         union_launcher.spec_type.set("mtp")
         union_launcher.app_settings["selected_gpus"] = [1, 7]
@@ -2301,11 +2322,10 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
         action, value = manager._resolve_cuda_visible_devices_action()
         assert action == "export"
-        assert value == "1,7,2,5"
+        assert value == "1,7"  # only main, no draft union
         cmd = manager.build_cmd()
-        # ik_llama uses the -devd short form.
-        assert "-devd" in cmd
-        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+        # -devd should NOT appear: MTP shares main GPUs.
+        assert "-devd" not in cmd
 
     def test_manual_gpu_mode_no_union_export(self, manager, union_launcher):
         """Manual GPU mode unsets CUDA_VISIBLE_DEVICES regardless of the
@@ -2389,10 +2409,11 @@ class TestMainDeviceEmittedOnDraftUnion:
 
     @pytest.fixture
     def union_launcher(self, launcher_mock):
-        """Same shape as ``TestDraftGpuUnionWithCudaVisibleDevices.union_launcher``."""
+        """Same shape as ``TestDraftGpuUnionWithCudaVisibleDevices.union_launcher``
+        — uses ``draft-simple`` because MTP variants don't union."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.app_settings = {
             "selected_gpus": [],
             "gpu_order": [],
@@ -2518,22 +2539,23 @@ class TestMainDeviceEmittedOnDraftUnion:
         cmd = manager.build_cmd()
         assert "--device" not in cmd
 
-    def test_ik_llama_mtp_also_emits_device(self, manager, union_launcher):
-        """ik_llama uses the same --device long-form spelling (confirmed in
-        common.cpp: 'arg == \"-dev\" || arg == \"--device\"'). The same
-        emission path covers both backends — verify the ik_llama path
-        emits the main constraint identically."""
+    def test_ik_llama_mtp_does_NOT_emit_device_or_devd(self, manager, union_launcher):
+        """ik_llama + mtp: the MTP head shares main GPUs, so neither
+        --device (main restriction, only emitted when union widens
+        CUDA_VISIBLE_DEVICES) nor -devd (draft device) appears.
+
+        Updated contract (was: emit --device CUDA0,CUDA1 + -devd CUDA2,CUDA3):
+        MTP variants don't union, so there are no extras for --device to
+        guard against, and no draft GPU subset for -devd to specify.
+        """
         union_launcher.backend_selection.set("ik_llama")
         union_launcher.spec_type.set("mtp")
         union_launcher.app_settings["selected_gpus"] = [1, 7]
         union_launcher.app_settings["gpu_order"] = [1, 7]
         union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
         cmd = manager.build_cmd()
-        assert "--device" in cmd
-        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
-        # Draft device flag uses -devd on ik_llama (existing contract).
-        assert "-devd" in cmd
-        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+        assert "--device" not in cmd
+        assert "-devd" not in cmd
 
     def test_device_value_preserves_main_order(self, manager, union_launcher):
         """Main order [7, 1] (user dragged 7 first) with draft [2] → union
@@ -2558,3 +2580,106 @@ class TestMainDeviceEmittedOnDraftUnion:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--device") + 1] == "CUDA0"
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA1"
+
+
+# ============================================================================
+# MTP variants must NOT use the draft GPU selection at all.
+# The MTP head is embedded in the main GGUF and rides on the main GPUs;
+# stale spec_draft_selected_gpus (from a prior draft-simple session) must
+# never widen CUDA_VISIBLE_DEVICES or emit --spec-draft-device for MTP.
+# ============================================================================
+
+
+class TestMtpDoesNotUnionDraftGpus:
+    """Locks the user-reported contract: with main=[0,1] selected and
+    draft=[2,3] persisted from a prior draft-simple session, switching
+    spec_type to draft-mtp (mainline) or mtp (ik_llama) MUST NOT cause
+    GPUs 2 and 3 to enter CUDA_VISIBLE_DEVICES, --spec-draft-device,
+    or --device.
+    """
+
+    @pytest.fixture
+    def mtp_launcher(self, launcher_mock):
+        """Same shape as ``TestDraftGpuUnionWithCudaVisibleDevices.union_launcher``."""
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.app_settings = {
+            "selected_gpus": [0, 1],
+            "gpu_order": [0, 1],
+            "spec_draft_selected_gpus": [2, 3],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+
+        def _ordered():
+            order = launcher_mock.app_settings.get("gpu_order", [])
+            sel = set(launcher_mock.app_settings.get("selected_gpus", []))
+            seen = set()
+            out = []
+            for g in order:
+                if g in sel and g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            for g in sorted(sel):
+                if g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            return out
+
+        launcher_mock.get_ordered_selected_gpus = _ordered
+        return launcher_mock
+
+    def test_llamacpp_draft_mtp_cuda_visible_devices_is_main_only(
+        self, manager, mtp_launcher
+    ):
+        """The bug: draft-mtp + persisted draft GPUs [2,3] used to widen
+        CUDA_VISIBLE_DEVICES=0,1,2,3. After fix it stays 0,1."""
+        mtp_launcher.backend_selection.set("llama.cpp")
+        mtp_launcher.spec_type.set("draft-mtp")
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "0,1", f"draft-mtp must not widen CUDA_VISIBLE_DEVICES, got {value!r}"
+
+    def test_llamacpp_draft_mtp_no_spec_draft_device(self, manager, mtp_launcher):
+        """draft-mtp must not emit --spec-draft-device — the MTP head
+        runs on the main GPUs."""
+        mtp_launcher.backend_selection.set("llama.cpp")
+        mtp_launcher.spec_type.set("draft-mtp")
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" not in cmd
+
+    def test_llamacpp_draft_mtp_no_main_device_restriction(self, manager, mtp_launcher):
+        """No union extras → no need to emit --device for main."""
+        mtp_launcher.backend_selection.set("llama.cpp")
+        mtp_launcher.spec_type.set("draft-mtp")
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_ik_llama_mtp_cuda_visible_devices_is_main_only(
+        self, manager, mtp_launcher
+    ):
+        mtp_launcher.backend_selection.set("ik_llama")
+        mtp_launcher.spec_type.set("mtp")
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "0,1"
+
+    def test_ik_llama_mtp_no_devd(self, manager, mtp_launcher):
+        """ik_llama + mtp: -devd must not appear."""
+        mtp_launcher.backend_selection.set("ik_llama")
+        mtp_launcher.spec_type.set("mtp")
+        cmd = manager.build_cmd()
+        assert "-devd" not in cmd
+
+    def test_draft_simple_still_unions(self, manager, mtp_launcher):
+        """Regression check: draft-simple (separate draft model) DOES
+        union draft GPUs into CUDA_VISIBLE_DEVICES."""
+        mtp_launcher.backend_selection.set("llama.cpp")
+        mtp_launcher.spec_type.set("draft-simple")
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert value == "0,1,2,3"
+
+    def test_draft_eagle3_still_unions(self, manager, mtp_launcher):
+        """Regression check: draft-eagle3 also unions."""
+        mtp_launcher.backend_selection.set("llama.cpp")
+        mtp_launcher.spec_type.set("draft-eagle3")
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert value == "0,1,2,3"

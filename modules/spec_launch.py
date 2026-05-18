@@ -46,6 +46,33 @@ _ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset({
 _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3", "draft-mtp"})
 _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
 
+# Spec types that load a SEPARATE draft model on its own GPU subset.
+# MTP (both backends) is excluded because the MTP head is embedded in
+# the main GGUF and rides along with the main model's GPU distribution
+# — it has no separate device requirement. A stale draft-GPU selection
+# from a prior draft-simple session must NOT cause a CUDA_VISIBLE_DEVICES
+# union or a --spec-draft-device emission when the user is now on
+# draft-mtp. Only the explicit draft-model variants need separate GPU
+# handling.
+_SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3"})
+_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA = frozenset()  # mtp uses main GPUs
+
+
+def _uses_separate_draft_gpus(spec_type, backend):
+    """Return True iff ``spec_type`` is a variant that loads a SEPARATE
+    draft model and therefore wants its own GPU subset / device flag.
+
+    Strictly narrower than ``_is_draft_capable_for_backend``: excludes
+    draft-mtp / mtp because their MTP head is embedded in the main GGUF
+    and shares the main GPU distribution. Used to gate
+    ``get_effective_visible_gpu_indices`` and ``_resolve_draft_device_value``.
+    """
+    if not spec_type or spec_type == "none":
+        return False
+    if backend == "ik_llama":
+        return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA
+    return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
+
 
 def _is_draft_capable_for_backend(spec_type, backend):
     """Return True iff ``spec_type`` is a draft-capable variant for ``backend``.
@@ -113,7 +140,12 @@ def get_effective_visible_gpu_indices(launcher):
         backend = launcher.backend_selection.get()
     except Exception:
         backend = ""
-    if not _is_draft_capable_for_backend(spec_type, backend):
+    # Only the SEPARATE-draft-model variants need a draft GPU subset
+    # unioned into CUDA_VISIBLE_DEVICES. MTP variants share the main GGUF
+    # and run on whatever GPUs the main model uses, so a stale draft-GPU
+    # selection (e.g. from a prior draft-simple session) must NOT widen
+    # the visible-device set when the user is now on draft-mtp / mtp.
+    if not _uses_separate_draft_gpus(spec_type, backend):
         return main_ordered
     try:
         draft_indices = list(
@@ -269,6 +301,20 @@ def _resolve_draft_device_value(launcher):
     free-text ``spec_draft_device`` value if ``spec_draft_selected_gpus``
     is empty (allowing power users to type a raw override).
     """
+    # MTP variants (draft-mtp on llama.cpp, mtp on ik_llama) DON'T use a
+    # separate draft model — the MTP head is embedded in the main GGUF and
+    # rides along with the main GPU distribution. So any stored draft-GPU
+    # selection (likely persisted from a prior draft-simple session) must
+    # be ignored here. Suppress --spec-draft-device entirely; the binary
+    # uses whatever the main model's devices are.
+    try:
+        spec_type = (launcher.spec_type.get() or "").strip()
+        backend = launcher.backend_selection.get()
+    except Exception:
+        spec_type, backend = "", ""
+    if not _uses_separate_draft_gpus(spec_type, backend):
+        return ""
+
     draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
     if not draft_indices:
         # No checkbox selection → fall back to the free-text override.
