@@ -395,9 +395,22 @@ class BuildTab:
         canvas.bind("<Configure>", _on_canvas_config)
 
         def _wheel(event):
-            delta = -1 * (event.delta // 120) if event.delta else 0
-            if delta == 0:
-                delta = -1 if event.num == 4 else 1
+            # Cross-platform scroll-wheel handling:
+            #   * Windows: event.delta is ±120 per notch.
+            #   * macOS:   event.delta is small (±1..±N) per notch.
+            #   * Linux:   no event.delta; uses Button-4 (up) / Button-5 (down).
+            # We dispatch by which attribute is meaningful for this event.
+            if getattr(event, "delta", 0):
+                # Use the sign of delta, not its magnitude — macOS reports tiny
+                # values where dividing by 120 truncates to 0.
+                if abs(event.delta) >= 120:
+                    delta = -1 * (event.delta // 120)
+                else:
+                    delta = -1 if event.delta > 0 else 1
+            elif getattr(event, "num", None) == 4:
+                delta = -1
+            else:
+                delta = 1
             canvas.yview_scroll(delta, "units")
 
         canvas.bind("<MouseWheel>", _wheel)
