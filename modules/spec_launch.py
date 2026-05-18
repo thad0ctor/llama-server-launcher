@@ -479,22 +479,45 @@ def emit_spec_args(launcher, backend, cmd):
                                 v = var.get().strip()
                                 if v:
                                     cmd.extend([flag, v])
-                        # Validate the draft model path before emitting —
-                        # a saved config can hold a stale path to a
-                        # moved/deleted draft GGUF; mirror the main -m
-                        # behaviour of resolving + skipping with a
-                        # stderr warning.
-                        mp_var = getattr(launcher, "spec_draft_model", None)
-                        if mp_var is not None:
-                            mp = mp_var.get().strip()
-                            if mp:
-                                if Path(mp).is_file():
-                                    cmd.extend(["--spec-draft-model", str(Path(mp).resolve())])
-                                else:
+                        # llama.cpp mainline's ``--spec-type draft-mtp`` uses
+                        # an MTP head embedded INSIDE the main GGUF (the model
+                        # file is the MTP-converted variant); there is NO
+                        # separate draft model and emitting
+                        # ``--spec-draft-model`` makes the server try to load
+                        # an unrelated GGUF as the MTP head — architecture
+                        # mismatch crashes the binary. A stale value from a
+                        # prior ``draft-simple`` session can still sit in the
+                        # Tk var (the UI hides but does not auto-clear it,
+                        # preserving the "flip back" UX), so suppress the
+                        # emission here with a one-line advisory.
+                        if spec_type == "draft-mtp":
+                            mp_var = getattr(launcher, "spec_draft_model", None)
+                            if mp_var is not None:
+                                mp = mp_var.get().strip()
+                                if mp:
                                     print(
-                                        f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
+                                        f"INFO: spec_type=draft-mtp uses the MTP head embedded in the main GGUF;\n"
+                                        f"     ignoring spec_draft_model='{mp}'. Switch to draft-simple/draft-eagle3\n"
+                                        f"     to use a separate draft model.",
                                         file=sys.stderr,
                                     )
+                        else:
+                            # Validate the draft model path before emitting —
+                            # a saved config can hold a stale path to a
+                            # moved/deleted draft GGUF; mirror the main -m
+                            # behaviour of resolving + skipping with a
+                            # stderr warning.
+                            mp_var = getattr(launcher, "spec_draft_model", None)
+                            if mp_var is not None:
+                                mp = mp_var.get().strip()
+                                if mp:
+                                    if Path(mp).is_file():
+                                        cmd.extend(["--spec-draft-model", str(Path(mp).resolve())])
+                                    else:
+                                        print(
+                                            f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
+                                            file=sys.stderr,
+                                        )
                         # ``spec_draft_device`` is resolved through the
                         # CUDA_VISIBLE_DEVICES remap helper (see ik_llama branch
                         # comment) so the value emitted matches what the binary

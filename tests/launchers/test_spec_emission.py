@@ -206,11 +206,15 @@ class TestSpecEmissionLlamaCpp:
     def test_spec_draft_model_emits(self, manager, launcher_mock, tmp_path):
         # Path is validated before emission (CR Comment B), so it must be a
         # real file. Use tmp_path to materialize a stand-in draft GGUF.
+        # NOTE: uses draft-simple here, NOT draft-mtp. For draft-mtp on
+        # llama.cpp mainline, the MTP head is embedded in the main GGUF and
+        # ``--spec-draft-model`` is intentionally suppressed (see
+        # ``TestDraftMtpSuppressesSeparateModel``).
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--spec-draft-model" in cmd
@@ -283,13 +287,18 @@ class TestSpecEmissionLlamaCpp:
     def test_all_llamacpp_draft_knobs_combined(self, manager, launcher_mock, tmp_path):
         """Setting many knobs at once: each one independently emits and
         none drops out due to interaction. Mirrors the
-        ``test_all_reasoning_flags_together`` style."""
+        ``test_all_reasoning_flags_together`` style.
+
+        Uses ``draft-simple`` so the ``--spec-draft-model`` path is exercised
+        (draft-mtp suppresses that flag; see
+        ``TestDraftMtpSuppressesSeparateModel``).
+        """
         # Real file for the path-validation guard (CR Comment B).
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_n_max.set("16")
         launcher_mock.spec_draft_n_min.set("2")
         launcher_mock.spec_draft_p_min.set("0.5")
@@ -303,7 +312,7 @@ class TestSpecEmissionLlamaCpp:
         launcher_mock.spec_draft_n_cpu_moe.set("4")
         cmd = manager.build_cmd()
         # spec_type
-        assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"
+        assert cmd[cmd.index("--spec-type") + 1] == "draft-simple"
         # Long-form draft tuning flags
         assert cmd[cmd.index("--spec-draft-n-max") + 1] == "16"
         assert cmd[cmd.index("--spec-draft-n-min") + 1] == "2"
@@ -1356,12 +1365,17 @@ class TestSpecDraftModelPathValidation:
     def test_llamacpp_existing_file_emits_resolved_absolute_path(
         self, manager, launcher_mock, tmp_path
     ):
-        """Valid path: the flag emits, value is the resolved absolute path."""
+        """Valid path: the flag emits, value is the resolved absolute path.
+
+        Uses ``draft-simple`` — draft-mtp on llama.cpp suppresses
+        ``--spec-draft-model`` since the MTP head is embedded in the main
+        GGUF (see ``TestDraftMtpSuppressesSeparateModel``).
+        """
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--spec-draft-model" in cmd
@@ -1379,7 +1393,7 @@ class TestSpecDraftModelPathValidation:
         assert not bogus.exists()
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_model.set(str(bogus))
         cmd = manager.build_cmd()
         assert "--spec-draft-model" not in cmd
@@ -1396,7 +1410,7 @@ class TestSpecDraftModelPathValidation:
         dir_path.mkdir()
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
-        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_type.set("draft-simple")
         launcher_mock.spec_draft_model.set(str(dir_path))
         cmd = manager.build_cmd()
         assert "--spec-draft-model" not in cmd
@@ -1437,6 +1451,118 @@ class TestSpecDraftModelPathValidation:
         assert str(bogus) in captured.err
         assert "--model-draft" in captured.err
         assert "--spec-draft-model" not in captured.err
+
+
+# ============================================================================
+# draft-mtp on llama.cpp suppresses the separate draft-model flag
+# ============================================================================
+#
+# Bug: a user who left a stale ``spec_draft_model`` path (set during a prior
+# ``draft-simple`` session) and then switched to ``spec_type=draft-mtp`` was
+# still emitting ``--spec-draft-model /path/to/other.gguf``. For llama.cpp
+# mainline, ``--spec-type draft-mtp`` uses the MTP head embedded INSIDE the
+# main GGUF (the model file is the MTP-converted variant) — there is NO
+# separate draft model. Emitting ``--spec-draft-model`` made the server try
+# to load some other GGUF as the MTP head, which segfaulted on architecture
+# mismatch. Emission now skips ``--spec-draft-model`` for that combination
+# and prints a one-line stderr advisory. The ik_llama+mtp path KEEPS
+# ``--model-draft`` (legacy support there was added by an earlier CR fix).
+
+
+class TestDraftMtpSuppressesSeparateModel:
+    """``--spec-type draft-mtp`` (llama.cpp) must NOT emit a separate
+    ``--spec-draft-model`` flag — the MTP head lives in the main GGUF."""
+
+    def test_llamacpp_draft_mtp_suppresses_spec_draft_model_with_advisory(
+        self, manager, launcher_mock, tmp_path, capsys
+    ):
+        """draft-mtp + non-empty stale spec_draft_model: ``--spec-draft-model``
+        does NOT appear; stderr carries the embedded-head advisory.
+        """
+        # Path is a real file — proves the suppression is unconditional,
+        # not just the existing ``Path.is_file()`` validator firing.
+        draft = tmp_path / "stale-from-draft-simple.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        # --spec-type emits, but --spec-draft-model is suppressed.
+        assert "--spec-type" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"
+        assert "--spec-draft-model" not in cmd
+        # Advisory mentions the stale path and the embedded-head reason.
+        captured = capsys.readouterr()
+        assert "draft-mtp" in captured.err
+        assert str(draft) in captured.err
+        assert "embedded" in captured.err
+
+    def test_llamacpp_draft_mtp_empty_draft_model_no_advisory(
+        self, manager, launcher_mock, capsys
+    ):
+        """draft-mtp with a blank spec_draft_model: no flag emits and no
+        spurious advisory is printed (silent happy path)."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.spec_draft_model.set("")
+        cmd = manager.build_cmd()
+        assert "--spec-type" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == "draft-mtp"
+        assert "--spec-draft-model" not in cmd
+        captured = capsys.readouterr()
+        # No advisory about ignoring a draft model when none was set.
+        assert "ignoring spec_draft_model" not in captured.err
+        assert "embedded in the main GGUF" not in captured.err
+
+    def test_llamacpp_draft_simple_still_emits_draft_model(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Regression: draft-simple keeps emitting ``--spec-draft-model``
+        with a resolved absolute path."""
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-simple")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        assert "--spec-draft-model" in cmd
+        assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
+
+    def test_llamacpp_draft_eagle3_still_emits_draft_model(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Regression: draft-eagle3 keeps emitting ``--spec-draft-model``
+        (it really does load a separate eagle3 draft GGUF)."""
+        draft = tmp_path / "eagle3.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-eagle3")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        assert "--spec-draft-model" in cmd
+        assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
+
+    def test_ik_llama_mtp_still_emits_model_draft(
+        self, manager, launcher_mock, tmp_path
+    ):
+        """Regression: ik_llama + mtp still emits ``--model-draft`` because
+        ik_llama supports the legacy separate-draft fallback (don't undo
+        the earlier CR fix that wired this path through the UI)."""
+        draft = tmp_path / "ik-draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_draft_model.set(str(draft))
+        cmd = manager.build_cmd()
+        assert "--model-draft" in cmd
+        assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
+        # And the llama.cpp-name advisory must NOT fire under ik_llama.
+        assert "--spec-draft-model" not in cmd
 
 
 # ============================================================================
