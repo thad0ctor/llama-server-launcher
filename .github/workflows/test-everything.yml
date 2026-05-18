@@ -235,6 +235,40 @@ jobs:
             -ra \
             -v
 
+      # Slow tests live in their own step so a Tcl-state deadlock in
+      # ``tests/ui/test_spec_tab_behavior.py`` can't poison the main suite.
+      # On Python 3.13 a single pytest invocation that runs all 19 real-launcher
+      # tests in one process deadlocks ``ttk.Notebook.add()`` around the
+      # 10th launcher instance; we sidestep that by running each test class
+      # as its own pytest subprocess (per-class fork == fresh Tcl state).
+      # ``continue-on-error: true`` because the deadlock is reproducible
+      # on 3.13 and we don't want it gating merges while a permanent fix
+      # is in flight. Linux-only because xvfb is only installed there;
+      # Windows/macOS runners would need their own GUI setup.
+      - name: Run slow real-launcher tests (per-class isolation)
+        if: runner.os == 'Linux'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set +e
+          # Discover class node IDs explicitly so each gets its own
+          # pytest process. The marker filter is set to ``slow`` so the
+          # default ``-m "not slow"`` from pytest.ini doesn't deselect
+          # everything.
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" bash -c '
+            classes=$(pytest --collect-only -q -m slow tests/ui/test_spec_tab_behavior.py 2>/dev/null \
+                      | awk -F"::" "/::/ {print \$1 \"::\" \$2}" | sort -u)
+            overall=0
+            for cls in $classes; do
+              echo "::group::pytest $cls"
+              pytest -m slow --timeout=60 --timeout-method=thread -v "$cls"
+              rc=$?
+              echo "::endgroup::"
+              if [ "$rc" != "0" ]; then overall=$rc; fi
+            done
+            exit $overall
+          '
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4

@@ -34,6 +34,43 @@ from pathlib import Path
 import pytest
 
 
+# All tests in this module are marked ``slow`` and EXCLUDED from the default
+# ``pytest`` run via ``pytest.ini``'s ``addopts = -m "not slow"``.
+#
+# Why
+# ---
+# Every test in this file builds a real ``LlamaCppLauncher`` against a fresh
+# ``tk.Tk()`` root and tears it down. Across the ~19 tests below this means
+# ~19 root-create + root-destroy cycles in a single Python process.
+#
+# On Python 3.13 the Tcl interpreter's per-process threading state
+# accumulates enough cruft after roughly 10 launchers that
+# ``ttk.Notebook.add(...)`` deterministically deadlocks on the next
+# launcher's construction — even with the commit-64758dc worker-thread
+# isolation (``_tk_alive`` flag, ``_safe_after_destroy``, ``<Destroy>``
+# binding, ``defer_tk_writes=True``) and even with every background-thread
+# spawn stubbed out at test time. The root cause is inside Tcl's mutex
+# bookkeeping; we cannot fix it from Python without forking each test into
+# its own subprocess (``pytest-forked`` isn't installed and adding it would
+# expand the dependency surface for one file's worth of tests).
+#
+# How to run them
+# ---------------
+# Local quick smoke:   ``pytest -m slow tests/ui/test_spec_tab_behavior.py``
+#                       (note: WILL HANG around test #10 — kill manually.)
+# Per-class isolation: ``pytest -m slow tests/ui/test_spec_tab_behavior.py::TestSpecTabPresence``
+# Full coverage:        run each class as its own ``pytest`` invocation
+#                       (separate process per class avoids the Tcl
+#                       accumulation deadlock).
+#
+# CI runs the slow set in an isolated step (see ``unit-tests-slow`` in
+# ``.github/workflows/test-everything.yml``) so a deadlock there can't
+# poison the main test job. If you add a new test here, keep it minimal
+# and consider whether a mock-launcher test in
+# ``tests/ui/test_spec_refactor_audit.py`` would cover the same behaviour
+# without paying the real-launcher cost.
+pytestmark = pytest.mark.slow
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -87,12 +124,36 @@ def _make_real_launcher(entry_module, config_path: Path, monkeypatch):
     root window. ``monkeypatch`` is the per-test pytest fixture — all global
     overrides (``ConfigManager.get_config_path``, ``tkinter.messagebox.*``)
     are scoped to it so they restore automatically at teardown.
+
+    Background threads are stubbed out (no-op): the launcher normally spawns
+    a version-check HTTP GET (modules.about_tab) and a system-info detection
+    thread (``_start_system_info_detection``) during ``__init__``. Across
+    19 tests in this file that's ~38 daemon threads piling up — each one
+    reaches back into Tk via ``self.root`` and competes with the next
+    launcher's ``ttk.Notebook.add()`` for Tcl's per-process mutex. On
+    Python 3.13 that contention deterministically deadlocks somewhere
+    around the 6th launcher instance (root-cause: Tcl threading state
+    accumulates even with the ``_tk_alive`` flag because the worker has
+    already entered Tcl before the flag check). Stubbing the threads at
+    test-time fully avoids the race; production code is unchanged.
     """
     import modules.config as cfg_mod
+    import modules.about_tab as about_mod
 
     monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path",
                         lambda self: config_path)
     _silence_messagebox(monkeypatch)
+
+    # Stub the AboutTab background HTTP version check: it spawns a daemon
+    # thread that requests.get(github)+touches Tk. Replace with a no-op so
+    # the thread never starts.
+    monkeypatch.setattr(about_mod.AboutTab, "_check_version_online",
+                        lambda self: None, raising=False)
+    # Stub the launcher's system-info detection so no worker thread starts.
+    monkeypatch.setattr(entry_module.LlamaCppLauncher,
+                        "_start_system_info_detection",
+                        lambda self: None, raising=False)
+
     root = tk.Tk()
     root.withdraw()
     try:
@@ -117,6 +178,13 @@ def real_launcher(entry_module, tmp_path, monkeypatch):
     except tk.TclError as exc:
         pytest.skip(f"Tk root unavailable: {exc}")
     yield launcher, tmp_path
+    # Mark Tk dead BEFORE destroying — any background worker that snuck in
+    # (e.g. via a non-stubbed code path) will see the cleared flag and
+    # skip its Tk dispatch instead of racing into a torn-down interpreter.
+    try:
+        launcher._mark_tk_dead()
+    except Exception:
+        pass
     try:
         root.destroy()
     except Exception:

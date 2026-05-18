@@ -397,7 +397,11 @@ LLAMA_CPP_DRAFT_MTP_FLAGS_EXPECTED = [
     "--spec-draft-n-min",
     "--spec-draft-p-min",
     "--spec-draft-p-split",
-    "--spec-draft-model",
+    # NOTE: --spec-draft-model is intentionally NOT in this list — for
+    # llama.cpp + draft-mtp the MTP head is embedded in the main GGUF
+    # and the launcher suppresses the flag (see emit_spec_args in
+    # modules/spec_launch.py + TestDraftMtpSuppressesSeparateModel for
+    # the contract test).
     "--spec-draft-ngl",
     "--spec-draft-device",
     "--spec-draft-type-k",
