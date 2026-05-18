@@ -47,6 +47,80 @@ _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3",
 _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
 
 
+def _resolve_draft_device_value(launcher):
+    """Return the correctly-remapped value for ``--spec-draft-device``
+    given the user's draft GPU selection and the main GPU selection.
+
+    The launch script applies ``CUDA_VISIBLE_DEVICES=<main_ordered>`` to
+    restrict GPUs the server can see — and that filter REINDEXES the
+    devices the binary then knows about. So when the main selection is
+    ``[2, 5]`` the binary sees only ``CUDA0`` (physical 2) and ``CUDA1``
+    (physical 5); a raw ``CUDA4`` reference (the user's launcher-side
+    draft selection on physical GPU 4) does not exist post-filter and
+    the binary aborts with "invalid device".
+
+    Mapping rules:
+        - No main subset selected (CUDA_VISIBLE_DEVICES not set):
+          launcher index N == binary CUDA<N>. Pass through.
+        - Main subset = ordered list (e.g. ``[5, 2]``):
+          binary CUDA<i> corresponds to ``ordered[i]``. Each draft
+          launcher index ``d`` is remapped to ``CUDA<ordered.index(d)>``.
+        - Draft selection includes an index that's NOT in the main
+          selection: that GPU is invisible to the binary. Warn and skip
+          the offending index (rest of the selection still emits).
+
+    Returns the comma-joined CUDA string, or "" when the result is
+    empty (no flag should be emitted). Falls back to the launcher's
+    free-text ``spec_draft_device`` value if ``spec_draft_selected_gpus``
+    is empty (allowing power users to type a raw override).
+    """
+    draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
+    if not draft_indices:
+        # No checkbox selection → fall back to the free-text override.
+        try:
+            return launcher.spec_draft_device.get().strip()
+        except Exception:
+            return ""
+    # Main subset gating
+    try:
+        main_ordered = launcher.get_ordered_selected_gpus()
+    except Exception:
+        main_ordered = []
+    detected_count = 0
+    try:
+        gpu_info = getattr(launcher, "gpu_info", {})
+        if isinstance(gpu_info, dict):
+            detected_count = int(gpu_info.get("device_count", 0) or 0)
+    except Exception:
+        detected_count = 0
+    # If the user has selected every detected GPU (or none), no CUDA_VISIBLE_DEVICES
+    # filter is in effect → launcher indices == binary indices.
+    no_filter = (not main_ordered) or (
+        detected_count > 0 and len(main_ordered) == detected_count
+    )
+    parts = []
+    if no_filter:
+        for d in draft_indices:
+            parts.append(f"CUDA{d}")
+    else:
+        main_set = set(main_ordered)
+        for d in draft_indices:
+            if d not in main_set:
+                print(
+                    f"WARNING: draft GPU index {d} is not in the main GPU selection "
+                    f"{sorted(main_set)}; --spec-draft-device entry for that GPU is "
+                    f"skipped (would be filtered out by CUDA_VISIBLE_DEVICES).",
+                    file=sys.stderr,
+                )
+                continue
+            try:
+                pos = main_ordered.index(d)
+            except ValueError:
+                continue
+            parts.append(f"CUDA{pos}")
+    return ",".join(parts)
+
+
 def emit_spec_args(launcher, backend, cmd):
     """Append all ``--spec-*`` / ``--draft-*`` family flags to ``cmd`` based on
     ``launcher.spec_*`` Tk vars and the active backend.
@@ -114,9 +188,12 @@ def emit_spec_args(launcher, backend, cmd):
                                         file=sys.stderr,
                                     )
                         # ik_llama uses the same short-form draft offload flags.
+                        # ``spec_draft_device`` is resolved through the CUDA_VISIBLE_DEVICES
+                        # remap helper rather than read verbatim so checkbox-driven
+                        # indices stay valid post-filter (e.g. CUDA4 → CUDA1 when
+                        # main selection reindexes the device list).
                         for var_name, flag in [
                             ("spec_draft_ngl", "-ngld"),
-                            ("spec_draft_device", "-devd"),
                             ("spec_draft_ctk", "-ctkd"),
                             ("spec_draft_ctv", "-ctvd"),
                         ]:
@@ -125,6 +202,9 @@ def emit_spec_args(launcher, backend, cmd):
                                 v = var.get().strip()
                                 if v:
                                     cmd.extend([flag, v])
+                        devd_val = _resolve_draft_device_value(launcher)
+                        if devd_val:
+                            cmd.extend(["-devd", devd_val])
                     # ngram: ik_llama has a single shared --spec-ngram-* set.
                     if spec_type.startswith("ngram-"):
                         for var_name, flag in [
@@ -214,9 +294,12 @@ def emit_spec_args(launcher, backend, cmd):
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
                                         file=sys.stderr,
                                     )
+                        # ``spec_draft_device`` is resolved through the
+                        # CUDA_VISIBLE_DEVICES remap helper (see ik_llama branch
+                        # comment) so the value emitted matches what the binary
+                        # sees post-filter.
                         for var_name, flag in [
                             ("spec_draft_ngl", "--spec-draft-ngl"),
-                            ("spec_draft_device", "--spec-draft-device"),
                             ("spec_draft_ctk", "--spec-draft-type-k"),
                             ("spec_draft_ctv", "--spec-draft-type-v"),
                         ]:
@@ -225,6 +308,9 @@ def emit_spec_args(launcher, backend, cmd):
                                 v = var.get().strip()
                                 if v:
                                     cmd.extend([flag, v])
+                        devd_val = _resolve_draft_device_value(launcher)
+                        if devd_val:
+                            cmd.extend(["--spec-draft-device", devd_val])
                         cpu_moe_var = getattr(launcher, "spec_draft_cpu_moe", None)
                         if cpu_moe_var is not None and cpu_moe_var.get():
                             cmd.append("--spec-draft-cpu-moe")

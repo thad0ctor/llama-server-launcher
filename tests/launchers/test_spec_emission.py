@@ -1856,3 +1856,151 @@ class TestResetSpecDefaults:
         second = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
                   reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
         assert first == second
+
+
+# ============================================================================
+# CUDA_VISIBLE_DEVICES remap for --spec-draft-device.
+# When the main GPU selection restricts visible devices via
+# CUDA_VISIBLE_DEVICES=2,5 the binary reindexes them — CUDA0=physical2,
+# CUDA1=physical5. A raw launcher-side draft selection on physical 4
+# would emit --spec-draft-device CUDA4 which is now invalid. The
+# emission must remap launcher indices to post-filter binary indices.
+# ============================================================================
+
+
+class TestSpecDraftDeviceCudaVisibleRemap:
+    """Reproduces the user-reported failure:
+    CUDA_VISIBLE_DEVICES=2,5 + draft index 4 → 'invalid device CUDA4'.
+    The remap converts launcher indices to post-filter binary CUDA<i>."""
+
+    @pytest.fixture
+    def remap_launcher(self, launcher_mock):
+        """Stand up a launcher with a controllable main selection. The
+        conftest mock has ``app_settings`` as a MagicMock auto-attribute
+        (so ``__setitem__`` works but ``get()`` returns a MagicMock, not a
+        list), so swap in a real dict and rebind
+        ``get_ordered_selected_gpus`` to a callable that reads from it
+        — mirroring the real launcher's behavior."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.app_settings = {
+            "selected_gpus": [],
+            "gpu_order": [],
+            "spec_draft_selected_gpus": [],
+        }
+        # 8 detected devices so the "selected = all detected" no-filter
+        # branch only fires when the test explicitly selects all 8.
+        launcher_mock.gpu_info = {"device_count": 8, "available": True, "devices": []}
+
+        def _ordered():
+            order = launcher_mock.app_settings.get("gpu_order", [])
+            sel = set(launcher_mock.app_settings.get("selected_gpus", []))
+            seen = set()
+            out = []
+            for g in order:
+                if g in sel and g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            for g in sorted(sel):
+                if g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            return out
+
+        launcher_mock.get_ordered_selected_gpus = _ordered
+        return launcher_mock
+
+    def test_main_subset_2_5_draft_on_2_emits_cuda0(self, manager, remap_launcher):
+        """Main=[2,5], draft=[2] → CUDA0 (physical 2 becomes CUDA0 post-filter)."""
+        remap_launcher.app_settings["selected_gpus"] = [2, 5]
+        remap_launcher.app_settings["gpu_order"] = [2, 5]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [2]
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" in cmd
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0"
+
+    def test_main_subset_2_5_draft_on_5_emits_cuda1(self, manager, remap_launcher):
+        """Main=[2,5], draft=[5] → CUDA1 (physical 5 becomes CUDA1)."""
+        remap_launcher.app_settings["selected_gpus"] = [2, 5]
+        remap_launcher.app_settings["gpu_order"] = [2, 5]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [5]
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA1"
+
+    def test_main_subset_2_5_draft_on_4_skips_with_warning(
+        self, manager, remap_launcher, capsys
+    ):
+        """The user's actual error case: draft on a GPU NOT in the main
+        selection. The bad index must be skipped with a warning, not
+        emitted as a phantom CUDA4."""
+        remap_launcher.app_settings["selected_gpus"] = [2, 5]
+        remap_launcher.app_settings["gpu_order"] = [2, 5]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [4]
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" not in cmd
+        assert "CUDA4" not in cmd
+        captured = capsys.readouterr()
+        assert "draft GPU index 4" in captured.err
+        assert "main GPU selection" in captured.err
+
+    def test_main_subset_5_2_reverse_order_remaps_correctly(
+        self, manager, remap_launcher
+    ):
+        """Order matters for CUDA_VISIBLE_DEVICES: =5,2 makes physical 5
+        be CUDA0 and physical 2 be CUDA1. Draft on physical 2 → CUDA1."""
+        remap_launcher.app_settings["selected_gpus"] = [5, 2]
+        remap_launcher.app_settings["gpu_order"] = [5, 2]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [2]
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA1"
+
+    def test_main_subset_2_5_draft_on_both_emits_csv(self, manager, remap_launcher):
+        """Multi-GPU draft on the full main subset emits a comma-joined string."""
+        remap_launcher.app_settings["selected_gpus"] = [2, 5]
+        remap_launcher.app_settings["gpu_order"] = [2, 5]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0,CUDA1"
+
+    def test_no_main_subset_uses_launcher_indices(self, manager, remap_launcher):
+        """When the main selection is empty (no CUDA_VISIBLE_DEVICES filter)
+        OR equals all detected GPUs, launcher indices pass through as
+        binary indices unchanged."""
+        # Empty selection
+        remap_launcher.app_settings["selected_gpus"] = []
+        remap_launcher.app_settings["gpu_order"] = []
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [3]
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA3"
+
+    def test_all_gpus_selected_no_filter(self, manager, remap_launcher):
+        """User selects every detected GPU = no CUDA_VISIBLE_DEVICES
+        restriction → launcher indices pass through."""
+        remap_launcher.app_settings["selected_gpus"] = [0, 1, 2, 3, 4, 5, 6, 7]
+        remap_launcher.app_settings["gpu_order"] = [0, 1, 2, 3, 4, 5, 6, 7]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [4]
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA4"
+
+    def test_free_text_override_used_when_no_checkbox_selection(
+        self, manager, remap_launcher
+    ):
+        """``spec_draft_device`` as a free-text string is honored only
+        when ``spec_draft_selected_gpus`` is empty (power-user override
+        path for non-CUDA backends)."""
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = []
+        remap_launcher.spec_draft_device.set("Vulkan0")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "Vulkan0"
+
+    def test_ik_llama_uses_devd_short_form(self, manager, remap_launcher):
+        """ik_llama emits the same remapped value but under -devd."""
+        remap_launcher.backend_selection.set("ik_llama")
+        remap_launcher.spec_type.set("mtp")
+        remap_launcher.app_settings["selected_gpus"] = [2, 5]
+        remap_launcher.app_settings["gpu_order"] = [2, 5]
+        remap_launcher.app_settings["spec_draft_selected_gpus"] = [5]
+        cmd = manager.build_cmd()
+        assert "-devd" in cmd
+        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
