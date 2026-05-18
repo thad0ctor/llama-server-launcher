@@ -103,15 +103,18 @@ class BuildTab:
         self._upstream_check_in_flight = False
         self._pending_status: queue.Queue[UpstreamStatus] = queue.Queue()
 
-        # Detach state. The button-text var must live on self (not the
-        # short-lived header frame) so it survives _build_ui rebuilds —
-        # otherwise switching backends while detached resets the label
-        # back to "Detach" even though the window IS detached.
-        self._detached_toplevel: tk.Toplevel | None = None
+        # Notebook integration. Detach-to-Toplevel was removed because the
+        # rebuild involved in re-parenting the heavy widget tree caused
+        # lock-ups in practice.
         self._notebook = None
         self._tab_frame = None
-        self._tab_text = "Build"
-        self._detach_button_text = tk.StringVar(value="Detach ⇗")
+        self._tab_text = "Build (beta)"
+        # Async-refresh guard + queue so we don't start two concurrent toolchain
+        # probes. Worker thread puts the new ToolchainProbe (or an exception) on
+        # the queue; the Tk main thread polls and applies it.
+        self._toolchain_refresh_in_flight = False
+        self._toolchain_refresh_queue: queue.Queue = queue.Queue()
+        self._toolchain_refresh_after_id: str | None = None
 
         # Re-entry / scheduling guards: _build_ui destroys its parent's
         # children, so we must NEVER call it synchronously from a widget's
@@ -154,6 +157,12 @@ class BuildTab:
         self.var_status = tk.StringVar(value="Idle")
         self.var_jobs_hint = tk.StringVar(value="")
         self.var_toolchain_hint = tk.StringVar(value="")
+        # Status banner shown next to the source-dir entry. Updates live
+        # as the user types (or pastes) a new path: tells them whether the
+        # path is an existing git repo, an existing non-git dir, or doesn't
+        # exist yet and will be auto-cloned on build.
+        self.var_source_status = tk.StringVar(value="")
+        self.var_source_status_color = tk.StringVar(value="#666")
         self.var_auto_check_updates = tk.BooleanVar(value=True)
         self.var_autoscroll = tk.BooleanVar(value=True)
 
@@ -215,6 +224,12 @@ class BuildTab:
         # Whenever CUDACXX changes (user-edited or programmatic), keep
         # CUDA root + picker label in sync.
         self.var_cudacxx.trace_add("write", lambda *_a: self._on_cudacxx_changed())
+
+        # Live source-dir state indicator: updates as the user types so
+        # they get immediate feedback about whether the path exists, is
+        # a git repo, or will be auto-cloned.
+        self.var_source_dir.trace_add("write", lambda *_a: self._update_source_dir_status())
+        self.var_backend.trace_add("write", lambda *_a: self._update_source_dir_status())
 
     # ─────────────────────────────────────────────────────────────────────
     # Seeding helpers
@@ -460,10 +475,6 @@ class BuildTab:
                   font=("TkSmallCaptionFont",)).pack(side="left", padx=(0, 8))
         ttk.Button(right, text="Refresh toolchain",
                    command=self._on_refresh_toolchain).pack(side="left", padx=2)
-        # _detach_button_text is created in __init__ so its current value
-        # ("Re-attach ⇙" while detached) survives UI rebuilds.
-        ttk.Button(right, textvariable=self._detach_button_text,
-                   command=self._toggle_detach).pack(side="left", padx=2)
 
         # Update banner — hidden when no updates available.
         self._banner = tk.Frame(parent, bg="#fff5cf", highlightbackground="#c5a800",
@@ -527,18 +538,29 @@ class BuildTab:
         ttk.Button(src_btns, text="Use backend dir",
                    command=self._on_use_backend_dir).pack(side="left", padx=2)
 
-        ttk.Label(lf, text="Build dir:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(lf, textvariable=self.var_build_dir).grid(row=2, column=1, sticky="ew", padx=4)
-        ttk.Label(lf, text="(relative to source dir or absolute)",
-                  font=("TkSmallCaptionFont",)).grid(row=2, column=2, sticky="w", padx=4)
+        # Live status line for the source dir. Recolored based on state
+        # (gray = neutral / will-be-cloned, red = problem). Updated by
+        # _update_source_dir_status whenever var_source_dir or var_backend
+        # changes.
+        self._source_status_label = tk.Label(
+            lf, textvariable=self.var_source_status,
+            anchor="w", justify="left", font=("TkSmallCaptionFont",),
+            fg=self.var_source_status_color.get(),
+        )
+        self._source_status_label.grid(row=2, column=1, columnspan=2, sticky="w", padx=4)
 
-        ttk.Label(lf, text="Git ref:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(lf, textvariable=self.var_git_ref).grid(row=3, column=1, sticky="ew", padx=4)
-        ttk.Label(lf, text="branch/tag/commit (blank = leave as-is)",
+        ttk.Label(lf, text="Build dir:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.var_build_dir).grid(row=3, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="(relative to source dir or absolute)",
                   font=("TkSmallCaptionFont",)).grid(row=3, column=2, sticky="w", padx=4)
 
+        ttk.Label(lf, text="Git ref:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.var_git_ref).grid(row=4, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="branch/tag/commit (blank = leave as-is)",
+                  font=("TkSmallCaptionFont",)).grid(row=4, column=2, sticky="w", padx=4)
+
         opts = ttk.Frame(lf)
-        opts.grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        opts.grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
         ttk.Checkbutton(opts, text="git pull --ff-only before build",
                         variable=self.var_git_pull).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(opts, text="Clean build dir first",
@@ -549,7 +571,9 @@ class BuildTab:
                   text=("Tip: if source dir doesn't exist it will be auto-cloned. "
                         "Set git ref to a branch/tag/commit, or leave blank to use the current checkout."),
                   font=("TkSmallCaptionFont",), foreground="#666") \
-            .grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+            .grid(row=6, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        # Seed the status line now that the widget exists.
+        self._update_source_dir_status()
 
     # ── Environment (jobs / archs / compilers) ──────────────────────────
     def _build_section_environment(self, parent: ttk.Frame, row: int) -> None:
@@ -1039,13 +1063,8 @@ class BuildTab:
                 self._sync_flag_widgets_from_values()
             finally:
                 self._suspend_traces = False
-            target = None
-            if self._detached_toplevel is not None and self._detached_toplevel.winfo_exists():
-                target = self._detached_toplevel
-            elif self._tab_frame is not None and self._tab_frame.winfo_exists():
-                target = self._tab_frame
-            if target is not None:
-                self._build_ui(target)
+            if self._tab_frame is not None and self._tab_frame.winfo_exists():
+                self._build_ui(self._tab_frame)
             self._schedule_preview_refresh()
             if self.var_auto_check_updates.get():
                 self.check_for_updates(do_fetch=False)
@@ -1083,20 +1102,135 @@ class BuildTab:
             self.var_source_dir.set(d)
             self.check_for_updates(do_fetch=False)
 
+    def _update_source_dir_status(self) -> None:
+        """Update the source-dir status line (and its color) based on what
+        the path currently points at:
+
+          * empty                     → blank
+          * doesn't exist             → "will be auto-cloned from <url>" (neutral)
+          * exists, not a git repo    → "exists but not a git repository" (red)
+          * exists, is a git repo     → "✓ Git repository detected" (neutral)
+
+        Called by traces on var_source_dir and var_backend, and once at
+        section-build time.
+        """
+        if not hasattr(self, "_source_status_label"):
+            return  # label not built yet
+        src = self.var_source_dir.get().strip()
+        if not src:
+            self.var_source_status.set("")
+            self._source_status_label.configure(fg="#666")
+            return
+        if not os.path.isdir(src):
+            upstream = UPSTREAMS.get(self.var_backend.get(), "")
+            url_suffix = f" from {upstream}" if upstream else ""
+            self.var_source_status.set(
+                f"⚠ Directory does not exist — will be auto-cloned{url_suffix} on Start build."
+            )
+            self._source_status_label.configure(fg="#b08000")
+            return
+        git_path = os.path.join(src, ".git")
+        is_git = os.path.exists(git_path)  # exists() covers worktree (.git is a file)
+        if not is_git:
+            self.var_source_status.set(
+                "⚠ Directory exists but is not a git repository. "
+                "Pick a different folder or delete it to allow auto-clone."
+            )
+            self._source_status_label.configure(fg="#b00000")
+        else:
+            self.var_source_status.set("✓ Git repository detected.")
+            self._source_status_label.configure(fg="#0a6")
+
     def _on_refresh_toolchain(self) -> None:
-        self._toolchain = detection.probe_toolchain()
-        # Invalidate the cached CUDA arch detection so next autodetect re-probes.
+        """Re-scan CUDA toolkits, compilers, etc. Runs the probe on a
+        background thread because ``probe_toolchain`` makes multiple
+        subprocess calls (nvcc/cmake --version, etc.) that can easily
+        spend 5+ seconds — running it on the Tk main thread would freeze
+        the entire app.
+
+        Uses a Queue + Tk after() polling pattern (rather than calling
+        root.after() directly from the worker) because Tkinter's
+        createcommand is not thread-safe and the direct-call pattern
+        breaks during shutdown / teardown.
+        """
+        if self._toolchain_refresh_in_flight:
+            return
+        self._toolchain_refresh_in_flight = True
+        self._append_console("Re-probing toolchain…\n", tag="stage")
+        threading.Thread(
+            target=self._refresh_toolchain_worker,
+            name="ToolchainProbe",
+            daemon=True,
+        ).start()
+        # Start polling the queue from the main thread.
+        if self._toolchain_refresh_after_id is None:
+            self._toolchain_refresh_after_id = self.root.after(
+                200, self._drain_toolchain_refresh
+            )
+
+    def _refresh_toolchain_worker(self) -> None:
+        """Background-thread worker. Posts a single result onto the
+        toolchain-refresh queue and exits. No direct Tk calls."""
+        try:
+            new_tc = detection.probe_toolchain()
+            self._toolchain_refresh_queue.put(("ok", new_tc))
+        except Exception as exc:
+            self._toolchain_refresh_queue.put(("error", exc))
+
+    def _drain_toolchain_refresh(self) -> None:
+        """Main-thread poll: pull a finished probe off the queue and apply
+        it. Reschedules itself while the worker is still in-flight."""
+        self._toolchain_refresh_after_id = None
+        try:
+            kind, payload = self._toolchain_refresh_queue.get_nowait()
+        except queue.Empty:
+            if self._toolchain_refresh_in_flight:
+                self._toolchain_refresh_after_id = self.root.after(
+                    200, self._drain_toolchain_refresh
+                )
+            return
+        if kind == "ok":
+            self._refresh_toolchain_finish(payload)
+        else:
+            self._toolchain_refresh_in_flight = False
+            self._append_console(f"Toolchain probe failed: {payload}\n", tag="error")
+
+    def _refresh_toolchain_finish(self, new_tc) -> None:
+        """Main-thread callback: apply the freshly-probed toolchain in
+        place, without rebuilding the whole tab. Only the CUDA-install
+        combobox values, the CUDACXX combobox values, and the toolchain
+        hint label need updating.
+        """
+        self._toolchain = new_tc
         self._cuda_arch_cache = None
         self._refresh_toolchain_hint()
         self._refresh_jobs_hint()
         self._seed_toolchain_defaults()
+        # In-place refresh of the CUDA-install combobox + label map.
+        if hasattr(self, "_cuda_pick_combo") and self._cuda_pick_combo.winfo_exists():
+            self._cuda_install_by_label = {
+                inst.label(): inst for inst in new_tc.cuda_installs
+            }
+            labels = list(self._cuda_install_by_label.keys())
+            if labels:
+                labels.append("Custom path…")
+            try:
+                self._cuda_pick_combo["values"] = labels
+                self._cuda_pick_combo["state"] = "readonly" if labels else "normal"
+            except Exception:
+                pass
+        # Refresh compiler comboboxes' value lists in place if we can find them.
+        # (They're tied to var_cc/var_cxx; we don't track the widget refs, but
+        # the values shown only matter on next dropdown open — Tk reads them
+        # fresh from the combobox values config.)
+        self._toolchain_refresh_in_flight = False
         self._append_console(
-            f"Toolchain re-probed: {len(self._toolchain.cuda_installs)} CUDA install(s), "
-            f"{len(self._toolchain.cc_candidates)} compiler(s).\n",
-            tag="stage",
+            f"Toolchain re-probed: {len(new_tc.cuda_installs)} CUDA install(s), "
+            f"{len(new_tc.cc_candidates)} compiler(s).\n",
+            tag="ok",
         )
-        # Use full rebuild — the CUDA-install combobox is in the env section.
-        self._schedule_rebuild(full=True)
+        # Update source-dir status if it now depends on a re-probed git binary.
+        self._update_source_dir_status()
 
     def _on_cuda_install_picked(self, *_args) -> None:
         """Combobox callback: a label like 'CUDA 12.8 · /usr/local/cuda-12.8'
@@ -1821,47 +1955,6 @@ class BuildTab:
             Path(path).write_text("\n".join(self._console_buffer), encoding="utf-8")
         except Exception as exc:
             messagebox.showerror("Save log", str(exc))
-
-    # ── Detach / reattach ──────────────────────────────────────────────
-    def _toggle_detach(self) -> None:
-        # Defer — we're inside a button command whose widget will be destroyed
-        # when the host frame is rebuilt.
-        if self._detached_toplevel is not None and self._detached_toplevel.winfo_exists():
-            self.root.after_idle(self._reattach)
-        else:
-            self.root.after_idle(self._detach)
-
-    def _detach(self) -> None:
-        if self._notebook is None or self._tab_frame is None:
-            return
-        try:
-            self._notebook.hide(self._tab_frame)
-        except Exception:
-            pass
-        top = tk.Toplevel(self.root)
-        top.title("Build — llama.cpp / ik_llama.cpp")
-        top.geometry("1100x800")
-        top.protocol("WM_DELETE_WINDOW", lambda: self.root.after_idle(self._reattach))
-        self._detached_toplevel = top
-        self._build_ui(top)
-        if hasattr(self, "_detach_button_text"):
-            self._detach_button_text.set("Re-attach ⇙")
-
-    def _reattach(self) -> None:
-        if self._detached_toplevel is not None:
-            try:
-                self._detached_toplevel.destroy()
-            except Exception:
-                pass
-            self._detached_toplevel = None
-        if self._notebook is not None and self._tab_frame is not None:
-            try:
-                self._notebook.add(self._tab_frame, text=self._tab_text)
-            except Exception:
-                pass
-            self._build_ui(self._tab_frame)
-        if hasattr(self, "_detach_button_text"):
-            self._detach_button_text.set("Detach ⇗")
 
     # ─────────────────────────────────────────────────────────────────────
     # Helpers

@@ -877,7 +877,7 @@ class LlamaCppLauncher:
         nb.add(settings_frame, text="Settings") # UI appearance / font
         # Build tab is always visible (lets you build either backend regardless of which is launched).
         # Positioned 2nd-to-last; About is always last.
-        nb.add(build_frame, text="Build")
+        nb.add(build_frame, text="Build (beta)")
         self.build_frame = build_frame
         nb.add(about_frame, text="About") # Add the about tab
 
@@ -2150,7 +2150,7 @@ class LlamaCppLauncher:
     def _setup_build_tab(self, parent):
         """Set up the Build tab (clone + cmake configure + build)."""
         self.build_tab = BuildTab(self)
-        self.build_tab.register_with_notebook(self.notebook, "Build")
+        self.build_tab.register_with_notebook(self.notebook, "Build (beta)")
         self.build_tab.setup_tab(parent)
 
     def _setup_about_tab(self, parent):
@@ -3942,9 +3942,9 @@ class LlamaCppLauncher:
             # Fallback 1: before MTP-Spec
             elif "MTP-Spec" in tab_ids:
                 insert_idx = tab_ids.index("MTP-Spec")
-            # Fallback 2: before Build
-            elif "Build" in tab_ids:
-                insert_idx = tab_ids.index("Build")
+            # Fallback 2: before Build (beta)
+            elif "Build (beta)" in tab_ids:
+                insert_idx = tab_ids.index("Build (beta)")
             # Fallback 3: before About
             elif "About" in tab_ids:
                 insert_idx = tab_ids.index("About")
