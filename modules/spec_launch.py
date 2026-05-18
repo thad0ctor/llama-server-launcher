@@ -58,20 +58,37 @@ _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eag
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA = frozenset()  # mtp uses main GPUs
 
 
-def _uses_separate_draft_gpus(spec_type, backend):
+def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
     """Return True iff ``spec_type`` is a variant that loads a SEPARATE
     draft model and therefore wants its own GPU subset / device flag.
 
-    Strictly narrower than ``_is_draft_capable_for_backend``: excludes
-    draft-mtp / mtp because their MTP head is embedded in the main GGUF
-    and shares the main GPU distribution. Used to gate
-    ``get_effective_visible_gpu_indices`` and ``_resolve_draft_device_value``.
+    Strictly narrower than ``_is_draft_capable_for_backend``: normally
+    excludes draft-mtp / mtp because their MTP head is embedded in the
+    main GGUF and shares the main GPU distribution. The exception is
+    ik_llama + mtp when the user has opted into the legacy separate
+    ``--model-draft`` path (``spec_use_draft_model`` checkbox): in that
+    case a real draft GGUF is loaded and needs its own GPU subset, so
+    union the draft GPUs into ``CUDA_VISIBLE_DEVICES`` and emit ``-devd``.
+    Used to gate ``get_effective_visible_gpu_indices`` and
+    ``_resolve_draft_device_value``.
     """
     if not spec_type or spec_type == "none":
         return False
     if backend == "ik_llama":
+        if spec_type == "mtp" and use_draft_model_opt_in:
+            return True
         return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA
     return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
+
+
+def _use_draft_model_opt_in(launcher):
+    """Read the ``spec_use_draft_model`` Tk var safely. Returns False if
+    the var is missing (defensive) or raises."""
+    try:
+        udm_var = getattr(launcher, "spec_use_draft_model", None)
+        return bool(udm_var.get()) if udm_var is not None else False
+    except Exception:
+        return False
 
 
 def _is_draft_capable_for_backend(spec_type, backend):
@@ -144,8 +161,10 @@ def get_effective_visible_gpu_indices(launcher):
     # unioned into CUDA_VISIBLE_DEVICES. MTP variants share the main GGUF
     # and run on whatever GPUs the main model uses, so a stale draft-GPU
     # selection (e.g. from a prior draft-simple session) must NOT widen
-    # the visible-device set when the user is now on draft-mtp / mtp.
-    if not _uses_separate_draft_gpus(spec_type, backend):
+    # the visible-device set when the user is now on draft-mtp / mtp —
+    # UNLESS the user has explicitly opted into a separate --model-draft
+    # for ik_llama mtp via the "Use a separate draft model" checkbox.
+    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return main_ordered
     try:
         draft_indices = list(
@@ -301,18 +320,20 @@ def _resolve_draft_device_value(launcher):
     free-text ``spec_draft_device`` value if ``spec_draft_selected_gpus``
     is empty (allowing power users to type a raw override).
     """
-    # MTP variants (draft-mtp on llama.cpp, mtp on ik_llama) DON'T use a
-    # separate draft model — the MTP head is embedded in the main GGUF and
-    # rides along with the main GPU distribution. So any stored draft-GPU
-    # selection (likely persisted from a prior draft-simple session) must
-    # be ignored here. Suppress --spec-draft-device entirely; the binary
-    # uses whatever the main model's devices are.
+    # MTP variants (draft-mtp on llama.cpp, mtp on ik_llama) normally DON'T
+    # use a separate draft model — the MTP head is embedded in the main
+    # GGUF and rides along with the main GPU distribution. So any stored
+    # draft-GPU selection (likely persisted from a prior draft-simple
+    # session) must be ignored. The ik_llama+mtp exception: when the user
+    # has opted into a separate --model-draft via the "Use a separate
+    # draft model" checkbox, the draft GPUs are real and -devd must be
+    # emitted normally (with the same CUDA_VISIBLE_DEVICES remap).
     try:
         spec_type = (launcher.spec_type.get() or "").strip()
         backend = launcher.backend_selection.get()
     except Exception:
         spec_type, backend = "", ""
-    if not _uses_separate_draft_gpus(spec_type, backend):
+    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return ""
 
     draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
@@ -409,6 +430,9 @@ def emit_spec_args(launcher, backend, cmd):
                     is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
                     if is_draft_capable:
                         # ik_llama draft tuning flags use --draft-max/--draft-min/--draft-p-min.
+                        # These tune draft generation for both the embedded MTP head
+                        # and a separate draft model, so emit regardless of the
+                        # ``spec_use_draft_model`` opt-in.
                         for var_name, flag in [
                             ("spec_draft_n_max", "--draft-max"),
                             ("spec_draft_n_min", "--draft-min"),
@@ -419,39 +443,47 @@ def emit_spec_args(launcher, backend, cmd):
                                 v = var.get().strip()
                                 if v:
                                     cmd.extend([flag, v])
-                        # Draft model file (rare for ik_llama, but supported via --model-draft).
-                        # Validate the path before emitting — a saved config can hold a
-                        # stale path to a moved/deleted draft GGUF; mirror the main -m
-                        # behaviour of resolving + skipping with a stderr warning.
-                        mp_var = getattr(launcher, "spec_draft_model", None)
-                        if mp_var is not None:
-                            mp = mp_var.get().strip()
-                            if mp:
-                                if Path(mp).is_file():
-                                    cmd.extend(["--model-draft", str(Path(mp).resolve())])
-                                else:
-                                    print(
-                                        f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
-                                        file=sys.stderr,
-                                    )
-                        # ik_llama uses the same short-form draft offload flags.
-                        # ``spec_draft_device`` is resolved through the CUDA_VISIBLE_DEVICES
-                        # remap helper rather than read verbatim so checkbox-driven
-                        # indices stay valid post-filter (e.g. CUDA4 → CUDA1 when
-                        # main selection reindexes the device list).
-                        for var_name, flag in [
-                            ("spec_draft_ngl", "-ngld"),
-                            ("spec_draft_ctk", "-ctkd"),
-                            ("spec_draft_ctv", "-ctvd"),
-                        ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
-                        devd_val = _resolve_draft_device_value(launcher)
-                        if devd_val:
-                            cmd.extend(["-devd", devd_val])
+                        # ik_llama+mtp opt-in for a SEPARATE draft model: when the
+                        # user hasn't checked "Use a separate draft model", suppress
+                        # --model-draft AND the per-draft offload flags. Embedded
+                        # MTP head rides with the main model's GPU distribution.
+                        udm_var = getattr(launcher, "spec_use_draft_model", None)
+                        use_separate_draft = bool(udm_var.get()) if udm_var is not None else False
+                        if use_separate_draft:
+                            # Validate the path before emitting — a saved config can
+                            # hold a stale path to a moved/deleted draft GGUF; mirror
+                            # the main -m behaviour of resolving + skipping with a
+                            # stderr warning.
+                            mp_var = getattr(launcher, "spec_draft_model", None)
+                            if mp_var is not None:
+                                mp = mp_var.get().strip()
+                                if mp:
+                                    if Path(mp).is_file():
+                                        cmd.extend(["--model-draft", str(Path(mp).resolve())])
+                                    else:
+                                        print(
+                                            f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
+                                            file=sys.stderr,
+                                        )
+                            # ik_llama uses the same short-form draft offload flags.
+                            # ``spec_draft_device`` is resolved through the
+                            # CUDA_VISIBLE_DEVICES remap helper rather than read
+                            # verbatim so checkbox-driven indices stay valid
+                            # post-filter (e.g. CUDA4 → CUDA1 when main selection
+                            # reindexes the device list).
+                            for var_name, flag in [
+                                ("spec_draft_ngl", "-ngld"),
+                                ("spec_draft_ctk", "-ctkd"),
+                                ("spec_draft_ctv", "-ctvd"),
+                            ]:
+                                var = getattr(launcher, var_name, None)
+                                if var is not None:
+                                    v = var.get().strip()
+                                    if v:
+                                        cmd.extend([flag, v])
+                            devd_val = _resolve_draft_device_value(launcher)
+                            if devd_val:
+                                cmd.extend(["-devd", devd_val])
                     # ngram: ik_llama has a single shared --spec-ngram-* set.
                     if spec_type.startswith("ngram-"):
                         for var_name, flag in [

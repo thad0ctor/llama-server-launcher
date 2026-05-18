@@ -108,6 +108,11 @@ class SpecTab:
         self.spec_draft_p_split  = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))   # llama.cpp only
         # Draft model selection.
         self.spec_draft_model    = tk.StringVar(value=is_(app_settings, "spec_draft_model"))    # -md path
+        # Opt-in for ik_llama+mtp: when False, hide the draft picker UI AND
+        # suppress --model-draft / draft offload emission so the embedded MTP
+        # head in the base GGUF is used. Required-draft modes (draft-simple /
+        # draft-eagle3 on llama.cpp) ignore this and always emit draft flags.
+        self.spec_use_draft_model = tk.BooleanVar(value=ib(app_settings, "spec_use_draft_model"))
         self.spec_draft_ngl      = tk.StringVar(value=is_(app_settings, "spec_draft_ngl"))
         self.spec_draft_device   = tk.StringVar(value=is_(app_settings, "spec_draft_device"))
         self.spec_draft_ctk      = tk.StringVar(value=is_(app_settings, "spec_draft_ctk"))
@@ -304,7 +309,19 @@ class SpecTab:
         self._spec_sections["draft_model"] = sec
         r += 1
 
-        sr = 0
+        # Opt-in toggle. Visible only for ik_llama+mtp (gated in
+        # _refresh_spec_tab_state); inner draft widgets below are hidden
+        # when this is unchecked so the section reads as "MTP head only".
+        self.spec_use_draft_cb = ttk.Checkbutton(
+            sec,
+            text="Use a separate draft model "
+                 "(optional for ik_llama MTP — leave unchecked to use the embedded head from the base GGUF)",
+            variable=self.spec_use_draft_model,
+        )
+        self.spec_use_draft_cb.grid(column=0, row=0, sticky="w", padx=6, pady=(4, 2), columnspan=4)
+        self._spec_widgets["use_draft_cb"] = self.spec_use_draft_cb
+
+        sr = 1
         ttk.Label(sec, text="Select draft GGUF:").grid(column=0, row=sr, sticky="nw", padx=6, pady=2)
         draft_list_frame = ttk.Frame(sec)
         draft_list_frame.grid(column=1, row=sr, columnspan=2, sticky="nsew", padx=4, pady=2)
@@ -432,6 +449,14 @@ class SpecTab:
         e_ncm = ttk.Entry(sec, textvariable=self.spec_draft_n_cpu_moe, width=10)
         e_ncm.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_n_cpu_moe"] = e_ncm
+
+        # Snapshot of every child of the draft_model section except the opt-in
+        # checkbox. _refresh_spec_tab_state grid_remove()s these as a group when
+        # ik_llama+mtp is active and spec_use_draft_model is False (so the
+        # section collapses to just the checkbox); grid()s them back otherwise.
+        self._spec_draft_inner_widgets = [
+            w for w in sec.winfo_children() if w is not self.spec_use_draft_cb
+        ]
 
         # --- Ngram tuning (llama.cpp per-variant; ik_llama shared) ---
         # Per-variant simple/mapk/mapk4v/mod groups for llama.cpp:
@@ -1150,6 +1175,33 @@ class SpecTab:
                     except (tk.TclError, AttributeError):
                         max_draft = 0
                     _set_state(slider_w, "normal" if max_draft > 0 else "disabled")
+                # Opt-in toggle: only shown for ik_llama+mtp (the only mode where
+                # the draft model is optional). For draft-simple/draft-eagle3 the
+                # draft model is required, so hide the checkbox and force the
+                # inner widgets visible regardless of the stored value.
+                use_cb = self._spec_widgets.get("use_draft_cb")
+                is_optional_draft = is_ik and effective_spec_type == "mtp"
+                if use_cb is not None:
+                    try:
+                        if is_optional_draft:
+                            use_cb.grid()
+                        else:
+                            use_cb.grid_remove()
+                    except tk.TclError:
+                        pass
+                # Show or hide the inner draft widgets (listbox, path, GPU
+                # layers, devices, cache types, cpu_moe) based on the checkbox
+                # for ik_llama+mtp; always show them for required-draft modes.
+                show_inner = (not is_optional_draft) or bool(self.spec_use_draft_model.get())
+                inner_widgets = getattr(self, "_spec_draft_inner_widgets", []) or []
+                for w in inner_widgets:
+                    try:
+                        if show_inner:
+                            w.grid()
+                        else:
+                            w.grid_remove()
+                    except tk.TclError:
+                        pass
         else:
             # Master off: disable everything except the master checkbox AND
             # the vision section (--no-mmproj is independent of spec_enabled).

@@ -173,6 +173,11 @@ SPEC_NONDEFAULT_VALUES = {
     # bogus path will be skipped (with a warning), which is the documented
     # contract. The round-trip itself does not care if the path resolves.
     "spec_draft_model": "/tmp/nonexistent_draft.gguf",
+    # Opt into the ik_llama+mtp separate-draft path so --model-draft and
+    # the per-draft offload flags emit when this fixture is reused for
+    # mtp-mode tests. On llama.cpp draft-mtp this var is ignored (the
+    # embedded MTP head is always used).
+    "spec_use_draft_model": True,
     "spec_draft_ngl": "32",
     "spec_draft_device": "CUDA0,CUDA1",
     "spec_draft_ctk": "q8_0",

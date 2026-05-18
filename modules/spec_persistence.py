@@ -19,6 +19,7 @@ the inline blocks did before extraction.
 # original `load_saved_configs` validation block.
 SPEC_BOOL_KEYS = (
     "spec_enabled", "spec_draft_cpu_moe", "spec_autotune", "no_mmproj",
+    "spec_use_draft_model",
 )
 
 # Exhaustive list of string keys. Mirrors `_spec_str_keys` in the original
@@ -60,6 +61,7 @@ def collect_spec_into_cfg(launcher, cfg):
     cfg["spec_draft_p_min"]           = launcher.spec_draft_p_min.get()
     cfg["spec_draft_p_split"]         = launcher.spec_draft_p_split.get()
     cfg["spec_draft_model"]           = launcher.spec_draft_model.get()
+    cfg["spec_use_draft_model"]       = launcher.spec_use_draft_model.get()
     cfg["spec_draft_ngl"]             = launcher.spec_draft_ngl.get()
     cfg["spec_draft_device"]          = launcher.spec_draft_device.get()
     cfg["spec_draft_ctk"]             = launcher.spec_draft_ctk.get()
@@ -128,6 +130,7 @@ def load_spec_from_cfg(launcher, cfg):
     launcher.spec_draft_p_min.set(_spec_str("spec_draft_p_min"))
     launcher.spec_draft_p_split.set(_spec_str("spec_draft_p_split"))
     launcher.spec_draft_model.set(_spec_str("spec_draft_model"))
+    launcher.spec_use_draft_model.set(_spec_bool("spec_use_draft_model"))
     launcher.spec_draft_ngl.set(_spec_str("spec_draft_ngl"))
     launcher.spec_draft_device.set(_spec_str("spec_draft_device"))
     launcher.spec_draft_ctk.set(_spec_str("spec_draft_ctk"))
@@ -222,6 +225,7 @@ def sync_spec_to_app_settings(launcher):
         ("spec_draft_p_min", launcher.spec_draft_p_min),
         ("spec_draft_p_split", launcher.spec_draft_p_split),
         ("spec_draft_model", launcher.spec_draft_model),
+        ("spec_use_draft_model", launcher.spec_use_draft_model),
         ("spec_draft_ngl", launcher.spec_draft_ngl),
         ("spec_draft_device", launcher.spec_draft_device),
         ("spec_draft_ctk", launcher.spec_draft_ctk),
@@ -355,5 +359,6 @@ def resync_spec_tk_vars_from_app_settings(launcher):
         ("spec_draft_cpu_moe", launcher.spec_draft_cpu_moe),
         ("spec_autotune", launcher.spec_autotune),
         ("no_mmproj", launcher.no_mmproj),
+        ("spec_use_draft_model", launcher.spec_use_draft_model),
     ):
         _resync_bool(_key, _var)

@@ -283,6 +283,7 @@ class LlamaCppLauncher:
             "spec_draft_p_min":    "",
             "spec_draft_p_split":  "",
             "spec_draft_model":    "",
+            "spec_use_draft_model": False,
             "spec_draft_ngl":      "",
             "spec_draft_device":   "",
             "spec_draft_ctk":      "",
@@ -544,7 +545,7 @@ class LlamaCppLauncher:
         _SPEC_TAB_VAR_REEXPORT = (
             "spec_enabled", "spec_type",
             "spec_draft_n_max", "spec_draft_n_min", "spec_draft_p_min", "spec_draft_p_split",
-            "spec_draft_model", "spec_draft_ngl", "spec_draft_device",
+            "spec_draft_model", "spec_use_draft_model", "spec_draft_ngl", "spec_draft_device",
             "spec_draft_ctk", "spec_draft_ctv", "spec_draft_cpu_moe", "spec_draft_n_cpu_moe",
             "spec_draft_ngl_int", "max_spec_draft_gpu_layers", "spec_draft_layers_status_var",
             "spec_ngram_simple_size_n", "spec_ngram_simple_size_m", "spec_ngram_simple_min_hits",
@@ -803,6 +804,7 @@ class LlamaCppLauncher:
         # current spec_type benefits from them and the user hasn't typed values.
         self.spec_enabled.trace_add("write", lambda *a: self._on_spec_enabled_changed())
         self.spec_type.trace_add("write", lambda *a: self._on_spec_type_changed())
+        self.spec_use_draft_model.trace_add("write", lambda *a: self._refresh_spec_tab_state())
 
 
         # Populate model directories listbox

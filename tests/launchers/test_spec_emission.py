@@ -591,6 +591,7 @@ class TestSpecEmissionIkLlama:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--model-draft" in cmd
@@ -598,23 +599,25 @@ class TestSpecEmissionIkLlama:
         assert "--spec-draft-model" not in cmd
 
     def test_draft_offload_uses_short_form_flags(self, manager, launcher_mock):
-        """``-ngld``, ``-ctkd``, ``-ctvd`` instead of the long
-        ``--spec-draft-*`` names. ``-devd`` is NOT emitted for ik_llama+mtp
-        because MTP shares the main GPUs (no separate draft device)."""
+        """``-ngld``, ``-ctkd``, ``-ctvd``, ``-devd`` instead of the long
+        ``--spec-draft-*`` names. With ``spec_use_draft_model=True`` the
+        user has opted into a separate ``--model-draft``, so ``-devd``
+        emits normally (this is the legacy ik_llama path). Without the
+        opt-in MTP shares the main GPUs and ``-devd`` would be suppressed
+        — covered by ``test_ik_llama_mtp_no_opt_in_suppresses_devd``."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_ngl.set("24")
-        launcher_mock.spec_draft_device.set("CUDA1")  # stale, suppressed
+        launcher_mock.spec_draft_device.set("CUDA1")
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
-        # Short forms present (except -devd, see below).
         assert cmd[cmd.index("-ngld") + 1] == "24"
         assert cmd[cmd.index("-ctkd") + 1] == "q4_0"
         assert cmd[cmd.index("-ctvd") + 1] == "q4_0"
-        # -devd must NOT appear for MTP (the MTP head shares main GPUs).
-        assert "-devd" not in cmd
+        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
         # Long forms also absent on ik_llama.
         for absent in (
             "--spec-draft-ngl",
@@ -623,6 +626,24 @@ class TestSpecEmissionIkLlama:
             "--spec-draft-type-v",
         ):
             assert absent not in cmd
+
+    def test_ik_llama_mtp_no_opt_in_suppresses_devd(self, manager, launcher_mock):
+        """Without ``spec_use_draft_model=True`` the embedded MTP head
+        rides with the main GPUs, so ``-devd`` (and every other separate-
+        draft offload flag) must NOT emit — even if stale values were
+        persisted from a prior session."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("mtp")
+        # Opt-in NOT set (default False). Stale draft-offload values that
+        # might survive from a previous session:
+        launcher_mock.spec_draft_ngl.set("24")
+        launcher_mock.spec_draft_device.set("CUDA1")
+        launcher_mock.spec_draft_ctk.set("q4_0")
+        launcher_mock.spec_draft_ctv.set("q4_0")
+        cmd = manager.build_cmd()
+        for absent in ("-ngld", "-devd", "-ctkd", "-ctvd", "--model-draft"):
+            assert absent not in cmd, f"{absent} should be suppressed without opt-in"
 
     def test_ik_llama_blank_draft_vars_omit_flags(self, manager, launcher_mock):
         launcher_mock.backend_selection.set("ik_llama")
@@ -644,21 +665,22 @@ class TestSpecEmissionIkLlama:
             assert absent not in cmd
 
     def test_ik_llama_all_draft_knobs_combined(self, manager, launcher_mock, tmp_path):
-        """Setting many ik_llama knobs at once: each translation lands
-        without interaction. ``-devd`` is suppressed because MTP shares
-        the main GPUs."""
+        """Setting many ik_llama knobs at once with the separate-draft
+        opt-in: each translation lands without interaction. ``-devd``
+        emits because the user opted into a real separate draft model."""
         # Real file for the path-validation guard (CR Comment B).
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_n_max.set("16")
         launcher_mock.spec_draft_n_min.set("2")
         launcher_mock.spec_draft_p_min.set("0.5")
         launcher_mock.spec_draft_model.set(str(draft))
         launcher_mock.spec_draft_ngl.set("24")
-        launcher_mock.spec_draft_device.set("CUDA1")  # stale, suppressed
+        launcher_mock.spec_draft_device.set("CUDA1")
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
@@ -668,7 +690,7 @@ class TestSpecEmissionIkLlama:
         assert cmd[cmd.index("--draft-p-min") + 1] == "0.5"
         assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
         assert cmd[cmd.index("-ngld") + 1] == "24"
-        assert "-devd" not in cmd  # MTP shares main GPUs
+        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
         assert cmd[cmd.index("-ctkd") + 1] == "q4_0"
         assert cmd[cmd.index("-ctvd") + 1] == "q4_0"
         # Long forms still absent.
@@ -1430,6 +1452,7 @@ class TestSpecDraftModelPathValidation:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--model-draft" in cmd
@@ -1447,6 +1470,7 @@ class TestSpecDraftModelPathValidation:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_model.set(str(bogus))
         cmd = manager.build_cmd()
         assert "--model-draft" not in cmd
@@ -1560,6 +1584,7 @@ class TestDraftMtpSuppressesSeparateModel:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--model-draft" in cmd
