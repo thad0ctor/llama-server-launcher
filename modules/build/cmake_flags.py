@@ -50,11 +50,11 @@ class CMakeFlag:
     group: str                                          # group title
     type: str                                           # BOOL | STRING | ENUM
     default: Any
-    backends: Tuple[str, ...] = BOTH
-    choices: Optional[List[str]] = None                 # for ENUM
+    backends: tuple[str, ...] = BOTH
+    choices: list[str] | None = None                 # for ENUM
     help: str = ""
-    visible_when: Optional[Callable[[Dict[str, Any]], bool]] = None
-    cuda_version_min: Optional[str] = None              # informational
+    visible_when: Callable[[dict[str, Any]], bool] | None = None
+    cuda_version_min: str | None = None              # informational
     # Some cmake options (e.g. CMAKE_CUDA_FLAGS) are not booleans/ints — they
     # ride along as raw strings. ``placeholder`` is the hint shown in the
     # entry widget.
@@ -93,7 +93,7 @@ GROUPS_ORDER = [
 # Visibility predicates
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _truthy(values: Dict[str, Any], key: str) -> bool:
+def _truthy(values: dict[str, Any], key: str) -> bool:
     v = values.get(key)
     if isinstance(v, bool):
         return v
@@ -102,39 +102,39 @@ def _truthy(values: Dict[str, Any], key: str) -> bool:
     return bool(v)
 
 
-def _cuda_on(values: Dict[str, Any]) -> bool:
+def _cuda_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_CUDA")
 
 
-def _backend_dl_on(values: Dict[str, Any]) -> bool:
+def _backend_dl_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_BACKEND_DL")
 
 
-def _hip_on(values: Dict[str, Any]) -> bool:
+def _hip_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_HIP") or _truthy(values, "GGML_HIPBLAS")
 
 
-def _vulkan_on(values: Dict[str, Any]) -> bool:
+def _vulkan_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_VULKAN")
 
 
-def _sycl_on(values: Dict[str, Any]) -> bool:
+def _sycl_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_SYCL")
 
 
-def _metal_on(values: Dict[str, Any]) -> bool:
+def _metal_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_METAL")
 
 
-def _blas_on(values: Dict[str, Any]) -> bool:
+def _blas_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_BLAS")
 
 
-def _ui_on(values: Dict[str, Any]) -> bool:
+def _ui_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "LLAMA_BUILD_UI")
 
 
-def _cpu_on(values: Dict[str, Any]) -> bool:
+def _cpu_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_CPU")
 
 
@@ -142,7 +142,7 @@ def _cpu_on(values: Dict[str, Any]) -> bool:
 # Flag catalogue
 # ─────────────────────────────────────────────────────────────────────────────
 
-FLAGS: List[CMakeFlag] = [
+FLAGS: list[CMakeFlag] = [
     # ── Build Targets ──
     CMakeFlag("LLAMA_BUILD_SERVER", "Build server", "Build Targets", BOOL, True,
               help="llama-server binary (always wanted for this launcher)."),
@@ -470,23 +470,23 @@ FLAGS: List[CMakeFlag] = [
 # Lookup + grouping helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-_FLAG_BY_KEY: Dict[str, CMakeFlag] = {f.key: f for f in FLAGS}
+_FLAG_BY_KEY: dict[str, CMakeFlag] = {f.key: f for f in FLAGS}
 
 
-def get_flag(key: str) -> Optional[CMakeFlag]:
+def get_flag(key: str) -> CMakeFlag | None:
     return _FLAG_BY_KEY.get(key)
 
 
-def flags_for_backend(backend: str) -> List[CMakeFlag]:
+def flags_for_backend(backend: str) -> list[CMakeFlag]:
     return [f for f in FLAGS if f.applies_to(backend)]
 
 
-def groups_for_backend(backend: str) -> List[Tuple[str, List[CMakeFlag]]]:
+def groups_for_backend(backend: str) -> list[tuple[str, list[CMakeFlag]]]:
     """Returns groups in declared order, only those non-empty for the backend."""
-    by_group: Dict[str, List[CMakeFlag]] = {}
+    by_group: dict[str, list[CMakeFlag]] = {}
     for f in flags_for_backend(backend):
         by_group.setdefault(f.group, []).append(f)
-    out: List[Tuple[str, List[CMakeFlag]]] = []
+    out: list[tuple[str, list[CMakeFlag]]] = []
     for grp in GROUPS_ORDER:
         if grp in by_group:
             out.append((grp, by_group[grp]))
@@ -496,7 +496,7 @@ def groups_for_backend(backend: str) -> List[Tuple[str, List[CMakeFlag]]]:
     return out
 
 
-def default_values_for_backend(backend: str) -> Dict[str, Any]:
+def default_values_for_backend(backend: str) -> dict[str, Any]:
     return {f.key: f.default for f in flags_for_backend(backend)}
 
 
@@ -510,7 +510,7 @@ def build_autodetect_values(
     cuda_available: bool,
     avx512_supported: bool,
     has_ccache: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Return a flag-values dict tuned for the detected system, mirroring
     the reference scripts (fast-math CUDA, FA-all-quants, LTO, P2P 512,
     AVX512 if the CPU has it). Caller is expected to additionally set
@@ -574,14 +574,14 @@ def _bool_str(v: Any) -> str:
 
 def values_to_cmake_args(
     backend: str,
-    values: Dict[str, Any],
+    values: dict[str, Any],
     *,
     extra_cmake_args: str = "",
-) -> List[str]:
+) -> list[str]:
     """Convert a flag-values dict to ``-DKEY=VAL`` strings, skipping flags
     that don't apply to ``backend`` and skipping empty STRING entries.
     ``extra_cmake_args`` is appended verbatim after shell-split."""
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for flag in flags_for_backend(backend):
         if flag.key in seen:

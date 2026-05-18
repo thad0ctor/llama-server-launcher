@@ -45,6 +45,17 @@ SCHEMA_VERSION = 1
 DEFAULT_FILENAME = "build_configs.json"
 
 
+def _safe_int(value: Any, *, default: int = 0, min_value: int = 0) -> int:
+    """Parse ``value`` as int, falling back to ``default`` on bad input and
+    clamping to ``min_value``. Used for fields where one malformed entry
+    shouldn't poison a whole config (e.g. ``jobs``)."""
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return default
+    return max(min_value, n)
+
+
 @dataclass
 class BuildConfig:
     name: str
@@ -56,23 +67,23 @@ class BuildConfig:
     clean_build: bool = True
     jobs: int = 0                       # 0 = auto (use nproc)
     cuda_archs: str = ""                # CMAKE_CUDA_ARCHITECTURES value
-    env: Dict[str, str] = field(default_factory=dict)
-    flag_values: Dict[str, Any] = field(default_factory=dict)
+    env: dict[str, str] = field(default_factory=dict)
+    flag_values: dict[str, Any] = field(default_factory=dict)
     extra_cmake_args: str = ""
     # UI-only state (generator selection, -a/-f preferences, etc.). Kept
     # separate from ``env`` so it never leaks to the cmake subprocess.
-    ui_state: Dict[str, str] = field(default_factory=dict)
+    ui_state: dict[str, str] = field(default_factory=dict)
     notes: str = ""
     created_at: str = ""
     last_used_at: str = ""
 
-    def to_json(self) -> Dict[str, Any]:
+    def to_json(self) -> dict[str, Any]:
         d = asdict(self)
         d.pop("name", None)
         return d
 
     @classmethod
-    def from_json(cls, name: str, data: Dict[str, Any]) -> "BuildConfig":
+    def from_json(cls, name: str, data: dict[str, Any]) -> BuildConfig:
         return cls(
             name=name,
             backend=data.get("backend", "llama.cpp"),
@@ -81,7 +92,7 @@ class BuildConfig:
             git_ref=data.get("git_ref", ""),
             git_pull_before_build=bool(data.get("git_pull_before_build", False)),
             clean_build=bool(data.get("clean_build", True)),
-            jobs=int(data.get("jobs", 0) or 0),
+            jobs=_safe_int(data.get("jobs", 0)),
             cuda_archs=data.get("cuda_archs", ""),
             env=dict(data.get("env", {}) or {}),
             flag_values=dict(data.get("flag_values", {}) or {}),
@@ -103,7 +114,7 @@ class BuildConfigStore:
     def __init__(self, config_dir: str | os.PathLike):
         self.config_dir = Path(config_dir)
         self.path = self.config_dir / DEFAULT_FILENAME
-        self._cache: Dict[str, BuildConfig] = {}
+        self._cache: dict[str, BuildConfig] = {}
         self._loaded = False
 
     # ---------------------------------------------------------------- io
@@ -161,16 +172,23 @@ class BuildConfigStore:
             print(f"ERROR: failed to write {self.path}: {exc}", file=sys.stderr)
 
     # ---------------------------------------------------------------- crud
-    def list_names(self) -> List[str]:
+    def list_names(self) -> list[str]:
         self._load()
         return sorted(self._cache.keys(), key=str.lower)
 
-    def get(self, name: str) -> Optional[BuildConfig]:
+    def get(self, name: str) -> BuildConfig | None:
         self._load()
         return self._cache.get(name)
 
     def save(self, cfg: BuildConfig) -> None:
         self._load()
+        # Normalize + reject blank names so we don't create unusable entries
+        # (e.g. {"": {...}} which would be invisible in the picker).
+        cfg.name = (cfg.name or "").strip()
+        if not cfg.name:
+            print("WARN: refusing to save build config with empty name",
+                  file=sys.stderr)
+            return
         if not cfg.created_at:
             cfg.created_at = _utcnow_iso()
         if not cfg.last_used_at:

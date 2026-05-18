@@ -93,10 +93,10 @@ class BuildTab:
         self.runner = BuildRunner()
 
         # Streaming console state.
-        self._console_buffer: List[str] = []
-        self._poll_after_id: Optional[str] = None
-        self._preview_after_id: Optional[str] = None
-        self._drain_after_id: Optional[str] = None
+        self._console_buffer: list[str] = []
+        self._poll_after_id: str | None = None
+        self._preview_after_id: str | None = None
+        self._drain_after_id: str | None = None
 
         # Update-banner state.
         self._upstream_status = UpstreamStatus()
@@ -107,7 +107,7 @@ class BuildTab:
         # short-lived header frame) so it survives _build_ui rebuilds —
         # otherwise switching backends while detached resets the label
         # back to "Detach" even though the window IS detached.
-        self._detached_toplevel: Optional[tk.Toplevel] = None
+        self._detached_toplevel: tk.Toplevel | None = None
         self._notebook = None
         self._tab_frame = None
         self._tab_text = "Build"
@@ -156,14 +156,14 @@ class BuildTab:
         self.var_autoscroll = tk.BooleanVar(value=True)
 
         # Lazy-initialised on first setup_tab().
-        self._flag_vars: Dict[str, tk.Variable] = {}
-        self._flag_widgets: Dict[str, tk.Widget] = {}
-        self._group_frames: Dict[str, ttk.LabelFrame] = {}
-        self._values_snapshot: Dict[str, Any] = {}
+        self._flag_vars: dict[str, tk.Variable] = {}
+        self._flag_widgets: dict[str, tk.Widget] = {}
+        self._group_frames: dict[str, ttk.LabelFrame] = {}
+        self._values_snapshot: dict[str, Any] = {}
 
         # CUDA arch picker state: one BooleanVar per known CC, plus a guard
         # to suppress recursive sync between checkboxes and the text entry.
-        self._arch_check_vars: Dict[str, tk.BooleanVar] = {}
+        self._arch_check_vars: dict[str, tk.BooleanVar] = {}
         self._arch_sync_in_progress: bool = False
         # Update the picker checkboxes whenever the entry changes (e.g. via
         # auto-detect, load-config, manual typing).
@@ -265,7 +265,7 @@ class BuildTab:
 
     def _refresh_toolchain_hint(self) -> None:
         tp = self._toolchain
-        bits: List[str] = []
+        bits: list[str] = []
         if tp.cuda_version:
             bits.append(f"CUDA {tp.cuda_version}")
         if tp.cmake_version:
@@ -572,7 +572,7 @@ class BuildTab:
         ttk.Label(cuda_pick_row, text="CUDA install:") \
             .grid(row=0, column=0, sticky="w")
         # Build label → install map for the combobox.
-        self._cuda_install_by_label: Dict[str, "detection.CudaInstall"] = {
+        self._cuda_install_by_label: dict[str, detection.CudaInstall] = {
             inst.label(): inst for inst in tp.cuda_installs
         }
         labels = list(self._cuda_install_by_label.keys())
@@ -938,7 +938,7 @@ class BuildTab:
         # Group archs by family in catalogue order, optionally hiding the
         # deprecated families.
         show_deprecated = self.var_show_deprecated_archs.get()
-        families: Dict[str, List[detection.KnownArch]] = {}
+        families: dict[str, list[detection.KnownArch]] = {}
         for k in detection.KNOWN_CUDA_ARCHS:
             if k.deprecated and not show_deprecated:
                 continue
@@ -1004,8 +1004,8 @@ class BuildTab:
         var = self._arch_check_vars.get(cc)
         if var is None:
             return
-        tokens_to_add: List[str] = []
-        tokens_to_remove: List[str] = []
+        tokens_to_add: list[str] = []
+        tokens_to_remove: list[str] = []
         base = "".join(cc.split("."))
         plain = f"{base}-real"
         known = detection.known_arch_for(cc)
@@ -1024,7 +1024,7 @@ class BuildTab:
             if f_token:
                 tokens_to_remove.append(f_token)
         current = [t.strip() for t in self.var_cuda_archs.get().split(";") if t.strip()]
-        out: List[str] = []
+        out: list[str] = []
         seen: set[str] = set()
         for t in current:
             if t in tokens_to_remove or t in seen:
@@ -1093,7 +1093,7 @@ class BuildTab:
         if not current:
             return
         seen_ccs: set[str] = set()
-        passthrough: List[str] = []
+        passthrough: list[str] = []
         for raw in current.split(";"):
             tok = raw.strip()
             if not tok:
@@ -1115,7 +1115,7 @@ class BuildTab:
                 continue
             seen_ccs.add(cc)
         # Now reconstruct.
-        out: List[str] = []
+        out: list[str] = []
         emitted: set[str] = set()
         for cc in seen_ccs:
             base = "".join(cc.split("."))
@@ -1247,7 +1247,7 @@ class BuildTab:
         if not name:
             return
         # Build the UI-state dict separately so it never reaches cmake_env.
-        ui_state: Dict[str, str] = {
+        ui_state: dict[str, str] = {
             "prefer_a": "1" if self.var_prefer_a_variant.get() else "0",
             "prefer_f": "1" if self.var_prefer_f_variant.get() else "0",
             "show_deprecated": "1" if self.var_show_deprecated_archs.get() else "0",
@@ -1372,7 +1372,15 @@ class BuildTab:
         self._upstream_check_in_flight = True
 
         def worker() -> None:
-            status = probe_upstream(src, do_fetch=do_fetch)
+            # probe_upstream is best-effort, but if anything raises (e.g.
+            # an OSError from a permission glitch on the .git dir) we must
+            # still post *something* to the queue — otherwise the drain
+            # loop reschedules forever and _upstream_check_in_flight never
+            # clears, blocking all subsequent checks.
+            try:
+                status = probe_upstream(src, do_fetch=do_fetch)
+            except Exception as exc:
+                status = UpstreamStatus(error=f"probe failed: {exc}")
             self._pending_status.put(status)
 
         threading.Thread(target=worker, name="UpstreamProbe", daemon=True).start()
@@ -1421,23 +1429,17 @@ class BuildTab:
         src = self.var_source_dir.get().strip()
         if not src:
             return
-        plan = BuildPlan(
-            backend=self.var_backend.get(),
-            source_dir=src,
-            build_dir=self._resolved_build_dir(),
-            cmake_args=[],
-            cmake_env={},
-            jobs=0,
-            git_clone_if_missing=False,
-            git_ref="",
-            git_pull_before_build=True,
-            clean_build=False,
-        )
-        # Run only the git pull step by short-circuiting via the runner — but
-        # since the runner always proceeds to configure+build, we instead use
-        # a direct subprocess for this one (cheap, foreground).
-        import subprocess
         self._append_console("\n══ git pull --ff-only ══\n", tag="stage")
+        # git pull can stall on network/disk for many seconds — run it off
+        # the Tk main thread and trampoline output back via root.after so
+        # we don't freeze the launcher during the pull.
+        threading.Thread(
+            target=self._run_pull_only_worker, args=(src,),
+            name="PullOnlyWorker", daemon=True,
+        ).start()
+
+    def _run_pull_only_worker(self, src: str) -> None:
+        import subprocess
         try:
             proc = subprocess.Popen(
                 ["git", "pull", "--ff-only"], cwd=src,
@@ -1446,11 +1448,21 @@ class BuildTab:
             )
             assert proc.stdout is not None
             for line in proc.stdout:
-                self._append_console(line.rstrip("\n") + "\n")
-            proc.wait()
+                line_to_emit = line.rstrip("\n") + "\n"
+                self.root.after(0, lambda txt=line_to_emit: self._append_console(txt))
+            rc = proc.wait()
+            if rc != 0:
+                self.root.after(
+                    0,
+                    lambda: self._append_console(f"git pull exited {rc}\n", tag="error"),
+                )
         except Exception as exc:
-            self._append_console(f"git pull failed: {exc}\n", tag="error")
-        self.check_for_updates(do_fetch=True)
+            self.root.after(
+                0,
+                lambda exc=exc: self._append_console(f"git pull failed: {exc}\n", tag="error"),
+            )
+        finally:
+            self.root.after(0, lambda: self.check_for_updates(do_fetch=True))
 
     def _on_pull_and_rebuild(self) -> None:
         self.var_git_pull.set(True)
@@ -1608,8 +1620,8 @@ class BuildTab:
     # ─────────────────────────────────────────────────────────────────────
     # Helpers
     # ─────────────────────────────────────────────────────────────────────
-    def _current_flag_values_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
+    def _current_flag_values_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
         for key, var in self._flag_vars.items():
             try:
                 v = var.get()
@@ -1633,8 +1645,8 @@ class BuildTab:
             except Exception:
                 pass
 
-    def _current_env_dict(self) -> Dict[str, str]:
-        env: Dict[str, str] = {}
+    def _current_env_dict(self) -> dict[str, str]:
+        env: dict[str, str] = {}
         cc = self.var_cc.get().strip()
         cxx = self.var_cxx.get().strip()
         cudacxx = self.var_cudacxx.get().strip()
@@ -1658,7 +1670,7 @@ class BuildTab:
             return str(bp)
         return str(Path(src) / bp) if src else build
 
-    def _build_plan(self) -> Optional[BuildPlan]:
+    def _build_plan(self) -> BuildPlan | None:
         values = self._current_flag_values_dict()
         backend = self.var_backend.get()
         # Inject the CMAKE_CUDA_ARCHITECTURES value as a regular cmake arg
@@ -1690,7 +1702,7 @@ class BuildTab:
             generator=self.var_generator.get().strip(),
         )
 
-    def _append_console(self, text: str, *, tag: Optional[str] = None) -> None:
+    def _append_console(self, text: str, *, tag: str | None = None) -> None:
         # Mirror to buffer so detach/reattach can replay history.
         for line in text.splitlines() or [""]:
             self._console_buffer.append(line)

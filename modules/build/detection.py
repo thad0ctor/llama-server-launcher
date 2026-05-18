@@ -46,7 +46,7 @@ class KnownArch:
 # NVIDIA Programming Guide tables for the older deprecated ones. The
 # has_a_variant / has_f_variant flags match what nvcc 13.2 actually accepts.
 # Deprecated entries are gated in the UI behind "Show deprecated archs".
-KNOWN_CUDA_ARCHS: List[KnownArch] = [
+KNOWN_CUDA_ARCHS: list[KnownArch] = [
     # Kepler (deprecated in CUDA 11.x; removed in CUDA 12+)
     KnownArch("3.5", "Tesla K20/K40 / GTX Titan (Kepler)",   "Kepler",   False, False, "5.0", deprecated=True),
     KnownArch("3.7", "Tesla K80 (Kepler datacenter)",        "Kepler",   False, False, "7.0", deprecated=True),
@@ -83,7 +83,7 @@ KNOWN_CUDA_ARCHS: List[KnownArch] = [
 ]
 
 
-def known_arch_for(cc: str) -> Optional[KnownArch]:
+def known_arch_for(cc: str) -> KnownArch | None:
     cc = cc.strip()
     for k in KNOWN_CUDA_ARCHS:
         if k.cc == cc:
@@ -143,11 +143,11 @@ class CudaArchInfo:
     # ``-a`` token (e.g. "120a-real", "90a-real") when the compute capability
     # has an architecture-accelerated variant in nvcc. Both Hopper (sm_90a)
     # and Blackwell (sm_100a / sm_120a / sm_121a) qualify.
-    a_variant_token: Optional[str] = None
+    a_variant_token: str | None = None
     family: str = ""          # "Ampere" / "Hopper" / "Blackwell" / ...
 
 
-def detect_cuda_archs() -> List[CudaArchInfo]:
+def detect_cuda_archs() -> list[CudaArchInfo]:
     """Return one CudaArchInfo per visible CUDA device, or [] if torch/CUDA
     is unavailable. Caller can map ``.arch_token`` for CMAKE_CUDA_ARCHITECTURES.
 
@@ -170,7 +170,7 @@ def detect_cuda_archs() -> List[CudaArchInfo]:
     except Exception:
         return []
 
-    out: List[CudaArchInfo] = []
+    out: list[CudaArchInfo] = []
     for i in range(n):
         try:
             props = torch.cuda.get_device_properties(i)
@@ -196,7 +196,7 @@ def detect_cuda_archs() -> List[CudaArchInfo]:
     return out
 
 
-def archs_to_cmake_value(infos: List[CudaArchInfo], *, prefer_a_variant: bool = True) -> str:
+def archs_to_cmake_value(infos: list[CudaArchInfo], *, prefer_a_variant: bool = True) -> str:
     """Collapse a list of CudaArchInfo into a semicolon-separated cmake
     value for CMAKE_CUDA_ARCHITECTURES, deduped while preserving order.
 
@@ -206,9 +206,9 @@ def archs_to_cmake_value(infos: List[CudaArchInfo], *, prefer_a_variant: bool = 
     portable fallback. Drop ``prefer_a_variant`` to emit plain tokens only.
     """
     seen: set[str] = set()
-    out: List[str] = []
+    out: list[str] = []
     for info in infos:
-        tokens: List[str] = []
+        tokens: list[str] = []
         if prefer_a_variant and info.a_variant_token:
             tokens.append(info.a_variant_token)
         tokens.append(info.arch_token)
@@ -222,7 +222,7 @@ def archs_to_cmake_value(infos: List[CudaArchInfo], *, prefer_a_variant: bool = 
 def merge_arch_tokens(*token_lists: str) -> str:
     """Combine multiple ';'-separated arch token strings, dedupe in order."""
     seen: set[str] = set()
-    out: List[str] = []
+    out: list[str] = []
     for s in token_lists:
         if not s:
             continue
@@ -247,7 +247,7 @@ def family_to_tokens(
     addition to the plain ``-real`` token. They are independent — pick one
     or both; defaults emit -a (Hopper+) but not -f.
     """
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for k in KNOWN_CUDA_ARCHS:
         if k.family.lower() != family.lower():
@@ -271,11 +271,11 @@ def family_to_tokens(
     return ";".join(out)
 
 
-def all_families(*, include_deprecated: bool = True) -> List[str]:
+def all_families(*, include_deprecated: bool = True) -> list[str]:
     """Distinct family names in catalogue order. With include_deprecated=False
     only emits families that have at least one non-deprecated arch.
     """
-    out: List[str] = []
+    out: list[str] = []
     for k in KNOWN_CUDA_ARCHS:
         if k.deprecated and not include_deprecated:
             continue
@@ -317,23 +317,23 @@ class CudaInstall:
 @dataclass
 class ToolchainProbe:
     """Whatever we could discover about the build toolchain on this host."""
-    cuda_version: Optional[str] = None      # "12.8"  (selected install)
-    nvcc_path: Optional[str] = None         # /usr/local/cuda/bin/nvcc (selected)
-    cuda_installs: List[CudaInstall] = field(default_factory=list)  # all detected
-    cc_candidates: List[str] = field(default_factory=list)   # ["/usr/bin/gcc-13", ...]
-    cxx_candidates: List[str] = field(default_factory=list)
-    cmake_path: Optional[str] = None
-    cmake_version: Optional[str] = None
-    ninja_path: Optional[str] = None
-    ccache_path: Optional[str] = None
-    git_path: Optional[str] = None
+    cuda_version: str | None = None      # "12.8"  (selected install)
+    nvcc_path: str | None = None         # /usr/local/cuda/bin/nvcc (selected)
+    cuda_installs: list[CudaInstall] = field(default_factory=list)  # all detected
+    cc_candidates: list[str] = field(default_factory=list)   # ["/usr/bin/gcc-13", ...]
+    cxx_candidates: list[str] = field(default_factory=list)
+    cmake_path: str | None = None
+    cmake_version: str | None = None
+    ninja_path: str | None = None
+    ccache_path: str | None = None
+    git_path: str | None = None
 
 
-def _which(name: str) -> Optional[str]:
+def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
-def _run(cmd: List[str], timeout: float = 1.5) -> Optional[str]:
+def _run(cmd: list[str], timeout: float = 1.5) -> str | None:
     """Best-effort subprocess capture. Short default timeout — these probes
     run during startup and a misconfigured tool must not block the UI."""
     try:
@@ -347,13 +347,13 @@ def _run(cmd: List[str], timeout: float = 1.5) -> Optional[str]:
         return None
 
 
-def _cuda_search_paths() -> List[str]:
+def _cuda_search_paths() -> list[str]:
     """Glob-style candidate locations for CUDA toolkit installs, by OS.
 
     Returned as a list of nvcc paths (not roots) so callers can run
     ``nvcc --version`` directly to confirm + extract version.
     """
-    candidates: List[str] = []
+    candidates: list[str] = []
     seen: set[str] = set()
 
     def add(p: str) -> None:
@@ -375,10 +375,12 @@ def _cuda_search_paths() -> List[str]:
                 add(nvcc)
 
     if sys.platform.startswith("win"):
-        # Windows: NVIDIA installs to Program Files by default.
+        # Windows: NVIDIA installs to Program Files by default. Env var
+        # names on Windows are case-insensitive but ruff (SIM112) wants the
+        # canonical uppercase form.
         prog_files = [
-            os.environ.get("ProgramFiles", r"C:\Program Files"),
-            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+            os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
         ]
         for pf in prog_files:
             base = os.path.join(pf, "NVIDIA GPU Computing Toolkit", "CUDA")
@@ -392,7 +394,7 @@ def _cuda_search_paths() -> List[str]:
                     pass
     else:
         # Linux/macOS: enumerate common install roots.
-        roots: List[str] = []
+        roots: list[str] = []
         for base in (
             "/usr/local",
             "/opt",
@@ -421,7 +423,7 @@ def _cuda_search_paths() -> List[str]:
     return candidates
 
 
-def _nvcc_in_root(root: str) -> Optional[str]:
+def _nvcc_in_root(root: str) -> str | None:
     """Given a CUDA root, return the nvcc inside it if present."""
     if not root:
         return None
@@ -447,14 +449,14 @@ def _root_from_nvcc(nvcc_path: str) -> str:
     return parent
 
 
-def detect_cuda_installs() -> List[CudaInstall]:
+def detect_cuda_installs() -> list[CudaInstall]:
     """Scan the filesystem for every CUDA toolkit install. Each entry is
     de-duped by version + root_dir. Best-effort and bounded — every nvcc
     probe has a short timeout so a misconfigured install can't pin the UI.
     """
     on_path_nvcc = _which("nvcc")
-    out: List[CudaInstall] = []
-    seen: set[Tuple[str, str]] = set()
+    out: list[CudaInstall] = []
+    seen: set[tuple[str, str]] = set()
     for nvcc in _cuda_search_paths():
         if not os.path.isfile(nvcc):
             continue
@@ -468,17 +470,34 @@ def detect_cuda_installs() -> List[CudaInstall]:
         if key in seen:
             continue
         seen.add(key)
+        # samefile can raise OSError on broken symlinks or stat permission
+        # errors (especially on Windows); fall back to absolute-path compare.
+        is_on_path = False
+        if on_path_nvcc and os.path.isfile(on_path_nvcc):
+            try:
+                is_on_path = os.path.samefile(nvcc, on_path_nvcc)
+            except OSError:
+                is_on_path = os.path.abspath(nvcc) == os.path.abspath(on_path_nvcc)
         out.append(CudaInstall(
             version=version,
             root_dir=root,
             nvcc_path=nvcc,
-            on_path=(on_path_nvcc is not None and os.path.samefile(nvcc, on_path_nvcc)
-                     if os.path.isfile(on_path_nvcc or "") else False),
+            on_path=is_on_path,
         ))
+    # Sort newest-first by *parsed* version (lexicographic order on the path
+    # text mis-ranks e.g. "13.10" vs "13.9"). Installs with an unparseable
+    # version sort last so PATH discovery still surfaces them but they never
+    # win the auto-pick.
+    def _ver_key(inst: CudaInstall) -> tuple[int, int, int]:
+        vm = re.match(r"^(\d+)\.(\d+)$", inst.version or "")
+        if not vm:
+            return (0, 0, 0)
+        return (1, int(vm.group(1)), int(vm.group(2)))
+    out.sort(key=_ver_key, reverse=True)
     return out
 
 
-def _detect_cuda() -> tuple[Optional[str], Optional[str]]:
+def _detect_cuda() -> tuple[str | None, str | None]:
     """Return (cuda_version, nvcc_path) for the *preferred* install:
     PATH first, then the newest detected install. Used to seed the UI's
     initial selection. See ``detect_cuda_installs`` for the full list.
@@ -495,7 +514,7 @@ def _detect_cuda() -> tuple[Optional[str], Optional[str]]:
     return (None if inst.version == "?" else inst.version), inst.nvcc_path
 
 
-def _detect_gcc_candidates() -> tuple[List[str], List[str]]:
+def _detect_gcc_candidates() -> tuple[list[str], list[str]]:
     """Return (cc_candidates, cxx_candidates). Cross-platform compiler scan:
 
     * Linux: gcc-9..15 from PATH, plus stock /usr/bin/gcc.
@@ -507,14 +526,14 @@ def _detect_gcc_candidates() -> tuple[List[str], List[str]]:
     Order matters: newer versions first so the UI's first option is the
     most-likely-best for current CUDA toolkits (e.g. gcc-13 for CUDA 12.x).
     """
-    cc: List[str] = []
-    cxx: List[str] = []
+    cc: list[str] = []
+    cxx: list[str] = []
 
-    def add_cc(p: Optional[str]) -> None:
+    def add_cc(p: str | None) -> None:
         if p and p not in cc:
             cc.append(p)
 
-    def add_cxx(p: Optional[str]) -> None:
+    def add_cxx(p: str | None) -> None:
         if p and p not in cxx:
             cxx.append(p)
 
@@ -596,8 +615,8 @@ def probe_toolchain() -> ToolchainProbe:
 class JobRecommendation:
     suggested: int       # what we recommend
     cpu_count: int       # raw nproc
-    physical_cores: Optional[int] = None
-    total_ram_gb: Optional[float] = None
+    physical_cores: int | None = None
+    total_ram_gb: float | None = None
     reason: str = ""     # human-readable rationale shown in the UI
 
 
@@ -609,8 +628,8 @@ def recommend_jobs() -> JobRecommendation:
     user can always override in the UI.
     """
     cpu_count = os.cpu_count() or 1
-    physical: Optional[int] = None
-    ram_gb: Optional[float] = None
+    physical: int | None = None
+    ram_gb: float | None = None
 
     try:
         import psutil  # type: ignore

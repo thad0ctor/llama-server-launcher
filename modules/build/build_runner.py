@@ -64,8 +64,8 @@ class BuildPlan:
     backend: str                          # "llama.cpp" | "ik_llama"
     source_dir: str                       # absolute path; clone target if missing
     build_dir: str                        # absolute (resolved by caller)
-    cmake_args: List[str]                 # e.g. ["-DGGML_CUDA=ON", ...]
-    cmake_env: Dict[str, str] = field(default_factory=dict)  # CC, CXX, CUDACXX, CUDA_TOOLKIT_ROOT_DIR
+    cmake_args: list[str]                 # e.g. ["-DGGML_CUDA=ON", ...]
+    cmake_env: dict[str, str] = field(default_factory=dict)  # CC, CXX, CUDACXX, CUDA_TOOLKIT_ROOT_DIR
     jobs: int = 0                         # 0 => omit -j (cmake picks default)
     git_clone_if_missing: bool = True
     git_ref: str = ""                     # checkout this after clone/pull, if set
@@ -94,7 +94,7 @@ class UpstreamStatus:
     error: str = ""
 
 
-def _run_capture(cmd: List[str], cwd: Optional[str] = None, timeout: float = 30.0) -> Tuple[int, str, str]:
+def _run_capture(cmd: list[str], cwd: str | None = None, timeout: float = 30.0) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
@@ -177,9 +177,9 @@ class BuildRunner:
     """Single-job pipeline runner. Reuse one instance for the tab lifetime."""
 
     def __init__(self) -> None:
-        self.events: queue.Queue[Tuple[str, object]] = queue.Queue()
-        self._thread: Optional[threading.Thread] = None
-        self._proc: Optional[subprocess.Popen] = None
+        self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen | None = None
         self._cancel = threading.Event()
         self._lock = threading.Lock()
 
@@ -193,13 +193,37 @@ class BuildRunner:
         with self._lock:
             proc = self._proc
         if proc and proc.poll() is None:
-            try:
-                if os.name == "nt":
-                    proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
-                else:
+            self._signal_terminate(proc)
+
+    @staticmethod
+    def _signal_terminate(proc: subprocess.Popen) -> None:
+        """Best-effort terminate of ``proc`` and any children it spawned.
+
+        On POSIX, we start subprocesses with ``start_new_session=True``, which
+        puts the child in its own process group. ``proc.terminate()`` would
+        only signal the session leader and leave grandchildren (ninja → cc1,
+        make → cc1) running. ``os.killpg`` sends SIGTERM to the whole group
+        so a cancel actually stops the build.
+
+        On Windows, sending CTRL_BREAK_EVENT to the new process group has the
+        same effect.
+        """
+        try:
+            if os.name == "nt":
+                proc.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+            else:
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except (OSError, ProcessLookupError):
+                    pgid = proc.pid
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    # Fall back to direct terminate if the group call fails
+                    # (e.g. process already exited).
                     proc.terminate()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- driver
     def start(self, plan: BuildPlan) -> bool:
@@ -230,6 +254,25 @@ class BuildRunner:
             build = Path(plan.build_dir).expanduser()
             if not build.is_absolute():
                 build = src / build
+            # Normalize both paths and refuse to operate on a build dir that
+            # would let `shutil.rmtree(build)` delete the checkout itself or
+            # an ancestor (catches "", ".", "..", and other foot-guns).
+            try:
+                build_resolved = build.resolve(strict=False)
+                src_resolved = src.resolve(strict=False)
+            except Exception as exc:
+                self.events.put((EVENT_ERROR, f"Could not resolve paths: {exc}"))
+                return
+            if not str(plan.build_dir).strip():
+                self.events.put((EVENT_ERROR, "build_dir is empty; refusing to operate."))
+                return
+            if build_resolved == src_resolved or build_resolved in src_resolved.parents:
+                self.events.put((EVENT_ERROR,
+                    f"Refusing unsafe build dir {build_resolved!s} "
+                    f"(would target the source dir or an ancestor)."))
+                return
+            build = build_resolved
+            src = src_resolved
 
             # Stage: clone if needed
             if not src.exists():
@@ -270,9 +313,14 @@ class BuildRunner:
                 if rc != 0:
                     self.events.put((EVENT_DONE, rc))
                     return
-                self._stream(["git", "submodule", "update", "--init", "--recursive"], cwd=str(src))
+                rc = self._stream(["git", "submodule", "update", "--init", "--recursive"], cwd=str(src))
                 if self._cancel.is_set():
                     self.events.put((EVENT_CANCELLED, None))
+                    return
+                if rc != 0:
+                    # Submodules not fetched cleanly — surfacing this is much
+                    # nicer than letting cmake fail later on a missing header.
+                    self.events.put((EVENT_DONE, rc))
                     return
 
             # Stage: clean
@@ -321,9 +369,9 @@ class BuildRunner:
     # ---------------------------------------------------------------- exec
     def _stream(
         self,
-        cmd: List[str],
+        cmd: list[str],
         cwd: str,
-        env: Optional[Dict[str, str]] = None,
+        env: dict[str, str] | None = None,
     ) -> int:
         """Run ``cmd``, stream its merged stdout/stderr to the events queue,
         and return its exit code. Sets ``self._proc`` so ``cancel()`` can
@@ -336,7 +384,7 @@ class BuildRunner:
         \\n boundaries and emitted as separate lines.
         """
         try:
-            popen_kwargs: Dict[str, object] = {
+            popen_kwargs: dict[str, object] = {
                 "cwd": cwd,
                 "env": env,
                 "stdout": subprocess.PIPE,
@@ -350,10 +398,12 @@ class BuildRunner:
 
             proc = subprocess.Popen(cmd, **popen_kwargs)
         except FileNotFoundError as exc:
-            self.events.put((EVENT_ERROR, f"Command not found: {cmd[0]} ({exc})"))
+            # _run is the sole emitter of terminal events; here we only emit
+            # a diagnostic line and return a non-zero rc so _run can decide.
+            self._emit_line(f"ERROR: Command not found: {cmd[0]} ({exc})")
             return 127
         except Exception as exc:
-            self.events.put((EVENT_ERROR, f"Failed to spawn {cmd[0]}: {exc}"))
+            self._emit_line(f"ERROR: Failed to spawn {cmd[0]}: {exc}")
             return 1
 
         with self._lock:
@@ -374,7 +424,7 @@ class BuildRunner:
                 while True:
                     nl = -1
                     for i, b in enumerate(buf):
-                        if b == 0x0A or b == 0x0D:
+                        if b in (10, 13):
                             nl = i
                             break
                     if nl < 0:
@@ -387,14 +437,14 @@ class BuildRunner:
                     self._emit_line(line)
                     del buf[: nl + 1]
                 if self._cancel.is_set() and proc.poll() is None:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
+                    # Same process-group semantics as cancel(): kill children too.
+                    self._signal_terminate(proc)
             if buf:
                 self._emit_line(buf.decode("utf-8", errors="replace"))
         except Exception as exc:
-            self.events.put((EVENT_ERROR, f"Stream read error: {exc}"))
+            # Emit a diagnostic line; _run is the sole emitter of terminal
+            # events so don't put EVENT_ERROR on the queue here.
+            self._emit_line(f"ERROR: Stream read error: {exc}")
 
         proc.wait()
         with self._lock:
@@ -410,7 +460,7 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
     """Render a ``BuildPlan`` as a self-contained bash script equivalent to
     what BuildRunner would execute. Stable enough to commit/share.
     """
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("#!/bin/bash")
     if header:
         for hl in header.splitlines():
@@ -463,8 +513,11 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
         lines.append(cfg_head)
     lines.append("")
 
+    # Match BuildRunner: omit -j entirely when jobs is unset so the script
+    # is portable (macOS has no `nproc` by default) and lets cmake pick the
+    # default parallelism. The runner has identical semantics.
     jobs = plan.jobs if plan.jobs and plan.jobs > 0 else None
-    jobs_arg = f" -j {jobs}" if jobs else " -j$(nproc)"
+    jobs_arg = f" -j {jobs}" if jobs else ""
     lines.append(f'cmake --build "$BUILD_DIR" --config Release{jobs_arg}')
     lines.append("")
     return "\n".join(lines)
