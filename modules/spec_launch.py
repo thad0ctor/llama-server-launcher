@@ -136,6 +136,110 @@ def get_effective_visible_gpu_indices(launcher):
     return main_ordered + extras
 
 
+def _resolve_main_device_value(launcher):
+    """Return the value for the MAIN model's ``--device`` flag when draft
+    GPUs were unioned into ``CUDA_VISIBLE_DEVICES`` — otherwise ``""``.
+
+    Background: when the union helper adds draft-only GPUs to
+    ``CUDA_VISIBLE_DEVICES`` so the binary can see them, the binary's
+    default device discovery will then spread the MAIN model's
+    ``--n-gpu-layers`` across ALL visible GPUs (including the
+    draft-target ones). That fills the draft-target GPUs with main
+    layers and OOMs the draft model on those GPUs. The fix: when the
+    union added extras, also restrict the main model to just the user's
+    main-selected GPUs via ``--device CUDA0,CUDA1,...``, mapped through
+    the same post-filter ordering ``--spec-draft-device`` already uses.
+
+    Skip conditions (return ""):
+        - Manual GPU mode: synthetic indices have no relation to real
+          CUDA, and the launcher already unsets ``CUDA_VISIBLE_DEVICES``;
+          emitting ``--device CUDA<i>`` would refer to wrong/nonexistent
+          devices.
+        - No main selection: nothing to constrain.
+        - No extras unioned in (draft empty / draft is a subset of main /
+          spec not draft-capable / spec disabled): the effective visible
+          set equals the main set, the binary's view already matches the
+          user intent, and ``--device`` is redundant.
+        - All-GPUs selected (effective == detected count, no filter in
+          effect): launcher passes indices through unchanged, no
+          re-mapping needed.
+
+    Emission case (non-empty return):
+        - Main=[1,7], draft=[2,5] → effective=[1,7,2,5] →
+          ``--device CUDA0,CUDA1`` (positions of 1 and 7 in the union).
+
+    Returns a comma-joined ``CUDA<i>`` string, or ``""`` when emission
+    should be skipped. Never raises.
+    """
+    try:
+        if getattr(launcher, "gpu_info", {}).get("manual_mode", False):
+            return ""
+    except Exception:
+        return ""
+    try:
+        main_ordered = list(launcher.get_ordered_selected_gpus())
+    except Exception:
+        return ""
+    if not main_ordered:
+        return ""
+    effective_ordered = get_effective_visible_gpu_indices(launcher)
+    # Only emit when the union actually grew the visible set. If
+    # effective == main (same length, same members in main order), the
+    # binary already only sees the user's main selection and --device
+    # would be a redundant restriction.
+    if len(effective_ordered) <= len(main_ordered):
+        return ""
+    # Defensive: ensure every main GPU is present in the effective list
+    # (the union helper guarantees this — main comes first verbatim — but
+    # guard against future helper changes).
+    parts = []
+    for g in main_ordered:
+        try:
+            pos = effective_ordered.index(g)
+        except ValueError:
+            # Should not happen; if it does, skip rather than emit a
+            # nonsensical index.
+            continue
+        parts.append(f"CUDA{pos}")
+    return ",".join(parts)
+
+
+def emit_main_device_arg(launcher, backend, cmd):
+    """Append ``--device CUDA<i>,...`` for the MAIN model when needed.
+
+    Pair to ``_resolve_draft_device_value``: when draft GPUs are unioned
+    into ``CUDA_VISIBLE_DEVICES`` (so the binary can SEE them), the main
+    model must be told to use ONLY the user's main-selected GPUs —
+    otherwise the binary spreads main layers across every visible GPU
+    and OOMs the draft model on the draft targets.
+
+    Skipped when ``--tensor-split`` is set (tensor-split takes precedence
+    and already constrains the main model's distribution). Skipped in
+    manual GPU mode (synthetic indices), when no main GPUs are selected,
+    and when the union didn't add any extras (no remap needed).
+
+    Both llama.cpp mainline (``-dev``/``--device``) and ik_llama
+    (``-dev``/``--device``) accept the same long-form spelling, so a
+    single emission path covers both backends.
+    """
+    try:
+        # Tensor-split takes precedence over per-device restrictions —
+        # don't double-constrain and don't risk a backend rejecting both
+        # together. The advisory in build_cmd already tells the user
+        # tensor-split is in charge.
+        try:
+            ts_val = launcher.tensor_split.get().strip()
+        except Exception:
+            ts_val = ""
+        if ts_val:
+            return
+        dev_val = _resolve_main_device_value(launcher)
+        if dev_val:
+            cmd.extend(["--device", dev_val])
+    except Exception as exc:
+        print(f"WARNING: --device (main) emission raised: {exc}", file=sys.stderr)
+
+
 def _resolve_draft_device_value(launcher):
     """Return the correctly-remapped value for ``--spec-draft-device``
     given the user's draft GPU selection and the effective visible-GPU set.

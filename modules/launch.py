@@ -20,6 +20,7 @@ from threading import Thread
 
 from modules.spec_launch import (
     emit_spec_args,
+    emit_main_device_arg,
     emit_reasoning_args,
     emit_kv_unify_args,
     emit_no_mmproj_arg,
@@ -333,6 +334,13 @@ class LaunchManager:
         # append to cmd in place. Behavior is unchanged from the prior inline
         # blocks; see spec_launch.py for the per-backend gating rationale.
         emit_spec_args(self.launcher, backend, cmd)
+        # Pair to --spec-draft-device: when draft GPUs were unioned into
+        # CUDA_VISIBLE_DEVICES, the MAIN model also needs --device CUDA<i>
+        # so the binary doesn't spread main layers onto the draft targets
+        # and OOM the draft model. Skipped when --tensor-split is set
+        # (precedence) and in manual GPU mode. See spec_launch.py for the
+        # full rationale.
+        emit_main_device_arg(self.launcher, backend, cmd)
         emit_reasoning_args(self.launcher, cmd)
         emit_kv_unify_args(self.launcher, backend, cmd)
         emit_no_mmproj_arg(self.launcher, backend, cmd)

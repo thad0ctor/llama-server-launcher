@@ -2247,3 +2247,193 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         assert "Specific GPUs (1,7)" in err
         # Draft-only advisory should NOT appear.
         assert "added to CUDA_VISIBLE_DEVICES for the draft model" not in err
+
+
+# ============================================================================
+# Main-model --device restriction when draft GPUs are unioned in.
+#
+# Pair to the union behavior above: when draft GPUs are added to the visible
+# set so the binary can SEE them, the binary's default device discovery will
+# spread the MAIN model's --n-gpu-layers across ALL visible GPUs (including
+# the draft targets). That fills the draft-target GPUs with main layers and
+# OOMs the draft model. The fix: emit --device CUDA0,CUDA1,... to restrict
+# the main model to just the user's main-selected GPUs.
+# ============================================================================
+
+
+class TestMainDeviceEmittedOnDraftUnion:
+    """Verifies the MAIN model gets a --device restriction whenever the
+    union helper added extras to CUDA_VISIBLE_DEVICES, and the various
+    skip cases (no extras, manual mode, tensor-split present)."""
+
+    @pytest.fixture
+    def union_launcher(self, launcher_mock):
+        """Same shape as ``TestDraftGpuUnionWithCudaVisibleDevices.union_launcher``."""
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.app_settings = {
+            "selected_gpus": [],
+            "gpu_order": [],
+            "spec_draft_selected_gpus": [],
+        }
+        launcher_mock.gpu_info = {"device_count": 8, "available": True, "devices": []}
+
+        def _ordered():
+            order = launcher_mock.app_settings.get("gpu_order", [])
+            sel = set(launcher_mock.app_settings.get("selected_gpus", []))
+            seen = set()
+            out = []
+            for g in order:
+                if g in sel and g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            for g in sorted(sel):
+                if g not in seen:
+                    out.append(g)
+                    seen.add(g)
+            return out
+
+        launcher_mock.get_ordered_selected_gpus = _ordered
+        return launcher_mock
+
+    def test_user_case_main_1_7_draft_2_5_emits_device_cuda0_cuda1(
+        self, manager, union_launcher
+    ):
+        """REGRESSION (the user's exact bug). main=[1,7] + draft=[2,5] →
+        - CUDA_VISIBLE_DEVICES=1,7,2,5
+        - --device CUDA0,CUDA1 (positions of main 1,7 in the union)
+        - --spec-draft-device CUDA2,CUDA3 (positions of draft 2,5)
+        All three flags must be present together for the binary to see
+        the draft GPUs but NOT spread main layers onto them."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7,2,5"
+        cmd = manager.build_cmd()
+        # MAIN constraint: --device CUDA0,CUDA1 (main 1,7 = effective[0],
+        # effective[1]).
+        assert "--device" in cmd, (
+            "expected --device to be emitted because draft GPUs were unioned in"
+        )
+        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
+        # DRAFT constraint: --spec-draft-device CUDA2,CUDA3 (draft 2,5 =
+        # effective[2], effective[3]).
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA2,CUDA3"
+
+    def test_no_device_when_draft_subset_of_main(self, manager, union_launcher):
+        """Draft is a SUBSET of main → effective == main → no union added
+        extras → no need to constrain main → no --device emission."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [7]
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_no_device_when_draft_empty(self, manager, union_launcher):
+        """No draft selection → no union → no --device emission."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = []
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_no_device_when_spec_disabled(self, manager, union_launcher):
+        """Spec disabled → draft selection ignored → no union → no --device."""
+        union_launcher.spec_enabled.set(False)
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_no_device_when_non_draft_capable_spec_type(
+        self, manager, union_launcher
+    ):
+        """ngram-* spec_types don't use a draft model → no union → no
+        --device emission, even with stale draft GPU selection."""
+        union_launcher.spec_type.set("ngram-simple")
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_no_device_when_tensor_split_set(self, manager, union_launcher):
+        """--tensor-split takes precedence over per-device restrictions —
+        emitting both would either be redundant or risk a backend rejecting
+        the combination. Skip --device entirely when tensor-split is set."""
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        union_launcher.tensor_split.set("1,1")
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+        # --tensor-split should still be present.
+        assert "--tensor-split" in cmd
+
+    def test_no_device_when_manual_gpu_mode(self, manager, union_launcher):
+        """Manual GPU mode uses synthetic indices that don't correspond to
+        real CUDA devices — emitting --device CUDA<i> would refer to wrong
+        hardware. Skip entirely."""
+        union_launcher.gpu_info = {
+            "device_count": 4, "available": True, "manual_mode": True,
+        }
+        union_launcher.app_settings["selected_gpus"] = [0, 1]
+        union_launcher.app_settings["gpu_order"] = [0, 1]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 3]
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_no_device_when_empty_main_selection(self, manager, union_launcher):
+        """Empty main selection means 'no filter' — union helper returns
+        main_ordered ([]) so there are no extras to union. Emitting
+        --device with an empty value would be nonsensical."""
+        union_launcher.app_settings["selected_gpus"] = []
+        union_launcher.app_settings["gpu_order"] = []
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [3]
+        cmd = manager.build_cmd()
+        assert "--device" not in cmd
+
+    def test_ik_llama_mtp_also_emits_device(self, manager, union_launcher):
+        """ik_llama uses the same --device long-form spelling (confirmed in
+        common.cpp: 'arg == \"-dev\" || arg == \"--device\"'). The same
+        emission path covers both backends — verify the ik_llama path
+        emits the main constraint identically."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set("mtp")
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        cmd = manager.build_cmd()
+        assert "--device" in cmd
+        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
+        # Draft device flag uses -devd on ik_llama (existing contract).
+        assert "-devd" in cmd
+        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+
+    def test_device_value_preserves_main_order(self, manager, union_launcher):
+        """Main order [7, 1] (user dragged 7 first) with draft [2] → union
+        [7, 1, 2] → --device CUDA0,CUDA1 (positions of 7 then 1)."""
+        union_launcher.app_settings["selected_gpus"] = [7, 1]
+        union_launcher.app_settings["gpu_order"] = [7, 1]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert value == "7,1,2"
+        cmd = manager.build_cmd()
+        # main_ordered=[7,1], effective=[7,1,2] → positions 0 and 1.
+        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
+
+    def test_device_emitted_with_single_main_and_single_draft(
+        self, manager, union_launcher
+    ):
+        """Minimum size: main=[0], draft=[1] → effective=[0,1] →
+        --device CUDA0, --spec-draft-device CUDA1."""
+        union_launcher.app_settings["selected_gpus"] = [0]
+        union_launcher.app_settings["gpu_order"] = [0]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [1]
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--device") + 1] == "CUDA0"
+        assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA1"
