@@ -214,6 +214,9 @@ class BuildConfigStore:
 
     def rename(self, old: str, new: str) -> bool:
         self._load()
+        # Mirror the empty-name guard from save(): strip + reject blanks so
+        # whitespace-only names can't sneak in through rename().
+        new = (new or "").strip()
         if old not in self._cache or not new or new in self._cache:
             return False
         cfg = self._cache.pop(old)

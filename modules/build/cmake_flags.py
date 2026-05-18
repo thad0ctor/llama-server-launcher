@@ -545,8 +545,12 @@ def build_autodetect_values(
         values["GGML_AVX512_VNNI"] = True
         values["GGML_AVX512_BF16"] = True
 
-    values["CMAKE_C_FLAGS"] = "-march=native"
-    values["CMAKE_CXX_FLAGS"] = "-march=native"
+    # Don't hard-code -march=native here: it's a GCC/Clang-only flag and
+    # breaks CMake configure on MSVC / clang-cl out of the box. ``GGML_NATIVE``
+    # (set True above) is the portable knob — upstream's cmake translates it
+    # to the right compiler-specific flag (``-march=native`` on GCC/Clang,
+    # ``/arch:AVX2`` etc. on MSVC). Users who want extra C/C++ flags can
+    # type them into the "Extra C flags" / "Extra C++ flags" fields.
 
     values["LLAMA_BUILD_TESTS"] = False
     values["LLAMA_BUILD_SERVER"] = True

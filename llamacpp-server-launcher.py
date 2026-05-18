@@ -1015,16 +1015,20 @@ class LlamaCppLauncher:
 
         inner.rowconfigure(r-1, weight=0) # Don't expand the directory listbox row with height
 
-        # Move directory buttons to the right of the listbox
-        dir_btn_frame = ttk.Frame(inner)
-        dir_btn_frame.grid(column=2, row=r-1, sticky="n", padx=5, pady=3)
-        ttk.Button(dir_btn_frame, text="Add Dir…", width=10, command=self._add_model_dir)\
+        # Move directory buttons to the right of the listbox. Stored on
+        # ``self`` so the scan-start/finish handlers can disable / re-enable
+        # them while a scan is in flight — without this assignment the
+        # ``hasattr(self, 'dir_btn_frame')`` checks downstream always
+        # short-circuit and the buttons stay clickable during a scan.
+        self.dir_btn_frame = ttk.Frame(inner)
+        self.dir_btn_frame.grid(column=2, row=r-1, sticky="n", padx=5, pady=3)
+        ttk.Button(self.dir_btn_frame, text="Add Dir…", width=10, command=self._add_model_dir)\
            .pack(side=tk.TOP, pady=2, fill=tk.X)
-        ttk.Button(dir_btn_frame, text="Remove Dir", width=10, command=self._remove_model_dir)\
+        ttk.Button(self.dir_btn_frame, text="Remove Dir", width=10, command=self._remove_model_dir)\
            .pack(side=tk.TOP, pady=2, fill=tk.X)
 
         # Add scan button next to directory buttons
-        scan_btn = ttk.Button(dir_btn_frame, text="Scan Models", command=self._trigger_scan)
+        scan_btn = ttk.Button(self.dir_btn_frame, text="Scan Models", command=self._trigger_scan)
         scan_btn.pack(side=tk.TOP, pady=2, fill=tk.X)
 
         # Add some vertical space between directory section and model selection
