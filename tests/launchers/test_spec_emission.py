@@ -1063,33 +1063,28 @@ class TestSpecDraftDeviceEmission:
 class TestSpecDraftCacheTypeComboboxValues:
     """The draft K/V cache type combos must offer a blank ("don't emit")
     option in addition to the same set the main combos offer. The "" entry
-    is the one that makes the combos different from the main combos."""
+    is the one that makes the combos different from the main combos.
+
+    Source-of-truth assertion: the UI imports ``SPEC_DRAFT_CACHE_TYPE_VALUES``
+    from ``modules.spec_tab``; we assert that constant matches the explicit
+    expected set here. That locks both ends so a unilateral edit to the UI
+    tuple (or this test's expected set) fails loudly instead of silently
+    drifting.
+    """
 
     _EXPECTED_VALUES = ("", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k")
 
-    def test_ctk_combo_values_match_expected(self, tk_root):
-        """spec_draft_ctk_combo offers the full draft set including blank."""
-        from tkinter import ttk
-        var = tk.StringVar(master=tk_root, value="")
-        combo = ttk.Combobox(
-            tk_root,
-            textvariable=var,
-            values=self._EXPECTED_VALUES,
-            state="readonly",
-        )
-        assert tuple(combo.cget("values")) == self._EXPECTED_VALUES
+    def test_module_level_constant_matches_expected_set(self):
+        """The constant the UI consumes is what we expect."""
+        from modules.spec_tab import SPEC_DRAFT_CACHE_TYPE_VALUES
+        assert SPEC_DRAFT_CACHE_TYPE_VALUES == self._EXPECTED_VALUES
 
-    def test_ctv_combo_values_match_expected(self, tk_root):
-        """Same contract for spec_draft_ctv_combo (paste-twin of the K combo)."""
-        from tkinter import ttk
-        var = tk.StringVar(master=tk_root, value="")
-        combo = ttk.Combobox(
-            tk_root,
-            textvariable=var,
-            values=self._EXPECTED_VALUES,
-            state="readonly",
-        )
-        assert tuple(combo.cget("values")) == self._EXPECTED_VALUES
+    def test_constant_includes_blank_first_entry(self):
+        """The "" entry is what makes the draft combos different from the
+        main combos — guarantee that contract."""
+        from modules.spec_tab import SPEC_DRAFT_CACHE_TYPE_VALUES
+        assert SPEC_DRAFT_CACHE_TYPE_VALUES[0] == ""
+        assert "f16" in SPEC_DRAFT_CACHE_TYPE_VALUES
 
     def test_blank_value_omits_flag_under_llamacpp(self, manager, launcher_mock):
         """When the combo is left blank, no --spec-draft-type-k flag emits."""

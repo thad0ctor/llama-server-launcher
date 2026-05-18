@@ -24,6 +24,15 @@ from tkinter import ttk
 from modules.system import parse_gguf_header_simple
 
 
+# Allowed values for the draft KV cache type comboboxes. Leading "" lets the
+# user pick "don't emit the flag" (emission code already treats blank as
+# omission). Module-level so tests can import and assert against the SAME
+# tuple the UI actually uses — preventing silent drift when the set changes.
+SPEC_DRAFT_CACHE_TYPE_VALUES = (
+    "", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k",
+)
+
+
 class SpecTab:
     """MTP / Speculative Decoding tab.
 
@@ -396,18 +405,17 @@ class SpecTab:
         # --- Draft KV cache types: comboboxes (blank = use server default) ---
         # Blank value lets the user pick "don't emit the flag"; emission code
         # already treats "" as omission so behavior is unchanged.
-        _draft_cache_values = ("", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k")
         ttk.Label(sec, text="Draft K cache type (-ctkd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_ctk_combo = ttk.Combobox(
             sec, textvariable=self.spec_draft_ctk, width=10,
-            values=_draft_cache_values, state="readonly",
+            values=SPEC_DRAFT_CACHE_TYPE_VALUES, state="readonly",
         )
         self.spec_draft_ctk_combo.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_ctk"] = self.spec_draft_ctk_combo
         ttk.Label(sec, text="Draft V cache type (-ctvd):").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_ctv_combo = ttk.Combobox(
             sec, textvariable=self.spec_draft_ctv, width=10,
-            values=_draft_cache_values, state="readonly",
+            values=SPEC_DRAFT_CACHE_TYPE_VALUES, state="readonly",
         )
         self.spec_draft_ctv_combo.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_ctv"] = self.spec_draft_ctv_combo

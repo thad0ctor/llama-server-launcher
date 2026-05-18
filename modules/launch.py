@@ -521,9 +521,16 @@ class LaunchManager:
         detected_gpu_count = self.launcher.gpu_info.get("device_count", 0)
         effective_indices_str = ",".join(map(str, effective_gpus))
         draft_only_gpus = [g for g in effective_gpus if g not in set(ordered_selected_gpus)]
+        # In manual GPU mode the launcher script intentionally UNSETS
+        # CUDA_VISIBLE_DEVICES (synthetic indices have no relation to real
+        # PCIe devices), so this advisory's "the script will set
+        # CUDA_VISIBLE_DEVICES=..." claim becomes a lie. Skip it entirely.
+        cuda_action, _cuda_val = self._resolve_cuda_visible_devices_action()
+        cuda_export_active = (cuda_action == "export")
 
-        # Only warn if GPUs were detected, the user selected a *subset*, and --tensor-split is not used.
-        if detected_gpu_count > 0 and len(effective_gpus) > 0 and len(effective_gpus) < detected_gpu_count and not tensor_split_val:
+        # Only warn if GPUs were detected, the user selected a *subset*, --tensor-split is not used,
+        # AND the resolver will actually export CUDA_VISIBLE_DEVICES (skips manual mode).
+        if cuda_export_active and detected_gpu_count > 0 and len(effective_gpus) > 0 and len(effective_gpus) < detected_gpu_count and not tensor_split_val:
              # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
              print(f"\nINFO: Specific GPUs ({effective_indices_str}) were selected via checkboxes, but --tensor-split was not used.", file=sys.stderr)
              # The PowerShell script will set CUDA_VISIBLE_DEVICES, so the warning applies more generally now.
