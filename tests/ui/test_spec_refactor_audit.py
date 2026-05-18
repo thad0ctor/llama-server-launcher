@@ -53,12 +53,15 @@ ENTRY_PATH = REPO_ROOT / "llamacpp-server-launcher.py"
 # ---------------------------------------------------------------------------
 
 
-def _silence_messagebox():
+def _silence_messagebox(monkeypatch):
+    """Scope messagebox no-ops to the test via monkeypatch — avoids
+    leaking global ``mb.showinfo = lambda: None`` across the rest of
+    the suite (would silently make popup-assertion tests pass)."""
     import tkinter.messagebox as mb
 
-    mb.showinfo = lambda *a, **kw: None
-    mb.showwarning = lambda *a, **kw: None
-    mb.showerror = lambda *a, **kw: None
+    monkeypatch.setattr(mb, "showinfo", lambda *a, **kw: None)
+    monkeypatch.setattr(mb, "showwarning", lambda *a, **kw: None)
+    monkeypatch.setattr(mb, "showerror", lambda *a, **kw: None)
 
 
 @pytest.fixture(scope="module")
@@ -70,11 +73,14 @@ def entry_module():
     return module
 
 
-def _make_real_launcher(entry_module, config_path):
+def _make_real_launcher(entry_module, config_path, monkeypatch):
+    """Build a real ``LlamaCppLauncher`` with ConfigManager + messagebox
+    overrides scoped to the test via ``monkeypatch``."""
     import modules.config as cfg_mod
 
-    cfg_mod.ConfigManager.get_config_path = lambda self: config_path
-    _silence_messagebox()
+    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path",
+                        lambda self: config_path)
+    _silence_messagebox(monkeypatch)
     root = tk.Tk()
     root.withdraw()
     try:
@@ -86,9 +92,9 @@ def _make_real_launcher(entry_module, config_path):
 
 
 @pytest.fixture
-def real_launcher(entry_module, tmp_path):
+def real_launcher(entry_module, tmp_path, monkeypatch):
     try:
-        launcher, root = _make_real_launcher(entry_module, tmp_path / "configs.json")
+        launcher, root = _make_real_launcher(entry_module, tmp_path / "configs.json", monkeypatch)
     except tk.TclError as exc:
         pytest.skip(f"Tk root unavailable: {exc}")
     yield launcher, tmp_path
@@ -453,7 +459,7 @@ class TestEmissionParity:
         launcher.spec_type.set("draft-mtp")
         launcher.parallel.set("8")
         from modules.spec_launch import resolve_effective_parallel
-        effective = resolve_effective_parallel(launcher)
+        effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
         assert effective == "1", (
             f"MTP must force --parallel 1; got {effective!r}"
         )
@@ -496,7 +502,7 @@ class TestPersistenceParity:
         return f"v_{name[-12:]}"
 
     def test_every_spec_key_persists_through_named_config(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """Set distinctive non-default values, save as named config,
         boot fresh launcher, load the named config back. Assert every
@@ -508,7 +514,7 @@ class TestPersistenceParity:
         }
 
         try:
-            launcher1, root1 = _make_real_launcher(entry_module, cfg_path)
+            launcher1, root1 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -558,7 +564,7 @@ class TestLoadOrderResync:
         # there so the call site picks up the spy.
         monkeypatch.setattr(entry_module, "resync_spec_tk_vars_from_app_settings", spy)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -599,7 +605,7 @@ class TestLoadOrderResync:
         )
 
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -634,7 +640,7 @@ class TestExtraAdversarialConfigs:
         }
         cfg_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def test_legacy_spec_draft_hf_silently_ignored(self, entry_module, tmp_path):
+    def test_legacy_spec_draft_hf_silently_ignored(self, entry_module, tmp_path, monkeypatch):
         """The legacy ``spec_draft_hf`` key (removed in this branch) must
         be silently ignored without crashing the loader."""
         cfg_path = tmp_path / "configs.json"
@@ -651,7 +657,7 @@ class TestExtraAdversarialConfigs:
             },
         )
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -663,7 +669,7 @@ class TestExtraAdversarialConfigs:
             root.destroy()
 
     def test_wrong_backend_spec_type_preserved_and_inactive(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """``spec_type=draft-mtp`` (llama.cpp-only) + ``backend=ik_llama``:
         the loader must preserve the stored value; emission must reject
@@ -684,7 +690,7 @@ class TestExtraAdversarialConfigs:
             },
         )
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -700,7 +706,7 @@ class TestExtraAdversarialConfigs:
         finally:
             root.destroy()
 
-    def test_mtp_with_parallel_8_overrides_at_launch(self, entry_module, tmp_path):
+    def test_mtp_with_parallel_8_overrides_at_launch(self, entry_module, tmp_path, monkeypatch):
         """parallel=8 + spec_enabled+spec_type=draft-mtp must force
         --parallel 1 at launch via resolve_effective_parallel.
         """
@@ -720,7 +726,7 @@ class TestExtraAdversarialConfigs:
             },
         )
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -729,7 +735,7 @@ class TestExtraAdversarialConfigs:
             # last-line-of-defense override).
             launcher.parallel.set("8")
             from modules.spec_launch import resolve_effective_parallel
-            effective = resolve_effective_parallel(launcher)
+            effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
             assert effective == "1", (
                 f"MTP + parallel=8 must override to 1; got {effective!r}"
             )
@@ -737,7 +743,7 @@ class TestExtraAdversarialConfigs:
             root.destroy()
 
     def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """``spec_draft_selected_gpus=[999, "abc", True]`` -> only valid
         ints survive. (True is a bool subclass and must NOT pass through
@@ -756,7 +762,7 @@ class TestExtraAdversarialConfigs:
             },
         )
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:

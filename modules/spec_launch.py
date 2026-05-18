@@ -408,9 +408,10 @@ def emit_no_mmproj_arg(launcher, backend, cmd):
         print(f"WARNING: --no-mmproj emission raised: {exc}", file=sys.stderr)
 
 
-def resolve_effective_parallel(launcher):
+def resolve_effective_parallel(launcher, backend):
     """Return the effective ``--parallel`` value, applying the MTP 'force 1'
-    override when MTP is active. Prints stderr warning on override.
+    override only when MTP is the *backend-valid* active spec_type. Prints
+    stderr warning on override.
 
     MTP enforces single-slot operation (-np 1) — OVERRIDES whatever the
     user (or another UI surface like the Advanced tab) set, since MTP
@@ -419,16 +420,30 @@ def resolve_effective_parallel(launcher):
     never make it into argv. The MTP/Spec tab also auto-sets parallel
     to "1" when MTP is selected, but this guard is the authoritative
     last line of defense regardless of where parallel was set from.
+
+    Backend validation: the launcher preserves the stored spec_type even
+    when the user flips backends, so a value like ``draft-mtp`` may sit
+    in ``self.spec_type`` while ``ik_llama`` is active (and vice versa).
+    In that case ``emit_spec_args`` correctly skips ``--spec-type`` for
+    that backend, so MTP is NOT actually active and we must NOT force
+    parallel to 1. Only the backend-correct MTP variant counts:
+        - llama.cpp + spec_type=='draft-mtp' → MTP active
+        - ik_llama  + spec_type=='mtp'       → MTP active
+        - anything else                       → not MTP active
     """
     parallel_val = launcher.parallel.get()
     try:
         spec_enabled_var = getattr(launcher, "spec_enabled", None)
         spec_type_var = getattr(launcher, "spec_type", None)
+        spec_type = (spec_type_var.get() or "").strip() if spec_type_var is not None else ""
+        if backend == "ik_llama":
+            mtp_type_for_backend = "mtp"
+        else:
+            mtp_type_for_backend = "draft-mtp"
         mtp_active = (
             spec_enabled_var is not None
             and spec_enabled_var.get()
-            and spec_type_var is not None
-            and (spec_type_var.get() or "").strip() in ("draft-mtp", "mtp")
+            and spec_type == mtp_type_for_backend
         )
     except Exception:
         mtp_active = False

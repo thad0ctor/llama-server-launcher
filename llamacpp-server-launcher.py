@@ -882,6 +882,15 @@ class LlamaCppLauncher:
             self._refresh_spec_tab_state()
         except Exception as exc:
             print(f"DEBUG: initial _refresh_spec_tab_state failed: {exc}", file=sys.stderr)
+        # Apply the MTP parallel constraint on initial boot too. Without this,
+        # a saved config that ships with spec_enabled=True + draft-mtp/mtp
+        # AND parallel>1 would keep parallel>1 in the UI until the user
+        # toggled spec_enabled or spec_type. Emission would still force 1,
+        # but the UI would show a stale value.
+        try:
+            self._apply_mtp_parallel_default()
+        except Exception as exc:
+            print(f"DEBUG: initial _apply_mtp_parallel_default failed: {exc}", file=sys.stderr)
         # Initial refresh of KV-unification combobox gating.
         try:
             self._refresh_kv_unify_state()
@@ -2383,6 +2392,7 @@ class LlamaCppLauncher:
                 self.spec_draft_listbox.insert(tk.END, name)
             # Restore the user's prior draft selection if its path still exists.
             saved_draft = (self.spec_draft_model.get() or "").strip()
+            restored_draft_selection = False
             if saved_draft:
                 try:
                     saved_path = Path(saved_draft).resolve()
@@ -2392,6 +2402,7 @@ class LlamaCppLauncher:
                             self.spec_draft_listbox.selection_clear(0, tk.END)
                             self.spec_draft_listbox.selection_set(idx)
                             self.spec_draft_listbox.see(idx)
+                            restored_draft_selection = True
                             break
                 except (ValueError, OSError):
                     pass
@@ -2400,6 +2411,15 @@ class LlamaCppLauncher:
             if hasattr(self, "spec_draft_path_display_var"):
                 cur = (self.spec_draft_model.get() or "").strip()
                 self.spec_draft_path_display_var.set(cur or "(none — uses base GGUF for MTP)")
+            # ``selection_set`` does not fire the ``<<ListboxSelect>>``
+            # binding, so the draft-layer analysis / slider state / status
+            # label would otherwise stay stale until the user clicked the
+            # item. Call the handler directly to repopulate them now.
+            if restored_draft_selection:
+                try:
+                    self._on_spec_draft_model_selected()
+                except Exception as exc:
+                    print(f"DEBUG: restored draft selection handler failed: {exc}", file=sys.stderr)
             try:
                 self._refresh_spec_tab_state()
             except Exception:

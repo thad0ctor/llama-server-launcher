@@ -50,15 +50,20 @@ from tests.launcher_var_registry import ALL_NEW_LAUNCHER_TK_VARS  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def _silence_messagebox():
+def _silence_messagebox(monkeypatch):
     """Make the launcher's modal pop-ups no-ops so non-interactive tests
     don't hang on showinfo/showwarning/showerror calls.
+
+    Uses pytest's ``monkeypatch`` fixture so the originals are restored at
+    test teardown — leaking a global `messagebox.showinfo = lambda: None`
+    would make any unrelated test that legitimately checks for a popup
+    silently pass.
     """
     import tkinter.messagebox as mb
 
-    mb.showinfo = lambda *a, **kw: None
-    mb.showwarning = lambda *a, **kw: None
-    mb.showerror = lambda *a, **kw: None
+    monkeypatch.setattr(mb, "showinfo", lambda *a, **kw: None)
+    monkeypatch.setattr(mb, "showwarning", lambda *a, **kw: None)
+    monkeypatch.setattr(mb, "showerror", lambda *a, **kw: None)
 
 
 @pytest.fixture(scope="module")
@@ -75,16 +80,19 @@ def entry_module():
     return module
 
 
-def _make_real_launcher(entry_module, config_path: Path):
+def _make_real_launcher(entry_module, config_path: Path, monkeypatch):
     """Construct a real ``LlamaCppLauncher`` whose config_path is ``config_path``.
 
     Caller owns the returned launcher and is responsible for destroying its
-    root window.
+    root window. ``monkeypatch`` is the per-test pytest fixture — all global
+    overrides (``ConfigManager.get_config_path``, ``tkinter.messagebox.*``)
+    are scoped to it so they restore automatically at teardown.
     """
     import modules.config as cfg_mod
 
-    cfg_mod.ConfigManager.get_config_path = lambda self: config_path
-    _silence_messagebox()
+    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path",
+                        lambda self: config_path)
+    _silence_messagebox(monkeypatch)
     root = tk.Tk()
     root.withdraw()
     try:
@@ -96,13 +104,16 @@ def _make_real_launcher(entry_module, config_path: Path):
 
 
 @pytest.fixture
-def real_launcher(entry_module, tmp_path):
+def real_launcher(entry_module, tmp_path, monkeypatch):
     """Module-tested ``LlamaCppLauncher`` against a fresh tmp config dir.
 
     Skips when DISPLAY is unavailable (the ``tk.Tk()`` call would error).
+    ``monkeypatch`` is forwarded so the global ConfigManager + messagebox
+    overrides applied inside ``_make_real_launcher`` are scoped to the
+    test and restored at teardown.
     """
     try:
-        launcher, root = _make_real_launcher(entry_module, tmp_path / "configs.json")
+        launcher, root = _make_real_launcher(entry_module, tmp_path / "configs.json", monkeypatch)
     except tk.TclError as exc:
         pytest.skip(f"Tk root unavailable: {exc}")
     yield launcher, tmp_path
@@ -356,7 +367,7 @@ class TestRealPersistenceRoundTrip:
         return f"v_{name[-12:]}"
 
     def test_every_new_var_round_trips_via_app_settings(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """Stage 1: save to disk. Stage 2: fresh launcher rehydrates Tk vars."""
         cfg_path = tmp_path / "configs.json"
@@ -365,7 +376,7 @@ class TestRealPersistenceRoundTrip:
         }
 
         try:
-            launcher1, root1 = _make_real_launcher(entry_module, cfg_path)
+            launcher1, root1 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -385,7 +396,7 @@ class TestRealPersistenceRoundTrip:
 
         # Stage 2 — fresh launcher reads app_settings AND rehydrates Tk vars.
         try:
-            launcher2, root2 = _make_real_launcher(entry_module, cfg_path)
+            launcher2, root2 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -398,7 +409,7 @@ class TestRealPersistenceRoundTrip:
             root2.destroy()
 
     def test_named_config_round_trips_via_load_configuration(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """Stage 3: save a named config, fresh launcher loads it back."""
         cfg_path = tmp_path / "configs.json"
@@ -409,7 +420,7 @@ class TestRealPersistenceRoundTrip:
         }
 
         try:
-            launcher1, root1 = _make_real_launcher(entry_module, cfg_path)
+            launcher1, root1 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -421,7 +432,7 @@ class TestRealPersistenceRoundTrip:
             root1.destroy()
 
         try:
-            launcher2, root2 = _make_real_launcher(entry_module, cfg_path)
+            launcher2, root2 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -489,7 +500,7 @@ class TestAdversarialConfigs:
         cfg_path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_garbage_spec_type_loads_then_emission_rejects(
-        self, entry_module, tmp_path, capsys
+        self, entry_module, tmp_path, capsys, monkeypatch
     ):
         """A literal-garbage ``spec_type`` must NOT crash on load.
 
@@ -506,7 +517,7 @@ class TestAdversarialConfigs:
                                               "selected_gpus": [], "gpu_order": [],
                                               "host": "127.0.0.1", "port": "8080"})
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -520,7 +531,7 @@ class TestAdversarialConfigs:
         finally:
             root.destroy()
 
-    def test_null_numeric_field_does_not_crash(self, entry_module, tmp_path):
+    def test_null_numeric_field_does_not_crash(self, entry_module, tmp_path, monkeypatch):
         """A JSON ``null`` for a numeric-typed string field must coerce to
         ``""`` (don't-emit) rather than crash."""
         cfg_path = tmp_path / "configs.json"
@@ -533,7 +544,7 @@ class TestAdversarialConfigs:
         }
         self._write_config_file(cfg_path, {}, app_settings=app)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -544,7 +555,7 @@ class TestAdversarialConfigs:
         finally:
             root.destroy()
 
-    def test_invalid_draft_gpu_indices_filtered(self, entry_module, tmp_path):
+    def test_invalid_draft_gpu_indices_filtered(self, entry_module, tmp_path, monkeypatch):
         """``spec_draft_selected_gpus`` with mixed garbage entries — the
         loader must filter to int-coercible values."""
         cfg_path = tmp_path / "configs.json"
@@ -555,7 +566,7 @@ class TestAdversarialConfigs:
         }
         self._write_config_file(cfg_path, {}, app_settings=app)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -573,7 +584,7 @@ class TestAdversarialConfigs:
             root.destroy()
 
     def test_legacy_config_without_spec_keys_loads_with_defaults(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """A config file from before this branch existed — no spec_* keys
         whatsoever — must load cleanly with the documented defaults."""
@@ -587,7 +598,7 @@ class TestAdversarialConfigs:
         }
         self._write_config_file(cfg_path, {}, app_settings=legacy)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -600,7 +611,7 @@ class TestAdversarialConfigs:
         finally:
             root.destroy()
 
-    def test_enabled_with_blank_type_loads_cleanly(self, entry_module, tmp_path):
+    def test_enabled_with_blank_type_loads_cleanly(self, entry_module, tmp_path, monkeypatch):
         """``spec_enabled=True`` + ``spec_type=""`` is a degenerate state
         a hand-edited config can reach. The load_saved_configs validator
         coerces blank spec_type to "none" so emission skips all flags."""
@@ -612,7 +623,7 @@ class TestAdversarialConfigs:
         }
         self._write_config_file(cfg_path, {}, app_settings=app)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -624,7 +635,7 @@ class TestAdversarialConfigs:
             root.destroy()
 
     def test_stale_reasoning_budget_non_int_loads_cleanly(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """A non-int ``reasoning_budget`` like ``"abc"`` (e.g. pre-validation
         config) must round-trip into the Tk var without crashing. The
@@ -638,7 +649,7 @@ class TestAdversarialConfigs:
         }
         self._write_config_file(cfg_path, {}, app_settings=app)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
@@ -647,7 +658,7 @@ class TestAdversarialConfigs:
             root.destroy()
 
     def test_cache_idle_without_kv_unified_clears_on_load(
-        self, entry_module, tmp_path
+        self, entry_module, tmp_path, monkeypatch
     ):
         """``cache_idle_slots_mode`` is dependent on ``kv_unified_mode=="on"``.
         With kvu blank/off on llama.cpp, the stale-value reset clears
@@ -663,7 +674,7 @@ class TestAdversarialConfigs:
         }
         self._write_config_file(cfg_path, {}, app_settings=app)
         try:
-            launcher, root = _make_real_launcher(entry_module, cfg_path)
+            launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:

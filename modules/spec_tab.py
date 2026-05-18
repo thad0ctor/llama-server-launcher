@@ -709,8 +709,20 @@ class SpecTab:
         count = gpu_info.get("device_count", 0) if isinstance(gpu_info, dict) else 0
         loaded_selected = set(self.launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
         detected_devices = getattr(self.launcher, "detected_gpu_devices", [])
+        # Manual GPU mode disables draft device emission entirely — the
+        # manual GPU list isn't real CUDA hardware, so we can't tell the
+        # binary "use CUDA<i>" reliably.
+        manual_mode = bool(
+            getattr(getattr(self.launcher, "manual_gpu_mode", None), "get", lambda: False)()
+        )
+        # Sanitize: rebuild the persisted-index list from what's currently
+        # valid, so a stale saved selection (e.g. GPUs that no longer exist
+        # or were filtered, or any selection while manual GPU mode is on)
+        # never re-emits as a phantom CUDA<i>. Also derive a fresh device
+        # string so spec_draft_device matches the visible checkbox state.
+        valid_selected = []
 
-        if count > 0:
+        if count > 0 and not manual_mode:
             MAX_GPUS_PER_ROW = 3
             for i in range(count):
                 gpu_details = (
@@ -718,7 +730,10 @@ class SpecTab:
                     if i < len(detected_devices)
                     else {}
                 )
-                v = tk.BooleanVar(value=(i in loaded_selected))
+                is_selected = i in loaded_selected
+                if is_selected:
+                    valid_selected.append(i)
+                v = tk.BooleanVar(value=is_selected)
                 gpu_name_display = f"GPU {i}"
                 if gpu_details and gpu_details.get("name"):
                     gpu_name_display += f": {gpu_details['name']}"
@@ -738,9 +753,25 @@ class SpecTab:
         else:
             ttk.Label(
                 self.spec_draft_gpu_checkbox_frame,
-                text="No CUDA devices detected.",
+                text=("No CUDA devices detected." if not manual_mode
+                      else "Draft device selection disabled in manual GPU mode."),
                 foreground="orange",
             ).grid(row=0, column=0, sticky="w", padx=5, pady=3)
+
+        # Mirror the sanitized selection back into app_settings + spec_draft_device
+        # so the next save flushes a consistent state and emission can't drift.
+        # ONLY clobber spec_draft_device when we actually rendered checkboxes
+        # (i.e. real GPUs detected, non-manual mode) — otherwise we'd wipe a
+        # legitimately-persisted free-text value during init on machines
+        # without detected CUDA hardware (and break test environments).
+        self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+        if count > 0 and not manual_mode:
+            try:
+                self.spec_draft_device.set(
+                    ",".join(f"CUDA{i}" for i in valid_selected)
+                )
+            except Exception:
+                pass
 
         # Re-apply enable/disable rules now that children exist. Safe to call
         # before _spec_sections is populated (the method short-circuits).

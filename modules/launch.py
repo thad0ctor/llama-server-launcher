@@ -270,7 +270,27 @@ class LaunchManager:
         cmd.extend(["-m", final_model_path])
 
         # --- Append mmproj if enabled and exists ---
-        if self.launcher.mmproj_enabled.get():
+        # Mutual exclusion with --no-mmproj: when the user has explicitly
+        # asked to suppress the projector (and we're on a backend that
+        # supports the flag), skip mmproj auto-detection entirely so we
+        # don't emit a contradictory ``--mmproj <path> --no-mmproj`` pair.
+        no_mmproj_set = False
+        try:
+            no_mmproj_var = getattr(self.launcher, "no_mmproj", None)
+            no_mmproj_set = bool(
+                no_mmproj_var is not None
+                and no_mmproj_var.get()
+                and backend != "ik_llama"
+            )
+        except Exception:
+            no_mmproj_set = False
+        if no_mmproj_set and self.launcher.mmproj_enabled.get():
+            print(
+                "INFO: --no-mmproj is set; skipping --mmproj auto-detection to "
+                "avoid a contradictory flag pair.",
+                file=sys.stderr,
+            )
+        if self.launcher.mmproj_enabled.get() and not no_mmproj_set:
             try:
                 mmproj_file = None
                 selected_mmproj_str = self.launcher.selected_mmproj_path.get().strip() if hasattr(self.launcher, "selected_mmproj_path") else ""
@@ -421,7 +441,7 @@ class LaunchManager:
         # MTP enforces single-slot operation (-np 1). resolve_effective_parallel
         # applies the override + stderr warning when MTP is active; see
         # modules/spec_launch.py for rationale.
-        parallel_val = resolve_effective_parallel(self.launcher)
+        parallel_val = resolve_effective_parallel(self.launcher, backend)
         self.add_arg(cmd, "--parallel", parallel_val, "1") # Omit if 1 (default)
 
         # --- MoE CPU options ---
