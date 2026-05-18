@@ -1,4 +1,5 @@
 config/llama_cpp_launcher_configs.json
+config/build_configs.json
 __pycache__
 bin/
 debug/

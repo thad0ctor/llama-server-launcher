@@ -92,6 +92,9 @@ from modules.ik_llama import IkLlamaTab
 # Import the MTP / Speculative Decoding tab module
 from modules.spec_tab import SpecTab
 
+# Import the Build tab (clone + cmake configure + build for llama.cpp / ik_llama)
+from modules.build import BuildTab
+
 # Import the launch functionality module
 from modules.launch import LaunchManager
 
@@ -860,18 +863,22 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
-        nb.add(main_frame, text="Main Settings")
-        nb.add(adv_frame,  text="Advanced Settings")
-        nb.add(chat_frame, text="Chat Template") # Add the new tab
-        nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        nb.add(main_frame, text="Main")
+        nb.add(adv_frame,  text="Advanced")
+        nb.add(chat_frame, text="Chat") # Add the new tab
+        nb.add(env_frame,  text="Env Vars") # Add environmental variables tab
         # MTP / Speculative decoding tab - always visible (both backends support spec).
-        nb.add(mtp_spec_frame, text="MTP / Spec")
+        nb.add(mtp_spec_frame, text="MTP-Spec")
         self.mtp_spec_frame = mtp_spec_frame
-        # ik_llama tab will be added conditionally
+        # ik_llama tab will be added conditionally between Env Vars and MTP-Spec
         self.ik_llama_frame = ik_llama_frame
-        nb.add(cfg_frame,  text="Configurations")
+        nb.add(cfg_frame,  text="Config")
         nb.add(settings_frame, text="Settings") # UI appearance / font
+        # Build tab is always visible (lets you build either backend regardless of which is launched).
+        # Positioned 2nd-to-last; About is always last.
+        nb.add(build_frame, text="Build")
+        self.build_frame = build_frame
         nb.add(about_frame, text="About") # Add the about tab
 
 
@@ -881,6 +888,7 @@ class LlamaCppLauncher:
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_mtp_spec_tab(mtp_spec_frame) # Setup the MTP / Spec tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
+        self._setup_build_tab(build_frame) # Setup the Build tab
         self._setup_config_tab(cfg_frame)
         self._setup_settings_tab(settings_frame) # UI settings tab
         self._setup_about_tab(about_frame) # Setup the about tab
@@ -2138,6 +2146,12 @@ class LlamaCppLauncher:
         """Set up the Settings (UI appearance) tab."""
         self.settings_tab = create_settings_tab(self)
         self.settings_tab.setup_settings_tab(parent)
+
+    def _setup_build_tab(self, parent):
+        """Set up the Build tab (clone + cmake configure + build)."""
+        self.build_tab = BuildTab(self)
+        self.build_tab.register_with_notebook(self.notebook, "Build")
+        self.build_tab.setup_tab(parent)
 
     def _setup_about_tab(self, parent):
         """Set up the About tab using the AboutTab class."""
@@ -3900,40 +3914,52 @@ class LlamaCppLauncher:
                         warn_label.config(text="Requires --kv-unified to be 'on'.")
 
     def _update_ik_llama_tab_visibility(self):
-        """Show or hide the ik_llama tab based on backend selection."""
+        """Show or hide the ik_llama tab based on backend selection.
+
+        Insertion strategy is anchor-based rather than index-based: we look up
+        a sibling tab by text and insert relative to it. This survives any
+        future tab reordering as long as the anchors exist; a chain of
+        fallbacks ensures we still place ik_llama in a reasonable spot if
+        every anchor is missing.
+        """
         if not hasattr(self, 'notebook') or not hasattr(self, 'ik_llama_frame'):
             return  # Not initialized yet
 
         backend = self.backend_selection.get()
+        try:
+            tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
+        except Exception as e:
+            print(f"DEBUG: Error reading notebook tabs: {e}", file=sys.stderr)
+            return
 
         if backend == "ik_llama":
-            # Show the ik_llama tab if not already visible
+            if "ik_llama" in tab_ids:
+                return  # already visible
+            insert_idx = None
+            # Preferred: after Env Vars
+            if "Env Vars" in tab_ids:
+                insert_idx = tab_ids.index("Env Vars") + 1
+            # Fallback 1: before MTP-Spec
+            elif "MTP-Spec" in tab_ids:
+                insert_idx = tab_ids.index("MTP-Spec")
+            # Fallback 2: before Build
+            elif "Build" in tab_ids:
+                insert_idx = tab_ids.index("Build")
+            # Fallback 3: before About
+            elif "About" in tab_ids:
+                insert_idx = tab_ids.index("About")
             try:
-                # Check if tab is already in notebook
-                tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
-                if "ik_llama Config" not in tab_ids:
-                    # Insert ik_llama tab after Environment Variables tab
-                    env_tab_index = None
-                    for i, tab_text in enumerate(tab_ids):
-                        if tab_text == "Environment Variables":
-                            env_tab_index = i
-                            break
-
-                    if env_tab_index is not None:
-                        self.notebook.insert(env_tab_index + 1, self.ik_llama_frame, text="ik_llama Config")
-                    else:
-                        # Fallback: add at the end before About tab
-                        self.notebook.insert(self.notebook.index("end") - 1, self.ik_llama_frame, text="ik_llama Config")
+                if insert_idx is not None:
+                    self.notebook.insert(insert_idx, self.ik_llama_frame, text="ik_llama")
+                else:
+                    self.notebook.add(self.ik_llama_frame, text="ik_llama")
             except Exception as e:
                 print(f"DEBUG: Error adding ik_llama tab: {e}", file=sys.stderr)
         else:
-            # Hide the ik_llama tab if visible
+            if "ik_llama" not in tab_ids:
+                return  # already hidden
             try:
-                tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
-                for i, tab_text in enumerate(tab_ids):
-                    if tab_text == "ik_llama Config":
-                        self.notebook.forget(i)
-                        break
+                self.notebook.forget(tab_ids.index("ik_llama"))
             except Exception as e:
                 print(f"DEBUG: Error removing ik_llama tab: {e}", file=sys.stderr)
 

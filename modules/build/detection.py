@@ -1,0 +1,658 @@
+"""Detection helpers for the Build tab.
+
+Everything here is best-effort: each probe returns a structured result and
+never raises out to callers. The Build tab presents whatever was found and
+falls back to manual entry when a probe fails.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Known CUDA compute-capability catalogue
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Comprehensive list of CUDA architectures users may want to build for, even
+# if they aren't present on the build host. The ``has_a_variant`` flag marks
+# architectures that have an ``-a`` (architecture-accelerated) form in nvcc;
+# those unlock SM-specific features like Hopper wgmma/TMA, Blackwell FP4
+# tensor cores, etc. The ``-a`` variant must be paired with the plain variant
+# for portability across minor revisions in that family.
+#
+# CUDA toolkit version that first supports the architecture is shown for
+# reference (informational; not enforced here).
+
+@dataclass(frozen=True)
+class KnownArch:
+    cc: str               # "8.6"
+    name: str             # "RTX 30xx (Ampere)"
+    family: str           # "Ampere"
+    has_a_variant: bool   # True if sm_XXa exists in nvcc (Hopper+, Blackwell+)
+    has_f_variant: bool   # True if sm_XXf exists in nvcc (CUDA 13+, Blackwell only)
+    min_cuda: str         # earliest CUDA toolkit that supports this
+    deprecated: bool = False  # True if dropped from current CUDA toolchains
+
+
+# Sourced from `nvcc --help` (CUDA 13.2) for the modern entries and from
+# NVIDIA Programming Guide tables for the older deprecated ones. The
+# has_a_variant / has_f_variant flags match what nvcc 13.2 actually accepts.
+# Deprecated entries are gated in the UI behind "Show deprecated archs".
+KNOWN_CUDA_ARCHS: List[KnownArch] = [
+    # Kepler (deprecated in CUDA 11.x; removed in CUDA 12+)
+    KnownArch("3.5", "Tesla K20/K40 / GTX Titan (Kepler)",   "Kepler",   False, False, "5.0", deprecated=True),
+    KnownArch("3.7", "Tesla K80 (Kepler datacenter)",        "Kepler",   False, False, "7.0", deprecated=True),
+    # Maxwell (deprecated in CUDA 13.x)
+    KnownArch("5.0", "GTX 9xx / Quadro M (Maxwell 1)",       "Maxwell",  False, False, "6.0", deprecated=True),
+    KnownArch("5.2", "GTX 9xx Ti / Titan X (Maxwell 2)",     "Maxwell",  False, False, "6.0", deprecated=True),
+    KnownArch("5.3", "Tegra X1 (Maxwell mobile)",            "Maxwell",  False, False, "6.5", deprecated=True),
+    # Pascal (deprecated in CUDA 13.x)
+    KnownArch("6.0", "Tesla P100 (Pascal datacenter)",       "Pascal",   False, False, "8.0", deprecated=True),
+    KnownArch("6.1", "GTX 10xx / Titan Xp (Pascal)",         "Pascal",   False, False, "8.0", deprecated=True),
+    KnownArch("6.2", "Tegra X2 (Pascal mobile)",             "Pascal",   False, False, "8.0", deprecated=True),
+    # Volta (deprecated in CUDA 13.x)
+    KnownArch("7.0", "Tesla V100 / Titan V (Volta)",         "Volta",    False, False, "9.0", deprecated=True),
+    KnownArch("7.2", "Tegra Xavier (Volta mobile)",          "Volta",    False, False, "9.2", deprecated=True),
+    # Turing
+    KnownArch("7.5", "RTX 20xx / GTX 16xx / T4 (Turing)",    "Turing",   False, False, "10.0"),
+    # Ampere
+    KnownArch("8.0", "A100 (Ampere datacenter)",             "Ampere",   False, False, "11.0"),
+    KnownArch("8.6", "RTX 30xx / A40 (Ampere consumer)",     "Ampere",   False, False, "11.1"),
+    KnownArch("8.7", "Jetson Orin (Ampere mobile)",          "Ampere",   False, False, "11.4"),
+    # Niche sm_88 — nvcc 13 accepts it; product confirmation pending.
+    KnownArch("8.8", "sm_88 (Ampere/Hopper variant)",        "Ampere",   False, False, "12.x"),
+    # Ada Lovelace
+    KnownArch("8.9", "RTX 40xx / L40 (Ada)",                 "Ada",      False, False, "11.8"),
+    # Hopper
+    KnownArch("9.0", "H100 / H200 (Hopper)",                 "Hopper",   True,  False, "11.8"),
+    # Blackwell datacenter (sm_100/103/110) — -a and -f both valid.
+    KnownArch("10.0", "B100 / B200 (Blackwell datacenter)",  "Blackwell", True, True, "12.8"),
+    KnownArch("10.3", "GB200-class (Blackwell datacenter)",  "Blackwell", True, True, "12.9"),
+    KnownArch("11.0", "Blackwell datacenter (sm_110)",       "Blackwell", True, True, "13.0"),
+    # Blackwell consumer (sm_120/121)
+    KnownArch("12.0", "RTX 50xx (Blackwell consumer)",       "Blackwell", True, True, "12.8"),
+    KnownArch("12.1", "RTX 50xx refresh (Blackwell)",        "Blackwell", True, True, "12.9"),
+]
+
+
+def known_arch_for(cc: str) -> Optional[KnownArch]:
+    cc = cc.strip()
+    for k in KNOWN_CUDA_ARCHS:
+        if k.cc == cc:
+            return k
+    return None
+
+
+def cc_to_arch_token(cc: str, *, real: bool = True) -> str:
+    """Convert "8.6" → "86-real" (or "86" if real=False)."""
+    parts = cc.split(".")
+    if len(parts) != 2:
+        return cc
+    major = parts[0]
+    minor = parts[1]
+    base = f"{major}{minor}"
+    return f"{base}-real" if real else base
+
+
+def arch_token_with_a(cc: str) -> str:
+    """Return "120a-real" for "12.0" if that compute capability supports
+    the ``-a`` variant, else the plain "-real" token."""
+    parts = cc.split(".")
+    if len(parts) != 2:
+        return cc
+    base = f"{parts[0]}{parts[1]}"
+    k = known_arch_for(cc)
+    if k and k.has_a_variant:
+        return f"{base}a-real"
+    return f"{base}-real"
+
+
+def arch_token_with_f(cc: str) -> str:
+    """Return "120f-real" if the compute capability has an ``-f`` family-
+    forward variant (Blackwell only as of CUDA 13), else the plain
+    "-real" token."""
+    parts = cc.split(".")
+    if len(parts) != 2:
+        return cc
+    base = f"{parts[0]}{parts[1]}"
+    k = known_arch_for(cc)
+    if k and k.has_f_variant:
+        return f"{base}f-real"
+    return f"{base}-real"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CUDA architecture detection (via torch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class CudaArchInfo:
+    """Per-GPU CUDA capability info used to assemble CMAKE_CUDA_ARCHITECTURES."""
+    index: int
+    name: str
+    compute_capability: str   # "8.6", "12.0"
+    arch_token: str           # "86-real", "120-real"
+    # ``-a`` token (e.g. "120a-real", "90a-real") when the compute capability
+    # has an architecture-accelerated variant in nvcc. Both Hopper (sm_90a)
+    # and Blackwell (sm_100a / sm_120a / sm_121a) qualify.
+    a_variant_token: Optional[str] = None
+    family: str = ""          # "Ampere" / "Hopper" / "Blackwell" / ...
+
+
+def detect_cuda_archs() -> List[CudaArchInfo]:
+    """Return one CudaArchInfo per visible CUDA device, or [] if torch/CUDA
+    is unavailable. Caller can map ``.arch_token`` for CMAKE_CUDA_ARCHITECTURES.
+
+    For compute capabilities with an ``-a`` (architecture-accelerated)
+    variant in nvcc — currently sm_90 (Hopper), sm_100/101/103 (Blackwell
+    datacenter), sm_120/121/122 (Blackwell consumer) — we surface the
+    ``XXa-real`` token too. Building with both tokens means the compiler
+    can pick the optimized variant where supported and fall back to the
+    plain code path otherwise.
+    """
+    try:
+        import torch  # noqa: WPS433
+    except Exception:
+        return []
+
+    try:
+        if not torch.cuda.is_available():
+            return []
+        n = torch.cuda.device_count()
+    except Exception:
+        return []
+
+    out: List[CudaArchInfo] = []
+    for i in range(n):
+        try:
+            props = torch.cuda.get_device_properties(i)
+        except Exception:
+            continue
+        major = int(getattr(props, "major", 0))
+        minor = int(getattr(props, "minor", 0))
+        if major == 0:
+            continue
+        cc = f"{major}.{minor}"
+        base = f"{major}{minor}"
+        token = f"{base}-real"
+        known = known_arch_for(cc)
+        a_token = f"{base}a-real" if (known and known.has_a_variant) else None
+        out.append(CudaArchInfo(
+            index=i,
+            name=getattr(props, "name", f"GPU {i}"),
+            compute_capability=cc,
+            arch_token=token,
+            a_variant_token=a_token,
+            family=known.family if known else "unknown",
+        ))
+    return out
+
+
+def archs_to_cmake_value(infos: List[CudaArchInfo], *, prefer_a_variant: bool = True) -> str:
+    """Collapse a list of CudaArchInfo into a semicolon-separated cmake
+    value for CMAKE_CUDA_ARCHITECTURES, deduped while preserving order.
+
+    When ``prefer_a_variant`` is True (default), every detected arch that has
+    a ``-a`` variant emits BOTH the ``XXa-real`` and plain ``XX-real`` tokens
+    so the build supports the architecture-accelerated features AND keeps a
+    portable fallback. Drop ``prefer_a_variant`` to emit plain tokens only.
+    """
+    seen: set[str] = set()
+    out: List[str] = []
+    for info in infos:
+        tokens: List[str] = []
+        if prefer_a_variant and info.a_variant_token:
+            tokens.append(info.a_variant_token)
+        tokens.append(info.arch_token)
+        for t in tokens:
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return ";".join(out)
+
+
+def merge_arch_tokens(*token_lists: str) -> str:
+    """Combine multiple ';'-separated arch token strings, dedupe in order."""
+    seen: set[str] = set()
+    out: List[str] = []
+    for s in token_lists:
+        if not s:
+            continue
+        for raw in s.split(";"):
+            t = raw.strip()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return ";".join(out)
+
+
+def family_to_tokens(
+    family: str,
+    *,
+    prefer_a_variant: bool = True,
+    prefer_f_variant: bool = False,
+    include_deprecated: bool = False,
+) -> str:
+    """Return a ';'-separated arch token list for every known arch in
+    a generation (Ampere / Hopper / Blackwell / ...). The two ``prefer_*``
+    flags control whether ``-a`` and ``-f`` sibling tokens are emitted in
+    addition to the plain ``-real`` token. They are independent — pick one
+    or both; defaults emit -a (Hopper+) but not -f.
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+    for k in KNOWN_CUDA_ARCHS:
+        if k.family.lower() != family.lower():
+            continue
+        if k.deprecated and not include_deprecated:
+            continue
+        if prefer_a_variant and k.has_a_variant:
+            t = arch_token_with_a(k.cc)
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        if prefer_f_variant and k.has_f_variant:
+            t = arch_token_with_f(k.cc)
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+        t = cc_to_arch_token(k.cc, real=True)
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return ";".join(out)
+
+
+def all_families(*, include_deprecated: bool = True) -> List[str]:
+    """Distinct family names in catalogue order. With include_deprecated=False
+    only emits families that have at least one non-deprecated arch.
+    """
+    out: List[str] = []
+    for k in KNOWN_CUDA_ARCHS:
+        if k.deprecated and not include_deprecated:
+            continue
+        if k.family not in out:
+            out.append(k.family)
+    return out
+
+
+def family_has_only_deprecated(family: str) -> bool:
+    for k in KNOWN_CUDA_ARCHS:
+        if k.family.lower() == family.lower() and not k.deprecated:
+            return False
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Toolchain probes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class CudaInstall:
+    """One CUDA toolkit installation discovered on disk.
+
+    ``root_dir`` is what we'd pass as ``CUDA_TOOLKIT_ROOT_DIR`` (the
+    parent of bin/, lib/, include/). cmake derives everything else
+    from this when ``CMAKE_CUDA_COMPILER`` is also set.
+    """
+    version: str                  # "12.8" (parsed from nvcc --version)
+    root_dir: str                 # /usr/local/cuda-12.8
+    nvcc_path: str                # /usr/local/cuda-12.8/bin/nvcc
+    on_path: bool = False         # True if this install is the one in $PATH
+
+    def label(self) -> str:
+        """Human-readable string for combobox display."""
+        suffix = "  (on PATH)" if self.on_path else ""
+        return f"CUDA {self.version}  ·  {self.root_dir}{suffix}"
+
+
+@dataclass
+class ToolchainProbe:
+    """Whatever we could discover about the build toolchain on this host."""
+    cuda_version: Optional[str] = None      # "12.8"  (selected install)
+    nvcc_path: Optional[str] = None         # /usr/local/cuda/bin/nvcc (selected)
+    cuda_installs: List[CudaInstall] = field(default_factory=list)  # all detected
+    cc_candidates: List[str] = field(default_factory=list)   # ["/usr/bin/gcc-13", ...]
+    cxx_candidates: List[str] = field(default_factory=list)
+    cmake_path: Optional[str] = None
+    cmake_version: Optional[str] = None
+    ninja_path: Optional[str] = None
+    ccache_path: Optional[str] = None
+    git_path: Optional[str] = None
+
+
+def _which(name: str) -> Optional[str]:
+    return shutil.which(name)
+
+
+def _run(cmd: List[str], timeout: float = 1.5) -> Optional[str]:
+    """Best-effort subprocess capture. Short default timeout — these probes
+    run during startup and a misconfigured tool must not block the UI."""
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+        if proc.returncode != 0:
+            return None
+        return (proc.stdout or "") + (proc.stderr or "")
+    except Exception:
+        return None
+
+
+def _cuda_search_paths() -> List[str]:
+    """Glob-style candidate locations for CUDA toolkit installs, by OS.
+
+    Returned as a list of nvcc paths (not roots) so callers can run
+    ``nvcc --version`` directly to confirm + extract version.
+    """
+    candidates: List[str] = []
+    seen: set[str] = set()
+
+    def add(p: str) -> None:
+        if p and p not in seen:
+            seen.add(p)
+            candidates.append(p)
+
+    # PATH first.
+    on_path = _which("nvcc")
+    if on_path:
+        add(on_path)
+
+    # Environment variables some toolchains set.
+    for env_var in ("CUDA_PATH", "CUDA_HOME", "CUDA_TOOLKIT_ROOT_DIR"):
+        v = os.environ.get(env_var)
+        if v:
+            nvcc = _nvcc_in_root(v)
+            if nvcc:
+                add(nvcc)
+
+    if sys.platform.startswith("win"):
+        # Windows: NVIDIA installs to Program Files by default.
+        prog_files = [
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ]
+        for pf in prog_files:
+            base = os.path.join(pf, "NVIDIA GPU Computing Toolkit", "CUDA")
+            if os.path.isdir(base):
+                try:
+                    for entry in sorted(os.listdir(base), reverse=True):
+                        nvcc = os.path.join(base, entry, "bin", "nvcc.exe")
+                        if os.path.isfile(nvcc):
+                            add(nvcc)
+                except Exception:
+                    pass
+    else:
+        # Linux/macOS: enumerate common install roots.
+        roots: List[str] = []
+        for base in (
+            "/usr/local",
+            "/opt",
+            "/Developer/NVIDIA",
+            os.path.expanduser("~/cuda"),
+        ):
+            if not os.path.isdir(base):
+                continue
+            try:
+                for entry in os.listdir(base):
+                    full = os.path.join(base, entry)
+                    if not os.path.isdir(full):
+                        continue
+                    # Match: cuda, cuda-*, CUDA-*
+                    low = entry.lower()
+                    if low == "cuda" or low.startswith("cuda-") or low.startswith("cuda_"):
+                        roots.append(full)
+            except Exception:
+                pass
+        # Sort newest-version-looking first (lexicographic descending works for cuda-XX.Y).
+        roots.sort(reverse=True)
+        for r in roots:
+            nvcc = _nvcc_in_root(r)
+            if nvcc:
+                add(nvcc)
+    return candidates
+
+
+def _nvcc_in_root(root: str) -> Optional[str]:
+    """Given a CUDA root, return the nvcc inside it if present."""
+    if not root:
+        return None
+    for name in ("nvcc", "nvcc.exe"):
+        p = os.path.join(root, "bin", name)
+        if os.path.isfile(p):
+            return p
+    # Some Mac installs put nvcc directly in root or nest differently — try root/.
+    for name in ("nvcc", "nvcc.exe"):
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _root_from_nvcc(nvcc_path: str) -> str:
+    """Given .../<root>/bin/nvcc, return <root>. Falls back to the nvcc
+    file's parent if the bin/ layout isn't present (rare)."""
+    parent = os.path.dirname(nvcc_path)
+    grand = os.path.dirname(parent)
+    if os.path.basename(parent).lower() == "bin" and grand:
+        return grand
+    return parent
+
+
+def detect_cuda_installs() -> List[CudaInstall]:
+    """Scan the filesystem for every CUDA toolkit install. Each entry is
+    de-duped by version + root_dir. Best-effort and bounded — every nvcc
+    probe has a short timeout so a misconfigured install can't pin the UI.
+    """
+    on_path_nvcc = _which("nvcc")
+    out: List[CudaInstall] = []
+    seen: set[Tuple[str, str]] = set()
+    for nvcc in _cuda_search_paths():
+        if not os.path.isfile(nvcc):
+            continue
+        text = _run([nvcc, "--version"], timeout=1.5)
+        if not text:
+            continue
+        m = re.search(r"release\s+(\d+\.\d+)", text)
+        version = m.group(1) if m else "?"
+        root = _root_from_nvcc(nvcc)
+        key = (version, root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(CudaInstall(
+            version=version,
+            root_dir=root,
+            nvcc_path=nvcc,
+            on_path=(on_path_nvcc is not None and os.path.samefile(nvcc, on_path_nvcc)
+                     if os.path.isfile(on_path_nvcc or "") else False),
+        ))
+    return out
+
+
+def _detect_cuda() -> tuple[Optional[str], Optional[str]]:
+    """Return (cuda_version, nvcc_path) for the *preferred* install:
+    PATH first, then the newest detected install. Used to seed the UI's
+    initial selection. See ``detect_cuda_installs`` for the full list.
+    """
+    installs = detect_cuda_installs()
+    if not installs:
+        return None, None
+    # Prefer the one on PATH.
+    for inst in installs:
+        if inst.on_path:
+            return (None if inst.version == "?" else inst.version), inst.nvcc_path
+    # Otherwise the first (newest) found.
+    inst = installs[0]
+    return (None if inst.version == "?" else inst.version), inst.nvcc_path
+
+
+def _detect_gcc_candidates() -> tuple[List[str], List[str]]:
+    """Return (cc_candidates, cxx_candidates). Cross-platform compiler scan:
+
+    * Linux: gcc-9..15 from PATH, plus stock /usr/bin/gcc.
+    * macOS: Homebrew gcc-12/13/14 in /opt/homebrew/bin (Apple Silicon)
+      and /usr/local/bin (Intel) — Apple's clang is also surfaced.
+    * Windows: stock gcc + MSYS2 / MinGW prefixes if present; MSVC is the
+      cmake default so we don't try to enumerate cl.exe versions here.
+
+    Order matters: newer versions first so the UI's first option is the
+    most-likely-best for current CUDA toolkits (e.g. gcc-13 for CUDA 12.x).
+    """
+    cc: List[str] = []
+    cxx: List[str] = []
+
+    def add_cc(p: Optional[str]) -> None:
+        if p and p not in cc:
+            cc.append(p)
+
+    def add_cxx(p: Optional[str]) -> None:
+        if p and p not in cxx:
+            cxx.append(p)
+
+    # Versioned gcc/g++ binaries — newer first.
+    for v in ("15", "14", "13", "12", "11", "10", "9"):
+        add_cc(_which(f"gcc-{v}"))
+        add_cxx(_which(f"g++-{v}"))
+
+    # macOS Homebrew explicit paths (in case `which` finds Apple's clang first).
+    if sys.platform == "darwin":
+        for prefix in ("/opt/homebrew/bin", "/usr/local/bin"):
+            for v in ("14", "13", "12", "11"):
+                p = os.path.join(prefix, f"gcc-{v}")
+                if os.path.isfile(p):
+                    add_cc(p)
+                p = os.path.join(prefix, f"g++-{v}")
+                if os.path.isfile(p):
+                    add_cxx(p)
+        # Apple clang is fine for CPU-only builds.
+        for p in ("/usr/bin/clang",):
+            if os.path.isfile(p):
+                add_cc(p)
+        for p in ("/usr/bin/clang++",):
+            if os.path.isfile(p):
+                add_cxx(p)
+
+    # Windows MSYS2/MinGW prefixes — best-effort.
+    if sys.platform.startswith("win"):
+        for prefix in (r"C:\msys64\mingw64\bin", r"C:\msys64\ucrt64\bin",
+                       r"C:\mingw64\bin"):
+            for fname in ("gcc.exe",):
+                p = os.path.join(prefix, fname)
+                if os.path.isfile(p):
+                    add_cc(p)
+            for fname in ("g++.exe",):
+                p = os.path.join(prefix, fname)
+                if os.path.isfile(p):
+                    add_cxx(p)
+
+    # Stock unversioned tools last (so versioned ones float to the top).
+    add_cc(_which("gcc"))
+    add_cxx(_which("g++"))
+
+    return cc, cxx
+
+
+def probe_toolchain() -> ToolchainProbe:
+    """Best-effort scan of the build toolchain. Never raises."""
+    probe = ToolchainProbe()
+
+    probe.cuda_installs = detect_cuda_installs()
+    if probe.cuda_installs:
+        # Pick PATH install if present, else newest detected.
+        preferred = next((i for i in probe.cuda_installs if i.on_path),
+                         probe.cuda_installs[0])
+        probe.cuda_version = preferred.version if preferred.version != "?" else None
+        probe.nvcc_path = preferred.nvcc_path
+    probe.cc_candidates, probe.cxx_candidates = _detect_gcc_candidates()
+
+    probe.cmake_path = _which("cmake")
+    if probe.cmake_path:
+        out = _run([probe.cmake_path, "--version"], timeout=1.5)
+        if out:
+            m = re.search(r"cmake version\s+(\S+)", out)
+            if m:
+                probe.cmake_version = m.group(1)
+
+    probe.ninja_path = _which("ninja")
+    probe.ccache_path = _which("ccache")
+    probe.git_path = _which("git")
+    return probe
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System resource recommendations
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class JobRecommendation:
+    suggested: int       # what we recommend
+    cpu_count: int       # raw nproc
+    physical_cores: Optional[int] = None
+    total_ram_gb: Optional[float] = None
+    reason: str = ""     # human-readable rationale shown in the UI
+
+
+def recommend_jobs() -> JobRecommendation:
+    """Pick a build-jobs count balancing nproc against RAM headroom.
+
+    NVCC peak memory per parallel job can hit ~2 GB for heavy CUDA TUs,
+    so we cap jobs at floor(total_ram_gb / 2) when CUDA is in play. The
+    user can always override in the UI.
+    """
+    cpu_count = os.cpu_count() or 1
+    physical: Optional[int] = None
+    ram_gb: Optional[float] = None
+
+    try:
+        import psutil  # type: ignore
+        physical = psutil.cpu_count(logical=False) or None
+        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+    except Exception:
+        pass
+
+    suggested = cpu_count
+    reason = f"nproc={cpu_count}"
+
+    if ram_gb is not None:
+        ram_cap = max(1, int(ram_gb // 2))
+        if ram_cap < suggested:
+            suggested = ram_cap
+            reason = (
+                f"capped at {ram_cap} (≈2 GB/job × {ram_cap} ≤ "
+                f"{ram_gb:.0f} GB RAM)"
+            )
+        else:
+            reason = f"nproc={cpu_count}, RAM={ram_gb:.0f} GB (headroom OK)"
+
+    return JobRecommendation(
+        suggested=suggested,
+        cpu_count=cpu_count,
+        physical_cores=physical,
+        total_ram_gb=ram_gb,
+        reason=reason,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default backend source dirs
+# ─────────────────────────────────────────────────────────────────────────────
+
+def default_source_dir(backend: str, existing_dir: str) -> str:
+    """Return an existing backend dir if present, else suggest a sibling
+    path of the launcher home so 'Clone' creates the repo somewhere sane.
+    """
+    existing_dir = (existing_dir or "").strip()
+    if existing_dir and os.path.isdir(existing_dir):
+        return existing_dir
+    home = str(Path.home())
+    folder = "ik_llama.cpp" if backend == "ik_llama" else "llama.cpp"
+    return str(Path(home) / "Documents" / "GitHub" / folder)

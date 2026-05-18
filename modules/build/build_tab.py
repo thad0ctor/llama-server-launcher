@@ -1,0 +1,1708 @@
+"""Build tab: clone, configure, build llama.cpp / ik_llama.cpp.
+
+Wiring
+------
+The launcher creates one ``BuildTab(launcher)`` at startup and calls
+``tab.setup_tab(parent_frame)`` to render the UI into a Notebook tab.
+
+State model
+-----------
+All persistent state lives on ``self`` as plain attributes and Tk variables.
+Widgets are rebuilt on detach/reattach but the underlying state survives,
+because:
+
+  * Tk variables (StringVar, BooleanVar, IntVar) are not parented by widgets.
+  * The build console history is mirrored into ``self._console_buffer``.
+  * Flag values are mirrored into ``self._flag_vars`` (a dict of Tk vars,
+    rebuilt only the first time the UI is constructed and reused thereafter).
+
+Threads
+-------
+The build pipeline runs on the ``BuildRunner`` worker thread; the UI polls
+its events queue from the Tk mainloop via ``root.after(...)``. Upstream
+fetches (used by the update banner) are spawned via ``threading.Thread`` and
+post their result back to the UI through ``self._pending_status``.
+"""
+
+from __future__ import annotations
+
+import os
+import queue
+import re
+import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+from typing import Any, Callable, Dict, List, Optional
+
+from . import cmake_flags as cf
+from . import detection
+from .build_persistence import BuildConfig, BuildConfigStore
+from .build_runner import (
+    BuildPlan,
+    BuildRunner,
+    EVENT_CANCELLED,
+    EVENT_DONE,
+    EVENT_ERROR,
+    EVENT_LINE,
+    EVENT_STAGE,
+    UPSTREAMS,
+    UpstreamStatus,
+    plan_to_shell_script,
+    probe_upstream,
+)
+
+
+CONSOLE_MAX_LINES = 5000
+PREVIEW_REFRESH_DEBOUNCE_MS = 120
+RUNNER_POLL_MS = 60
+
+
+def _truthy_flag_str(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "on", "true", "yes"}
+    return bool(v)
+
+# Parse a CUDA arch token like "86-real", "120a-real", "120f-real", "90a",
+# "75" into its parts. Group "base" is the digit pair, "variant" is the
+# optional 'a' (arch-accelerated) or 'f' (family-forward) suffix, "suffix"
+# is the trailing "-real" / "-virtual" if present.
+_ARCH_TOKEN_RE = re.compile(r"^(?P<base>\d{2,3})(?P<variant>[af]?)(?P<suffix>(?:-real|-virtual)?)$")
+
+
+class BuildTab:
+    """Owner of the Build tab UI and its build pipeline."""
+
+    # ---------------------------------------------------------------- init
+    def __init__(self, launcher: Any) -> None:
+        self.launcher = launcher
+        self.root = launcher.root
+
+        # Backing store for named build configs (config/build_configs.json).
+        try:
+            config_dir = Path(launcher.config_path).parent
+        except Exception:
+            config_dir = Path("config")
+        self.store = BuildConfigStore(config_dir)
+
+        # Runner — single instance for the tab lifetime.
+        self.runner = BuildRunner()
+
+        # Streaming console state.
+        self._console_buffer: List[str] = []
+        self._poll_after_id: Optional[str] = None
+        self._preview_after_id: Optional[str] = None
+        self._drain_after_id: Optional[str] = None
+
+        # Update-banner state.
+        self._upstream_status = UpstreamStatus()
+        self._upstream_check_in_flight = False
+        self._pending_status: queue.Queue[UpstreamStatus] = queue.Queue()
+
+        # Detach state. The button-text var must live on self (not the
+        # short-lived header frame) so it survives _build_ui rebuilds —
+        # otherwise switching backends while detached resets the label
+        # back to "Detach" even though the window IS detached.
+        self._detached_toplevel: Optional[tk.Toplevel] = None
+        self._notebook = None
+        self._tab_frame = None
+        self._tab_text = "Build"
+        self._detach_button_text = tk.StringVar(value="Detach ⇗")
+
+        # Re-entry / scheduling guards: _build_ui destroys its parent's
+        # children, so we must NEVER call it synchronously from a widget's
+        # command callback — that destroys the very widget mid-event and
+        # Tk's event loop hangs. _rebuild_pending coalesces deferred rebuilds.
+        self._rebuild_pending: bool = False
+        self._suspend_traces: bool = False
+
+        # ── Tk variables (state survives widget rebuilds) ──
+        seed_backend = "llama.cpp"
+        try:
+            seed_backend = launcher.backend_selection.get() or "llama.cpp"
+        except Exception:
+            pass
+        self.var_backend = tk.StringVar(value=seed_backend)
+        self.var_source_dir = tk.StringVar(value=self._initial_source_dir(seed_backend))
+        self.var_build_dir = tk.StringVar(value="build")
+        self.var_git_ref = tk.StringVar(value="")
+        self.var_git_pull = tk.BooleanVar(value=False)
+        self.var_clean_build = tk.BooleanVar(value=True)
+        self.var_jobs = tk.IntVar(value=detection.recommend_jobs().suggested)
+        self.var_cuda_archs = tk.StringVar(value="")
+        self.var_prefer_a_variant = tk.BooleanVar(value=True)
+        self.var_prefer_f_variant = tk.BooleanVar(value=False)
+        self.var_show_deprecated_archs = tk.BooleanVar(value=False)
+        self.var_cc = tk.StringVar(value="")
+        self.var_cxx = tk.StringVar(value="")
+        self.var_cudacxx = tk.StringVar(value="")
+        # Root dir of the active CUDA toolkit. Drives CMAKE_CUDA_TOOLKIT_ROOT_DIR
+        # so cmake doesn't pick up a stray install via PATH. Empty = derive from nvcc.
+        self.var_cuda_root = tk.StringVar(value="")
+        # Picker for "which detected CUDA install"; updated when var_cudacxx changes.
+        self.var_cuda_pick = tk.StringVar(value="")
+        # cmake -G generator. Empty = whatever cmake's platform default is.
+        self.var_generator = tk.StringVar(value="")
+        self.var_extra_args = tk.StringVar(value="")
+        self.var_config_name = tk.StringVar(value="")
+        self.var_status = tk.StringVar(value="Idle")
+        self.var_jobs_hint = tk.StringVar(value="")
+        self.var_toolchain_hint = tk.StringVar(value="")
+        self.var_auto_check_updates = tk.BooleanVar(value=True)
+        self.var_autoscroll = tk.BooleanVar(value=True)
+
+        # Lazy-initialised on first setup_tab().
+        self._flag_vars: Dict[str, tk.Variable] = {}
+        self._flag_widgets: Dict[str, tk.Widget] = {}
+        self._group_frames: Dict[str, ttk.LabelFrame] = {}
+        self._values_snapshot: Dict[str, Any] = {}
+
+        # CUDA arch picker state: one BooleanVar per known CC, plus a guard
+        # to suppress recursive sync between checkboxes and the text entry.
+        self._arch_check_vars: Dict[str, tk.BooleanVar] = {}
+        self._arch_sync_in_progress: bool = False
+        # Update the picker checkboxes whenever the entry changes (e.g. via
+        # auto-detect, load-config, manual typing).
+        self.var_cuda_archs.trace_add("write", lambda *_a: self._sync_arch_pickers_from_value())
+
+        # Toolchain probe + jobs reco (one-shot at startup; refreshable button).
+        self._toolchain = detection.probe_toolchain()
+        self._refresh_toolchain_hint()
+        self._refresh_jobs_hint()
+        self._seed_toolchain_defaults()
+        # Explicitly seed CUDA root/pick: depending on Tk's trace timing, the
+        # write trace registered above may or may not have fired during the
+        # in-__init__ var.set() — invoking the handler directly here makes the
+        # initial state deterministic.
+        self._on_cudacxx_changed()
+
+        # Auto-detected preset seed.
+        self._apply_autodetect_defaults()
+
+        # When the launcher's backend changes, mirror it (only if user hasn't
+        # explicitly overridden the build-tab backend). Implemented as a one-way
+        # mirror — the build tab can target a different backend than the
+        # currently-running server.
+        try:
+            launcher.backend_selection.trace_add("write", self._on_launcher_backend_changed)
+        except Exception:
+            pass
+        try:
+            launcher.current_backend_dir.trace_add("write", self._on_launcher_dir_changed)
+        except Exception:
+            pass
+
+        # Traces that drive the live cmake-preview refresh.
+        for v in (self.var_backend, self.var_source_dir, self.var_build_dir,
+                  self.var_git_ref, self.var_git_pull, self.var_clean_build,
+                  self.var_jobs, self.var_cuda_archs, self.var_extra_args,
+                  self.var_cc, self.var_cxx, self.var_cudacxx,
+                  self.var_cuda_root, self.var_generator):
+            v.trace_add("write", lambda *_a: self._schedule_preview_refresh())
+
+        # Whenever CUDACXX changes (user-edited or programmatic), keep
+        # CUDA root + picker label in sync.
+        self.var_cudacxx.trace_add("write", lambda *_a: self._on_cudacxx_changed())
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Seeding helpers
+    # ─────────────────────────────────────────────────────────────────────
+    def _initial_source_dir(self, backend: str) -> str:
+        existing = ""
+        try:
+            if backend == "ik_llama":
+                existing = self.launcher.ik_llama_dir.get()
+            else:
+                existing = self.launcher.llama_cpp_dir.get()
+        except Exception:
+            pass
+        return detection.default_source_dir(backend, existing)
+
+    def _seed_toolchain_defaults(self) -> None:
+        tp = self._toolchain
+        if not self.var_cc.get() and tp.cc_candidates:
+            self.var_cc.set(tp.cc_candidates[0])
+        if not self.var_cxx.get() and tp.cxx_candidates:
+            self.var_cxx.set(tp.cxx_candidates[0])
+        if not self.var_cudacxx.get() and tp.nvcc_path:
+            self.var_cudacxx.set(tp.nvcc_path)
+        # _on_cudacxx_changed runs via trace when var_cudacxx was set above.
+
+    def _on_cudacxx_changed(self) -> None:
+        """Sync the CUDA root + picker label whenever CUDACXX changes."""
+        nvcc = self.var_cudacxx.get().strip()
+        if not nvcc:
+            self.var_cuda_root.set("")
+            self.var_cuda_pick.set("")
+            return
+        # Try to match against detected installs first.
+        for inst in self._toolchain.cuda_installs:
+            if not os.path.isfile(nvcc) or not os.path.isfile(inst.nvcc_path):
+                continue
+            try:
+                if os.path.samefile(nvcc, inst.nvcc_path):
+                    self.var_cuda_root.set(inst.root_dir)
+                    self.var_cuda_pick.set(inst.label())
+                    return
+            except OSError:
+                # samefile can raise OSError on broken symlinks or stat errors
+                # (especially on Windows). Try the next install.
+                continue
+        # Fallback: derive root from the nvcc path.
+        try:
+            self.var_cuda_root.set(detection._root_from_nvcc(nvcc))
+        except Exception:
+            pass
+        self.var_cuda_pick.set(f"Custom · {nvcc}")
+
+    def _refresh_jobs_hint(self) -> None:
+        reco = detection.recommend_jobs()
+        self.var_jobs_hint.set(f"recommended: {reco.suggested} ({reco.reason})")
+
+    def _refresh_toolchain_hint(self) -> None:
+        tp = self._toolchain
+        bits: List[str] = []
+        if tp.cuda_version:
+            bits.append(f"CUDA {tp.cuda_version}")
+        if tp.cmake_version:
+            bits.append(f"cmake {tp.cmake_version}")
+        if tp.ccache_path:
+            bits.append("ccache")
+        if tp.ninja_path:
+            bits.append("ninja")
+        self.var_toolchain_hint.set(" · ".join(bits) if bits else "no CUDA/cmake/ccache detected")
+
+    def _apply_autodetect_defaults(self) -> None:
+        """Seed the flag-values dict from the auto-detected preset.
+
+        Merges over the current snapshot rather than replacing it: when the
+        user switches backend we keep their overlapping per-flag overrides
+        and only fill in flags that didn't exist (or were unset) before.
+        Call _on_apply_autodetect for a hard reset instead.
+        """
+        cuda_infos = detection.detect_cuda_archs()
+        cuda_available = bool(cuda_infos) and self._toolchain.nvcc_path is not None
+        avx512 = self._cpu_has_avx512()
+        defaults = cf.build_autodetect_values(
+            self.var_backend.get(),
+            cuda_available=cuda_available,
+            avx512_supported=avx512,
+            has_ccache=bool(self._toolchain.ccache_path),
+        )
+        # Merge: defaults provide a baseline, user values (in current snapshot)
+        # win for any flag that exists in both. For a fresh seed at startup
+        # _values_snapshot is empty, so defaults take effect cleanly.
+        self._values_snapshot = {**defaults, **self._values_snapshot}
+        if cuda_available and not self.var_cuda_archs.get().strip():
+            self.var_cuda_archs.set(
+                detection.archs_to_cmake_value(
+                    cuda_infos, prefer_a_variant=self.var_prefer_a_variant.get()
+                )
+            )
+
+    def _reset_to_autodetect(self) -> None:
+        """Hard reset — discards user overrides. Used by the 'Auto-detect
+        preset' button explicitly, not by backend-switch flows."""
+        self._values_snapshot = {}
+        self.var_cuda_archs.set("")
+        self._apply_autodetect_defaults()
+
+    def _cpu_has_avx512(self) -> bool:
+        try:
+            with open("/proc/cpuinfo", "r") as fh:
+                txt = fh.read()
+            return " avx512f " in (" " + txt + " ") or "avx512f" in txt.split()
+        except Exception:
+            return False
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Public API used by launcher
+    # ─────────────────────────────────────────────────────────────────────
+    def setup_tab(self, parent: tk.Widget) -> None:
+        """Render the build tab UI into ``parent`` (a notebook tab frame)."""
+        self._tab_frame = parent
+        self._build_ui(parent)
+        # Kick the preview + initial update-banner check.
+        self._schedule_preview_refresh()
+        if self.var_auto_check_updates.get():
+            self.check_for_updates(do_fetch=False)
+
+    def register_with_notebook(self, notebook: ttk.Notebook, tab_text: str) -> None:
+        self._notebook = notebook
+        self._tab_text = tab_text
+
+    # ─────────────────────────────────────────────────────────────────────
+    # UI construction (re-entrant on detach/reattach)
+    # ─────────────────────────────────────────────────────────────────────
+    def _build_ui(self, parent: tk.Widget) -> None:
+        # Cancel any pending after() callbacks that reference about-to-be-
+        # destroyed widgets so they don't fire against stale references.
+        for attr in ("_preview_after_id", "_drain_after_id"):
+            aid = getattr(self, attr, None)
+            if aid is not None:
+                try:
+                    self.root.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        for child in parent.winfo_children():
+            child.destroy()
+
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+        outer.rowconfigure(1, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        # Top: header bar with detach + status + update banner area.
+        self._build_header(outer)
+
+        # Scrollable middle pane with all editor sections.
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.grid(row=1, column=0, sticky="nsew", padx=(8, 0), pady=4)
+        vsb.grid(row=1, column=1, sticky="ns", padx=(0, 4), pady=4)
+
+        scrollable = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=scrollable, anchor="nw")
+
+        def _on_scrollable_config(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_config(event):
+            canvas.itemconfigure(canvas_window, width=event.width)
+
+        scrollable.bind("<Configure>", _on_scrollable_config)
+        canvas.bind("<Configure>", _on_canvas_config)
+
+        def _wheel(event):
+            delta = -1 * (event.delta // 120) if event.delta else 0
+            if delta == 0:
+                delta = -1 if event.num == 4 else 1
+            canvas.yview_scroll(delta, "units")
+
+        canvas.bind("<MouseWheel>", _wheel)
+        canvas.bind("<Button-4>", _wheel)
+        canvas.bind("<Button-5>", _wheel)
+
+        # Each section is laid out top-to-bottom in `scrollable`.
+        scrollable.columnconfigure(0, weight=1)
+        row = 0
+        self._build_section_config_bar(scrollable, row); row += 1
+        self._build_section_source(scrollable, row); row += 1
+        self._build_section_environment(scrollable, row); row += 1
+        self._build_section_flags(scrollable, row); row += 1
+        self._build_section_preview(scrollable, row); row += 1
+
+        # Bottom: action bar + console.
+        self._build_action_bar(outer)
+        self._build_console(outer)
+
+        # Now that widgets exist, push current state into them and refresh
+        # config-name dropdown.
+        self._refresh_saved_configs_dropdown()
+        self._sync_flag_widgets_from_values()
+        self._update_status_banner_visibility()
+
+    # ── Header (title + detach + status) ─────────────────────────────────
+    def _build_header(self, parent: ttk.Frame) -> None:
+        hdr = ttk.Frame(parent)
+        hdr.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+        hdr.columnconfigure(1, weight=1)
+
+        ttk.Label(hdr, text="Build llama.cpp / ik_llama.cpp",
+                  font=("TkDefaultFont", 13, "bold")) \
+            .grid(row=0, column=0, sticky="w")
+
+        right = ttk.Frame(hdr)
+        right.grid(row=0, column=2, sticky="e")
+        ttk.Label(right, textvariable=self.var_toolchain_hint,
+                  font=("TkSmallCaptionFont",)).pack(side="left", padx=(0, 8))
+        ttk.Button(right, text="Refresh toolchain",
+                   command=self._on_refresh_toolchain).pack(side="left", padx=2)
+        # _detach_button_text is created in __init__ so its current value
+        # ("Re-attach ⇙" while detached) survives UI rebuilds.
+        ttk.Button(right, textvariable=self._detach_button_text,
+                   command=self._toggle_detach).pack(side="left", padx=2)
+
+        # Update banner — hidden when no updates available.
+        self._banner = tk.Frame(parent, bg="#fff5cf", highlightbackground="#c5a800",
+                                highlightthickness=1)
+        self._banner_label = tk.Label(self._banner, bg="#fff5cf", anchor="w",
+                                      justify="left",
+                                      text="Checking upstream…",
+                                      font=("TkDefaultFont", 10))
+        self._banner_label.pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        self._banner_btns = ttk.Frame(self._banner)
+        self._banner_btns.pack(side="right", padx=8, pady=4)
+        ttk.Button(self._banner_btns, text="Check",
+                   command=lambda: self.check_for_updates(do_fetch=True)) \
+            .pack(side="left", padx=2)
+        ttk.Button(self._banner_btns, text="Pull only",
+                   command=self._on_pull_only).pack(side="left", padx=2)
+        ttk.Button(self._banner_btns, text="Pull & Rebuild",
+                   command=self._on_pull_and_rebuild).pack(side="left", padx=2)
+        ttk.Button(self._banner_btns, text="Dismiss",
+                   command=lambda: self._banner.grid_remove()).pack(side="left", padx=2)
+        # Initially hidden; grid is set in _update_status_banner_visibility().
+
+    # ── Named config bar ────────────────────────────────────────────────
+    def _build_section_config_bar(self, parent: ttk.Frame, row: int) -> None:
+        lf = ttk.LabelFrame(parent, text="Saved build configurations")
+        lf.grid(row=row, column=0, sticky="ew", padx=8, pady=6)
+        lf.columnconfigure(1, weight=1)
+
+        ttk.Label(lf, text="Name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        self._cfg_combo = ttk.Combobox(lf, textvariable=self.var_config_name)
+        self._cfg_combo.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
+        self._cfg_combo.bind("<<ComboboxSelected>>", lambda *_a: None)
+
+        btns = ttk.Frame(lf)
+        btns.grid(row=0, column=2, sticky="e", padx=4)
+        ttk.Button(btns, text="Load", command=self._on_load_config).pack(side="left", padx=2)
+        ttk.Button(btns, text="Save", command=self._on_save_config).pack(side="left", padx=2)
+        ttk.Button(btns, text="Save as…", command=self._on_save_as_config).pack(side="left", padx=2)
+        ttk.Button(btns, text="Delete", command=self._on_delete_config).pack(side="left", padx=2)
+        ttk.Button(btns, text="Auto-detect preset",
+                   command=self._on_apply_autodetect).pack(side="left", padx=(8, 2))
+
+    # ── Source / backend ────────────────────────────────────────────────
+    def _build_section_source(self, parent: ttk.Frame, row: int) -> None:
+        lf = ttk.LabelFrame(parent, text="Source")
+        lf.grid(row=row, column=0, sticky="ew", padx=8, pady=6)
+        lf.columnconfigure(1, weight=1)
+
+        ttk.Label(lf, text="Backend:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        backend_frame = ttk.Frame(lf)
+        backend_frame.grid(row=0, column=1, columnspan=2, sticky="w", padx=4)
+        for label, value in (("llama.cpp", "llama.cpp"), ("ik_llama", "ik_llama")):
+            ttk.Radiobutton(backend_frame, text=label, value=value,
+                            variable=self.var_backend,
+                            command=self._on_backend_changed).pack(side="left", padx=(0, 12))
+
+        ttk.Label(lf, text="Source dir:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.var_source_dir).grid(row=1, column=1, sticky="ew", padx=4)
+        src_btns = ttk.Frame(lf); src_btns.grid(row=1, column=2, sticky="e", padx=4)
+        ttk.Button(src_btns, text="Browse…", command=self._on_browse_source).pack(side="left", padx=2)
+        ttk.Button(src_btns, text="Use backend dir",
+                   command=self._on_use_backend_dir).pack(side="left", padx=2)
+
+        ttk.Label(lf, text="Build dir:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.var_build_dir).grid(row=2, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="(relative to source dir or absolute)",
+                  font=("TkSmallCaptionFont",)).grid(row=2, column=2, sticky="w", padx=4)
+
+        ttk.Label(lf, text="Git ref:").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.var_git_ref).grid(row=3, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="branch/tag/commit (blank = leave as-is)",
+                  font=("TkSmallCaptionFont",)).grid(row=3, column=2, sticky="w", padx=4)
+
+        opts = ttk.Frame(lf)
+        opts.grid(row=4, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        ttk.Checkbutton(opts, text="git pull --ff-only before build",
+                        variable=self.var_git_pull).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(opts, text="Clean build dir first",
+                        variable=self.var_clean_build).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(opts, text="Auto-check for updates",
+                        variable=self.var_auto_check_updates).pack(side="left", padx=(0, 12))
+        ttk.Label(lf,
+                  text=("Tip: if source dir doesn't exist it will be auto-cloned. "
+                        "Set git ref to a branch/tag/commit, or leave blank to use the current checkout."),
+                  font=("TkSmallCaptionFont",), foreground="#666") \
+            .grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+
+    # ── Environment (jobs / archs / compilers) ──────────────────────────
+    def _build_section_environment(self, parent: ttk.Frame, row: int) -> None:
+        lf = ttk.LabelFrame(parent, text="Build environment")
+        lf.grid(row=row, column=0, sticky="ew", padx=8, pady=6)
+        lf.columnconfigure(1, weight=1)
+
+        # Jobs
+        ttk.Label(lf, text="Parallel jobs:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        jobs_frame = ttk.Frame(lf); jobs_frame.grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Spinbox(jobs_frame, from_=1, to=512, textvariable=self.var_jobs, width=6) \
+            .pack(side="left")
+        ttk.Label(jobs_frame, textvariable=self.var_jobs_hint,
+                  font=("TkSmallCaptionFont",)).pack(side="left", padx=8)
+
+        # CUDA archs — entry + auto-detect + per-arch multi-select grid
+        ttk.Label(lf, text="CUDA archs:").grid(row=1, column=0, sticky="nw", padx=6, pady=4)
+        arch_frame = ttk.Frame(lf); arch_frame.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4)
+        arch_frame.columnconfigure(0, weight=1)
+
+        ttk.Entry(arch_frame, textvariable=self.var_cuda_archs).grid(row=0, column=0, sticky="ew")
+        arch_btns = ttk.Frame(arch_frame); arch_btns.grid(row=0, column=1, padx=4)
+        ttk.Button(arch_btns, text="Detect", width=8,
+                   command=self._on_autodetect_archs).pack(side="left", padx=2)
+        ttk.Button(arch_btns, text="Clear", width=6,
+                   command=lambda: self.var_cuda_archs.set("")).pack(side="left", padx=2)
+
+        toggles_row = ttk.Frame(arch_frame)
+        toggles_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Checkbutton(toggles_row, text="Prefer -a (arch-accelerated; Hopper+/Blackwell)",
+                        variable=self.var_prefer_a_variant,
+                        command=self._on_variant_toggle).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(toggles_row, text="Prefer -f (family-forward; Blackwell, CUDA 13+)",
+                        variable=self.var_prefer_f_variant,
+                        command=self._on_variant_toggle).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(toggles_row, text="Show deprecated archs (Kepler/Maxwell/Pascal/Volta)",
+                        variable=self.var_show_deprecated_archs,
+                        command=self._on_show_deprecated_toggle).pack(side="left")
+
+        # Per-arch multi-select grid, grouped by generation family. Each
+        # checkbutton appends/removes its arch tokens from var_cuda_archs.
+        archs_grid = ttk.LabelFrame(arch_frame, text="Add architectures by generation")
+        archs_grid.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self._build_cuda_arch_picker(archs_grid)
+        ttk.Label(arch_frame,
+                  text="Ticks add the matching arch tokens to the field above; untick to remove.",
+                  font=("TkSmallCaptionFont",)) \
+            .grid(row=3, column=0, columnspan=2, sticky="w", padx=2, pady=(2, 0))
+
+        tp = self._toolchain
+
+        # ── CUDA install picker ──
+        cuda_pick_row = tk.Frame(lf)
+        cuda_pick_row.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(8, 4))
+        cuda_pick_row.columnconfigure(1, weight=1)
+        ttk.Label(cuda_pick_row, text="CUDA install:") \
+            .grid(row=0, column=0, sticky="w")
+        # Build label → install map for the combobox.
+        self._cuda_install_by_label: Dict[str, "detection.CudaInstall"] = {
+            inst.label(): inst for inst in tp.cuda_installs
+        }
+        labels = list(self._cuda_install_by_label.keys())
+        if labels:
+            labels.append("Custom path…")
+        self._cuda_pick_combo = ttk.Combobox(
+            cuda_pick_row, textvariable=self.var_cuda_pick,
+            values=labels, state="readonly" if labels else "normal",
+        )
+        self._cuda_pick_combo.grid(row=0, column=1, sticky="ew", padx=4)
+        self._cuda_pick_combo.bind("<<ComboboxSelected>>", self._on_cuda_install_picked)
+        ttk.Button(cuda_pick_row, text="Re-scan",
+                   command=self._on_rescan_cuda_installs).grid(row=0, column=2, padx=4)
+        ttk.Label(cuda_pick_row,
+                  text=(f"{len(tp.cuda_installs)} CUDA install(s) found" if tp.cuda_installs
+                        else "No CUDA installs found"),
+                  font=("TkSmallCaptionFont",)) \
+            .grid(row=1, column=1, sticky="w", padx=4)
+        # Inline warning shown when GGML_CUDA is ON but no toolkit was found.
+        self._cuda_warning_var = tk.StringVar(value="")
+        ttk.Label(cuda_pick_row, textvariable=self._cuda_warning_var,
+                  foreground="#b00", font=("TkSmallCaptionFont",), wraplength=600) \
+            .grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 0))
+
+        ttk.Label(lf, text="CUDACXX (nvcc):").grid(row=3, column=0, sticky="w", padx=6, pady=4)
+        nvcc_vals = [inst.nvcc_path for inst in tp.cuda_installs]
+        ttk.Combobox(lf, textvariable=self.var_cudacxx,
+                     values=nvcc_vals).grid(row=3, column=1, sticky="ew", padx=4, columnspan=2)
+        ttk.Label(lf, text="CUDA root:").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.var_cuda_root).grid(row=4, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="(passed as CUDA_TOOLKIT_ROOT_DIR)",
+                  font=("TkSmallCaptionFont",)).grid(row=4, column=2, sticky="w", padx=4)
+
+        # ── Host compilers ──
+        ttk.Label(lf, text="CC:").grid(row=5, column=0, sticky="w", padx=6, pady=(8, 4))
+        ttk.Combobox(lf, textvariable=self.var_cc,
+                     values=tp.cc_candidates).grid(row=5, column=1, sticky="ew", padx=4, columnspan=2)
+        ttk.Label(lf, text="CXX:").grid(row=6, column=0, sticky="w", padx=6, pady=4)
+        ttk.Combobox(lf, textvariable=self.var_cxx,
+                     values=tp.cxx_candidates).grid(row=6, column=1, sticky="ew", padx=4, columnspan=2)
+
+        # ── cmake generator ──
+        ttk.Label(lf, text="Generator:").grid(row=7, column=0, sticky="w", padx=6, pady=(8, 4))
+        gen_values = ["", "Ninja", "Unix Makefiles"]
+        if sys.platform.startswith("win"):
+            gen_values += ["Visual Studio 17 2022", "Visual Studio 16 2019", "NMake Makefiles"]
+        elif sys.platform == "darwin":
+            gen_values += ["Xcode"]
+        ttk.Combobox(lf, textvariable=self.var_generator,
+                     values=gen_values, width=24).grid(row=7, column=1, sticky="w", padx=4)
+        hint = "Ninja is fastest"
+        if self._toolchain.ninja_path:
+            hint += " (detected)"
+        else:
+            hint += " (not installed)"
+        ttk.Label(lf, text=hint + ". Empty = cmake default.",
+                  font=("TkSmallCaptionFont",)).grid(row=7, column=2, sticky="w", padx=4)
+
+        ttk.Label(lf, text="Extra cmake args:").grid(row=8, column=0, sticky="w", padx=6, pady=(8, 4))
+        ttk.Entry(lf, textvariable=self.var_extra_args).grid(row=8, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="(passed through verbatim)",
+                  font=("TkSmallCaptionFont",)).grid(row=8, column=2, sticky="w", padx=4)
+
+    # ── Flags grouped into LabelFrames ──────────────────────────────────
+    def _build_section_flags(self, parent: ttk.Frame, row: int) -> None:
+        lf = ttk.LabelFrame(parent, text="CMake flags")
+        lf.grid(row=row, column=0, sticky="ew", padx=8, pady=6)
+        lf.columnconfigure(0, weight=1)
+
+        self._flag_widgets = {}
+        self._group_frames = {}
+
+        # Ensure every flag has a Tk var bound (created once, reused on rebuilds).
+        for flag in cf.FLAGS:
+            if flag.key in self._flag_vars:
+                continue
+            initial = self._values_snapshot.get(flag.key, flag.default)
+            if flag.type == cf.BOOL:
+                var: tk.Variable = tk.BooleanVar(value=bool(initial))
+            elif flag.type == cf.ENUM:
+                var = tk.StringVar(value=str(initial))
+            else:
+                var = tk.StringVar(value=str(initial) if initial is not None else "")
+            var.trace_add("write", lambda *_a, k=flag.key, v=var:
+                          self._on_flag_changed(k, v))
+            self._flag_vars[flag.key] = var
+
+        # Build group frames for the *current* backend.
+        backend = self.var_backend.get()
+        for group_name, flags in cf.groups_for_backend(backend):
+            grp = ttk.LabelFrame(lf, text=group_name)
+            grp.pack(fill="x", padx=4, pady=4)
+            grp.columnconfigure(1, weight=1)
+            self._group_frames[group_name] = grp
+            for i, flag in enumerate(flags):
+                self._build_flag_widget(grp, flag, i)
+
+    def _build_flag_widget(self, parent: ttk.LabelFrame, flag: cf.CMakeFlag, row: int) -> None:
+        var = self._flag_vars[flag.key]
+        if flag.type == cf.BOOL:
+            w = ttk.Checkbutton(parent, text=flag.label, variable=var)
+            w.grid(row=row, column=0, sticky="w", padx=6, pady=2)
+            help_lbl = ttk.Label(parent, text=flag.help, font=("TkSmallCaptionFont",))
+            help_lbl.grid(row=row, column=1, sticky="w", padx=8, pady=2)
+        elif flag.type == cf.ENUM:
+            ttk.Label(parent, text=flag.label + ":") \
+                .grid(row=row, column=0, sticky="w", padx=6, pady=2)
+            w = ttk.Combobox(parent, textvariable=var,
+                             values=flag.choices or [], state="readonly", width=14)
+            w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+            help_lbl = ttk.Label(parent, text=flag.help, font=("TkSmallCaptionFont",))
+            help_lbl.grid(row=row, column=2, sticky="w", padx=8, pady=2)
+        else:
+            ttk.Label(parent, text=flag.label + ":") \
+                .grid(row=row, column=0, sticky="w", padx=6, pady=2)
+            w = ttk.Entry(parent, textvariable=var, width=24)
+            w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+            hint = flag.help
+            if flag.placeholder:
+                hint = f"{flag.help} (e.g. {flag.placeholder})"
+            help_lbl = ttk.Label(parent, text=hint, font=("TkSmallCaptionFont",))
+            help_lbl.grid(row=row, column=2, sticky="w", padx=8, pady=2)
+        self._flag_widgets[flag.key] = w
+        self._apply_flag_visibility(flag)
+
+    def _apply_flag_visibility(self, flag: cf.CMakeFlag) -> None:
+        w = self._flag_widgets.get(flag.key)
+        if w is None:
+            return
+        visible = True
+        if flag.visible_when:
+            try:
+                visible = flag.visible_when(self._current_flag_values_dict())
+            except Exception as exc:
+                # Predicates should be pure functions of flag values; if one
+                # raises, surface it once rather than swallowing silently —
+                # otherwise the bug hides forever and the flag stays visible.
+                print(f"WARN: visible_when predicate for {flag.key!r} raised: {exc}",
+                      file=sys.stderr)
+                visible = True
+        state = "normal" if visible else "disabled"
+        try:
+            if w.winfo_exists():
+                w.configure(state=state)
+        except Exception:
+            pass
+
+    # ── Live preview ────────────────────────────────────────────────────
+    def _build_section_preview(self, parent: ttk.Frame, row: int) -> None:
+        lf = ttk.LabelFrame(parent, text="Resolved cmake invocation (preview)")
+        lf.grid(row=row, column=0, sticky="ew", padx=8, pady=6)
+        lf.columnconfigure(0, weight=1)
+
+        self._preview_text = tk.Text(lf, height=8, wrap="word",
+                                     font=("TkFixedFont",), state="disabled")
+        self._preview_text.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+
+        btns = ttk.Frame(lf); btns.grid(row=1, column=0, sticky="e", padx=4, pady=(0, 4))
+        ttk.Button(btns, text="Copy command",
+                   command=self._on_copy_preview).pack(side="left", padx=2)
+        ttk.Button(btns, text="Save as .sh…",
+                   command=self._on_save_script).pack(side="left", padx=2)
+
+    # ── Action bar + console ───────────────────────────────────────────
+    def _build_action_bar(self, parent: ttk.Frame) -> None:
+        bar = ttk.Frame(parent)
+        bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 0))
+        bar.columnconfigure(2, weight=1)
+        self._start_btn = ttk.Button(bar, text="▶ Start build",
+                                     command=self._on_start_build)
+        self._start_btn.grid(row=0, column=0, padx=2)
+        self._cancel_btn = ttk.Button(bar, text="■ Cancel",
+                                      command=self._on_cancel, state="disabled")
+        self._cancel_btn.grid(row=0, column=1, padx=2)
+        ttk.Label(bar, textvariable=self.var_status,
+                  font=("TkDefaultFont", 10, "bold")) \
+            .grid(row=0, column=2, padx=12, sticky="w")
+        ttk.Checkbutton(bar, text="Auto-scroll",
+                        variable=self.var_autoscroll) \
+            .grid(row=0, column=3, padx=8)
+        ttk.Button(bar, text="Clear log",
+                   command=self._on_clear_console).grid(row=0, column=4, padx=2)
+        ttk.Button(bar, text="Save log…",
+                   command=self._on_save_log).grid(row=0, column=5, padx=2)
+
+    def _build_console(self, parent: ttk.Frame) -> None:
+        cf_frame = ttk.LabelFrame(parent, text="Build output")
+        cf_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=8, pady=(4, 8))
+        parent.rowconfigure(3, weight=2)
+        cf_frame.rowconfigure(0, weight=1)
+        cf_frame.columnconfigure(0, weight=1)
+
+        self._console = tk.Text(cf_frame, wrap="none", height=14,
+                                font=("TkFixedFont",), state="disabled")
+        self._console.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        sb_y = ttk.Scrollbar(cf_frame, orient="vertical", command=self._console.yview)
+        sb_x = ttk.Scrollbar(cf_frame, orient="horizontal", command=self._console.xview)
+        self._console.configure(yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
+        sb_y.grid(row=0, column=1, sticky="ns")
+        sb_x.grid(row=1, column=0, sticky="ew")
+
+        # Tags for stage headers.
+        self._console.tag_configure("stage", foreground="#0a6", font=("TkFixedFont", 10, "bold"))
+        self._console.tag_configure("error", foreground="#c00")
+        self._console.tag_configure("ok",    foreground="#0a6")
+
+        # Replay any history saved across rebuilds.
+        if self._console_buffer:
+            self._console.configure(state="normal")
+            for line in self._console_buffer[-CONSOLE_MAX_LINES:]:
+                self._console.insert("end", line + "\n")
+            self._console.see("end")
+            self._console.configure(state="disabled")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Event handlers
+    # ─────────────────────────────────────────────────────────────────────
+    def _on_backend_changed(self) -> None:
+        # Fired by the radio button's command=. The radio button is a child of
+        # the tab's content frame which _build_ui destroys; doing the rebuild
+        # synchronously freezes Tk. Defer until the event has fully unwound.
+        self._schedule_rebuild()
+
+    def _on_launcher_backend_changed(self, *_a) -> None:
+        try:
+            new_backend = self.launcher.backend_selection.get()
+        except Exception:
+            return
+        if new_backend and new_backend != self.var_backend.get():
+            self.var_backend.set(new_backend)
+            # Setting var_backend programmatically doesn't fire the radio
+            # button's command callback, so we need to schedule the rebuild
+            # ourselves — otherwise flag groups remain stuck on the old backend.
+            self._schedule_rebuild()
+
+    def _schedule_rebuild(self) -> None:
+        """Coalesce rapid rebuild requests onto a single after_idle callback."""
+        if self._rebuild_pending:
+            return
+        self._rebuild_pending = True
+        self.root.after_idle(self._do_rebuild)
+
+    def _do_rebuild(self) -> None:
+        self._rebuild_pending = False
+        try:
+            # Re-seed flag defaults for the (possibly new) backend. We suspend
+            # traces while bulk-writing flag vars so each individual write
+            # doesn't trigger an O(N) visibility refresh + preview reschedule.
+            self._suspend_traces = True
+            try:
+                self._apply_autodetect_defaults()
+                self._sync_flag_widgets_from_values()
+            finally:
+                self._suspend_traces = False
+            # Source dir: re-suggest if current dir isn't a git repo for this backend.
+            src = self.var_source_dir.get()
+            if not os.path.isdir(src):
+                self.var_source_dir.set(self._initial_source_dir(self.var_backend.get()))
+            # Rebuild flag widgets into whichever container is currently mounted.
+            target = None
+            if self._detached_toplevel is not None and self._detached_toplevel.winfo_exists():
+                target = self._detached_toplevel
+            elif self._tab_frame is not None and self._tab_frame.winfo_exists():
+                target = self._tab_frame
+            if target is not None:
+                self._build_ui(target)
+            self._schedule_preview_refresh()
+            if self.var_auto_check_updates.get():
+                self.check_for_updates(do_fetch=False)
+        except Exception as exc:
+            print(f"WARN: Build tab rebuild failed: {exc}", file=sys.stderr)
+
+    def _on_launcher_dir_changed(self, *_a) -> None:
+        # If the user just changed the active backend dir in the main tab and
+        # the build tab's source matches the previous default, follow along.
+        # We don't want to clobber a user-set source dir, so only nudge when
+        # the user hasn't typed anything custom.
+        try:
+            cur = self.launcher.current_backend_dir.get()
+        except Exception:
+            return
+        if cur and not self.var_source_dir.get().strip():
+            self.var_source_dir.set(cur)
+
+    def _on_browse_source(self) -> None:
+        start = self.var_source_dir.get().strip() or str(Path.home())
+        directory = filedialog.askdirectory(
+            initialdir=start if os.path.isdir(start) else str(Path.home()),
+            title="Select source directory",
+        )
+        if directory:
+            self.var_source_dir.set(directory)
+            self.check_for_updates(do_fetch=False)
+
+    def _on_use_backend_dir(self) -> None:
+        try:
+            d = self.launcher.current_backend_dir.get()
+        except Exception:
+            d = ""
+        if d:
+            self.var_source_dir.set(d)
+            self.check_for_updates(do_fetch=False)
+
+    def _on_refresh_toolchain(self) -> None:
+        self._toolchain = detection.probe_toolchain()
+        self._refresh_toolchain_hint()
+        self._refresh_jobs_hint()
+        self._seed_toolchain_defaults()
+        self._append_console(
+            f"Toolchain re-probed: {len(self._toolchain.cuda_installs)} CUDA install(s), "
+            f"{len(self._toolchain.cc_candidates)} compiler(s).\n",
+            tag="stage",
+        )
+        # Rebuild so the CUDA-install combobox refreshes.
+        self._schedule_rebuild()
+
+    def _on_cuda_install_picked(self, *_args) -> None:
+        """Combobox callback: a label like 'CUDA 12.8 · /usr/local/cuda-12.8'
+        was selected — look it up and set CUDACXX + root accordingly."""
+        label = self.var_cuda_pick.get()
+        if label == "Custom path…":
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(
+                title="Select nvcc",
+                initialdir="/usr/local",
+                filetypes=[("nvcc", "nvcc nvcc.exe"), ("All files", "*.*")],
+            )
+            if path:
+                self.var_cudacxx.set(path)
+            else:
+                # User cancelled — restore previous label.
+                self._on_cudacxx_changed()
+            return
+        inst = self._cuda_install_by_label.get(label)
+        if inst is None:
+            return
+        self.var_cudacxx.set(inst.nvcc_path)
+        self.var_cuda_root.set(inst.root_dir)
+
+    def _on_rescan_cuda_installs(self) -> None:
+        self._on_refresh_toolchain()
+
+    def _on_autodetect_archs(self) -> None:
+        infos = detection.detect_cuda_archs()
+        if not infos:
+            messagebox.showinfo("Auto-detect", "No CUDA-capable GPUs detected via torch.")
+            return
+        # Replace whatever's in the field with just the detected GPUs.
+        value = detection.archs_to_cmake_value(
+            infos, prefer_a_variant=self.var_prefer_a_variant.get()
+        )
+        self.var_cuda_archs.set(value)
+        self._sync_arch_pickers_from_value()
+
+    def _build_cuda_arch_picker(self, parent: ttk.LabelFrame) -> None:
+        """Render a grouped grid of CUDA-arch checkboxes (Turing → Blackwell
+        by default; Kepler/Maxwell/Pascal/Volta appear when "Show deprecated
+        archs" is on).
+
+        Each ticked box adds its tokens to var_cuda_archs; unticking removes
+        them. A '+all <family>' button per row flips the entire family.
+        """
+        # Group archs by family in catalogue order, optionally hiding the
+        # deprecated families.
+        show_deprecated = self.var_show_deprecated_archs.get()
+        families: Dict[str, List[detection.KnownArch]] = {}
+        for k in detection.KNOWN_CUDA_ARCHS:
+            if k.deprecated and not show_deprecated:
+                continue
+            families.setdefault(k.family, []).append(k)
+
+        family_order = [f for f in detection.all_families() if f in families]
+
+        for row_idx, family in enumerate(family_order):
+            row_frame = ttk.Frame(parent)
+            row_frame.grid(row=row_idx, column=0, sticky="ew", padx=4, pady=2)
+            row_frame.columnconfigure(1, weight=1)
+            is_deprecated_family = detection.family_has_only_deprecated(family)
+            family_label = family + (" (deprecated)" if is_deprecated_family else "")
+            # Dim the label color for deprecated families to make their
+            # status visually obvious in addition to the text suffix.
+            label_widget = ttk.Label(
+                row_frame, text=f"{family_label}:",
+                font=("TkDefaultFont", 9, "bold"),
+                width=18, anchor="e",
+            )
+            if is_deprecated_family:
+                try:
+                    label_widget.configure(foreground="#888")
+                except Exception:
+                    pass
+            label_widget.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            boxes = ttk.Frame(row_frame)
+            boxes.grid(row=0, column=1, sticky="w")
+            for col, k in enumerate(families[family]):
+                var = self._arch_check_vars.get(k.cc)
+                if var is None:
+                    var = tk.BooleanVar(value=False)
+                    self._arch_check_vars[k.cc] = var
+                base = k.cc.split(".")
+                label = f"sm_{base[0]}{base[1]}"
+                # Tag -a / -f capability on the label so users can see at a glance.
+                if k.has_a_variant or k.has_f_variant:
+                    suffix_bits = []
+                    if k.has_a_variant:
+                        suffix_bits.append("-a")
+                    if k.has_f_variant:
+                        suffix_bits.append("-f")
+                    label = f"{label} ({'/'.join(suffix_bits)})"
+                cb = ttk.Checkbutton(
+                    boxes, text=label, variable=var,
+                    command=lambda cc=k.cc: self._on_arch_check_toggle(cc),
+                )
+                cb.grid(row=0, column=col, sticky="w", padx=2, pady=1)
+            ttk.Button(row_frame, text=f"+all {family}",
+                       width=14,
+                       command=lambda fam=family: self._on_add_family(fam)) \
+                .grid(row=0, column=2, sticky="e", padx=(8, 0))
+        # Sync the initial check state from whatever's in the entry.
+        self._sync_arch_pickers_from_value()
+
+    def _on_show_deprecated_toggle(self) -> None:
+        """Re-render the arch picker when the deprecated-archs toggle flips."""
+        self._schedule_rebuild()
+
+    def _on_arch_check_toggle(self, cc: str) -> None:
+        if self._arch_sync_in_progress:
+            return
+        var = self._arch_check_vars.get(cc)
+        if var is None:
+            return
+        tokens_to_add: List[str] = []
+        tokens_to_remove: List[str] = []
+        base = "".join(cc.split("."))
+        plain = f"{base}-real"
+        known = detection.known_arch_for(cc)
+        a_token = f"{base}a-real" if (known and known.has_a_variant) else None
+        f_token = f"{base}f-real" if (known and known.has_f_variant) else None
+        if var.get():
+            if self.var_prefer_a_variant.get() and a_token:
+                tokens_to_add.append(a_token)
+            if self.var_prefer_f_variant.get() and f_token:
+                tokens_to_add.append(f_token)
+            tokens_to_add.append(plain)
+        else:
+            tokens_to_remove.append(plain)
+            if a_token:
+                tokens_to_remove.append(a_token)
+            if f_token:
+                tokens_to_remove.append(f_token)
+        current = [t.strip() for t in self.var_cuda_archs.get().split(";") if t.strip()]
+        out: List[str] = []
+        seen: set[str] = set()
+        for t in current:
+            if t in tokens_to_remove or t in seen:
+                continue
+            seen.add(t); out.append(t)
+        for t in tokens_to_add:
+            if t not in seen:
+                seen.add(t); out.append(t)
+        self._arch_sync_in_progress = True
+        try:
+            self.var_cuda_archs.set(";".join(out))
+        finally:
+            self._arch_sync_in_progress = False
+
+    def _on_add_family(self, family: str) -> None:
+        """Add every arch in a generation family to the field, honoring
+        the -a/-f and deprecated-archs toggles."""
+        addition = detection.family_to_tokens(
+            family,
+            prefer_a_variant=self.var_prefer_a_variant.get(),
+            prefer_f_variant=self.var_prefer_f_variant.get(),
+            include_deprecated=self.var_show_deprecated_archs.get(),
+        )
+        merged = detection.merge_arch_tokens(self.var_cuda_archs.get(), addition)
+        self.var_cuda_archs.set(merged)
+
+    def _sync_arch_pickers_from_value(self) -> None:
+        """Update picker checkboxes to reflect whatever tokens are in the
+        field. Tolerates user-typed tokens we don't know about."""
+        if self._arch_sync_in_progress:
+            return
+        if not self._arch_check_vars:
+            return
+        present_ccs: set[str] = set()
+        for raw in self.var_cuda_archs.get().split(";"):
+            tok = raw.strip()
+            if not tok:
+                continue
+            m = _ARCH_TOKEN_RE.match(tok)
+            if not m:
+                continue
+            base = m.group("base")
+            try:
+                cc = f"{int(base) // 10}.{int(base) % 10}"
+            except ValueError:
+                continue
+            present_ccs.add(cc)
+        self._arch_sync_in_progress = True
+        try:
+            for cc, var in self._arch_check_vars.items():
+                want = cc in present_ccs
+                if var.get() != want:
+                    var.set(want)
+        finally:
+            self._arch_sync_in_progress = False
+
+    def _on_variant_toggle(self) -> None:
+        """Toggle preference for the ``-a`` and/or ``-f`` arch variants.
+        Rewrites the current arch field: each present compute-capability
+        gets its plain ``-real`` token plus the ``-a`` and ``-f`` siblings
+        the user's toggles request. Leaves user-typed tokens we don't
+        recognize untouched."""
+        prefer_a = self.var_prefer_a_variant.get()
+        prefer_f = self.var_prefer_f_variant.get()
+        current = self.var_cuda_archs.get().strip()
+        if not current:
+            return
+        seen_ccs: set[str] = set()
+        passthrough: List[str] = []
+        for raw in current.split(";"):
+            tok = raw.strip()
+            if not tok:
+                continue
+            m = _ARCH_TOKEN_RE.match(tok)
+            if not m:
+                if tok not in passthrough:
+                    passthrough.append(tok)
+                continue
+            base = m.group("base")
+            try:
+                # Handle 2-digit (sm_86) and 3-digit (sm_120) bases.
+                if len(base) == 2:
+                    major = int(base[0]); minor = int(base[1])
+                else:
+                    major = int(base[:2]); minor = int(base[2:])
+                cc = f"{major}.{minor}"
+            except ValueError:
+                continue
+            seen_ccs.add(cc)
+        # Now reconstruct.
+        out: List[str] = []
+        emitted: set[str] = set()
+        for cc in seen_ccs:
+            base = "".join(cc.split("."))
+            known = detection.known_arch_for(cc)
+            if prefer_a and known and known.has_a_variant:
+                t = f"{base}a-real"
+                if t not in emitted:
+                    emitted.add(t); out.append(t)
+            if prefer_f and known and known.has_f_variant:
+                t = f"{base}f-real"
+                if t not in emitted:
+                    emitted.add(t); out.append(t)
+            t = f"{base}-real"
+            if t not in emitted:
+                emitted.add(t); out.append(t)
+        for t in passthrough:
+            if t not in emitted:
+                emitted.add(t); out.append(t)
+        self.var_cuda_archs.set(";".join(out))
+        self._sync_arch_pickers_from_value()
+
+    def _on_apply_autodetect(self) -> None:
+        self._suspend_traces = True
+        try:
+            self._reset_to_autodetect()
+            self._sync_flag_widgets_from_values()
+        finally:
+            self._suspend_traces = False
+        self._append_console("Applied auto-detected preset (reset overrides).\n", tag="stage")
+        self._schedule_preview_refresh()
+
+    def _on_flag_changed(self, key: str, var: tk.Variable) -> None:
+        # Bulk-write paths suspend the trace handler so we don't fire O(N²)
+        # visibility refreshes when seeding defaults.
+        if self._suspend_traces:
+            return
+        # Update visibility chain (a flag may gate another flag).
+        for f in cf.FLAGS:
+            if f.visible_when:
+                self._apply_flag_visibility(f)
+        self._schedule_preview_refresh()
+
+    # ── Config save/load ────────────────────────────────────────────────
+    def _refresh_saved_configs_dropdown(self) -> None:
+        if hasattr(self, "_cfg_combo"):
+            self._cfg_combo["values"] = self.store.list_names()
+
+    def _on_load_config(self) -> None:
+        name = self.var_config_name.get().strip()
+        if not name:
+            return
+        cfg = self.store.get(name)
+        if cfg is None:
+            messagebox.showerror("Load", f"No saved config named {name!r}.")
+            return
+        self._apply_loaded_config(cfg)
+        self.store.touch_last_used(name)
+        self._append_console(f"Loaded config: {name}\n", tag="stage")
+
+    def _apply_loaded_config(self, cfg: BuildConfig) -> None:
+        self._suspend_traces = True
+        try:
+            self.var_backend.set(cfg.backend)
+            self.var_source_dir.set(cfg.source_dir)
+            self.var_build_dir.set(cfg.build_dir or "build")
+            self.var_git_ref.set(cfg.git_ref)
+            self.var_git_pull.set(cfg.git_pull_before_build)
+            self.var_clean_build.set(cfg.clean_build)
+            if cfg.jobs:
+                self.var_jobs.set(cfg.jobs)
+            self.var_cuda_archs.set(cfg.cuda_archs)
+            self.var_extra_args.set(cfg.extra_cmake_args)
+            env = cfg.env or {}
+            if env.get("CC"):
+                self.var_cc.set(env["CC"])
+            if env.get("CXX"):
+                self.var_cxx.set(env["CXX"])
+            if env.get("CUDACXX"):
+                self.var_cudacxx.set(env["CUDACXX"])
+            if env.get("CUDA_TOOLKIT_ROOT_DIR"):
+                self.var_cuda_root.set(env["CUDA_TOOLKIT_ROOT_DIR"])
+            # UI-only state (kept off the cmake env).
+            ui = cfg.ui_state or {}
+            if ui.get("generator"):
+                self.var_generator.set(ui["generator"])
+            if "prefer_a" in ui:
+                self.var_prefer_a_variant.set(ui["prefer_a"] == "1")
+            if "prefer_f" in ui:
+                self.var_prefer_f_variant.set(ui["prefer_f"] == "1")
+            if "show_deprecated" in ui:
+                self.var_show_deprecated_archs.set(ui["show_deprecated"] == "1")
+            # Migration: older configs stashed UI state inside env with __KEY__
+            # markers. Read those if present so we don't lose user prefs.
+            legacy_map = {
+                "__GENERATOR__": ("generator", lambda v: self.var_generator.set(v)),
+                "__PREFER_A__": ("prefer_a", lambda v: self.var_prefer_a_variant.set(v == "1")),
+                "__PREFER_F__": ("prefer_f", lambda v: self.var_prefer_f_variant.set(v == "1")),
+                "__SHOW_DEPRECATED__": ("show_deprecated",
+                                        lambda v: self.var_show_deprecated_archs.set(v == "1")),
+            }
+            for legacy_key, (_ui_key, apply) in legacy_map.items():
+                if legacy_key in env:
+                    apply(env[legacy_key])
+            # Apply flag values, defaulting unspecified flags from the schema.
+            backend_defaults = cf.default_values_for_backend(cfg.backend)
+            self._values_snapshot = {**backend_defaults, **(cfg.flag_values or {})}
+            self._sync_flag_widgets_from_values()
+        finally:
+            self._suspend_traces = False
+        # Defer the rebuild — this method is called from a button command.
+        self._schedule_rebuild()
+
+    def _on_save_config(self) -> None:
+        name = self.var_config_name.get().strip()
+        if not name:
+            self._on_save_as_config()
+            return
+        self._persist_current_as(name)
+
+    def _on_save_as_config(self) -> None:
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Save build config", "Name:",
+                                      initialvalue=self.var_config_name.get())
+        if not name:
+            return
+        self._persist_current_as(name.strip())
+
+    def _persist_current_as(self, name: str) -> None:
+        if not name:
+            return
+        # Build the UI-state dict separately so it never reaches cmake_env.
+        ui_state: Dict[str, str] = {
+            "prefer_a": "1" if self.var_prefer_a_variant.get() else "0",
+            "prefer_f": "1" if self.var_prefer_f_variant.get() else "0",
+            "show_deprecated": "1" if self.var_show_deprecated_archs.get() else "0",
+        }
+        if self.var_generator.get().strip():
+            ui_state["generator"] = self.var_generator.get().strip()
+        cfg = BuildConfig(
+            name=name,
+            backend=self.var_backend.get(),
+            source_dir=self.var_source_dir.get().strip(),
+            build_dir=self.var_build_dir.get().strip() or "build",
+            git_ref=self.var_git_ref.get().strip(),
+            git_pull_before_build=self.var_git_pull.get(),
+            clean_build=self.var_clean_build.get(),
+            jobs=int(self.var_jobs.get() or 0),
+            cuda_archs=self.var_cuda_archs.get().strip(),
+            env=self._current_env_dict(),
+            flag_values=self._current_flag_values_dict(),
+            extra_cmake_args=self.var_extra_args.get().strip(),
+            ui_state=ui_state,
+        )
+        self.store.save(cfg)
+        self.var_config_name.set(name)
+        self._refresh_saved_configs_dropdown()
+        self._append_console(f"Saved config: {name}\n", tag="stage")
+
+    def _on_delete_config(self) -> None:
+        name = self.var_config_name.get().strip()
+        if not name:
+            return
+        if not messagebox.askyesno("Delete", f"Delete saved build config {name!r}?"):
+            return
+        if self.store.delete(name):
+            self.var_config_name.set("")
+            self._refresh_saved_configs_dropdown()
+            self._append_console(f"Deleted config: {name}\n", tag="stage")
+
+    # ── Preview ─────────────────────────────────────────────────────────
+    def _schedule_preview_refresh(self) -> None:
+        if self._preview_after_id is not None:
+            try:
+                self.root.after_cancel(self._preview_after_id)
+            except Exception:
+                pass
+        self._preview_after_id = self.root.after(
+            PREVIEW_REFRESH_DEBOUNCE_MS, self._refresh_preview
+        )
+
+    def _refresh_preview(self) -> None:
+        self._preview_after_id = None
+        plan = self._build_plan()
+        if plan is None:
+            return
+        try:
+            shell = plan_to_shell_script(plan, header="Preview (not yet executed)")
+        except Exception as exc:
+            shell = f"# preview failed: {exc}"
+        if not hasattr(self, "_preview_text") or not self._preview_text.winfo_exists():
+            return
+        self._preview_text.configure(state="normal")
+        self._preview_text.delete("1.0", "end")
+        self._preview_text.insert("1.0", shell)
+        self._preview_text.configure(state="disabled")
+        # Warn if CUDA is requested but we couldn't detect a toolkit.
+        self._update_cuda_warning()
+
+    def _update_cuda_warning(self) -> None:
+        """Show/hide the inline 'no CUDA toolkit found' warning next to the
+        CUDA install picker. Triggered from the preview-refresh path so it
+        stays in sync with GGML_CUDA toggles."""
+        if not hasattr(self, "_cuda_warning_var"):
+            return
+        wants_cuda = _truthy_flag_str(self._values_snapshot.get("GGML_CUDA"))
+        try:
+            cur_val = self._flag_vars.get("GGML_CUDA")
+            if cur_val is not None:
+                wants_cuda = _truthy_flag_str(cur_val.get())
+        except Exception:
+            pass
+        if wants_cuda and not self._toolchain.cuda_installs:
+            self._cuda_warning_var.set(
+                "⚠ GGML_CUDA is ON but no CUDA toolkit was detected. "
+                "The build will likely fail at cmake configure."
+            )
+        else:
+            self._cuda_warning_var.set("")
+
+    def _on_copy_preview(self) -> None:
+        if not hasattr(self, "_preview_text"):
+            return
+        txt = self._preview_text.get("1.0", "end-1c")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(txt)
+        self._append_console("cmake command copied to clipboard.\n", tag="stage")
+
+    def _on_save_script(self) -> None:
+        plan = self._build_plan()
+        if plan is None:
+            return
+        default_name = f"build_{plan.backend.replace('.', '_')}.sh"
+        path = filedialog.asksaveasfilename(
+            title="Save build script",
+            defaultextension=".sh",
+            initialfile=default_name,
+            filetypes=[("Shell script", "*.sh"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(plan_to_shell_script(plan), encoding="utf-8")
+            os.chmod(path, 0o755)
+        except Exception as exc:
+            messagebox.showerror("Save script", str(exc))
+            return
+        self._append_console(f"Wrote script: {path}\n", tag="stage")
+
+    # ── Update banner / upstream check ──────────────────────────────────
+    def check_for_updates(self, *, do_fetch: bool) -> None:
+        src = self.var_source_dir.get().strip()
+        if not src or self._upstream_check_in_flight:
+            return
+        self._upstream_check_in_flight = True
+
+        def worker() -> None:
+            status = probe_upstream(src, do_fetch=do_fetch)
+            self._pending_status.put(status)
+
+        threading.Thread(target=worker, name="UpstreamProbe", daemon=True).start()
+        # Cancel any prior drain before scheduling a new one so we don't
+        # leak overlapping after() callbacks if the user clicks Check rapidly.
+        if self._drain_after_id is not None:
+            try:
+                self.root.after_cancel(self._drain_after_id)
+            except Exception:
+                pass
+        self._drain_after_id = self.root.after(150, self._drain_pending_status)
+
+    def _drain_pending_status(self) -> None:
+        self._drain_after_id = None
+        try:
+            while True:
+                status = self._pending_status.get_nowait()
+                self._upstream_status = status
+                self._upstream_check_in_flight = False
+                self._update_status_banner_visibility()
+        except queue.Empty:
+            if self._upstream_check_in_flight:
+                self._drain_after_id = self.root.after(200, self._drain_pending_status)
+
+    def _update_status_banner_visibility(self) -> None:
+        if not hasattr(self, "_banner"):
+            return
+        status = self._upstream_status
+        if status.behind > 0:
+            self._banner.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 0))
+            msg = (
+                f"{status.behind} new commit(s) available on {status.upstream_ref}"
+                + (f"  (HEAD {status.head_sha}: {status.head_subject})"
+                   if status.head_subject else "")
+            )
+            self._banner_label.configure(text=msg, bg="#fff5cf")
+            self._banner.configure(bg="#fff5cf", highlightbackground="#c5a800")
+        elif status.error and status.is_git_repo:
+            self._banner.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 0))
+            self._banner_label.configure(text=f"Update check: {status.error}", bg="#fde0e0")
+            self._banner.configure(bg="#fde0e0", highlightbackground="#c00000")
+        else:
+            self._banner.grid_remove()
+
+    def _on_pull_only(self) -> None:
+        src = self.var_source_dir.get().strip()
+        if not src:
+            return
+        plan = BuildPlan(
+            backend=self.var_backend.get(),
+            source_dir=src,
+            build_dir=self._resolved_build_dir(),
+            cmake_args=[],
+            cmake_env={},
+            jobs=0,
+            git_clone_if_missing=False,
+            git_ref="",
+            git_pull_before_build=True,
+            clean_build=False,
+        )
+        # Run only the git pull step by short-circuiting via the runner — but
+        # since the runner always proceeds to configure+build, we instead use
+        # a direct subprocess for this one (cheap, foreground).
+        import subprocess
+        self._append_console("\n══ git pull --ff-only ══\n", tag="stage")
+        try:
+            proc = subprocess.Popen(
+                ["git", "pull", "--ff-only"], cwd=src,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                self._append_console(line.rstrip("\n") + "\n")
+            proc.wait()
+        except Exception as exc:
+            self._append_console(f"git pull failed: {exc}\n", tag="error")
+        self.check_for_updates(do_fetch=True)
+
+    def _on_pull_and_rebuild(self) -> None:
+        self.var_git_pull.set(True)
+        self._on_start_build()
+
+    # ── Action bar handlers ────────────────────────────────────────────
+    def _on_start_build(self) -> None:
+        if self.runner.is_running:
+            messagebox.showinfo("Build", "A build is already running.")
+            return
+        plan = self._build_plan()
+        if plan is None:
+            return
+        if not plan.source_dir.strip():
+            messagebox.showerror("Build", "Source directory is required.")
+            return
+        self._console_buffer.clear()
+        if hasattr(self, "_console"):
+            self._console.configure(state="normal")
+            self._console.delete("1.0", "end")
+            self._console.configure(state="disabled")
+
+        self.var_status.set("Running…")
+        self._start_btn.configure(state="disabled")
+        self._cancel_btn.configure(state="normal")
+        started = self.runner.start(plan)
+        if not started:
+            self.var_status.set("Idle")
+            self._start_btn.configure(state="normal")
+            self._cancel_btn.configure(state="disabled")
+            return
+        # Persist last-used name.
+        name = self.var_config_name.get().strip()
+        if name:
+            self.store.touch_last_used(name)
+        # Drain events on a Tk-after loop.
+        self._poll_runner()
+
+    def _on_cancel(self) -> None:
+        self.runner.cancel()
+        self.var_status.set("Cancelling…")
+
+    def _poll_runner(self) -> None:
+        drained_any = False
+        try:
+            while True:
+                kind, payload = self.runner.events.get_nowait()
+                drained_any = True
+                if kind == EVENT_LINE:
+                    self._append_console(str(payload) + "\n")
+                elif kind == EVENT_STAGE:
+                    self.var_status.set(str(payload))
+                elif kind == EVENT_DONE:
+                    rc = int(payload or 0)
+                    if rc == 0:
+                        self.var_status.set("Done ✓")
+                        self._append_console("\nBuild succeeded.\n", tag="ok")
+                    else:
+                        self.var_status.set(f"Failed (rc={rc})")
+                        self._append_console(f"\nBuild failed with exit {rc}.\n", tag="error")
+                    self._on_build_finished()
+                    return
+                elif kind == EVENT_CANCELLED:
+                    self.var_status.set("Cancelled")
+                    self._append_console("\nBuild cancelled.\n", tag="error")
+                    self._on_build_finished()
+                    return
+                elif kind == EVENT_ERROR:
+                    self.var_status.set("Error")
+                    self._append_console(f"\nError: {payload}\n", tag="error")
+                    self._on_build_finished()
+                    return
+        except queue.Empty:
+            pass
+
+        if self.runner.is_running:
+            self._poll_after_id = self.root.after(RUNNER_POLL_MS, self._poll_runner)
+
+    def _on_build_finished(self) -> None:
+        self._poll_after_id = None
+        for attr in ("_start_btn", "_cancel_btn"):
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            try:
+                if w.winfo_exists():
+                    w.configure(state="normal" if attr == "_start_btn" else "disabled")
+            except Exception:
+                pass
+        # Re-check upstream after a successful pull-and-rebuild flow.
+        if self.var_auto_check_updates.get():
+            self.check_for_updates(do_fetch=False)
+
+    def _on_clear_console(self) -> None:
+        self._console_buffer.clear()
+        if hasattr(self, "_console"):
+            self._console.configure(state="normal")
+            self._console.delete("1.0", "end")
+            self._console.configure(state="disabled")
+
+    def _on_save_log(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save build log",
+            defaultextension=".log",
+            filetypes=[("Log", "*.log"), ("Text", "*.txt"), ("All", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text("\n".join(self._console_buffer), encoding="utf-8")
+        except Exception as exc:
+            messagebox.showerror("Save log", str(exc))
+
+    # ── Detach / reattach ──────────────────────────────────────────────
+    def _toggle_detach(self) -> None:
+        # Defer — we're inside a button command whose widget will be destroyed
+        # when the host frame is rebuilt.
+        if self._detached_toplevel is not None and self._detached_toplevel.winfo_exists():
+            self.root.after_idle(self._reattach)
+        else:
+            self.root.after_idle(self._detach)
+
+    def _detach(self) -> None:
+        if self._notebook is None or self._tab_frame is None:
+            return
+        try:
+            self._notebook.hide(self._tab_frame)
+        except Exception:
+            pass
+        top = tk.Toplevel(self.root)
+        top.title("Build — llama.cpp / ik_llama.cpp")
+        top.geometry("1100x800")
+        top.protocol("WM_DELETE_WINDOW", lambda: self.root.after_idle(self._reattach))
+        self._detached_toplevel = top
+        self._build_ui(top)
+        if hasattr(self, "_detach_button_text"):
+            self._detach_button_text.set("Re-attach ⇙")
+
+    def _reattach(self) -> None:
+        if self._detached_toplevel is not None:
+            try:
+                self._detached_toplevel.destroy()
+            except Exception:
+                pass
+            self._detached_toplevel = None
+        if self._notebook is not None and self._tab_frame is not None:
+            try:
+                self._notebook.add(self._tab_frame, text=self._tab_text)
+            except Exception:
+                pass
+            self._build_ui(self._tab_frame)
+        if hasattr(self, "_detach_button_text"):
+            self._detach_button_text.set("Detach ⇗")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Helpers
+    # ─────────────────────────────────────────────────────────────────────
+    def _current_flag_values_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for key, var in self._flag_vars.items():
+            try:
+                v = var.get()
+            except Exception:
+                continue
+            out[key] = v
+        # Snapshot for next rebuild.
+        self._values_snapshot = {**self._values_snapshot, **out}
+        return out
+
+    def _sync_flag_widgets_from_values(self) -> None:
+        for key, val in self._values_snapshot.items():
+            var = self._flag_vars.get(key)
+            if var is None:
+                continue
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    var.set(bool(val))
+                else:
+                    var.set("" if val is None else str(val))
+            except Exception:
+                pass
+
+    def _current_env_dict(self) -> Dict[str, str]:
+        env: Dict[str, str] = {}
+        cc = self.var_cc.get().strip()
+        cxx = self.var_cxx.get().strip()
+        cudacxx = self.var_cudacxx.get().strip()
+        cuda_root = self.var_cuda_root.get().strip()
+        if cc:
+            env["CC"] = cc
+        if cxx:
+            env["CXX"] = cxx
+        if cudacxx:
+            env["CUDACXX"] = cudacxx
+        if cuda_root:
+            # cmake reads this; pinning it avoids stray PATH installs hijacking the build.
+            env["CUDA_TOOLKIT_ROOT_DIR"] = cuda_root
+        return env
+
+    def _resolved_build_dir(self) -> str:
+        src = self.var_source_dir.get().strip()
+        build = self.var_build_dir.get().strip() or "build"
+        bp = Path(build)
+        if bp.is_absolute():
+            return str(bp)
+        return str(Path(src) / bp) if src else build
+
+    def _build_plan(self) -> Optional[BuildPlan]:
+        values = self._current_flag_values_dict()
+        backend = self.var_backend.get()
+        # Inject the CMAKE_CUDA_ARCHITECTURES value as a regular cmake arg
+        # (the schema lists it as a STRING flag — it materialises from the
+        # values dict). Same goes for CMAKE_*_FLAGS.
+        archs = self.var_cuda_archs.get().strip()
+        if archs:
+            values["CMAKE_CUDA_ARCHITECTURES"] = archs
+        args = cf.values_to_cmake_args(
+            backend, values, extra_cmake_args=self.var_extra_args.get().strip()
+        )
+        # Also pin CUDA_TOOLKIT_ROOT_DIR via -D so it's recorded in the cache;
+        # cmake otherwise auto-derives from CMAKE_CUDA_COMPILER but pinning
+        # makes the value explicit in the build artifacts.
+        cuda_root = self.var_cuda_root.get().strip()
+        if cuda_root and _truthy_flag_str(values.get("GGML_CUDA")):
+            args.append(f"-DCMAKE_CUDA_COMPILER_TOOLKIT_ROOT={cuda_root}")
+        return BuildPlan(
+            backend=backend,
+            source_dir=self.var_source_dir.get().strip(),
+            build_dir=self._resolved_build_dir(),
+            cmake_args=args,
+            cmake_env=self._current_env_dict(),
+            jobs=int(self.var_jobs.get() or 0),
+            git_clone_if_missing=True,
+            git_ref=self.var_git_ref.get().strip(),
+            git_pull_before_build=self.var_git_pull.get(),
+            clean_build=self.var_clean_build.get(),
+            generator=self.var_generator.get().strip(),
+        )
+
+    def _append_console(self, text: str, *, tag: Optional[str] = None) -> None:
+        # Mirror to buffer so detach/reattach can replay history.
+        for line in text.splitlines() or [""]:
+            self._console_buffer.append(line)
+        if len(self._console_buffer) > CONSOLE_MAX_LINES:
+            self._console_buffer[:] = self._console_buffer[-CONSOLE_MAX_LINES:]
+        if not hasattr(self, "_console") or not self._console.winfo_exists():
+            return
+        self._console.configure(state="normal")
+        if tag:
+            self._console.insert("end", text, tag)
+        else:
+            self._console.insert("end", text)
+        if self.var_autoscroll.get():
+            self._console.see("end")
+        self._console.configure(state="disabled")
