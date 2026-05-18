@@ -8,6 +8,14 @@ from pathlib import Path
 from tkinter import messagebox, filedialog
 from datetime import datetime
 
+from modules.spec_persistence import (
+    collect_spec_into_cfg,
+    load_spec_from_cfg,
+    validate_spec_app_settings,
+    sync_spec_to_app_settings,
+    coerce_spec_draft_selected_gpus,
+)
+
 
 class ConfigManager:
     """Configuration management for LLaMa.cpp Server Launcher."""
@@ -303,49 +311,9 @@ class ConfigManager:
             "parallel":      self.launcher.parallel.get(),
             # --- Multi-modal Projection ---
             "mmproj_enabled": self.launcher.mmproj_enabled.get(),
-            # --- MTP / Speculative Decoding ---
-            "spec_enabled":               self.launcher.spec_enabled.get(),
-            "spec_type":                  self.launcher.spec_type.get(),
-            "spec_draft_n_max":           self.launcher.spec_draft_n_max.get(),
-            "spec_draft_n_min":           self.launcher.spec_draft_n_min.get(),
-            "spec_draft_p_min":           self.launcher.spec_draft_p_min.get(),
-            "spec_draft_p_split":         self.launcher.spec_draft_p_split.get(),
-            "spec_draft_model":           self.launcher.spec_draft_model.get(),
-            "spec_draft_ngl":             self.launcher.spec_draft_ngl.get(),
-            "spec_draft_device":          self.launcher.spec_draft_device.get(),
-            "spec_draft_ctk":             self.launcher.spec_draft_ctk.get(),
-            "spec_draft_ctv":             self.launcher.spec_draft_ctv.get(),
-            "spec_draft_cpu_moe":         self.launcher.spec_draft_cpu_moe.get(),
-            "spec_draft_n_cpu_moe":       self.launcher.spec_draft_n_cpu_moe.get(),
-            "spec_ngram_simple_size_n":   self.launcher.spec_ngram_simple_size_n.get(),
-            "spec_ngram_simple_size_m":   self.launcher.spec_ngram_simple_size_m.get(),
-            "spec_ngram_simple_min_hits": self.launcher.spec_ngram_simple_min_hits.get(),
-            "spec_ngram_mapk_size_n":     self.launcher.spec_ngram_mapk_size_n.get(),
-            "spec_ngram_mapk_size_m":     self.launcher.spec_ngram_mapk_size_m.get(),
-            "spec_ngram_mapk_min_hits":   self.launcher.spec_ngram_mapk_min_hits.get(),
-            "spec_ngram_mapk4v_size_n":   self.launcher.spec_ngram_mapk4v_size_n.get(),
-            "spec_ngram_mapk4v_size_m":   self.launcher.spec_ngram_mapk4v_size_m.get(),
-            "spec_ngram_mapk4v_min_hits": self.launcher.spec_ngram_mapk4v_min_hits.get(),
-            "spec_ngram_mod_n_min":       self.launcher.spec_ngram_mod_n_min.get(),
-            "spec_ngram_mod_n_max":       self.launcher.spec_ngram_mod_n_max.get(),
-            "spec_ngram_mod_n_match":     self.launcher.spec_ngram_mod_n_match.get(),
-            "spec_ngram_size_n":          self.launcher.spec_ngram_size_n.get(),
-            "spec_ngram_size_m":          self.launcher.spec_ngram_size_m.get(),
-            "spec_ngram_min_hits":        self.launcher.spec_ngram_min_hits.get(),
-            "spec_suffix_pattern_len":    self.launcher.spec_suffix_pattern_len.get(),
-            "spec_suffix_max_depth":      self.launcher.spec_suffix_max_depth.get(),
-            "spec_autotune":              self.launcher.spec_autotune.get(),
-            "spec_draft_params":          self.launcher.spec_draft_params.get(),
-            "no_mmproj":                  self.launcher.no_mmproj.get(),
-            # --- Reasoning / Thinking (both backends) ---
-            "reasoning_mode":             self.launcher.reasoning_mode.get(),
-            "reasoning_format":           self.launcher.reasoning_format.get(),
-            "reasoning_budget":           self.launcher.reasoning_budget.get(),
-            "reasoning_budget_message":   self.launcher.reasoning_budget_message.get(),
-            "chat_template_kwargs":       self.launcher.chat_template_kwargs.get(),
-            # --- KV Unification (llama.cpp only) ---
-            "kv_unified_mode":            self.launcher.kv_unified_mode.get(),
-            "cache_idle_slots_mode":      self.launcher.cache_idle_slots_mode.get(),
+            # --- MTP / Speculative Decoding + Reasoning + KV Unification ---
+            # All spec/reasoning/kvu keys are mirrored by collect_spec_into_cfg
+            # below (after the dict literal); see modules/spec_persistence.py.
             # --- Fit Parameters ---
             "fit_enabled": self.launcher.fit_enabled.get(),
             "fit_ctx": self.launcher.fit_ctx.get(),
@@ -361,6 +329,11 @@ class ConfigManager:
             # --- NEW: Save Custom Parameters ---
             "custom_parameters": self.launcher.custom_parameters_list, # Save the list of strings
         }
+
+        # Mirror every spec/reasoning/kvu Tk var into the cfg dict. Lives in
+        # modules/spec_persistence.py so the named-config save/load and the
+        # app_settings save/load all share one source of truth for keys.
+        collect_spec_into_cfg(self.launcher, cfg)
 
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
         # This is redundant with app_settings, but keeps config self-contained for this tab.
@@ -439,59 +412,9 @@ class ConfigManager:
         # --- Multi-modal Projection ---
         self.launcher.mmproj_enabled.set(cfg.get("mmproj_enabled", False))
         self.launcher.selected_mmproj_path.set(cfg.get("selected_mmproj_path", ""))
-        # --- MTP / Speculative Decoding ---
-        # Boolean toggles default False; strings default "" (= "don't emit");
-        # spec_type defaults to "none" so older configs keep emitting nothing.
-        def _spec_bool(key):
-            val = cfg.get(key, False)
-            return bool(val) if isinstance(val, bool) else (str(val).lower() in ("1", "true", "yes"))
-
-        def _spec_str(key, default=""):
-            val = cfg.get(key, default)
-            return val if isinstance(val, str) else (str(val) if val is not None else default)
-
-        self.launcher.spec_enabled.set(_spec_bool("spec_enabled"))
-        self.launcher.spec_type.set(_spec_str("spec_type", "none") or "none")
-        self.launcher.spec_draft_n_max.set(_spec_str("spec_draft_n_max"))
-        self.launcher.spec_draft_n_min.set(_spec_str("spec_draft_n_min"))
-        self.launcher.spec_draft_p_min.set(_spec_str("spec_draft_p_min"))
-        self.launcher.spec_draft_p_split.set(_spec_str("spec_draft_p_split"))
-        self.launcher.spec_draft_model.set(_spec_str("spec_draft_model"))
-        self.launcher.spec_draft_ngl.set(_spec_str("spec_draft_ngl"))
-        self.launcher.spec_draft_device.set(_spec_str("spec_draft_device"))
-        self.launcher.spec_draft_ctk.set(_spec_str("spec_draft_ctk"))
-        self.launcher.spec_draft_ctv.set(_spec_str("spec_draft_ctv"))
-        self.launcher.spec_draft_cpu_moe.set(_spec_bool("spec_draft_cpu_moe"))
-        self.launcher.spec_draft_n_cpu_moe.set(_spec_str("spec_draft_n_cpu_moe"))
-        self.launcher.spec_ngram_simple_size_n.set(_spec_str("spec_ngram_simple_size_n"))
-        self.launcher.spec_ngram_simple_size_m.set(_spec_str("spec_ngram_simple_size_m"))
-        self.launcher.spec_ngram_simple_min_hits.set(_spec_str("spec_ngram_simple_min_hits"))
-        self.launcher.spec_ngram_mapk_size_n.set(_spec_str("spec_ngram_mapk_size_n"))
-        self.launcher.spec_ngram_mapk_size_m.set(_spec_str("spec_ngram_mapk_size_m"))
-        self.launcher.spec_ngram_mapk_min_hits.set(_spec_str("spec_ngram_mapk_min_hits"))
-        self.launcher.spec_ngram_mapk4v_size_n.set(_spec_str("spec_ngram_mapk4v_size_n"))
-        self.launcher.spec_ngram_mapk4v_size_m.set(_spec_str("spec_ngram_mapk4v_size_m"))
-        self.launcher.spec_ngram_mapk4v_min_hits.set(_spec_str("spec_ngram_mapk4v_min_hits"))
-        self.launcher.spec_ngram_mod_n_min.set(_spec_str("spec_ngram_mod_n_min"))
-        self.launcher.spec_ngram_mod_n_max.set(_spec_str("spec_ngram_mod_n_max"))
-        self.launcher.spec_ngram_mod_n_match.set(_spec_str("spec_ngram_mod_n_match"))
-        self.launcher.spec_ngram_size_n.set(_spec_str("spec_ngram_size_n"))
-        self.launcher.spec_ngram_size_m.set(_spec_str("spec_ngram_size_m"))
-        self.launcher.spec_ngram_min_hits.set(_spec_str("spec_ngram_min_hits"))
-        self.launcher.spec_suffix_pattern_len.set(_spec_str("spec_suffix_pattern_len"))
-        self.launcher.spec_suffix_max_depth.set(_spec_str("spec_suffix_max_depth"))
-        self.launcher.spec_autotune.set(_spec_bool("spec_autotune"))
-        self.launcher.spec_draft_params.set(_spec_str("spec_draft_params"))
-        self.launcher.no_mmproj.set(_spec_bool("no_mmproj"))
-        # --- Reasoning / Thinking (both backends) ---
-        self.launcher.reasoning_mode.set(_spec_str("reasoning_mode"))
-        self.launcher.reasoning_format.set(_spec_str("reasoning_format"))
-        self.launcher.reasoning_budget.set(_spec_str("reasoning_budget"))
-        self.launcher.reasoning_budget_message.set(_spec_str("reasoning_budget_message"))
-        self.launcher.chat_template_kwargs.set(_spec_str("chat_template_kwargs"))
-        # --- KV Unification (llama.cpp only) ---
-        self.launcher.kv_unified_mode.set(_spec_str("kv_unified_mode"))
-        self.launcher.cache_idle_slots_mode.set(_spec_str("cache_idle_slots_mode"))
+        # --- MTP / Speculative Decoding + Reasoning + KV Unification ---
+        # All set() calls live in modules/spec_persistence.load_spec_from_cfg.
+        load_spec_from_cfg(self.launcher, cfg)
         # --- Fit Parameters ---
         self.launcher.fit_enabled.set(cfg.get("fit_enabled", True))  # Default: True (on)
         self.launcher.fit_ctx_synced = cfg.get("fit_ctx_synced", True)  # Default: synced
@@ -559,22 +482,9 @@ class ConfigManager:
             self.launcher.app_settings.get("spec_draft_selected_gpus", []),
         )
         # Coerce defensively — same shape as the load_saved_configs validation.
-        if not isinstance(loaded_draft_gpus, list):
-            loaded_draft_gpus = []
-        else:
-            cleaned = []
-            for entry in loaded_draft_gpus:
-                if isinstance(entry, bool):
-                    continue
-                if isinstance(entry, int):
-                    cleaned.append(entry)
-                else:
-                    try:
-                        cleaned.append(int(entry))
-                    except (TypeError, ValueError):
-                        continue
-            loaded_draft_gpus = cleaned
-        self.launcher.app_settings["spec_draft_selected_gpus"] = loaded_draft_gpus
+        self.launcher.app_settings["spec_draft_selected_gpus"] = (
+            coerce_spec_draft_selected_gpus(loaded_draft_gpus)
+        )
 
         self.launcher._update_gpu_checkboxes() # This will set the checkboxes according to self.launcher.app_settings["selected_gpus"]
         # _update_gpu_checkboxes also triggers _update_recommendations and updates the GPU order listbox
@@ -984,23 +894,11 @@ class ConfigManager:
             # Validate spec_draft_selected_gpus: must be a list of ints; coerce
             # anything else to [] so legacy/garbage configs can't corrupt the
             # checkbox grid.
-            raw_spec_gpus = self.launcher.app_settings.get("spec_draft_selected_gpus", [])
-            if not isinstance(raw_spec_gpus, list):
-                self.launcher.app_settings["spec_draft_selected_gpus"] = []
-            else:
-                cleaned = []
-                for entry in raw_spec_gpus:
-                    if isinstance(entry, bool):
-                        # bool is a subclass of int but doesn't make sense as a GPU id
-                        continue
-                    if isinstance(entry, int):
-                        cleaned.append(entry)
-                    else:
-                        try:
-                            cleaned.append(int(entry))
-                        except (TypeError, ValueError):
-                            continue
-                self.launcher.app_settings["spec_draft_selected_gpus"] = cleaned
+            self.launcher.app_settings["spec_draft_selected_gpus"] = (
+                coerce_spec_draft_selected_gpus(
+                    self.launcher.app_settings.get("spec_draft_selected_gpus", [])
+                )
+            )
             # Ensure custom_parameters is a list
             if not isinstance(self.launcher.app_settings.get("custom_parameters"), list):
                  self.launcher.app_settings["custom_parameters"] = []
@@ -1028,40 +926,9 @@ class ConfigManager:
             self.launcher.app_settings.pop("ui_scaling", None)
 
             # Validate MTP / Speculative Decoding entries so legacy/missing
-            # entries don't break later set() calls (strings stay strings;
-            # booleans stay booleans; everything else falls back to a default).
-            _spec_bool_keys = (
-                "spec_enabled", "spec_draft_cpu_moe", "spec_autotune", "no_mmproj",
-            )
-            _spec_str_keys = (
-                "spec_type",
-                "spec_draft_n_max", "spec_draft_n_min", "spec_draft_p_min", "spec_draft_p_split",
-                "spec_draft_model", "spec_draft_ngl", "spec_draft_device",
-                "spec_draft_ctk", "spec_draft_ctv", "spec_draft_n_cpu_moe",
-                "spec_ngram_simple_size_n", "spec_ngram_simple_size_m", "spec_ngram_simple_min_hits",
-                "spec_ngram_mapk_size_n", "spec_ngram_mapk_size_m", "spec_ngram_mapk_min_hits",
-                "spec_ngram_mapk4v_size_n", "spec_ngram_mapk4v_size_m", "spec_ngram_mapk4v_min_hits",
-                "spec_ngram_mod_n_min", "spec_ngram_mod_n_max", "spec_ngram_mod_n_match",
-                "spec_ngram_size_n", "spec_ngram_size_m", "spec_ngram_min_hits",
-                "spec_suffix_pattern_len", "spec_suffix_max_depth",
-                "spec_draft_params",
-                # Reasoning / Thinking + KV Unification keys. All start as "" so
-                # the corresponding flags are omitted by default.
-                "reasoning_mode", "reasoning_format", "reasoning_budget",
-                "reasoning_budget_message", "chat_template_kwargs",
-                "kv_unified_mode", "cache_idle_slots_mode",
-            )
-            for k in _spec_bool_keys:
-                v = self.launcher.app_settings.get(k, False)
-                if not isinstance(v, bool):
-                    self.launcher.app_settings[k] = (str(v).lower() in ("1", "true", "yes"))
-            for k in _spec_str_keys:
-                v = self.launcher.app_settings.get(k, "")
-                if not isinstance(v, str):
-                    self.launcher.app_settings[k] = "" if v is None else str(v)
-            # spec_type defaults to "none" so we never emit a flag with an unknown empty value.
-            if not self.launcher.app_settings.get("spec_type"):
-                self.launcher.app_settings["spec_type"] = "none"
+            # entries don't break later set() calls. Mutates app_settings
+            # in place; see modules/spec_persistence.validate_spec_app_settings.
+            validate_spec_app_settings(self.launcher.app_settings)
 
             # Filter selected_gpus to only include indices of currently detected GPUs
             valid_gpu_indices = {gpu['id'] for gpu in self.launcher.detected_gpu_devices}
@@ -1181,57 +1048,8 @@ class ConfigManager:
 
         # Mirror MTP / Speculative Decoding settings into app_settings so they
         # round-trip independently of named-config save/load (matches the
-        # selected_mmproj_path pattern).
-        spec_app_keys = [
-            ("spec_enabled", self.launcher.spec_enabled),
-            ("spec_type", self.launcher.spec_type),
-            ("spec_draft_n_max", self.launcher.spec_draft_n_max),
-            ("spec_draft_n_min", self.launcher.spec_draft_n_min),
-            ("spec_draft_p_min", self.launcher.spec_draft_p_min),
-            ("spec_draft_p_split", self.launcher.spec_draft_p_split),
-            ("spec_draft_model", self.launcher.spec_draft_model),
-            ("spec_draft_ngl", self.launcher.spec_draft_ngl),
-            ("spec_draft_device", self.launcher.spec_draft_device),
-            ("spec_draft_ctk", self.launcher.spec_draft_ctk),
-            ("spec_draft_ctv", self.launcher.spec_draft_ctv),
-            ("spec_draft_cpu_moe", self.launcher.spec_draft_cpu_moe),
-            ("spec_draft_n_cpu_moe", self.launcher.spec_draft_n_cpu_moe),
-            ("spec_ngram_simple_size_n", self.launcher.spec_ngram_simple_size_n),
-            ("spec_ngram_simple_size_m", self.launcher.spec_ngram_simple_size_m),
-            ("spec_ngram_simple_min_hits", self.launcher.spec_ngram_simple_min_hits),
-            ("spec_ngram_mapk_size_n", self.launcher.spec_ngram_mapk_size_n),
-            ("spec_ngram_mapk_size_m", self.launcher.spec_ngram_mapk_size_m),
-            ("spec_ngram_mapk_min_hits", self.launcher.spec_ngram_mapk_min_hits),
-            ("spec_ngram_mapk4v_size_n", self.launcher.spec_ngram_mapk4v_size_n),
-            ("spec_ngram_mapk4v_size_m", self.launcher.spec_ngram_mapk4v_size_m),
-            ("spec_ngram_mapk4v_min_hits", self.launcher.spec_ngram_mapk4v_min_hits),
-            ("spec_ngram_mod_n_min", self.launcher.spec_ngram_mod_n_min),
-            ("spec_ngram_mod_n_max", self.launcher.spec_ngram_mod_n_max),
-            ("spec_ngram_mod_n_match", self.launcher.spec_ngram_mod_n_match),
-            ("spec_ngram_size_n", self.launcher.spec_ngram_size_n),
-            ("spec_ngram_size_m", self.launcher.spec_ngram_size_m),
-            ("spec_ngram_min_hits", self.launcher.spec_ngram_min_hits),
-            ("spec_suffix_pattern_len", self.launcher.spec_suffix_pattern_len),
-            ("spec_suffix_max_depth", self.launcher.spec_suffix_max_depth),
-            ("spec_autotune", self.launcher.spec_autotune),
-            ("spec_draft_params", self.launcher.spec_draft_params),
-            ("no_mmproj", self.launcher.no_mmproj),
-            # Reasoning / Thinking (both backends).
-            ("reasoning_mode", self.launcher.reasoning_mode),
-            ("reasoning_format", self.launcher.reasoning_format),
-            ("reasoning_budget", self.launcher.reasoning_budget),
-            ("reasoning_budget_message", self.launcher.reasoning_budget_message),
-            ("chat_template_kwargs", self.launcher.chat_template_kwargs),
-            # KV Unification (llama.cpp only).
-            ("kv_unified_mode", self.launcher.kv_unified_mode),
-            ("cache_idle_slots_mode", self.launcher.cache_idle_slots_mode),
-        ]
-        for key, var in spec_app_keys:
-            try:
-                self.launcher.app_settings[key] = var.get()
-            except Exception:
-                # Defensive: never let a UI sync wedge config save.
-                pass
+        # selected_mmproj_path pattern). See modules/spec_persistence.py.
+        sync_spec_to_app_settings(self.launcher)
 
         # Save ik_llama settings to app_settings
         ik_llama_settings = self.launcher.ik_llama_tab.save_to_config()

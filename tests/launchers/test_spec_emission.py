@@ -1489,7 +1489,7 @@ class TestSpecDefaultsPrefill:
         spec_type would otherwise trigger defaults."""
         spec_defaults_stub.spec_enabled.set(False)
         spec_defaults_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == ""
         assert spec_defaults_stub.spec_draft_n_min.get() == ""
         assert spec_defaults_stub.spec_draft_p_min.get() == ""
@@ -1500,7 +1500,7 @@ class TestSpecDefaultsPrefill:
         n_min=0 means 'always speculate'."""
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == "3"
         assert spec_defaults_stub.spec_draft_n_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
@@ -1511,7 +1511,7 @@ class TestSpecDefaultsPrefill:
         is still set even though ik_llama skips it at emission (warns)."""
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("mtp")
-        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == "3"
         assert spec_defaults_stub.spec_draft_n_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
@@ -1521,7 +1521,7 @@ class TestSpecDefaultsPrefill:
         """draft-simple / draft-eagle3 use the binary default of n_max=16."""
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("draft-simple")
-        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == "16"
         assert spec_defaults_stub.spec_draft_n_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
@@ -1532,7 +1532,7 @@ class TestSpecDefaultsPrefill:
         autofilled (would clutter the UI for users picking ngram)."""
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("ngram-simple")
-        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         assert spec_defaults_stub.spec_draft_n_max.get() == ""
         assert spec_defaults_stub.spec_draft_n_min.get() == ""
         assert spec_defaults_stub.spec_draft_p_min.get() == ""
@@ -1545,7 +1545,7 @@ class TestSpecDefaultsPrefill:
         spec_defaults_stub.spec_type.set("draft-mtp")
         spec_defaults_stub.spec_draft_n_max.set("5")
         spec_defaults_stub.spec_draft_n_min.set("2")
-        entry_module.LlamaCppLauncher._apply_spec_defaults_if_blank(spec_defaults_stub)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         # User's typed values stay; the other two get default-filled because they're blank.
         assert spec_defaults_stub.spec_draft_n_max.get() == "5"
         assert spec_defaults_stub.spec_draft_n_min.get() == "2"
@@ -1606,7 +1606,7 @@ class TestSetSpecDraftGpuLayers:
         expected_int,
     ):
         draft_layers_stub.max_spec_draft_gpu_layers.set(max_layers)
-        entry_module.LlamaCppLauncher._set_spec_draft_gpu_layers(
+        entry_module.SpecTab._set_spec_draft_gpu_layers(
             draft_layers_stub, input_value, from_slider=from_slider
         )
         assert draft_layers_stub.spec_draft_ngl_int.get() == expected_int
@@ -1617,13 +1617,13 @@ class TestValidateSpecDraftGpuLayersEntry:
 
     @pytest.mark.parametrize("value", ["", "-", "0", "1", "100", "-1", "999"])
     def test_accepts_valid(self, draft_layers_stub, entry_module, value):
-        assert entry_module.LlamaCppLauncher._validate_spec_draft_gpu_layers_entry(
+        assert entry_module.SpecTab._validate_spec_draft_gpu_layers_entry(
             draft_layers_stub, value
         ) is True
 
     @pytest.mark.parametrize("value", ["abc", "1.5", "-2", "1e3", "0x10", "--1"])
     def test_rejects_invalid(self, draft_layers_stub, entry_module, value):
-        assert entry_module.LlamaCppLauncher._validate_spec_draft_gpu_layers_entry(
+        assert entry_module.SpecTab._validate_spec_draft_gpu_layers_entry(
             draft_layers_stub, value
         ) is False
 
@@ -1656,13 +1656,13 @@ class TestMtpParallelDefault:
     def test_draft_mtp_forces_parallel_to_1(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("8")
         mtp_parallel_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "1"
 
     def test_ik_llama_mtp_forces_parallel_to_1(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("4")
         mtp_parallel_stub.spec_type.set("mtp")
-        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "1"
 
     def test_overwrites_even_if_user_typed_value(self, mtp_parallel_stub, entry_module):
@@ -1670,13 +1670,13 @@ class TestMtpParallelDefault:
         OVERWRITTEN, not preserved."""
         mtp_parallel_stub.parallel.set("16")
         mtp_parallel_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "1"
 
     def test_non_mtp_spec_type_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("8")
         mtp_parallel_stub.spec_type.set("ngram-simple")
-        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "8"
 
     def test_spec_disabled_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
@@ -1685,13 +1685,13 @@ class TestMtpParallelDefault:
         mtp_parallel_stub.spec_enabled.set(False)
         mtp_parallel_stub.parallel.set("8")
         mtp_parallel_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "8"
 
     def test_already_1_is_idempotent(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("1")
         mtp_parallel_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._apply_mtp_parallel_default(mtp_parallel_stub)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "1"
 
 
@@ -1801,7 +1801,7 @@ class TestResetSpecDefaults:
         reset_stub.spec_draft_p_min.set("0.01")
         reset_stub.spec_draft_p_split.set("0.99")
         reset_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
         assert reset_stub.spec_draft_n_max.get() == "3"
         assert reset_stub.spec_draft_n_min.get() == "0"
         assert reset_stub.spec_draft_p_min.get() == "0.75"
@@ -1810,7 +1810,7 @@ class TestResetSpecDefaults:
     def test_mtp_ik_llama_overwrites_to_mtp_defaults(self, reset_stub, entry_module):
         reset_stub.spec_draft_n_max.set("999")
         reset_stub.spec_type.set("mtp")
-        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
         assert reset_stub.spec_draft_n_max.get() == "3"
         assert reset_stub.spec_draft_n_min.get() == "0"
         assert reset_stub.spec_draft_p_min.get() == "0.75"
@@ -1820,7 +1820,7 @@ class TestResetSpecDefaults:
     def test_classical_draft_overwrites_to_n_max_16(self, reset_stub, entry_module, draft_type):
         reset_stub.spec_draft_n_max.set("999")
         reset_stub.spec_type.set(draft_type)
-        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
         assert reset_stub.spec_draft_n_max.get() == "16"
         assert reset_stub.spec_draft_n_min.get() == "0"
         assert reset_stub.spec_draft_p_min.get() == "0.75"
@@ -1840,7 +1840,7 @@ class TestResetSpecDefaults:
         reset_stub.spec_draft_p_min.set("0.01")
         reset_stub.spec_draft_p_split.set("0.99")
         reset_stub.spec_type.set(spec_type)
-        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
         assert reset_stub.spec_draft_n_max.get() == ""
         assert reset_stub.spec_draft_n_min.get() == ""
         assert reset_stub.spec_draft_p_min.get() == ""
@@ -1849,10 +1849,10 @@ class TestResetSpecDefaults:
     def test_reset_is_idempotent(self, reset_stub, entry_module):
         """Calling reset twice produces the same result as calling it once."""
         reset_stub.spec_type.set("draft-mtp")
-        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
         first = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
                  reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
-        entry_module.LlamaCppLauncher._reset_spec_defaults(reset_stub)
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
         second = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
                   reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
         assert first == second

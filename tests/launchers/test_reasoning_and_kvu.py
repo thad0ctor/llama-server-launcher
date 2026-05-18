@@ -533,14 +533,14 @@ class TestRefreshSpecTabStatePreservesSpecType:
         changes (no flags emit while ik_llama is active)."""
         spec_tab_stub.spec_type.set("draft-mtp")
         spec_tab_stub.backend_selection.set("ik_llama")
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "draft-mtp"
 
     def test_mtp_under_llama_cpp_preserves_value(self, spec_tab_stub, entry_module):
         """And the inverse: ik_llama 'mtp' survives a flip to llama.cpp."""
         spec_tab_stub.spec_type.set("mtp")
         spec_tab_stub.backend_selection.set("llama.cpp")
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "mtp"
 
     def test_round_trip_backend_flip_keeps_value(self, spec_tab_stub, entry_module):
@@ -548,15 +548,15 @@ class TestRefreshSpecTabStatePreservesSpecType:
         The stored draft-mtp value should still be there at the end."""
         spec_tab_stub.spec_type.set("draft-mtp")
         # llama.cpp active — value is valid here
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "draft-mtp"
         # Flip to ik_llama — value invalid for this backend
         spec_tab_stub.backend_selection.set("ik_llama")
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "draft-mtp"
         # Flip back to llama.cpp — value still there
         spec_tab_stub.backend_selection.set("llama.cpp")
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "draft-mtp"
 
     def test_status_label_explains_inactive_state(self, spec_tab_stub, entry_module):
@@ -564,7 +564,7 @@ class TestRefreshSpecTabStatePreservesSpecType:
         user the stored value isn't valid on this backend but is preserved."""
         spec_tab_stub.spec_type.set("draft-mtp")
         spec_tab_stub.backend_selection.set("ik_llama")
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         status = spec_tab_stub.spec_status_var.get().lower()
         assert "draft-mtp" in status
         assert "ik_llama" in status or "not valid" in status or "inactive" in status
@@ -574,6 +574,6 @@ class TestRefreshSpecTabStatePreservesSpecType:
         the status label reports 'Active'."""
         spec_tab_stub.spec_type.set("draft-mtp")
         spec_tab_stub.backend_selection.set("llama.cpp")
-        entry_module.LlamaCppLauncher._refresh_spec_tab_state(spec_tab_stub)
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "draft-mtp"
         assert "active" in spec_tab_stub.spec_status_var.get().lower()
