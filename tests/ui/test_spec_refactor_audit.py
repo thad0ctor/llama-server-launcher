@@ -1,8 +1,10 @@
 """Adversarial audit of the MTP / Spec modularization refactor.
 
 This test file does NOT replicate the comprehensive coverage already in
-``tests/ui/test_spec_tab_behavior.py`` and the launcher suites. Instead it
-directly exercises the five contracts the refactor claims to preserve:
+the launcher suites (``tests/launchers/test_reasoning_and_kvu.py``,
+``tests/launchers/test_spec_emission.py``,
+``tests/launchers/test_full_roundtrip.py``). Instead it directly exercises
+the five contracts the refactor claims to preserve:
 
 1. **Re-export contract integrity** — every spec Tk var the launcher
    exposes must be the same Python object as the one on
@@ -49,7 +51,7 @@ ENTRY_PATH = REPO_ROOT / "llamacpp-server-launcher.py"
 
 
 # ---------------------------------------------------------------------------
-# Module / launcher helpers (mirror tests/ui/test_spec_tab_behavior.py)
+# Module / launcher helpers
 # ---------------------------------------------------------------------------
 
 
@@ -629,8 +631,8 @@ class TestLoadOrderResync:
 
 
 class TestExtraAdversarialConfigs:
-    """Scenarios not already covered by tests/ui/test_spec_tab_behavior.py
-    TestAdversarialConfigs."""
+    """Scenarios not already covered by
+    ``tests/launchers/test_full_roundtrip.py::TestAdversarialLoadCoercion``."""
 
     @staticmethod
     def _write(cfg_path, app_settings):

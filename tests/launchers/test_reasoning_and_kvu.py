@@ -577,3 +577,320 @@ class TestRefreshSpecTabStatePreservesSpecType:
         entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
         assert spec_tab_stub.spec_type.get() == "draft-mtp"
         assert "active" in spec_tab_stub.spec_status_var.get().lower()
+
+
+# ============================================================================
+# Backend-switch contract: combobox values track the active backend.
+# Ported from the deleted tests/ui/test_spec_tab_behavior.py::TestBackendSwitch.
+# ============================================================================
+
+
+class TestRefreshSpecTabStateCombobox:
+    """The ``type_combo`` widget values must mirror the per-backend whitelist
+    after _refresh_spec_tab_state runs. Locks the contract that draft-mtp is
+    visible only under llama.cpp and mtp/suffix only under ik_llama."""
+
+    def test_combobox_values_track_llama_cpp_backend(
+        self, spec_tab_stub, entry_module
+    ):
+        """llama.cpp: draft-mtp present, mtp absent."""
+        # Plant a fake combo into _spec_widgets so the refresh method
+        # writes the per-backend whitelist into it.
+        fake_combo = MagicMock()
+        # Mimic mapping-style ``combo["values"] = (...)`` assignment.
+        fake_combo._values = None
+
+        def _setitem(key, value):
+            if key == "values":
+                fake_combo._values = list(value)
+
+        fake_combo.__setitem__ = MagicMock(side_effect=_setitem)
+        # Also make it readable like a real ttk.Combobox (not strictly needed).
+        spec_tab_stub._spec_widgets["type_combo"] = fake_combo
+
+        spec_tab_stub.backend_selection.set("llama.cpp")
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
+        values = fake_combo._values
+        assert values is not None, "combobox values were not assigned"
+        assert "draft-mtp" in values
+        assert "mtp" not in values
+
+    def test_combobox_values_track_ik_llama_backend(
+        self, spec_tab_stub, entry_module
+    ):
+        """ik_llama: mtp + suffix present, draft-mtp absent."""
+        fake_combo = MagicMock()
+        fake_combo._values = None
+
+        def _setitem(key, value):
+            if key == "values":
+                fake_combo._values = list(value)
+
+        fake_combo.__setitem__ = MagicMock(side_effect=_setitem)
+        spec_tab_stub._spec_widgets["type_combo"] = fake_combo
+
+        spec_tab_stub.backend_selection.set("ik_llama")
+        entry_module.SpecTab._refresh_spec_tab_state(spec_tab_stub)
+        values = fake_combo._values
+        assert values is not None
+        assert "mtp" in values
+        assert "suffix" in values
+        assert "draft-mtp" not in values
+
+
+# ============================================================================
+# ik_llama disables both kv-unified combos. Ported from
+# tests/ui/test_spec_tab_behavior.py::TestKvUnifiedGating.
+# ============================================================================
+
+
+class TestRefreshKvUnifyStateBackendGating:
+    """``_refresh_kv_unify_state`` must disable BOTH the kv_unified and
+    cache_idle_slots combos under ik_llama (ik_llama doesn't accept either
+    flag) and leave them enabled under llama.cpp (kvu always; cis only when
+    kvu=on)."""
+
+    def test_ik_llama_disables_both_combos(self, kvu_stub, entry_module):
+        kvu_stub.backend_selection.set("ik_llama")
+        entry_module.LlamaCppLauncher._refresh_kv_unify_state(kvu_stub)
+        # The method calls ``combo.config(state=tk.DISABLED)`` on both.
+        # We just inspect the MagicMock call list — no real Tk needed.
+        kvu_combo_calls = [
+            c for c in kvu_stub.kv_unified_mode_combo.config.call_args_list
+        ]
+        cis_combo_calls = [
+            c for c in kvu_stub.cache_idle_slots_mode_combo.config.call_args_list
+        ]
+        # Each combo should have been configured with state=DISABLED.
+        assert any(
+            ("state" in c.kwargs and c.kwargs["state"] == tk.DISABLED)
+            for c in kvu_combo_calls
+        ), f"kv_unified combo not disabled under ik_llama; calls={kvu_combo_calls}"
+        assert any(
+            ("state" in c.kwargs and c.kwargs["state"] == tk.DISABLED)
+            for c in cis_combo_calls
+        ), f"cache_idle_slots combo not disabled under ik_llama; calls={cis_combo_calls}"
+
+    def test_llama_cpp_with_kvu_on_enables_cis_combo(self, kvu_stub, entry_module):
+        """llama.cpp + kvu=on: cis combo enabled (readonly)."""
+        kvu_stub.backend_selection.set("llama.cpp")
+        kvu_stub.kv_unified_mode.set("on")
+        entry_module.LlamaCppLauncher._refresh_kv_unify_state(kvu_stub)
+        cis_combo_calls = [
+            c for c in kvu_stub.cache_idle_slots_mode_combo.config.call_args_list
+        ]
+        assert any(
+            ("state" in c.kwargs and c.kwargs["state"] == "readonly")
+            for c in cis_combo_calls
+        ), f"cis combo should be readonly when kvu=on; calls={cis_combo_calls}"
+
+    def test_llama_cpp_with_kvu_off_disables_cis_combo(self, kvu_stub, entry_module):
+        """llama.cpp + kvu=off: cis combo disabled (and stale value cleared
+        — separately covered by TestRefreshKvUnifyStateResetsStaleCacheIdleSlots)."""
+        kvu_stub.backend_selection.set("llama.cpp")
+        kvu_stub.kv_unified_mode.set("off")
+        entry_module.LlamaCppLauncher._refresh_kv_unify_state(kvu_stub)
+        cis_combo_calls = [
+            c for c in kvu_stub.cache_idle_slots_mode_combo.config.call_args_list
+        ]
+        assert any(
+            ("state" in c.kwargs and c.kwargs["state"] == tk.DISABLED)
+            for c in cis_combo_calls
+        ), f"cis combo should be disabled when kvu=off; calls={cis_combo_calls}"
+
+
+# ============================================================================
+# Reasoning-budget FocusOut normalization. Ported from
+# tests/ui/test_spec_tab_behavior.py::TestReasoningBudgetFocusOut.
+# The original test bound a real <FocusOut> event to a real Entry; the
+# normalization logic itself was refactored out of the inline lambda into
+# ``LlamaCppLauncher._normalize_reasoning_budget_on_focus_out`` so we can
+# call it directly with a SimpleNamespace stub here.
+# ============================================================================
+
+
+class TestNormalizeReasoningBudgetOnFocusOut:
+    """A bare ``-`` accepted by the keystroke validator must be normalized
+    back to ``""`` on focus-out — otherwise it persists into the config and
+    is silently dropped at emission with a stderr warning."""
+
+    @pytest.fixture()
+    def reasoning_stub(self, tk_root):
+        stub = SimpleNamespace()
+        stub.reasoning_budget = tk.StringVar(master=tk_root, value="")
+        return stub
+
+    def test_bare_minus_normalizes_to_empty(self, reasoning_stub, entry_module):
+        reasoning_stub.reasoning_budget.set("-")
+        entry_module.LlamaCppLauncher._normalize_reasoning_budget_on_focus_out(
+            reasoning_stub
+        )
+        assert reasoning_stub.reasoning_budget.get() == ""
+
+    def test_minus_with_whitespace_normalizes(self, reasoning_stub, entry_module):
+        """``  -  `` (whitespace around a lone dash) is also a degenerate case."""
+        reasoning_stub.reasoning_budget.set("  -  ")
+        entry_module.LlamaCppLauncher._normalize_reasoning_budget_on_focus_out(
+            reasoning_stub
+        )
+        assert reasoning_stub.reasoning_budget.get() == ""
+
+    def test_valid_negative_integer_preserved(self, reasoning_stub, entry_module):
+        """``-1`` (unlimited) is the legitimate use case — must NOT be wiped."""
+        reasoning_stub.reasoning_budget.set("-1")
+        entry_module.LlamaCppLauncher._normalize_reasoning_budget_on_focus_out(
+            reasoning_stub
+        )
+        assert reasoning_stub.reasoning_budget.get() == "-1"
+
+    def test_positive_integer_preserved(self, reasoning_stub, entry_module):
+        reasoning_stub.reasoning_budget.set("2048")
+        entry_module.LlamaCppLauncher._normalize_reasoning_budget_on_focus_out(
+            reasoning_stub
+        )
+        assert reasoning_stub.reasoning_budget.get() == "2048"
+
+    def test_blank_value_left_blank(self, reasoning_stub, entry_module):
+        """Sanity: ``""`` -> ``""`` (no spurious set call)."""
+        reasoning_stub.reasoning_budget.set("")
+        entry_module.LlamaCppLauncher._normalize_reasoning_budget_on_focus_out(
+            reasoning_stub
+        )
+        assert reasoning_stub.reasoning_budget.get() == ""
+
+
+# ============================================================================
+# Draft GPU checkbox count==0 selection-wipe regression. Ported from
+# tests/ui/test_spec_tab_behavior.py::TestDraftGpuSelectionWipeRegression.
+#
+# The bug: ``SpecTab._update_spec_draft_gpu_checkboxes`` used to unconditionally
+# overwrite ``app_settings["spec_draft_selected_gpus"]`` with the sanitized
+# list — but during early init the SystemInfoManager hasn't completed yet, so
+# ``gpu_info["device_count"]==0`` and the sanitized list is always ``[]``,
+# wiping the user's persisted selection.
+#
+# Fix: the mirror-back happens only when ``count > 0 and not manual_mode``,
+# so the count==0 path preserves whatever was loaded.
+# ============================================================================
+
+
+class _DraftGpuStub(SimpleNamespace):
+    """A SimpleNamespace shaped like ``SpecTab`` for the methods under test.
+
+    Drives ``_update_spec_draft_gpu_checkboxes`` directly without
+    instantiating the real Tk widget hierarchy.
+    """
+
+
+@pytest.fixture()
+def draft_gpu_stub(tk_root):
+    """Stub for ``SpecTab._update_spec_draft_gpu_checkboxes``.
+
+    Provides a fake checkbox-frame whose ``winfo_exists`` returns ``True``
+    (so the early-exit guard doesn't trigger) and ``winfo_children`` returns
+    an empty list (so the destroy-children loop runs against nothing). The
+    launcher reference carries the gpu_info / app_settings / detected_gpu_devices
+    state needed by the method.
+    """
+    stub = _DraftGpuStub()
+
+    # Fake the checkbox frame: winfo_exists True, no children to destroy.
+    fake_frame = MagicMock()
+    fake_frame.winfo_exists.return_value = True
+    fake_frame.winfo_children.return_value = []
+    stub.spec_draft_gpu_checkbox_frame = fake_frame
+
+    # Tk vars the method touches directly.
+    stub.spec_draft_device = tk.StringVar(master=tk_root, value="")
+    stub.spec_draft_gpu_vars = []
+
+    # Avoid the _refresh_spec_tab_state side-effect at the tail of the method.
+    stub._refresh_spec_tab_state = lambda: None
+
+    # The launcher sub-object the method reads.
+    launcher = SimpleNamespace()
+    launcher.gpu_info = {"available": False, "device_count": 0, "devices": []}
+    launcher.detected_gpu_devices = []
+    launcher.app_settings = {}
+    launcher.manual_gpu_mode = tk.BooleanVar(master=tk_root, value=False)
+    launcher._save_configs = lambda: None
+    stub.launcher = launcher
+    return stub
+
+
+class TestUpdateSpecDraftGpuCheckboxesPreservesSelection:
+    """Locks the count==0 initial-render bug: when the async SystemInfoManager
+    hasn't completed yet, ``_update_spec_draft_gpu_checkboxes`` must NOT
+    wipe ``app_settings["spec_draft_selected_gpus"]`` or ``spec_draft_device``."""
+
+    def test_count_zero_preserves_loaded_selection(self, draft_gpu_stub, entry_module):
+        """The exact regression: count==0, persisted selection survives."""
+        draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        entry_module.SpecTab._update_spec_draft_gpu_checkboxes(draft_gpu_stub)
+        assert draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] == [2, 5], (
+            f"selection wiped during count==0 init; got "
+            f"{draft_gpu_stub.launcher.app_settings['spec_draft_selected_gpus']!r}"
+        )
+
+    def test_count_zero_does_not_clobber_spec_draft_device(self, draft_gpu_stub, entry_module):
+        """A persisted free-text ``spec_draft_device`` value (e.g. ``Vulkan0``
+        for a non-CUDA backend) must also survive the count==0 init — the
+        old code wrote ``""`` back into the Tk var when count==0."""
+        draft_gpu_stub.spec_draft_device.set("Vulkan0")
+        entry_module.SpecTab._update_spec_draft_gpu_checkboxes(draft_gpu_stub)
+        assert draft_gpu_stub.spec_draft_device.get() == "Vulkan0"
+
+    def test_async_detection_sequence_preserves_then_validates(
+        self, draft_gpu_stub, entry_module
+    ):
+        """Stage 1 (count==0) preserves; stage 2 (count==N) sanitizes against
+        the now-known device list. Deferred sanitization, not eager wipe."""
+        # Stage 1: count==0, persisted selection.
+        draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        entry_module.SpecTab._update_spec_draft_gpu_checkboxes(draft_gpu_stub)
+        assert draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] == [2, 5]
+        # Stage 2: SystemInfoManager finished — 8 GPUs, all indices valid.
+        draft_gpu_stub.launcher.gpu_info = {
+            "available": True, "device_count": 8, "devices": [],
+        }
+        draft_gpu_stub.launcher.detected_gpu_devices = [
+            {"id": i, "name": f"GPU {i}"} for i in range(8)
+        ]
+        entry_module.SpecTab._update_spec_draft_gpu_checkboxes(draft_gpu_stub)
+        # 2 and 5 are valid indices on an 8-GPU host — still there.
+        assert draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] == [2, 5]
+        # spec_draft_device rebuilt to match.
+        assert draft_gpu_stub.spec_draft_device.get() == "CUDA2,CUDA5"
+
+    def test_count_zero_with_manual_mode_also_preserves(
+        self, draft_gpu_stub, entry_module
+    ):
+        """Manual GPU mode + count==0 is another path through the early
+        branch. The mirror-back guard ``count > 0 and not manual_mode``
+        must skip both."""
+        draft_gpu_stub.launcher.gpu_info = {
+            "available": True, "device_count": 0, "devices": [], "manual_mode": True,
+        }
+        draft_gpu_stub.launcher.manual_gpu_mode.set(True)
+        draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        entry_module.SpecTab._update_spec_draft_gpu_checkboxes(draft_gpu_stub)
+        assert draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] == [2, 5]
+
+    def test_post_detection_emits_comma_joined_device_string(
+        self, draft_gpu_stub, entry_module
+    ):
+        """Locks the legacy ``TestDraftGpuCheckboxes`` contract: after the
+        checkbox grid has been built against detected GPUs, toggling indices
+        produces ``CUDA<i>,CUDA<j>,...`` in ``spec_draft_device``."""
+        # Build the grid with 3 GPUs and a selection of [0, 2].
+        draft_gpu_stub.launcher.gpu_info = {
+            "available": True, "device_count": 3, "devices": [],
+        }
+        draft_gpu_stub.launcher.detected_gpu_devices = [
+            {"id": i, "name": f"GPU {i}"} for i in range(3)
+        ]
+        draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] = [0, 2]
+        entry_module.SpecTab._update_spec_draft_gpu_checkboxes(draft_gpu_stub)
+        assert draft_gpu_stub.spec_draft_device.get() == "CUDA0,CUDA2"
+        # And the persisted selection is mirrored back as well.
+        assert draft_gpu_stub.launcher.app_settings["spec_draft_selected_gpus"] == [0, 2]

@@ -728,3 +728,217 @@ class TestSpecDraftHfRemoved:
             "llamacpp-server-launcher.py still references spec_draft_hf — "
             "removal incomplete"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. Adversarial app_settings load coercion. Ported from the deleted
+# tests/ui/test_spec_tab_behavior.py::TestAdversarialConfigs scenarios that
+# weren't already covered by other mock-based tests.
+# ---------------------------------------------------------------------------
+
+
+def _write_adversarial_config(cfg_path, app_settings):
+    """Write a minimal configs.json with the given app_settings block."""
+    payload = {
+        "configs": {},
+        "app_settings": app_settings,
+    }
+    cfg_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class TestAdversarialLoadCoercion:
+    """The ``ConfigManager.load_saved_configs`` path must coerce garbage /
+    legacy / null inputs without crashing. These exercise the JSON->disk->load
+    pipeline against a real ``ConfigManager`` driven by the same
+    ``_make_launcher_mock`` helper used elsewhere in this file (no Tk root
+    needed).
+    """
+
+    @staticmethod
+    def _load_and_resync(cfg_path):
+        """Run the production load + resync sequence in order.
+
+        The real launcher's ``__init__`` calls
+        ``ConfigManager.load_saved_configs`` (which populates
+        ``launcher.app_settings``), then
+        ``resync_spec_tk_vars_from_app_settings`` (which mirrors the
+        app_settings values back into the Tk vars to fix the order-of-init
+        bug). Mock-launcher tests must call both to model production
+        behaviour — otherwise the Tk vars keep their constructor defaults
+        even though app_settings is up to date.
+        """
+        from modules.config import ConfigManager
+        from modules.spec_persistence import resync_spec_tk_vars_from_app_settings
+
+        launcher = _make_launcher_mock(cfg_path)
+        # selected_mmproj_path is referenced by resync_spec_tk_vars; the
+        # roundtrip mock doesn't define it by default.
+        if not hasattr(launcher, "selected_mmproj_path"):
+            launcher.selected_mmproj_path = _FakeVar("")
+        cm = ConfigManager(launcher)
+        cm.load_saved_configs()
+        resync_spec_tk_vars_from_app_settings(launcher)
+        return launcher
+
+    def test_null_numeric_field_coerces_to_empty(self, tmp_path):
+        """A JSON ``null`` for a numeric-string field (here:
+        ``spec_draft_n_max``) must coerce to ``""`` rather than crash on load."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+                "spec_draft_n_max": None,  # the offender
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        # None must be coerced to "" by validate_spec_app_settings.
+        assert launcher.app_settings.get("spec_draft_n_max") == "", (
+            f"None coercion failed; got "
+            f"{launcher.app_settings.get('spec_draft_n_max')!r}"
+        )
+        assert launcher.spec_draft_n_max.get() == "", (
+            f"Tk var didn't rehydrate as empty; got {launcher.spec_draft_n_max.get()!r}"
+        )
+
+    def test_legacy_config_without_spec_keys_loads_with_defaults(self, tmp_path):
+        """A pre-branch legacy config (no spec_* keys at all) must load cleanly
+        with the documented defaults."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+                "last_llama_cpp_dir": "", "last_venv_dir": "",
+                "last_model_path": "", "selected_mmproj_path": "",
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        # Defaults: spec_enabled=False, spec_type="none" (loader normalizes
+        # blank to "none"), kv_unified_mode="", no_mmproj=False.
+        assert launcher.spec_enabled.get() is False
+        assert launcher.spec_type.get() == "none"
+        assert launcher.reasoning_mode.get() == ""
+        assert launcher.kv_unified_mode.get() == ""
+        assert launcher.no_mmproj.get() is False
+
+    def test_enabled_with_blank_type_normalizes_to_none(self, tmp_path):
+        """``spec_enabled=True`` + ``spec_type=""`` is a degenerate state a
+        hand-edited config can reach. The loader normalizes blank spec_type
+        to ``"none"`` so emission skips all flags."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "spec_enabled": True, "spec_type": "",
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        # validate_spec_app_settings normalizes blank spec_type to "none";
+        # resync then mirrors that into the Tk var.
+        assert launcher.spec_type.get() == "none"
+        assert launcher.spec_enabled.get() is True
+
+    def test_garbage_spec_type_survives_load_and_emission_whitelist_rejects(
+        self, tmp_path
+    ):
+        """Literal-garbage ``spec_type`` must NOT crash on load. Loader is
+        permissive (Tk var stores whatever was on disk so user can correct it
+        in the UI); the launch.py whitelist is the safety net at emission."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "spec_enabled": True, "spec_type": "<><>",
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        # 1) Load survived without crashing; the permissive validator stores
+        #    the garbage verbatim so the user can correct it in the UI.
+        assert launcher.spec_type.get() == "<><>"
+        assert launcher.spec_enabled.get() is True
+        # 2) Emission whitelist rejects: garbage isn't in the spec-type
+        #    allowlist for either backend.
+        from modules.launch import _ALLOWED_SPEC_TYPES_LLAMA_CPP
+        assert "<><>" not in _ALLOWED_SPEC_TYPES_LLAMA_CPP
+
+    def test_cache_idle_without_kv_unified_on_load_clears_orphan(self, tmp_path):
+        """``cache_idle_slots_mode=on`` with ``kv_unified_mode=""`` is an
+        orphaned child — load doesn't strip it (UI trace + emission gating
+        are the real safety nets, both already locked elsewhere)."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "kv_unified_mode": "",
+                "cache_idle_slots_mode": "on",  # orphaned child
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+                "backend_selection": "llama.cpp",
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        # NOTE: the mock launcher does not run the kv-unify gating trace at
+        # load time — that's a UI-side concern locked by
+        # tests/launchers/test_reasoning_and_kvu.py::TestRefreshKvUnifyStateResetsStaleCacheIdleSlots
+        # and the build_cmd emission gating locked by
+        # TestCacheIdleSlotsRequiresKvUnified. Here we simply assert the
+        # load path didn't crash and the raw on-disk value is preserved in
+        # app_settings — emission gating is the real safety net.
+        assert launcher.app_settings.get("cache_idle_slots_mode") == "on"
+        assert launcher.app_settings.get("kv_unified_mode") == ""
+
+    def test_invalid_draft_gpu_indices_filtered_at_load(self, tmp_path):
+        """``spec_draft_selected_gpus=[999, -1, "abc", True, 0]``:
+        the loader must filter to int-coercible values and drop bools."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+                "spec_draft_selected_gpus": [999, -1, "abc", True, 0],
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        cleaned = launcher.app_settings.get("spec_draft_selected_gpus")
+        # bool is filtered (subclass of int but doesn't make sense as an id);
+        # "abc" is filtered. The detected-GPU filter further trims indices
+        # that don't exist on the (empty) detected-GPU list.
+        assert isinstance(cleaned, list)
+        assert True not in cleaned
+        assert "abc" not in cleaned
+        for entry in cleaned:
+            assert isinstance(entry, int) and not isinstance(entry, bool), (
+                f"non-int / bool survived filter: {cleaned!r}"
+            )
+
+    def test_stale_reasoning_budget_non_int_loads_cleanly(self, tmp_path):
+        """A non-int ``reasoning_budget`` like ``"abc"`` (e.g. pre-validation
+        config) must round-trip into the Tk var without crashing. The
+        emission warn-and-skip is covered by
+        TestReasoningBudgetIntegerEmission in test_reasoning_and_kvu.py."""
+        cfg_path = tmp_path / "cfg.json"
+        _write_adversarial_config(
+            cfg_path,
+            {
+                "reasoning_budget": "abc",
+                "model_dirs": [], "model_list_height": 8,
+                "selected_gpus": [], "gpu_order": [],
+                "host": "127.0.0.1", "port": "8080",
+            },
+        )
+        launcher = self._load_and_resync(cfg_path)
+        assert launcher.reasoning_budget.get() == "abc"

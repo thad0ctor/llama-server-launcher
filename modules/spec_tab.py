@@ -182,8 +182,8 @@ class SpecTab:
         # Tracked widgets are kept on self for _refresh_spec_tab_state() to
         # enable/disable and show/hide based on backend + spec_type + master
         # toggle. Mutate-in-place rather than reassigning so the launcher's
-        # ``__getattr__`` delegation always sees the live mapping (callers like
-        # tests/ui/test_spec_tab_behavior.py read these via ``launcher.<name>``).
+        # ``__getattr__`` delegation always sees the live mapping (callers
+        # read these via ``launcher.<name>``).
         self._spec_widgets.clear()
         # Sections we hide/show wholesale.
         self._spec_sections.clear()

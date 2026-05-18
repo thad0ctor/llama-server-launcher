@@ -129,8 +129,8 @@ class LlamaCppLauncher:
         # Widget refs + hint/status vars created lazily inside SpecTab.setup_tab.
         # The static re-export in __init__ runs BEFORE setup_tab so these would
         # be missing at construction time; delegating via __getattr__ lets
-        # external callers (tests/ui/test_spec_tab_behavior.py) read the live
-        # SpecTab attribute once setup_tab has populated it.
+        # external callers read the live SpecTab attribute once setup_tab has
+        # populated it.
         "spec_status_var",
         "spec_pmin_hint_var",
         "spec_psplit_hint_var",
@@ -1904,9 +1904,7 @@ class LlamaCppLauncher:
         # config and be silently dropped at emission.
         self.reasoning_budget_entry.bind(
             "<FocusOut>",
-            lambda _e: (self.reasoning_budget.set("")
-                        if self.reasoning_budget.get().strip() == "-"
-                        else None),
+            lambda _e: self._normalize_reasoning_budget_on_focus_out(),
         )
         ttk.Label(frame, text="Integer. -1 = unlimited (default), 0 = end immediately, N > 0 = token budget.", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r, sticky="w", padx=5, pady=3); r += 1
@@ -3828,6 +3826,20 @@ class LlamaCppLauncher:
             return True
         except ValueError:
             return False
+
+    def _normalize_reasoning_budget_on_focus_out(self):
+        """FocusOut handler for the reasoning_budget Entry.
+
+        The validator allows a bare ``-`` mid-typing (so users can type
+        ``-1``) but a lone ``-`` is not a valid integer and would otherwise
+        persist into the config and be silently dropped at emission. On
+        focus-out, normalize a bare ``-`` back to ``""``.
+        """
+        try:
+            if self.reasoning_budget.get().strip() == "-":
+                self.reasoning_budget.set("")
+        except Exception:
+            pass
 
     def _refresh_kv_unify_state(self, *args):
         """Enable/disable the kv-unified and cache-idle-slots combos.
