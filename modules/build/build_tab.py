@@ -282,11 +282,14 @@ class BuildTab:
                 # samefile can raise OSError on broken symlinks or stat errors
                 # (especially on Windows). Try the next install.
                 continue
-        # Fallback: derive root from the nvcc path.
+        # Fallback: derive root from the nvcc path. If resolution fails,
+        # clear the previous CUDA root rather than leaving a stale one —
+        # otherwise the build plan would pair the new CUDACXX with the
+        # last detected install's toolkit root.
         try:
             self.var_cuda_root.set(detection._root_from_nvcc(nvcc))
         except Exception:
-            pass
+            self.var_cuda_root.set("")
         self.var_cuda_pick.set(f"Custom · {nvcc}")
 
     @staticmethod
