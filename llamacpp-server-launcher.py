@@ -210,6 +210,24 @@ class LlamaCppLauncher:
         self.root.geometry("900x1000")
         self.root.minsize(800, 750)
 
+        # Worker-thread lifecycle flag: background detection / version-check
+        # threads consult this Event before touching any Tk API on
+        # ``self.root``. We clear it the instant the root is destroyed
+        # (via WM_DELETE_WINDOW protocol and a <Destroy> binding) so any
+        # late-completing worker becomes a no-op rather than racing into a
+        # dead Tcl interpreter and corrupting the next launcher's UI
+        # threading state. See ``_safe_after_destroy`` / ``_mark_tk_dead``.
+        import threading as _threading_local
+        self._tk_alive = _threading_local.Event()
+        self._tk_alive.set()
+        try:
+            # Tk fires <Destroy> on the root widget before tearing down its
+            # interpreter, so we get a deterministic moment to flip the flag
+            # even when callers bypass ``on_exit`` (e.g. test fixtures).
+            self.root.bind("<Destroy>", self._on_root_destroy_event, add="+")
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         # ------------------------------------------------ Internal Data Attributes --
         # Attributes that hold data not directly tied to Tk variables, often
         # populated during setup or used for internal logic.
@@ -3926,6 +3944,11 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     # Fixed structure: method definition is outside other methods
     def on_exit(self):
+        # Tell background workers to stop dispatching back to Tk *before*
+        # we begin destroying the root. ``_save_configs`` itself doesn't
+        # need the flag, but a worker that wakes up during the save+destroy
+        # window would otherwise race into a half-torn-down interpreter.
+        self._mark_tk_dead()
         try:
             self._save_configs()
         except Exception as e:
@@ -3979,7 +4002,17 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
 
     def _start_system_info_detection(self):
-        """Start system info detection in a background thread."""
+        """Start system info detection in a background thread.
+
+        Reads the venv path on the *main* thread before forking — touching
+        a ``tk.StringVar`` from a worker thread after the root has been
+        destroyed (e.g. during pytest teardown between UI cases) raises
+        ``RuntimeError: main thread is not in main loop`` and corrupts
+        Tcl's threading state on Python 3.13, which then deadlocks the
+        next ``ttk.Notebook.add()``. The worker only consumes the captured
+        string and dispatches Tk-mutating work back through ``.after(...)``
+        wrapped in ``_safe_after_destroy``.
+        """
         # Prevent multiple simultaneous detection threads
         if hasattr(self, '_detection_in_progress') and self._detection_in_progress:
             debug_print("GPU detection already in progress, skipping new request")
@@ -3987,16 +4020,29 @@ class LlamaCppLauncher:
 
         self._detection_in_progress = True
 
-        def detect_system_info():
+        # Pre-read all Tk vars the worker would otherwise touch — done here
+        # on the main thread so a late-completing worker can't reach back
+        # into a destroyed interpreter.
+        try:
+            captured_venv_path = self.venv_dir.get().strip() or None
+        except (tk.TclError, RuntimeError):
+            captured_venv_path = None
+
+        def detect_system_info(venv_path=captured_venv_path):
             """Background thread function to detect system info."""
             try:
                 print("DEBUG: Starting background system info detection...", file=sys.stderr)
-                # Perform the potentially slow system info detection
-                self.system_info_manager.fetch_system_info()
+                # ``defer_tk_writes=True`` keeps the worker from touching
+                # Tcl: it only populates plain-Python attributes. The
+                # completion callback (main thread) applies Tk vars
+                # afterwards via ``_apply_system_info_to_tk_vars``.
+                self.system_info_manager.fetch_system_info(
+                    venv_path=venv_path, defer_tk_writes=True
+                )
                 print("DEBUG: Background system info detection completed.", file=sys.stderr)
 
                 # Schedule UI update on main thread (flag will be cleared there)
-                self.root.after(0, self._on_system_info_detection_complete)
+                self._safe_after_destroy(0, self._on_system_info_detection_complete)
             except Exception as e:
                 print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
@@ -4005,7 +4051,7 @@ class LlamaCppLauncher:
                 # callback later on the main thread — so a naive ``lambda:
                 # ... error=str(e)`` raises NameError at callback time.
                 error_message = str(e)
-                self.root.after(
+                self._safe_after_destroy(
                     0,
                     lambda: self._on_system_info_detection_complete(error=error_message),
                 )
@@ -4014,11 +4060,68 @@ class LlamaCppLauncher:
         detection_thread = Thread(target=detect_system_info, daemon=True)
         detection_thread.start()
 
+    def _safe_after_destroy(self, delay, callback):
+        """``self.root.after(delay, callback)`` that swallows post-destroy
+        races. Background threads that complete after the launcher root
+        has been destroyed (common during test teardown) would otherwise
+        raise ``RuntimeError: main thread is not in main loop`` from deep
+        inside Tcl, and on Python 3.13 that error corrupts the global
+        interpreter state and deadlocks the next root's UI calls.
+
+        Uses a Python-level ``threading.Event`` flag (``_tk_alive``) so
+        the check itself never touches Tcl from the worker thread —
+        ``root.winfo_exists()`` would raise ``RuntimeError`` from a
+        non-main thread on Python 3.13 and the raise itself wedges the
+        global Tcl interpreter, blocking any subsequent ``ttk`` call on
+        the next root. The flag is cleared in ``_mark_tk_dead`` which
+        every teardown path (on_exit, root.destroy via Tk's WM_DELETE
+        protocol, test fixtures) must call.
+        """
+        if not getattr(self, "_tk_alive", None) or not self._tk_alive.is_set():
+            return
+        root = getattr(self, "root", None)
+        if root is None:
+            return
+        try:
+            root.after(delay, callback)
+        except (tk.TclError, RuntimeError):
+            # Final fence: even with the Python flag, the root could
+            # have been destroyed between the flag check and the call.
+            pass
+
+    def _mark_tk_dead(self):
+        """Clear the ``_tk_alive`` flag so worker threads stop dispatching
+        Tk callbacks. Idempotent; safe to call from any thread.
+        """
+        flag = getattr(self, "_tk_alive", None)
+        if flag is not None:
+            flag.clear()
+
+    def _on_root_destroy_event(self, event):
+        """``<Destroy>`` handler on ``self.root``. Tk fires this once per
+        widget under the root; we only care about the root itself, so we
+        compare ``event.widget`` to ``self.root``. Flipping the
+        ``_tk_alive`` flag here guarantees that workers see the dead-root
+        state even when teardown bypassed ``on_exit`` (test fixtures call
+        ``root.destroy()`` directly).
+        """
+        try:
+            if event.widget is self.root:
+                self._mark_tk_dead()
+        except Exception:
+            pass
+
     def _on_system_info_detection_complete(self, error=None):
         """Handle completion of system info detection (runs on main thread)."""
         try:
             # Clear detection flag (single point of clearing)
             self._detection_in_progress = False
+
+            # Apply the system-info Tk vars on the main thread — the worker
+            # populated plain-Python attributes only (defer_tk_writes=True),
+            # so we mirror them into Tk now that we're back on the GIL/Tcl
+            # main thread. Bail out if the root has been destroyed under us.
+            self._apply_system_info_to_tk_vars()
 
             if error:
                 self._handle_detection_error(error)
@@ -4035,6 +4138,38 @@ class LlamaCppLauncher:
         except Exception as e:
             print(f"ERROR: Failed to update UI after system info detection: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+
+    def _apply_system_info_to_tk_vars(self):
+        """Mirror the worker-populated system-info attributes into their
+        Tk var counterparts. Always called on the main thread by
+        ``_on_system_info_detection_complete``. Wrapped in try/except so
+        a destroyed-root race during teardown is a no-op.
+        """
+        if not self._tk_alive.is_set():
+            return
+        try:
+            physical = getattr(self, "physical_cores", 2)
+            logical = getattr(self, "logical_cores", 4)
+            gpu_msg = ""
+            if (not self.gpu_info.get("available")
+                    and self.gpu_info.get("message")):
+                gpu_msg = self.gpu_info["message"]
+            for var_name, value in (
+                ("threads", str(physical)),
+                ("threads_batch", str(logical)),
+                ("recommended_threads_var",
+                 f"Recommended: {physical} (Your CPU physical cores)"),
+                ("recommended_threads_batch_var",
+                 f"Recommended: {logical} (Your CPU logical cores)"),
+                ("gpu_detected_status_var", gpu_msg),
+            ):
+                try:
+                    getattr(self, var_name).set(value)
+                except (tk.TclError, RuntimeError):
+                    pass
+        except Exception as e:
+            print(f"WARN: _apply_system_info_to_tk_vars failed: {e}",
+                  file=sys.stderr)
 
     def _handle_detection_error(self, error):
         """Handle GPU detection error state."""

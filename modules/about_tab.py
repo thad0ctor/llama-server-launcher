@@ -208,7 +208,7 @@ rm -f {q_current_dir}/update_script.sh
 
 class AboutTab:
     """About tab for the llama-server-launcher application."""
-    
+
     def __init__(self):
         self.version = self._load_version()
         self.github_url = "https://github.com/thad0ctor/llama-server-launcher"
@@ -218,6 +218,34 @@ class AboutTab:
         self.remote_version = None
         self.version_label = None
         self.update_button = None
+        # Python-level flag the background version-check thread consults
+        # before touching any Tk widget. Cleared by ``_mark_dead`` (bound
+        # to the parent frame's ``<Destroy>`` event in ``setup_about_tab``)
+        # so a late-completing HTTP response can't race into a torn-down
+        # Tcl interpreter — which on Python 3.13 wedges all subsequent UI
+        # tests by corrupting the global Tk threading state.
+        self._alive = threading.Event()
+        self._alive.set()
+
+    def _mark_dead(self, _event=None):
+        """Tell the background thread to bail. Idempotent."""
+        try:
+            self._alive.clear()
+        except Exception:
+            pass
+
+    def _on_parent_destroy(self, event):
+        """``<Destroy>`` fires once per child widget under the parent;
+        only flip the flag when the parent frame itself is being torn
+        down so a routine intra-frame widget rebuild doesn't kill the
+        background thread."""
+        try:
+            # event.widget is a string path-name; compare via str() of the
+            # bound parent's _w attribute, which Tk uses internally.
+            if str(event.widget) == str(getattr(self, "_parent_path", None)):
+                self._mark_dead()
+        except Exception:
+            pass
         
     def _load_version(self):
         """Load version from the version file."""
@@ -261,13 +289,40 @@ class AboutTab:
         remote_tuple = self._parse_version(remote_version)
         return remote_tuple > current_tuple
     
+    def _widget_alive(self):
+        """Return True iff the About tab is still mounted.
+
+        Uses the Python-level ``_alive`` Event flag rather than
+        ``winfo_exists()`` — calling ``winfo_exists`` from a non-main
+        thread on Python 3.13 raises ``RuntimeError: main thread is not
+        in main loop`` and the raise itself wedges the global Tcl
+        interpreter, which deadlocks the next launcher's ``ttk.add()``
+        call. The flag is cleared from the main thread by
+        ``_on_parent_destroy``; the worker thread only ever reads it.
+        """
+        try:
+            return self._alive.is_set()
+        except Exception:
+            return False
+
     def _check_version_online(self):
-        """Check version against GitHub repository."""
+        """Check version against GitHub repository.
+
+        Runs in a daemon background thread. Every Tk-mutating helper is
+        guarded by ``_widget_alive()`` so the thread becomes a no-op once
+        the launcher root has been torn down — without that guard, a
+        late-arriving HTTP response would touch a destroyed Tk widget
+        and leak a ``RuntimeError: main thread is not in main loop``
+        into Tcl, which (Python 3.13) corrupts the next root's
+        interpreter and deadlocks subsequent UI tests.
+        """
         try:
             response = requests.get(self.github_version_url, timeout=10)
+            if not self._widget_alive():
+                return
             if response.status_code == 200:
                 self.remote_version = response.text.strip()
-                
+
                 if self._is_version_newer(self.version, self.remote_version):
                     self.version_status = "Update Available"
                     self._update_version_display()
@@ -280,21 +335,43 @@ class AboutTab:
                 self._update_version_display()
         except requests.RequestException as e:
             print(f"Error checking version: {e}", file=sys.stderr)
+            if not self._widget_alive():
+                return
             self.version_status = "Check Failed"
             self._update_version_display()
     
     def _update_version_display(self):
-        """Update the version display with status."""
-        if self.version_label:
-            version_text = f"Version: {self.version} ({self.version_status})"
-            if self.remote_version and self.version_status == "Update Available":
-                version_text += f" - Latest: {self.remote_version}"
+        """Update the version display with status.
+
+        Guards against the widget having been destroyed — the background
+        version-check thread may complete after the parent window has been
+        torn down (notably during pytest teardown between UI test cases).
+        Touching a destroyed widget from a background thread leaks a
+        ``RuntimeError: main thread is not in main loop`` into Tcl's
+        global state and on Python 3.13 corrupts the next Tk root's
+        threading view, causing later ``ttk.Notebook.add()`` calls to
+        deadlock. We check the Python-level ``_alive`` flag (set on the
+        main thread) instead of ``winfo_exists()`` so the worker thread
+        never reaches into Tcl at all when the parent is torn down.
+        """
+        if not self.version_label or not self._widget_alive():
+            return
+        version_text = f"Version: {self.version} ({self.version_status})"
+        if self.remote_version and self.version_status == "Update Available":
+            version_text += f" - Latest: {self.remote_version}"
+        try:
             self.version_label.config(text=version_text)
-    
+        except (tk.TclError, RuntimeError):
+            pass
+
     def _show_update_button(self):
         """Show the update button when an update is available."""
-        if self.update_button:
+        if not self.update_button or not self._widget_alive():
+            return
+        try:
             self.update_button.pack(pady=(10, 0))
+        except (tk.TclError, RuntimeError):
+            pass
     
     def _perform_update(self):
         """Perform the auto-update process."""
@@ -429,6 +506,18 @@ class AboutTab:
     
     def setup_about_tab(self, parent):
         """Set up the About tab UI."""
+        # Bind the parent's <Destroy> so background workers know to stop
+        # touching widgets before Tcl tears them down. Without this, the
+        # version-check thread can race into a destroyed widget and leak
+        # a ``RuntimeError`` that on Python 3.13 hangs the next launcher.
+        try:
+            # Capture the Tk widget path so we can disambiguate the
+            # parent's own <Destroy> from grandchild <Destroy> events that
+            # bubble up via add="+".
+            self._parent_path = str(parent)
+            parent.bind("<Destroy>", self._on_parent_destroy, add="+")
+        except Exception:  # pragma: no cover - defensive
+            pass
         # Create main frame with padding
         main_frame = ttk.Frame(parent, padding=20)
         main_frame.pack(fill="both", expand=True)

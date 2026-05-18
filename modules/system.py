@@ -879,20 +879,43 @@ class SystemInfoManager:
         """Initialize with reference to the main launcher instance."""
         self.launcher = launcher_instance
     
-    def fetch_system_info(self):
-        """Fetches GPU, RAM, and CPU info and populates class attributes."""
+    def fetch_system_info(self, venv_path=None, defer_tk_writes=False):
+        """Fetches GPU, RAM, and CPU info and populates class attributes.
+
+        ``venv_path`` is now an explicit parameter (read on the main
+        thread by ``_start_system_info_detection``) so this method never
+        reaches into ``self.launcher.venv_dir.get()`` from a worker
+        thread. Reading a ``tk.StringVar`` after the root has been
+        destroyed raises ``RuntimeError: main thread is not in main
+        loop`` and on Python 3.13 corrupts Tcl's threading state,
+        deadlocking the next launcher's ``ttk.Notebook.add()``.
+
+        When ``defer_tk_writes=True`` the method skips the Tk ``.set()``
+        calls entirely — the worker thread populates only plain-Python
+        attributes (``gpu_info``, ``logical_cores``, etc.) and the main
+        thread's completion callback (``_apply_system_info_to_tk_vars``)
+        is responsible for writing the Tk vars after a destroyed-root
+        guard. Bypassing the Tcl interpreter from the worker entirely
+        is the only reliable way to avoid the Python 3.13 deadlock —
+        even a guarded ``.set()`` acquires the Tcl mutex and competes
+        with the next root's UI calls.
+        """
         print("Fetching system info...", file=sys.stderr)
-        
-        # Get the configured virtual environment path from the launcher
-        venv_path = None
-        if hasattr(self.launcher, 'venv_dir'):
-            venv_path_str = self.launcher.venv_dir.get().strip()
+
+        # Back-compat: callers that omit ``venv_path`` get the old behaviour
+        # (read from the Tk var on the *main* thread). Worker threads should
+        # always pass an explicit string here.
+        if venv_path is None and hasattr(self.launcher, 'venv_dir'):
+            try:
+                venv_path_str = self.launcher.venv_dir.get().strip()
+            except Exception:
+                venv_path_str = ""
             if venv_path_str:
                 venv_path = venv_path_str
                 print(f"DEBUG: Using configured venv for GPU detection: {venv_path}", file=sys.stderr)
             else:
                 print("DEBUG: No venv configured, using current process for GPU detection", file=sys.stderr)
-        
+
         self.launcher.gpu_info = get_gpu_info_with_venv(venv_path)
         self.launcher.ram_info = get_ram_info_static()
         self.launcher.cpu_info = get_cpu_info_static() # Fetch CPU info here
@@ -917,13 +940,29 @@ class SystemInfoManager:
         self.launcher.logical_cores = self.launcher.cpu_info.get("logical_cores", 4)
         self.launcher.physical_cores = self.launcher.cpu_info.get("physical_cores", 2) # Use fallback 2 if psutil failed or physical count is 0
 
-        # Update initial default values for threads and threads_batch if they are still the initial fallback values
-        # This handles the case where system info is fetched successfully *after* the variables were initialized
-        # Also update the recommended variables immediately after fetching
-        self.launcher.threads.set(str(self.launcher.physical_cores))
-        self.launcher.threads_batch.set(str(self.launcher.logical_cores))
-        self.launcher.recommended_threads_var.set(f"Recommended: {self.launcher.physical_cores} (Your CPU physical cores)")
-        self.launcher.recommended_threads_batch_var.set(f"Recommended: {self.launcher.logical_cores} (Your CPU logical cores)")
+        if defer_tk_writes:
+            # Worker path: do NOT touch any Tk var here. The main-thread
+            # completion callback will read the populated attributes and
+            # apply them via ``_apply_system_info_to_tk_vars``.
+            return
 
-        # Display initial GPU detection status message
-        self.launcher.gpu_detected_status_var.set(self.launcher.gpu_info['message'] if not self.launcher.gpu_info['available'] and self.launcher.gpu_info.get('message') else "") 
+        # Main-thread fallback (back-compat for any synchronous caller).
+        # Update initial default values for threads and threads_batch.
+        physical = self.launcher.physical_cores
+        logical = self.launcher.logical_cores
+        gpu_msg = ""
+        if not self.launcher.gpu_info['available'] and self.launcher.gpu_info.get('message'):
+            gpu_msg = self.launcher.gpu_info['message']
+        for var_name, value in (
+            ("threads", str(physical)),
+            ("threads_batch", str(logical)),
+            ("recommended_threads_var",
+             f"Recommended: {physical} (Your CPU physical cores)"),
+            ("recommended_threads_batch_var",
+             f"Recommended: {logical} (Your CPU logical cores)"),
+            ("gpu_detected_status_var", gpu_msg),
+        ):
+            try:
+                getattr(self.launcher, var_name).set(value)
+            except Exception:  # noqa: BLE001 - includes tk.TclError, RuntimeError
+                pass
