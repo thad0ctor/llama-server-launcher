@@ -117,7 +117,9 @@ class BuildTab:
         # children, so we must NEVER call it synchronously from a widget's
         # command callback — that destroys the very widget mid-event and
         # Tk's event loop hangs. _rebuild_pending coalesces deferred rebuilds.
+        # _rebuild_full_pending elevates a pending light rebuild to a full one.
         self._rebuild_pending: bool = False
+        self._rebuild_full_pending: bool = False
         self._suspend_traces: bool = False
 
         # ── Tk variables (state survives widget rebuilds) ──
@@ -160,6 +162,12 @@ class BuildTab:
         self._flag_widgets: dict[str, tk.Widget] = {}
         self._group_frames: dict[str, ttk.LabelFrame] = {}
         self._values_snapshot: dict[str, Any] = {}
+        # The outer "CMake flags" LabelFrame. Kept stable across backend
+        # switches so we only have to rebuild its contents, not the whole
+        # tab (rebuilding the whole tab tears down ~349 widgets including
+        # the canvas/scrollable which can deadlock on pending Configure
+        # events).
+        self._flags_label_frame: ttk.LabelFrame | None = None
 
         # CUDA arch picker state: one BooleanVar per known CC, plus a guard
         # to suppress recursive sync between checkboxes and the text entry.
@@ -283,10 +291,17 @@ class BuildTab:
         user switches backend we keep their overlapping per-flag overrides
         and only fill in flags that didn't exist (or were unset) before.
         Call _on_apply_autodetect for a hard reset instead.
+
+        CUDA arch detection is cached for the tab's lifetime — torch.cuda
+        device properties don't change between backend swaps, and a repeated
+        call adds 100ms+ each time.
         """
-        cuda_infos = detection.detect_cuda_archs()
+        if not hasattr(self, "_cuda_arch_cache") or self._cuda_arch_cache is None:
+            self._cuda_arch_cache = detection.detect_cuda_archs()
+            self._cuda_arch_cache_avx512 = self._cpu_has_avx512()
+        cuda_infos = self._cuda_arch_cache
+        avx512 = self._cuda_arch_cache_avx512
         cuda_available = bool(cuda_infos) and self._toolchain.nvcc_path is not None
-        avx512 = self._cpu_has_avx512()
         defaults = cf.build_autodetect_values(
             self.var_backend.get(),
             cuda_available=cuda_available,
@@ -405,7 +420,15 @@ class BuildTab:
         # Now that widgets exist, push current state into them and refresh
         # config-name dropdown.
         self._refresh_saved_configs_dropdown()
-        self._sync_flag_widgets_from_values()
+        # Suspend per-flag traces while bulk-writing — otherwise each
+        # var.set() fires _on_flag_changed which itself does O(N) work
+        # (iterates every visible_when flag), producing O(N²) cost and
+        # a flood of redundant preview-refresh schedules.
+        self._suspend_traces = True
+        try:
+            self._sync_flag_widgets_from_values()
+        finally:
+            self._suspend_traces = False
         self._update_status_banner_visibility()
 
     # ── Header (title + detach + status) ─────────────────────────────────
@@ -638,10 +661,25 @@ class BuildTab:
 
     # ── Flags grouped into LabelFrames ──────────────────────────────────
     def _build_section_flags(self, parent: ttk.Frame, row: int) -> None:
+        # The outer LabelFrame is stable across backend switches; only its
+        # children change. _populate_flag_groups builds the per-backend
+        # group frames and widgets inside it.
         lf = ttk.LabelFrame(parent, text="CMake flags")
         lf.grid(row=row, column=0, sticky="ew", padx=8, pady=6)
         lf.columnconfigure(0, weight=1)
+        self._flags_label_frame = lf
+        self._populate_flag_groups()
 
+    def _populate_flag_groups(self) -> None:
+        """Build (or rebuild) the group frames inside ``self._flags_label_frame``
+        for the currently-selected backend. Cheap to call repeatedly — used
+        by backend switches to avoid rebuilding the whole tab."""
+        lf = self._flags_label_frame
+        if lf is None or not lf.winfo_exists():
+            return
+        # Clear out any existing per-backend group frames.
+        for child in lf.winfo_children():
+            child.destroy()
         self._flag_widgets = {}
         self._group_frames = {}
 
@@ -669,6 +707,39 @@ class BuildTab:
             self._group_frames[group_name] = grp
             for i, flag in enumerate(flags):
                 self._build_flag_widget(grp, flag, i)
+        # Apply visibility once at the end rather than per-widget — otherwise
+        # each visible_when flag triggers a full var-dict snapshot, producing
+        # O(N_visible × N) cost (≈2200 var.get() calls per rebuild). One
+        # snapshot here is O(N).
+        self._apply_all_flag_visibilities()
+
+    def _apply_all_flag_visibilities(self) -> None:
+        """Single-pass visibility refresh shared by all visible_when flags.
+        Computes the values dict once and reuses it for every predicate
+        evaluation."""
+        try:
+            values = self._current_flag_values_dict()
+        except Exception as exc:
+            print(f"WARN: could not build flag-values snapshot: {exc}",
+                  file=sys.stderr)
+            return
+        for flag in cf.FLAGS:
+            w = self._flag_widgets.get(flag.key)
+            if w is None:
+                continue
+            visible = True
+            if flag.visible_when:
+                try:
+                    visible = flag.visible_when(values)
+                except Exception as exc:
+                    print(f"WARN: visible_when predicate for {flag.key!r} raised: {exc}",
+                          file=sys.stderr)
+                    visible = True
+            try:
+                if w.winfo_exists():
+                    w.configure(state="normal" if visible else "disabled")
+            except Exception:
+                pass
 
     def _build_flag_widget(self, parent: ttk.LabelFrame, flag: cf.CMakeFlag, row: int) -> None:
         var = self._flag_vars[flag.key]
@@ -696,7 +767,8 @@ class BuildTab:
             help_lbl = ttk.Label(parent, text=hint, font=("TkSmallCaptionFont",))
             help_lbl.grid(row=row, column=2, sticky="w", padx=8, pady=2)
         self._flag_widgets[flag.key] = w
-        self._apply_flag_visibility(flag)
+        # Visibility is applied in a single pass at the end of
+        # _populate_flag_groups, not per-widget — see _apply_all_flag_visibilities.
 
     def _apply_flag_visibility(self, flag: cf.CMakeFlag) -> None:
         w = self._flag_widgets.get(flag.key)
@@ -808,30 +880,71 @@ class BuildTab:
             # ourselves — otherwise flag groups remain stuck on the old backend.
             self._schedule_rebuild()
 
-    def _schedule_rebuild(self) -> None:
-        """Coalesce rapid rebuild requests onto a single after_idle callback."""
+    def _schedule_rebuild(self, *, full: bool = False) -> None:
+        """Coalesce rapid rebuild requests onto a single after_idle callback.
+
+        ``full=True`` upgrades a pending light rebuild to a full one. A
+        previously-scheduled full rebuild stays full.
+        """
+        if full:
+            self._rebuild_full_pending = True
         if self._rebuild_pending:
             return
         self._rebuild_pending = True
-        self.root.after_idle(self._do_rebuild)
+        self.root.after_idle(self._dispatch_rebuild)
+
+    def _dispatch_rebuild(self) -> None:
+        do_full = getattr(self, "_rebuild_full_pending", False)
+        self._rebuild_full_pending = False
+        if do_full:
+            # _full_rebuild manages _rebuild_pending itself? No — set it here.
+            self._rebuild_pending = False
+            self._full_rebuild()
+        else:
+            self._do_rebuild()
 
     def _do_rebuild(self) -> None:
+        """Lightweight rebuild for backend switches. Only repaints the
+        flag-section LabelFrame contents (~100 widgets) rather than tearing
+        down the entire tab (~349 widgets). The static sections — source,
+        env/CUDA picker, preview, console, action bar — stay intact, which
+        also avoids destroying the canvas/scrollable Frame and the pending
+        Configure events that come with it.
+
+        For detach/reattach (which legitimately needs the whole UI built in
+        a new parent), use ``_full_rebuild()``.
+        """
         self._rebuild_pending = False
         try:
-            # Re-seed flag defaults for the (possibly new) backend. We suspend
-            # traces while bulk-writing flag vars so each individual write
-            # doesn't trigger an O(N) visibility refresh + preview reschedule.
             self._suspend_traces = True
             try:
                 self._apply_autodetect_defaults()
                 self._sync_flag_widgets_from_values()
             finally:
                 self._suspend_traces = False
-            # Source dir: re-suggest if current dir isn't a git repo for this backend.
             src = self.var_source_dir.get()
             if not os.path.isdir(src):
                 self.var_source_dir.set(self._initial_source_dir(self.var_backend.get()))
-            # Rebuild flag widgets into whichever container is currently mounted.
+            # Narrow rebuild: just the flag groups.
+            self._populate_flag_groups()
+            self._schedule_preview_refresh()
+            if self.var_auto_check_updates.get():
+                self.check_for_updates(do_fetch=False)
+        except Exception as exc:
+            print(f"WARN: Build tab rebuild failed: {exc}", file=sys.stderr)
+
+    def _full_rebuild(self) -> None:
+        """Heavyweight rebuild — recreates every widget in the tab. Used
+        only when the host frame changed (detach/reattach) or when loading
+        a saved config that may have changed UI-state preferences that
+        affect non-flag sections (e.g. arch-picker visibility)."""
+        try:
+            self._suspend_traces = True
+            try:
+                self._apply_autodetect_defaults()
+                self._sync_flag_widgets_from_values()
+            finally:
+                self._suspend_traces = False
             target = None
             if self._detached_toplevel is not None and self._detached_toplevel.winfo_exists():
                 target = self._detached_toplevel
@@ -843,7 +956,7 @@ class BuildTab:
             if self.var_auto_check_updates.get():
                 self.check_for_updates(do_fetch=False)
         except Exception as exc:
-            print(f"WARN: Build tab rebuild failed: {exc}", file=sys.stderr)
+            print(f"WARN: Build tab full rebuild failed: {exc}", file=sys.stderr)
 
     def _on_launcher_dir_changed(self, *_a) -> None:
         # If the user just changed the active backend dir in the main tab and
@@ -878,6 +991,8 @@ class BuildTab:
 
     def _on_refresh_toolchain(self) -> None:
         self._toolchain = detection.probe_toolchain()
+        # Invalidate the cached CUDA arch detection so next autodetect re-probes.
+        self._cuda_arch_cache = None
         self._refresh_toolchain_hint()
         self._refresh_jobs_hint()
         self._seed_toolchain_defaults()
@@ -886,8 +1001,8 @@ class BuildTab:
             f"{len(self._toolchain.cc_candidates)} compiler(s).\n",
             tag="stage",
         )
-        # Rebuild so the CUDA-install combobox refreshes.
-        self._schedule_rebuild()
+        # Use full rebuild — the CUDA-install combobox is in the env section.
+        self._schedule_rebuild(full=True)
 
     def _on_cuda_install_picked(self, *_args) -> None:
         """Combobox callback: a label like 'CUDA 12.8 · /usr/local/cuda-12.8'
@@ -916,16 +1031,48 @@ class BuildTab:
         self._on_refresh_toolchain()
 
     def _on_autodetect_archs(self) -> None:
+        # Surface the diagnostic in the build console too — much easier
+        # to debug "nothing happened" reports than just a popup.
+        self._append_console("\nDetect CUDA architectures…\n", tag="stage")
+        try:
+            import torch  # noqa: WPS433
+            torch_ok = True
+            cuda_avail = torch.cuda.is_available()
+            ndev = torch.cuda.device_count() if cuda_avail else 0
+        except Exception as exc:
+            torch_ok = False
+            cuda_avail = False
+            ndev = 0
+            self._append_console(f"  torch import failed: {exc}\n", tag="error")
+        if torch_ok:
+            self._append_console(
+                f"  torch CUDA available: {cuda_avail}, device count: {ndev}\n"
+            )
+
         infos = detection.detect_cuda_archs()
         if not infos:
-            messagebox.showinfo("Auto-detect", "No CUDA-capable GPUs detected via torch.")
+            msg = ("No CUDA-capable GPUs detected via torch.\n"
+                   + ("  (torch reports CUDA not available — install a CUDA "
+                      "torch build, or check that the GPU driver is loaded.)\n"
+                      if not cuda_avail else ""))
+            self._append_console("  " + msg.strip().replace("\n", "\n  ") + "\n",
+                                 tag="error")
+            messagebox.showinfo("Auto-detect", msg.split("\n")[0])
             return
+        for info in infos:
+            self._append_console(
+                f"  GPU{info.index}: {info.name}  (sm_{info.compute_capability.replace('.', '')}, "
+                f"family={info.family or 'unknown'})\n"
+            )
         # Replace whatever's in the field with just the detected GPUs.
         value = detection.archs_to_cmake_value(
             infos, prefer_a_variant=self.var_prefer_a_variant.get()
         )
         self.var_cuda_archs.set(value)
         self._sync_arch_pickers_from_value()
+        self._append_console(
+            f"  CMAKE_CUDA_ARCHITECTURES = {value}\n", tag="ok",
+        )
 
     def _build_cuda_arch_picker(self, parent: ttk.LabelFrame) -> None:
         """Render a grouped grid of CUDA-arch checkboxes (Turing → Blackwell
@@ -995,8 +1142,12 @@ class BuildTab:
         self._sync_arch_pickers_from_value()
 
     def _on_show_deprecated_toggle(self) -> None:
-        """Re-render the arch picker when the deprecated-archs toggle flips."""
-        self._schedule_rebuild()
+        """Re-render the arch picker when the deprecated-archs toggle flips.
+
+        Uses the full-rebuild path because the arch picker lives in the
+        env section, not the flag section.
+        """
+        self._schedule_rebuild(full=True)
 
     def _on_arch_check_toggle(self, cc: str) -> None:
         if self._arch_sync_in_progress:
@@ -1152,10 +1303,9 @@ class BuildTab:
         # visibility refreshes when seeding defaults.
         if self._suspend_traces:
             return
-        # Update visibility chain (a flag may gate another flag).
-        for f in cf.FLAGS:
-            if f.visible_when:
-                self._apply_flag_visibility(f)
+        # Update visibility chain (a flag may gate another flag). Single-pass
+        # — sharing one values-dict snapshot for all predicates.
+        self._apply_all_flag_visibilities()
         self._schedule_preview_refresh()
 
     # ── Config save/load ────────────────────────────────────────────────
@@ -1226,7 +1376,9 @@ class BuildTab:
         finally:
             self._suspend_traces = False
         # Defer the rebuild — this method is called from a button command.
-        self._schedule_rebuild()
+        # Use full rebuild because a loaded config may have changed
+        # ui_state preferences that affect non-flag sections.
+        self._schedule_rebuild(full=True)
 
     def _on_save_config(self) -> None:
         name = self.var_config_name.get().strip()
