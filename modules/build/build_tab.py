@@ -529,13 +529,14 @@ class BuildTab:
         # Update banner — hidden when no updates available.
         self._banner = tk.Frame(parent, bg="#fff5cf", highlightbackground="#c5a800",
                                 highlightthickness=1)
-        self._banner_label = tk.Label(self._banner, bg="#fff5cf", anchor="w",
-                                      justify="left",
+        self._banner.columnconfigure(0, weight=1)
+        self._banner_label = tk.Label(self._banner, bg="#fff5cf", anchor="center",
+                                      justify="center",
                                       text="Checking upstream…",
                                       font=("TkDefaultFont", 10))
-        self._banner_label.pack(side="left", fill="x", expand=True, padx=8, pady=6)
-        self._banner_btns = ttk.Frame(self._banner)
-        self._banner_btns.pack(side="right", padx=8, pady=4)
+        self._banner_label.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
+        self._banner_btns = tk.Frame(self._banner, bg="#fff5cf")
+        self._banner_btns.grid(row=1, column=0, pady=(0, 8))
         ttk.Button(self._banner_btns, text="Check",
                    command=lambda: self.check_for_updates(do_fetch=True)) \
             .pack(side="left", padx=2)
@@ -2171,10 +2172,12 @@ class BuildTab:
             )
             self._banner_label.configure(text=msg, bg="#fff5cf")
             self._banner.configure(bg="#fff5cf", highlightbackground="#c5a800")
+            self._banner_btns.configure(bg="#fff5cf")
         elif status.error and status.is_git_repo:
             self._banner.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 0))
             self._banner_label.configure(text=f"Update check: {status.error}", bg="#fde0e0")
             self._banner.configure(bg="#fde0e0", highlightbackground="#c00000")
+            self._banner_btns.configure(bg="#fde0e0")
         else:
             self._banner.grid_remove()
 
