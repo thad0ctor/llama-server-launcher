@@ -134,6 +134,7 @@ class BuildTab:
         self._rebuild_pending: bool = False
         self._rebuild_full_pending: bool = False
         self._suspend_traces: bool = False
+        self._syncing_backend_dirs: bool = False
 
         # ── Tk variables (state survives widget rebuilds) ──
         seed_backend = "llama.cpp"
@@ -234,16 +235,29 @@ class BuildTab:
             self._on_cudacxx_changed()
             self._apply_autodetect_defaults()
 
-        # When the launcher's backend changes, mirror it (only if user hasn't
-        # explicitly overridden the build-tab backend). Implemented as a one-way
-        # mirror — the build tab can target a different backend than the
-        # currently-running server.
+        # Keep the build source directory and main-tab backend root directory
+        # mirrored per backend. Users can still select either backend here; the
+        # source path writes through to the matching launcher root.
         try:
             launcher.backend_selection.trace_add("write", self._on_launcher_backend_changed)
         except Exception:
             pass
         try:
-            launcher.current_backend_dir.trace_add("write", self._on_launcher_dir_changed)
+            launcher.current_backend_dir.trace_add("write", self._on_launcher_current_dir_changed)
+        except Exception:
+            pass
+        try:
+            launcher.llama_cpp_dir.trace_add(
+                "write",
+                lambda *_a: self._on_launcher_backend_dir_var_changed("llama.cpp"),
+            )
+        except Exception:
+            pass
+        try:
+            launcher.ik_llama_dir.trace_add(
+                "write",
+                lambda *_a: self._on_launcher_backend_dir_var_changed("ik_llama"),
+            )
         except Exception:
             pass
 
@@ -262,8 +276,8 @@ class BuildTab:
         # Live source-dir state indicator: updates as the user types so
         # they get immediate feedback about whether the path exists, is
         # a git repo, or will be auto-cloned.
-        self.var_source_dir.trace_add("write", lambda *_a: self._update_source_dir_status())
-        self.var_backend.trace_add("write", lambda *_a: self._update_source_dir_status())
+        self.var_source_dir.trace_add("write", self._on_build_source_dir_changed)
+        self.var_backend.trace_add("write", self._on_build_backend_var_changed)
 
     # ─────────────────────────────────────────────────────────────────────
     # Seeding helpers
@@ -1049,11 +1063,14 @@ class BuildTab:
         except Exception:
             return
         if new_backend and new_backend != self.var_backend.get():
-            self.var_backend.set(new_backend)
+            self._set_var_if_changed(self.var_backend, new_backend)
+            self._sync_source_dir_from_launcher(new_backend, prefer_current=False)
             # Setting var_backend programmatically doesn't fire the radio
             # button's command callback, so we need to schedule the rebuild
             # ourselves — otherwise flag groups remain stuck on the old backend.
             self._schedule_rebuild()
+        elif new_backend:
+            self._sync_source_dir_from_launcher(new_backend, prefer_current=False)
 
     def _schedule_rebuild(self, *, full: bool = False) -> None:
         """Coalesce rapid rebuild requests onto a single after_idle callback.
@@ -1104,9 +1121,6 @@ class BuildTab:
                 self._sync_flag_widgets_from_values()
             finally:
                 self._suspend_traces = False
-            src = self.var_source_dir.get()
-            if not os.path.isdir(src):
-                self.var_source_dir.set(self._initial_source_dir(self.var_backend.get()))
             # The cheap part: just re-evaluate per-flag visibility against
             # the new backend. No destroy/create.
             self._apply_all_flag_visibilities()
@@ -1141,9 +1155,6 @@ class BuildTab:
                 self._sync_flag_widgets_from_values()
             finally:
                 self._suspend_traces = False
-            src = self.var_source_dir.get()
-            if not os.path.isdir(src):
-                self.var_source_dir.set(self._initial_source_dir(self.var_backend.get()))
             # Flag visibility tracks the (possibly newly-loaded) backend.
             self._apply_all_flag_visibilities()
             # Arch picker may need to add/remove deprecated rows. This
@@ -1181,17 +1192,84 @@ class BuildTab:
                 pass
         self._build_cuda_arch_picker(grid)
 
-    def _on_launcher_dir_changed(self, *_a) -> None:
-        # If the user just changed the active backend dir in the main tab and
-        # the build tab's source matches the previous default, follow along.
-        # We don't want to clobber a user-set source dir, so only nudge when
-        # the user hasn't typed anything custom.
+    def _on_launcher_current_dir_changed(self, *_a) -> None:
         try:
-            cur = self.launcher.current_backend_dir.get()
+            backend = self.launcher.backend_selection.get()
         except Exception:
             return
-        if cur and not self.var_source_dir.get().strip():
-            self.var_source_dir.set(cur)
+        self._sync_source_dir_from_launcher(backend, prefer_current=True)
+
+    def _on_launcher_backend_dir_var_changed(self, backend: str) -> None:
+        self._sync_source_dir_from_launcher(backend, prefer_current=False)
+
+    def _on_build_source_dir_changed(self, *_a) -> None:
+        self._update_source_dir_status()
+        self._sync_launcher_dir_from_source()
+
+    def _on_build_backend_var_changed(self, *_a) -> None:
+        self._update_source_dir_status()
+        self._sync_source_dir_from_launcher(self.var_backend.get(), prefer_current=True)
+
+    @staticmethod
+    def _set_var_if_changed(var: tk.Variable, value: str) -> None:
+        try:
+            if var.get() != value:
+                var.set(value)
+        except Exception:
+            pass
+
+    def _launcher_backend_dir_var(self, backend: str) -> tk.Variable | None:
+        try:
+            if backend == "ik_llama":
+                return self.launcher.ik_llama_dir
+            return self.launcher.llama_cpp_dir
+        except Exception:
+            return None
+
+    def _launcher_backend_settings_key(self, backend: str) -> str:
+        return "last_ik_llama_dir" if backend == "ik_llama" else "last_llama_cpp_dir"
+
+    def _sync_source_dir_from_launcher(self, backend: str, *, prefer_current: bool) -> None:
+        if self._syncing_backend_dirs or backend != self.var_backend.get():
+            return
+        try:
+            if prefer_current and self.launcher.backend_selection.get() == backend:
+                source_dir = self.launcher.current_backend_dir.get()
+            else:
+                dir_var = self._launcher_backend_dir_var(backend)
+                if dir_var is None:
+                    return
+                source_dir = dir_var.get()
+        except Exception:
+            return
+        self._syncing_backend_dirs = True
+        try:
+            self._set_var_if_changed(self.var_source_dir, source_dir)
+        finally:
+            self._syncing_backend_dirs = False
+
+    def _sync_launcher_dir_from_source(self) -> None:
+        if self._syncing_backend_dirs:
+            return
+        backend = self.var_backend.get() or "llama.cpp"
+        source_dir = self.var_source_dir.get()
+        dir_var = self._launcher_backend_dir_var(backend)
+        if dir_var is None:
+            return
+        self._syncing_backend_dirs = True
+        try:
+            self._set_var_if_changed(dir_var, source_dir)
+            try:
+                self.launcher.app_settings[self._launcher_backend_settings_key(backend)] = source_dir
+            except Exception:
+                pass
+            try:
+                if self.launcher.backend_selection.get() == backend:
+                    self._set_var_if_changed(self.launcher.current_backend_dir, source_dir)
+            except Exception:
+                pass
+        finally:
+            self._syncing_backend_dirs = False
 
     def _on_browse_source(self) -> None:
         start = self.var_source_dir.get().strip() or str(Path.home())
