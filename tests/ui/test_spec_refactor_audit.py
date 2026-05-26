@@ -32,9 +32,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import queue
 import sys
 import tkinter as tk
 from pathlib import Path
+from threading import Lock
 
 import pytest
 
@@ -857,3 +859,23 @@ class TestRedirectIntegrity:
             entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA
             is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
         )
+
+    def test_stale_draft_analysis_is_dropped_at_enqueue(self, entry_module, monkeypatch):
+        import modules.spec_tab as spec_mod
+
+        tab = type("SpecTabStub", (), {})()
+        tab._spec_draft_analysis_generation = 1
+        tab._spec_draft_analysis_queue = queue.Queue()
+        tab._spec_draft_analysis_lock = Lock()
+
+        def parse_and_supersede(path):
+            tab._spec_draft_analysis_generation = 2
+            return {"path": path}
+
+        monkeypatch.setattr(spec_mod, "parse_gguf_header_simple", parse_and_supersede)
+
+        entry_module.SpecTab._run_spec_draft_gguf_analysis(
+            tab, "/models/draft.gguf", analysis_id=1
+        )
+
+        assert tab._spec_draft_analysis_queue.empty()

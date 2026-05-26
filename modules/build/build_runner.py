@@ -45,6 +45,7 @@ EVENT_ERROR = "error"         # ("error", message)
 EVENT_QUEUE_MAXSIZE = 4000
 PROC_TERMINATE_WAIT_SECONDS = 5.0
 PROC_KILL_WAIT_SECONDS = 2.0
+PROC_POLL_SECONDS = 0.05
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -498,12 +499,37 @@ class BuildRunner:
             self._proc = proc
 
         assert proc.stdout is not None
+        reader = threading.Thread(
+            target=self._stream_reader,
+            args=(proc.stdout,),
+            name="BuildRunnerOutput",
+            daemon=True,
+        )
+        reader.start()
+        try:
+            while proc.poll() is None:
+                if self._cancel.is_set():
+                    self._signal_terminate(proc)
+                    break
+                time.sleep(PROC_POLL_SECONDS)
+            return self._wait_for_proc_shutdown(proc)
+        finally:
+            reader.join(timeout=PROC_KILL_WAIT_SECONDS)
+            if reader.is_alive():
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                reader.join(timeout=PROC_POLL_SECONDS)
+
+    def _stream_reader(self, stdout) -> None:
+        """Drain subprocess output without owning process lifetime control."""
         chunk_size = 4096
         max_line_len = 4096
         buf = bytearray()
         try:
             while True:
-                chunk = proc.stdout.read(chunk_size)
+                chunk = stdout.read(chunk_size)
                 if not chunk:
                     break
                 buf.extend(chunk)
@@ -524,17 +550,13 @@ class BuildRunner:
                     line = bytes(buf[:nl]).decode("utf-8", errors="replace")
                     self._emit_line(line)
                     del buf[: nl + 1]
-                if self._cancel.is_set() and proc.poll() is None:
-                    # Same process-group semantics as cancel(): kill children too.
-                    self._signal_terminate(proc)
             if buf:
                 self._emit_line(buf.decode("utf-8", errors="replace"))
         except Exception as exc:
             # Emit a diagnostic line; _run is the sole emitter of terminal
             # events so don't put EVENT_ERROR on the queue here.
-            self._emit_line(f"ERROR: Stream read error: {exc}")
-
-        return self._wait_for_proc_shutdown(proc)
+            if not self._cancel.is_set():
+                self._emit_line(f"ERROR: Stream read error: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

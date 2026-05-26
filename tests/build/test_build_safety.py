@@ -1,5 +1,7 @@
 import subprocess
 import sys
+import threading
+import time
 import types
 
 import pytest
@@ -92,6 +94,94 @@ def test_build_runner_shutdown_escalates_and_clears_proc(monkeypatch):
         build_runner.PROC_TERMINATE_WAIT_SECONDS,
         build_runner.PROC_KILL_WAIT_SECONDS,
     ]
+    with runner._lock:
+        assert runner._proc is None
+
+
+def test_build_runner_cancel_not_blocked_by_stdout_read(monkeypatch):
+    runner = BuildRunner()
+    runner._cancel.set()
+
+    class BlockingStdout:
+        def __init__(self):
+            self.closed = threading.Event()
+
+        def read(self, _chunk_size):
+            self.closed.wait(timeout=10)
+            return b""
+
+        def close(self):
+            self.closed.set()
+
+    class HangingProc:
+        pid = 12345
+
+        def __init__(self):
+            self.stdout = BlockingStdout()
+            self.returncode = None
+            self.wait_timeouts = []
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired(["fake-build"], timeout)
+            return self.returncode
+
+    proc = HangingProc()
+    terminated = []
+    killed = []
+
+    monkeypatch.setattr(
+        build_runner.subprocess,
+        "Popen",
+        lambda *args, **kwargs: proc,
+    )
+    monkeypatch.setattr(
+        build_runner,
+        "PROC_TERMINATE_WAIT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        build_runner,
+        "PROC_KILL_WAIT_SECONDS",
+        0.01,
+    )
+    monkeypatch.setattr(
+        build_runner,
+        "PROC_POLL_SECONDS",
+        0.001,
+    )
+
+    def record_terminate(proc_to_signal):
+        terminated.append(proc_to_signal)
+
+    def record_kill(proc_to_kill):
+        killed.append(proc_to_kill)
+        proc_to_kill.returncode = -9
+
+    monkeypatch.setattr(
+        BuildRunner,
+        "_signal_terminate",
+        staticmethod(record_terminate),
+    )
+    monkeypatch.setattr(
+        BuildRunner,
+        "_signal_kill",
+        staticmethod(record_kill),
+    )
+
+    start = time.perf_counter()
+    rc = runner._stream(["fake-build"], cwd=".")
+    elapsed = time.perf_counter() - start
+
+    assert rc == -9
+    assert elapsed < 1.0
+    assert terminated == [proc]
+    assert killed == [proc]
+    assert proc.stdout.closed.is_set()
     with runner._lock:
         assert runner._proc is None
 

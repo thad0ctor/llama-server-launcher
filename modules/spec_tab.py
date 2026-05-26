@@ -18,7 +18,7 @@ launch.py emission block.
 import sys
 import queue
 import tkinter as tk
-from threading import Thread
+from threading import Lock, Thread
 from tkinter import ttk
 
 from modules.system import parse_gguf_header_simple
@@ -131,6 +131,7 @@ class SpecTab:
         self.current_spec_draft_analysis  = {}  # mirrors self.current_model_analysis
         self._spec_draft_analysis_generation = 0
         self._spec_draft_analysis_queue = queue.Queue()
+        self._spec_draft_analysis_lock = Lock()
         self._spec_draft_analysis_after_id = None
         self._spec_draft_analysis_thread = None
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
@@ -919,8 +920,9 @@ class SpecTab:
 
     def _start_spec_draft_gguf_analysis(self, draft_path_str):
         """Start draft GGUF parsing and poll results from the Tk thread."""
-        self._spec_draft_analysis_generation += 1
-        analysis_id = self._spec_draft_analysis_generation
+        with SpecTab._get_spec_draft_analysis_lock(self):
+            self._spec_draft_analysis_generation += 1
+            analysis_id = self._spec_draft_analysis_generation
         t = Thread(
             target=self._run_spec_draft_gguf_analysis,
             args=(draft_path_str, analysis_id),
@@ -934,17 +936,26 @@ class SpecTab:
                 self._drain_spec_draft_gguf_analysis,
             )
 
+    def _get_spec_draft_analysis_lock(self):
+        lock = getattr(self, "_spec_draft_analysis_lock", None)
+        if lock is None:
+            lock = Lock()
+            self._spec_draft_analysis_lock = lock
+        return lock
+
     def _run_spec_draft_gguf_analysis(self, draft_path_str, analysis_id=None):
         """Background worker that parses the draft GGUF. No Tk calls here."""
         try:
             if analysis_id is None:
-                analysis_id = self._spec_draft_analysis_generation
+                with SpecTab._get_spec_draft_analysis_lock(self):
+                    analysis_id = self._spec_draft_analysis_generation
             analysis_result = parse_gguf_header_simple(draft_path_str)
         except Exception as e:
             analysis_result = {"path": draft_path_str, "error": str(e)}
-        if analysis_id != self._spec_draft_analysis_generation:
-            return
-        self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
+        with SpecTab._get_spec_draft_analysis_lock(self):
+            if analysis_id != self._spec_draft_analysis_generation:
+                return
+            self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
 
     def _drain_spec_draft_gguf_analysis(self):
         self._spec_draft_analysis_after_id = None
