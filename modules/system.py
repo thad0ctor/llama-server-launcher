@@ -7,6 +7,9 @@ import sys
 import traceback
 import ctypes
 import struct
+import csv
+import importlib.util
+import io
 from pathlib import Path
 
 # Force CUDA device ordering to PCI_BUS_ID before importing torch or touching
@@ -59,18 +62,13 @@ print(f"Python version: {sys.version}", file=sys.stderr)
 print(f"sys.path: {sys.path}", file=sys.stderr)
 print("===================================\n", file=sys.stderr)
 
-# --- New Imports ---
-try:
-    import torch
-    TORCH_AVAILABLE = torch.cuda.is_available()
-except ImportError:
-    TORCH_AVAILABLE = False
-    torch = None # Define torch as None if import fails
-except Exception as e:
-    # Catch other potential issues during torch import (e.g., missing CUDA drivers)
-    TORCH_AVAILABLE = False
-    torch = None
-    print(f"Warning: PyTorch import failed: {e}", file=sys.stderr)
+# Torch is intentionally imported lazily. Importing the module and especially
+# calling torch.cuda.is_available() can initialize CUDA on the Tk main thread
+# during app startup. GPU detection now prefers nvidia-smi and only touches
+# torch inside the background detection worker.
+torch = None
+_TORCH_IMPORT_ERROR = None
+TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 
 
 # Check for requests module (required for version checking)
@@ -122,8 +120,140 @@ if MISSING_DEPS:
 #  Helper Functions (These remain outside the class as they don't need 'self')
 # ═════════════════════════════════════════════════════════════════════
 
+def _load_torch_module():
+    """Import torch lazily for the torch fallback path."""
+    global torch, TORCH_AVAILABLE, _TORCH_IMPORT_ERROR
+    if torch is not None:
+        return torch
+    if not TORCH_AVAILABLE:
+        return None
+    try:
+        import torch as torch_module  # noqa: WPS433
+    except ImportError as exc:
+        TORCH_AVAILABLE = False
+        _TORCH_IMPORT_ERROR = exc
+        return None
+    except Exception as exc:
+        TORCH_AVAILABLE = False
+        _TORCH_IMPORT_ERROR = exc
+        print(f"Warning: PyTorch import failed: {exc}", file=sys.stderr)
+        return None
+    torch = torch_module
+    return torch
+
+
+def _normalize_compute_capability(value):
+    text = str(value or "").strip()
+    if not text or text.upper() in {"N/A", "[N/A]", "NOT SUPPORTED"}:
+        return "Unknown"
+    match = re.search(r"(\d+)(?:\.(\d+))?", text)
+    if not match:
+        return "Unknown"
+    major = match.group(1)
+    minor = match.group(2) if match.group(2) is not None else "0"
+    return f"{major}.{minor}"
+
+
+def _unavailable_gpu_info(message, source):
+    return {
+        "available": False,
+        "message": message,
+        "device_count": 0,
+        "devices": [],
+        "detection_source": source,
+    }
+
+
+def get_gpu_info_from_nvidia_smi(timeout=5):
+    """Get GPU information via nvidia-smi without initializing CUDA."""
+    cmd = [
+        "nvidia-smi",
+        "--query-gpu=index,pci.bus_id,name,memory.total,compute_cap",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return _unavailable_gpu_info("nvidia-smi not found", "nvidia-smi")
+    except subprocess.TimeoutExpired:
+        return _unavailable_gpu_info("nvidia-smi timed out", "nvidia-smi")
+    except Exception as exc:
+        return _unavailable_gpu_info(f"nvidia-smi failed: {exc}", "nvidia-smi")
+
+    if result.returncode != 0:
+        error = (result.stderr or result.stdout or "").strip() or "unknown error"
+        return _unavailable_gpu_info(f"nvidia-smi failed: {error}", "nvidia-smi")
+
+    rows = []
+    try:
+        reader = csv.reader(io.StringIO(result.stdout.strip()))
+        for row in reader:
+            fields = [part.strip() for part in row]
+            if len(fields) < 5:
+                continue
+            _nvidia_idx, pci_bus_id, name, memory_total_mib, compute_cap = fields[:5]
+            try:
+                total_mib = float(memory_total_mib)
+            except (TypeError, ValueError):
+                total_mib = 0.0
+            total_bytes = int(total_mib * 1024 * 1024)
+            rows.append({
+                "pci_bus_id": pci_bus_id,
+                "name": name or "Unknown GPU",
+                "total_memory_bytes": total_bytes,
+                "total_memory_gb": round(total_bytes / (1024**3), 2),
+                "compute_capability": _normalize_compute_capability(compute_cap),
+                # nvidia-smi does not expose SM count through the query API.
+                "multi_processor_count": None,
+            })
+    except Exception as exc:
+        return _unavailable_gpu_info(f"Failed to parse nvidia-smi output: {exc}", "nvidia-smi")
+
+    if not rows:
+        return _unavailable_gpu_info("nvidia-smi reported no CUDA devices", "nvidia-smi")
+
+    # Match CUDA_DEVICE_ORDER=PCI_BUS_ID: assign launcher ids after sorting by
+    # PCI bus, not by nvidia-smi's displayed index. nvidia-smi emits the bus
+    # id as fixed-width zero-padded hex like ``00000000:01:00.0``, so plain
+    # lexicographic sort produces the same order as a structural domain /
+    # bus / device / function comparison would.
+    rows.sort(key=lambda item: item.get("pci_bus_id", ""))
+    devices = []
+    for idx, row in enumerate(rows):
+        row = dict(row)
+        row["id"] = idx
+        devices.append(row)
+
+    return {
+        "available": True,
+        "device_count": len(devices),
+        "devices": devices,
+        "detection_source": "nvidia-smi",
+        "message": "Detected via nvidia-smi",
+    }
+
+
 def get_gpu_info_with_venv(venv_path=None):
-    """Get GPU information using PyTorch, optionally from a virtual environment."""
+    """Get GPU information, preferring nvidia-smi before torch fallbacks."""
+    smi_info = get_gpu_info_from_nvidia_smi()
+    if smi_info.get("available"):
+        print(
+            f"DEBUG: nvidia-smi GPU detection successful: "
+            f"{smi_info.get('device_count', 0)} devices",
+            file=sys.stderr,
+        )
+        return smi_info
+
+    print(
+        f"DEBUG: nvidia-smi GPU detection unavailable: "
+        f"{smi_info.get('message', 'unknown error')}",
+        file=sys.stderr,
+    )
     if venv_path and Path(venv_path).exists():
         # Use the virtual environment to check for PyTorch/CUDA
         return get_gpu_info_from_venv(venv_path)
@@ -172,7 +302,9 @@ try:
         gpu_info = {
             "available": True,
             "device_count": device_count,
-            "devices": []
+            "devices": [],
+            "detection_source": "torch-venv",
+            "message": "Detected via torch in configured venv"
         }
         
         for i in range(device_count):
@@ -188,12 +320,12 @@ try:
         
         print(json.dumps(gpu_info))
     else:
-        print(json.dumps({"available": False, "message": "CUDA not available via PyTorch in venv", "device_count": 0, "devices": []}))
+        print(json.dumps({"available": False, "message": "CUDA not available via PyTorch in venv", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 
 except ImportError:
-    print(json.dumps({"available": False, "message": "PyTorch not found in venv", "device_count": 0, "devices": []}))
+    print(json.dumps({"available": False, "message": "PyTorch not found in venv", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 except Exception as e:
-    print(json.dumps({"available": False, "message": f"Error in venv GPU detection: {e}", "device_count": 0, "devices": []}))
+    print(json.dumps({"available": False, "message": f"Error in venv GPU detection: {e}", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 '''
     
     try:
@@ -264,23 +396,34 @@ def _create_fallback_gpu_info(reason):
 
 def get_gpu_info_static():
     """Get GPU information using PyTorch (static method)."""
-    if not torch or not TORCH_AVAILABLE:
-        msg = "PyTorch not found." if not torch else "CUDA not available via PyTorch."
-        return {"available": False, "message": msg, "device_count": 0, "devices": []}
+    torch_module = _load_torch_module()
+    if not torch_module:
+        msg = "PyTorch not found."
+        if _TORCH_IMPORT_ERROR is not None:
+            msg = f"PyTorch import failed: {_TORCH_IMPORT_ERROR}"
+        return _unavailable_gpu_info(msg, "torch")
+
+    try:
+        if not torch_module.cuda.is_available():
+            return _unavailable_gpu_info("CUDA not available via PyTorch.", "torch")
+    except Exception as exc:
+        return _unavailable_gpu_info(f"CUDA availability check failed: {exc}", "torch")
 
     # Ensure consistent GPU ordering by PCIe bus ID (matches nvidia-smi and llama.cpp)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
     try:
-        device_count = torch.cuda.device_count()
+        device_count = torch_module.cuda.device_count()
         gpu_info = {
             "available": True,
             "device_count": device_count,
-            "devices": []
+            "devices": [],
+            "detection_source": "torch",
+            "message": "Detected via torch"
         }
 
         for i in range(device_count):
-            props = torch.cuda.get_device_properties(i)
+            props = torch_module.cuda.get_device_properties(i)
             # Getting free memory can be slow/problematic in some envs, skip for basic info
             # free_mem, total_mem = torch.cuda.mem_get_info(i)
             gpu_info["devices"].append({
@@ -486,6 +629,90 @@ def get_cpu_info_static():
     except Exception as e:
         print(f"Failed to get CPU info: {str(e)}", file=sys.stderr)
         return {"error": f"Failed to get CPU info: {str(e)}", "logical_cores": 4, "physical_cores": 2}
+
+
+# ── GPU detection cache (skip ~3-10s torch+CUDA init on every startup) ──
+#
+# On systems with many GPUs and a venv-based torch install, the first
+# ``torch.cuda.is_available()`` + ``get_device_properties`` call in a
+# fresh subprocess takes several seconds (CUDA context init). The result
+# is deterministic across launches as long as the hardware and venv
+# don't change, so we persist the JSON result to ``config/`` keyed by
+# ``last_venv_dir`` + path-to-this-checkout and reuse it on the next
+# startup. A background re-detection still runs to refresh the cache,
+# so swapped hardware will eventually self-heal.
+
+_GPU_CACHE_FILENAME = "gpu_detection_cache.json"
+
+
+def _gpu_cache_path(config_dir):
+    """Return the gpu-detection cache path. Accepts a Path or a str; if
+    ``config_dir`` is falsy, returns None so callers degrade gracefully.
+    """
+    if not config_dir:
+        return None
+    return Path(config_dir) / _GPU_CACHE_FILENAME
+
+
+def load_cached_gpu_info(config_dir, venv_path):
+    """Try to read the persisted GPU-detection result.
+
+    Returns a dict shaped like :func:`get_gpu_info_static` on hit, or
+    ``None`` if there's no cache, the venv key doesn't match, or the
+    file is unreadable/malformed. The cache key is the venv path (or
+    the literal string ``"__none__"`` when the user has no venv set)
+    because the same hardware reports different ``torch.cuda``
+    properties depending on which torch build runs the detection
+    (different driver versions / build flags / etc.).
+    """
+    cache_path = _gpu_cache_path(config_dir)
+    if cache_path is None:
+        return None
+    try:
+        raw = cache_path.read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    cached_venv = data.get("venv_path") or "__none__"
+    expected_venv = (venv_path or "").strip() or "__none__"
+    if cached_venv != expected_venv:
+        return None
+    gpu_info = data.get("gpu_info")
+    if not isinstance(gpu_info, dict):
+        return None
+    # Minimal shape check so a corrupt-but-valid-JSON file doesn't crash
+    # downstream UI code that assumes ``device_count`` is int + ``devices``
+    # is a list.
+    if not isinstance(gpu_info.get("device_count"), int):
+        return None
+    if not isinstance(gpu_info.get("devices"), list):
+        return None
+    return gpu_info
+
+
+def save_cached_gpu_info(config_dir, venv_path, gpu_info):
+    """Persist the latest GPU-detection result. Best-effort: I/O errors
+    are logged to stderr but never raised — a cache write failure must
+    not block the UI cascade that runs after detection completes.
+    """
+    cache_path = _gpu_cache_path(config_dir)
+    if cache_path is None:
+        return
+    payload = {
+        "venv_path": (venv_path or "").strip() or "__none__",
+        "gpu_info": gpu_info,
+    }
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        print(f"DEBUG: GPU detection cache write failed at "
+              f"{cache_path}: {exc}", file=sys.stderr)
 
 
 def calculate_total_gguf_size(model_path_str):
@@ -882,13 +1109,19 @@ class SystemInfoManager:
     def fetch_system_info(self, venv_path=None, defer_tk_writes=False):
         """Fetches GPU, RAM, and CPU info and populates class attributes.
 
-        ``venv_path`` is now an explicit parameter (read on the main
-        thread by ``_start_system_info_detection``) so this method never
-        reaches into ``self.launcher.venv_dir.get()`` from a worker
-        thread. Reading a ``tk.StringVar`` after the root has been
-        destroyed raises ``RuntimeError: main thread is not in main
-        loop`` and on Python 3.13 corrupts Tcl's threading state,
-        deadlocking the next launcher's ``ttk.Notebook.add()``.
+        ``venv_path`` MUST be passed in (or left None) by the caller —
+        it must NEVER be re-read from ``self.launcher.venv_dir`` here.
+        The worker thread that calls this method has no safe way to
+        touch a ``tk.StringVar``: Tcl is single-threaded, so a
+        cross-thread ``.get()`` serializes through the Tcl interpreter
+        lock and blocks until the Tk main loop is idle. With a busy
+        startup (model-list population, GGUF analysis dispatch, etc.)
+        that block can easily stretch to tens of seconds — observed
+        in practice as a 33-second gap between worker start and the
+        actual GPU probe firing. The launcher's
+        ``_start_system_info_detection`` already captures the venv path
+        on the main thread before forking, so the value is in hand by
+        the time we get here.
 
         When ``defer_tk_writes=True`` the method skips the Tk ``.set()``
         calls entirely — the worker thread populates only plain-Python
@@ -901,20 +1134,6 @@ class SystemInfoManager:
         with the next root's UI calls.
         """
         print("Fetching system info...", file=sys.stderr)
-
-        # Back-compat: callers that omit ``venv_path`` get the old behaviour
-        # (read from the Tk var on the *main* thread). Worker threads should
-        # always pass an explicit string here.
-        if venv_path is None and hasattr(self.launcher, 'venv_dir'):
-            try:
-                venv_path_str = self.launcher.venv_dir.get().strip()
-            except Exception:
-                venv_path_str = ""
-            if venv_path_str:
-                venv_path = venv_path_str
-                print(f"DEBUG: Using configured venv for GPU detection: {venv_path}", file=sys.stderr)
-            else:
-                print("DEBUG: No venv configured, using current process for GPU detection", file=sys.stderr)
 
         self.launcher.gpu_info = get_gpu_info_with_venv(venv_path)
         self.launcher.ram_info = get_ram_info_static()

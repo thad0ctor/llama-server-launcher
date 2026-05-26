@@ -253,16 +253,37 @@ class ConfigManager:
 
 
     def update_default_config_name_if_needed(self, *args):
-        """Traced callback for variables that influence the default config name."""
-        # This trace function is bound to variables that influence the generated config name.
-        # It's called whenever those variables change.
-        # We only want to regenerate and update the config name if the user hasn't
-        # already manually set a custom name.
-        # The generate_default_config_name function already contains the logic
-        # to decide whether to overwrite the current self.launcher.config_name value.
-        # So we just call it here.
-        # Use after(1) to prevent recursive trace calls on config_name update
-        self.launcher.root.after(1, self.generate_default_config_name)
+        """Traced callback for variables that influence the default config name.
+
+        Debounced: ~20 traced vars get .set() in quick succession during
+        ``load_configuration`` (and a similar burst happens during
+        ``_update_ui_after_analysis``). Without coalescing each one
+        scheduled its own ``root.after(1, generate_default_config_name)``,
+        producing N independent regenerations that ran back-to-back on
+        the Tk thread. Now a pending callback is reused — the trailing
+        regen sees the final value of every var.
+        """
+        # Cancel an outstanding pending regen so we only ever have one
+        # in flight at a time. ``after_cancel`` is a no-op on an unknown
+        # id, but we set the attr to None first so a re-entrancy through
+        # ``generate_default_config_name`` (which itself sets vars) can't
+        # cancel the callback that's about to run.
+        pending = getattr(self, "_default_name_regen_after_id", None)
+        if pending is not None:
+            try:
+                self.launcher.root.after_cancel(pending)
+            except Exception:
+                pass
+        self._default_name_regen_after_id = self.launcher.root.after(
+            10, self._fire_default_name_regen
+        )
+
+    def _fire_default_name_regen(self):
+        """Trailing callback for the debounced regen. Clears the pending
+        handle BEFORE running so a new ``.set()`` arriving mid-regen
+        correctly queues another trailing call."""
+        self._default_name_regen_after_id = None
+        self.generate_default_config_name()
 
 
     def current_cfg(self):
@@ -367,6 +388,28 @@ class ConfigManager:
              messagebox.showerror("Error", f"Configuration '{name}' data not found.")
              return
 
+        # Silence per-var save traces for the duration of the ~50 .set()
+        # calls below. Without this, each .set() that hits a traced var
+        # (port, host, ik_llama_*, env vars, spec) fires _save_configs +
+        # the model_dirs stat sweep, and the UI freezes while the disk
+        # gets pummeled. We re-enable autosave and write once at the end.
+        prior_suppress = getattr(self.launcher, "_suppress_autosave", False)
+        self.launcher._suppress_autosave = True
+        try:
+            self._apply_loaded_configuration(name, cfg)
+        finally:
+            self.launcher._suppress_autosave = prior_suppress
+        # Single explicit save now that every traced var is settled.
+        self.launcher._save_configs()
+        messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
+
+    def _apply_loaded_configuration(self, name, cfg):
+        """Mutates launcher state from a named-config dict.
+
+        Split out of ``load_configuration`` so callers can wrap the whole
+        cascade with ``_suppress_autosave``. Does not write to disk and
+        does not show the "Loaded" toast — the caller handles both.
+        """
         # Load simple variables first
         self.launcher.llama_cpp_dir.set(cfg.get("llama_cpp_dir",""))
         self.launcher.ik_llama_dir.set(cfg.get("ik_llama_dir",""))
@@ -541,9 +584,6 @@ class ConfigManager:
              self.generate_default_config_name() # Generate default name for no model state
              if loaded_model_path_str:
                   messagebox.showwarning("Model Not Found", f"The model from the config ('{Path(loaded_model_path_str).name if loaded_model_path_str else 'N/A'}') was not found in the current list.\nPlease ensure its directory is added and scanned, then select a model manually.")
-
-
-        messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
 
     def delete_configuration(self):
         """Delete selected configuration(s) from the listbox."""
@@ -997,6 +1037,19 @@ class ConfigManager:
         if self.launcher.config_path.name in ("null", "NUL"):
              print("Config saving is disabled.", file=sys.stderr)
              return
+
+        if getattr(self.launcher, "_suppress_autosave", False) is True:
+            # The launcher temporarily silences autosaves during startup
+            # load_from_config() cascades (see launcher __init__). Without
+            # this gate, the per-var traces wired in IkLlamaTab /
+            # EnvironmentalVariablesManager / spec would each trigger a
+            # full JSON write + model_dirs stat sweep on startup. The
+            # ``is True`` check is deliberate: tests use ``MagicMock``
+            # launchers, which auto-vivify attribute access into Mock
+            # objects (truthy), and ``is True`` distinguishes a real
+            # boolean from that case so test runs still hit the write path.
+            return
+
 
         # Validate and clean up model_dirs paths before saving
         valid_model_dirs = []

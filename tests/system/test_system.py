@@ -181,6 +181,11 @@ def test_gpu_info_with_venv_none_falls_back_to_static(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sentinel = {"available": True, "device_count": 0, "devices": [], "message": "x"}
+    monkeypatch.setattr(
+        sysmod,
+        "get_gpu_info_from_nvidia_smi",
+        lambda: {"available": False, "device_count": 0, "devices": [], "message": "no smi"},
+    )
     monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
 
     assert sysmod.get_gpu_info_with_venv(None) is sentinel
@@ -191,10 +196,34 @@ def test_gpu_info_with_venv_missing_path_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sentinel = {"available": False, "device_count": 0, "devices": [], "message": "fallback"}
+    monkeypatch.setattr(
+        sysmod,
+        "get_gpu_info_from_nvidia_smi",
+        lambda: {"available": False, "device_count": 0, "devices": [], "message": "no smi"},
+    )
     monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
     # A path that doesn't exist
     result = sysmod.get_gpu_info_with_venv(str(tmp_path / "does_not_exist"))
     assert result is sentinel
+
+
+def test_gpu_info_with_venv_prefers_nvidia_smi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    smi_info = {
+        "available": True,
+        "device_count": 1,
+        "devices": [{"id": 0, "name": "SMI GPU"}],
+        "detection_source": "nvidia-smi",
+    }
+    monkeypatch.setattr(sysmod, "get_gpu_info_from_nvidia_smi", lambda: smi_info)
+    static = mock.Mock(return_value={"available": False, "device_count": 0, "devices": []})
+    monkeypatch.setattr(sysmod, "get_gpu_info_static", static)
+
+    result = sysmod.get_gpu_info_with_venv(None)
+
+    assert result is smi_info
+    static.assert_not_called()
 
 
 def test_gpu_info_from_venv_success(
@@ -600,6 +629,15 @@ def test_fetch_system_info_sets_status_when_gpu_unavailable(
 def test_fetch_system_info_uses_configured_venv_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Caller must pass venv_path; fetch_system_info forwards it verbatim.
+
+    The previous implementation re-read ``launcher.venv_dir.get()`` here
+    as a back-compat path, but that ran a cross-thread Tk-var read from
+    the detection worker, serializing through the Tcl interpreter lock
+    and blocking until the main thread went idle (observed: ~33 s on a
+    busy startup). The contract is now: ``_start_system_info_detection``
+    captures the path on the main thread and passes it explicitly.
+    """
     captured = {}
 
     def fake_gpu_with_venv(venv_path):
@@ -615,9 +653,10 @@ def test_fetch_system_info_uses_configured_venv_path(
     )
 
     launcher = _FakeLauncher(venv_value="  /opt/myvenv  ")
-    sysmod.SystemInfoManager(launcher).fetch_system_info()
+    # Caller (the real launcher's _start_system_info_detection) strips
+    # whitespace before passing the value; we mimic that here.
+    sysmod.SystemInfoManager(launcher).fetch_system_info(venv_path="/opt/myvenv")
 
-    # Whitespace gets stripped before being forwarded.
     assert captured["venv"] == "/opt/myvenv"
 
 

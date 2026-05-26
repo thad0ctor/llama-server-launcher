@@ -167,9 +167,31 @@ class TestSameObjectReferenceContract:
         """spec_*_hint_var / spec_status_var / spec_draft_path_display_var /
         spec_draft_listbox are created lazily in ``setup_tab``. They must
         be reachable via ``__getattr__`` delegation once setup_tab has
-        run (which it has, because the launcher built its notebook).
+        run.
+
+        The MTP-Spec tab is now lazy-built (see launcher
+        ``_register_lazy_tab``) — its widget tree only materialises
+        when the user first selects it. We trigger that here so the
+        delegated attributes have been created before we assert.
         """
         launcher, _ = real_launcher
+        # Drive the lazy build by selecting the MTP-Spec frame. The
+        # notebook event handler reads ``notebook.select()``, so we
+        # call it via tab index lookup to be robust to label changes.
+        try:
+            tab_count = launcher.notebook.index("end")
+            for idx in range(tab_count):
+                if launcher.notebook.tab(idx, "text") == "MTP-Spec":
+                    launcher.notebook.select(idx)
+                    break
+        except Exception:
+            pytest.skip("Notebook tab navigation unavailable")
+        # Directly invoke the lazy dispatcher — in a withdrawn test
+        # root the <<NotebookTabChanged>> virtual event isn't reliably
+        # dispatched without a real ``update()`` (which can block on
+        # X11). Calling the handler explicitly is equivalent and
+        # deterministic.
+        launcher._on_notebook_tab_changed()
         for name in (
             "spec_status_var",
             "spec_pmin_hint_var",

@@ -2582,6 +2582,29 @@ class TestMainDeviceEmittedOnDraftUnion:
         assert "--device" not in cmd
         assert "-devd" not in cmd
 
+    def test_ik_llama_mtp_separate_draft_emits_device_and_devd(
+        self, manager, union_launcher
+    ):
+        """ik_llama + mtp with the separate --model-draft opt-in uses the
+        same post-CUDA_VISIBLE_DEVICES assignment as llama.cpp separate-draft
+        modes. The emitted -devd value must be local to the filtered device
+        list, matching ik_llama's fixed -dev/-devd subset semantics."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set("mtp")
+        union_launcher.spec_use_draft_model.set(True)
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7,2,5"
+
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
+        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+        assert "--spec-draft-device" not in cmd
+
     def test_device_value_preserves_main_order(self, manager, union_launcher):
         """Main order [7, 1] (user dragged 7 first) with draft [2] → union
         [7, 1, 2] → --device CUDA0,CUDA1 (positions of 7 then 1)."""

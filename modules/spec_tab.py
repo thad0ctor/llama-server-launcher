@@ -16,12 +16,15 @@ launch.py emission block.
 """
 
 import sys
+import queue
 import tkinter as tk
 from pathlib import Path
 from threading import Thread
 from tkinter import ttk
 
 from modules.system import parse_gguf_header_simple
+
+SPEC_DRAFT_ANALYSIS_POLL_MS = 80
 
 
 # Allowed values for the draft KV cache type comboboxes. Leading "" lets the
@@ -127,6 +130,10 @@ class SpecTab:
         self.max_spec_draft_gpu_layers    = tk.IntVar(value=0)
         self.spec_draft_layers_status_var = tk.StringVar(value="Select draft model to see layer info")
         self.current_spec_draft_analysis  = {}  # mirrors self.current_model_analysis
+        self._spec_draft_analysis_generation = 0
+        self._spec_draft_analysis_queue = queue.Queue()
+        self._spec_draft_analysis_after_id = None
+        self._spec_draft_analysis_thread = None
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
         self.spec_ngram_simple_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
         self.spec_ngram_simple_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
@@ -565,6 +572,25 @@ class SpecTab:
             foreground="gray",
         ).grid(column=0, row=1, sticky="w", padx=6, pady=(0, 4))
 
+        # Apply per-backend / per-spec_type visibility + enable rules
+        # now that every section + widget reference is registered.
+        # This call used to be unnecessary because ``setup_tab`` ran
+        # during launcher ``__init__`` and the subsequent config-load
+        # traces (on backend_selection / spec_enabled / spec_type)
+        # fired ``_refresh_spec_tab_state`` for us. With the tab now
+        # built lazily on first selection (see launcher
+        # ``_register_lazy_tab``), config load has long since finished
+        # — no trace fires when we build — so widgets render in their
+        # default (everything-shown) state unless we kick the refresh
+        # explicitly here.
+        try:
+            self._refresh_spec_tab_state()
+        except Exception as exc:
+            print(
+                f"WARN: post-setup _refresh_spec_tab_state failed: {exc}",
+                file=sys.stderr,
+            )
+
     def _on_spec_draft_model_selected(self, event=None):
         """Listbox <<ListboxSelect>> handler for the draft GGUF picker.
 
@@ -603,12 +629,7 @@ class SpecTab:
                 ):
                     self.spec_draft_ngl_slider.config(state=tk.DISABLED)
                 self.current_spec_draft_analysis = {}
-                t = Thread(
-                    target=self._run_spec_draft_gguf_analysis,
-                    args=(full_path_str,),
-                    daemon=True,
-                )
-                t.start()
+                self._start_spec_draft_gguf_analysis(full_path_str)
         except Exception as e:
             print(f"WARN: _on_spec_draft_model_selected failed: {e}", file=sys.stderr)
 
@@ -728,15 +749,19 @@ class SpecTab:
         the resulting comma-joined string is written to ``self.spec_draft_device``
         so the existing emission block in ``modules/launch.py`` picks it up
         unchanged.
+
+        Incremental: when the GPU shape (count + names + manual-mode flag)
+        matches the prior render we just update the existing BooleanVars in
+        place. The main GPU panel uses the same trick — see the comment on
+        ``_gpu_checkboxes_fingerprint`` in the launcher for the motivation
+        (post-detection refresh was destroying + recreating 8 checkboxes
+        every time even when nothing changed).
         """
         if (
             not hasattr(self, "spec_draft_gpu_checkbox_frame")
             or not self.spec_draft_gpu_checkbox_frame.winfo_exists()
         ):
             return
-        for w in self.spec_draft_gpu_checkbox_frame.winfo_children():
-            w.destroy()
-        self.spec_draft_gpu_vars = []
 
         gpu_info = getattr(self.launcher, "gpu_info", {})
         count = gpu_info.get("device_count", 0) if isinstance(gpu_info, dict) else 0
@@ -748,6 +773,52 @@ class SpecTab:
         manual_mode = bool(
             getattr(getattr(self.launcher, "manual_gpu_mode", None), "get", lambda: False)()
         )
+
+        new_fp = (
+            manual_mode,
+            count,
+            tuple(
+                (detected_devices[i].get("name", "")
+                 if i < len(detected_devices) and isinstance(detected_devices[i], dict)
+                 else "")
+                for i in range(count)
+            ),
+        )
+        existing_fp = getattr(self, "_spec_draft_checkboxes_last_fp", None)
+        if (
+            existing_fp is not None
+            and existing_fp == new_fp
+            and count > 0
+            and not manual_mode
+            and len(self.spec_draft_gpu_vars) == count
+        ):
+            valid_selected = []
+            for i, var in enumerate(self.spec_draft_gpu_vars):
+                desired = i in loaded_selected
+                if desired:
+                    valid_selected.append(i)
+                try:
+                    if var.get() != desired:
+                        var.set(desired)
+                except Exception:
+                    pass
+            self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+            try:
+                self.spec_draft_device.set(
+                    ",".join(f"CUDA{i}" for i in valid_selected)
+                )
+            except Exception:
+                pass
+            try:
+                self._refresh_spec_tab_state()
+            except Exception:
+                pass
+            return
+
+        self._spec_draft_checkboxes_last_fp = new_fp
+        for w in self.spec_draft_gpu_checkbox_frame.winfo_children():
+            w.destroy()
+        self.spec_draft_gpu_vars = []
         # Sanitize: rebuild the persisted-index list from what's currently
         # valid, so a stale saved selection (e.g. GPUs that no longer exist
         # or were filtered, or any selection while manual GPU mode is on)
@@ -842,17 +913,54 @@ class SpecTab:
 
     # -- Draft GGUF analysis (mirrors _on_model_selected/_run_gguf_analysis) --
 
-    def _run_spec_draft_gguf_analysis(self, draft_path_str):
-        """Background worker that parses the draft GGUF and dispatches the
-        result back onto the Tk thread."""
+    def _start_spec_draft_gguf_analysis(self, draft_path_str):
+        """Start draft GGUF parsing and poll results from the Tk thread."""
+        self._spec_draft_analysis_generation += 1
+        analysis_id = self._spec_draft_analysis_generation
+        t = Thread(
+            target=self._run_spec_draft_gguf_analysis,
+            args=(draft_path_str, analysis_id),
+            daemon=True,
+        )
+        self._spec_draft_analysis_thread = t
+        t.start()
+        if self._spec_draft_analysis_after_id is None:
+            self._spec_draft_analysis_after_id = self.launcher.root.after(
+                SPEC_DRAFT_ANALYSIS_POLL_MS,
+                self._drain_spec_draft_gguf_analysis,
+            )
+
+    def _run_spec_draft_gguf_analysis(self, draft_path_str, analysis_id=None):
+        """Background worker that parses the draft GGUF. No Tk calls here."""
         try:
-            if self.spec_draft_model.get() != draft_path_str:
-                return  # selection changed before we even started
+            if analysis_id is None:
+                analysis_id = self._spec_draft_analysis_generation
             analysis_result = parse_gguf_header_simple(draft_path_str)
-            if self.spec_draft_model.get() == draft_path_str:
-                self.launcher.root.after(0, self._update_ui_after_spec_draft_analysis, analysis_result)
         except Exception as e:
-            print(f"WARN: spec draft GGUF analysis failed: {e}", file=sys.stderr)
+            analysis_result = {"path": draft_path_str, "error": str(e)}
+        self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
+
+    def _drain_spec_draft_gguf_analysis(self):
+        self._spec_draft_analysis_after_id = None
+        try:
+            while True:
+                analysis_id, analysis_result = self._spec_draft_analysis_queue.get_nowait()
+                if analysis_id != self._spec_draft_analysis_generation:
+                    continue
+                if self.spec_draft_model.get() != analysis_result.get("path"):
+                    continue
+                self._update_ui_after_spec_draft_analysis(analysis_result)
+                return
+        except queue.Empty:
+            pass
+        if (
+            self._spec_draft_analysis_thread
+            and self._spec_draft_analysis_thread.is_alive()
+        ) or not self._spec_draft_analysis_queue.empty():
+            self._spec_draft_analysis_after_id = self.launcher.root.after(
+                SPEC_DRAFT_ANALYSIS_POLL_MS,
+                self._drain_spec_draft_gguf_analysis,
+            )
 
     def _update_ui_after_spec_draft_analysis(self, analysis_result):
         """Apply analysis result to the draft slider/status (Tk thread)."""

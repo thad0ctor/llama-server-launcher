@@ -10,12 +10,15 @@ import webbrowser
 from pathlib import Path
 import sys
 import os
+import queue
 import shlex
 import subprocess
 import requests
 import threading
 from datetime import datetime
 import shutil
+
+VERSION_CHECK_POLL_MS = 100
 
 
 def build_update_script(current_dir, backup_path, current_version, remote_version,
@@ -218,6 +221,10 @@ class AboutTab:
         self.remote_version = None
         self.version_label = None
         self.update_button = None
+        self._version_queue = queue.Queue()
+        self._version_after_id = None
+        self._version_thread = None
+        self._parent = None
         # Python-level flag the background version-check thread consults
         # before touching any Tk widget. Cleared by ``_mark_dead`` (bound
         # to the parent frame's ``<Destroy>`` event in ``setup_about_tab``)
@@ -321,24 +328,57 @@ class AboutTab:
             if not self._widget_alive():
                 return
             if response.status_code == 200:
-                self.remote_version = response.text.strip()
-
-                if self._is_version_newer(self.version, self.remote_version):
-                    self.version_status = "Update Available"
-                    self._update_version_display()
-                    self._show_update_button()
-                else:
-                    self.version_status = "Current"
-                    self._update_version_display()
+                remote_version = response.text.strip()
+                status = (
+                    "Update Available"
+                    if self._is_version_newer(self.version, remote_version)
+                    else "Current"
+                )
+                self._post_version_result(status, remote_version)
             else:
-                self.version_status = "Check Failed"
-                self._update_version_display()
+                self._post_version_result("Check Failed", None)
         except requests.RequestException as e:
             print(f"Error checking version: {e}", file=sys.stderr)
             if not self._widget_alive():
                 return
-            self.version_status = "Check Failed"
+            self._post_version_result("Check Failed", None)
+
+    def _post_version_result(self, status, remote_version):
+        if self._parent is None:
+            self.version_status = status
+            self.remote_version = remote_version
             self._update_version_display()
+            if status == "Update Available":
+                self._show_update_button()
+            return
+        self._version_queue.put((status, remote_version))
+
+    def _schedule_version_queue_drain(self):
+        if self._version_after_id is None and self._parent is not None:
+            self._version_after_id = self._parent.after(
+                VERSION_CHECK_POLL_MS,
+                self._drain_version_queue,
+            )
+
+    def _drain_version_queue(self):
+        self._version_after_id = None
+        try:
+            status, remote_version = self._version_queue.get_nowait()
+        except queue.Empty:
+            if (
+                self._widget_alive()
+                and self._version_thread is not None
+                and self._version_thread.is_alive()
+            ):
+                self._schedule_version_queue_drain()
+            return
+        if not self._widget_alive():
+            return
+        self.version_status = status
+        self.remote_version = remote_version
+        self._update_version_display()
+        if status == "Update Available":
+            self._show_update_button()
     
     def _update_version_display(self):
         """Update the version display with status.
@@ -506,6 +546,7 @@ class AboutTab:
     
     def setup_about_tab(self, parent):
         """Set up the About tab UI."""
+        self._parent = parent
         # Bind the parent's <Destroy> so background workers know to stop
         # touching widgets before Tcl tears them down. Without this, the
         # version-check thread can race into a destroyed widget and leak
@@ -555,8 +596,10 @@ class AboutTab:
                                       style="Accent.TButton")  # Use accent style if available
         # Don't pack initially - will be shown when update is available
         
-        # Start version check in background
-        threading.Thread(target=self._check_version_online, daemon=True).start()
+        # Start version check in background; results are applied by the Tk thread.
+        self._version_thread = threading.Thread(target=self._check_version_online, daemon=True)
+        self._version_thread.start()
+        self._schedule_version_queue_drain()
         
         # Project information
         project_frame = ttk.LabelFrame(content_frame, text="Project Information", padding=15)
