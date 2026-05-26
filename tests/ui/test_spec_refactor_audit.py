@@ -178,14 +178,17 @@ class TestSameObjectReferenceContract:
         # Drive the lazy build by selecting the MTP-Spec frame. The
         # notebook event handler reads ``notebook.select()``, so we
         # call it via tab index lookup to be robust to label changes.
+        mtp_spec_tab_index = None
         try:
             tab_count = launcher.notebook.index("end")
             for idx in range(tab_count):
                 if launcher.notebook.tab(idx, "text") == "MTP-Spec":
-                    launcher.notebook.select(idx)
+                    mtp_spec_tab_index = idx
                     break
-        except Exception:
-            pytest.skip("Notebook tab navigation unavailable")
+            assert mtp_spec_tab_index is not None
+            launcher.notebook.select(mtp_spec_tab_index)
+        except tk.TclError as exc:
+            pytest.skip(f"Notebook tab navigation unavailable: {exc}")
         # Directly invoke the lazy dispatcher — in a withdrawn test
         # root the <<NotebookTabChanged>> virtual event isn't reliably
         # dispatched without a real ``update()`` (which can block on

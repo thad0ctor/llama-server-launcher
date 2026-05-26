@@ -18,7 +18,6 @@ launch.py emission block.
 import sys
 import queue
 import tkinter as tk
-from pathlib import Path
 from threading import Thread
 from tkinter import ttk
 
@@ -213,25 +212,30 @@ class SpecTab:
 
         # --- Header / master toggle ---
         ttk.Label(inner, text="MTP / Speculative Decoding", font=("TkDefaultFont", 12, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4); r += 1
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4)
+        r += 1
         ttk.Separator(inner, orient="horizontal")\
-            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5)
+        r += 1
 
         master_cb = ttk.Checkbutton(
             inner,
             text="Enable speculative decoding",
             variable=self.spec_enabled,
         )
-        master_cb.grid(column=0, row=r, sticky="w", padx=10, pady=4, columnspan=4); r += 1
+        master_cb.grid(column=0, row=r, sticky="w", padx=10, pady=4, columnspan=4)
+        r += 1
         self._spec_widgets["master_cb"] = master_cb
 
         self.spec_status_var = tk.StringVar(value="")
         ttk.Label(inner, textvariable=self.spec_status_var, foreground="gray")\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4); r += 1
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4)
+        r += 1
 
         # --- Speculative type ---
         ttk.Label(inner, text="Speculative type:", font=("TkDefaultFont", 10, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4); r += 1
+            .grid(column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4)
+        r += 1
         type_combo = ttk.Combobox(
             inner,
             textvariable=self.spec_type,
@@ -585,7 +589,7 @@ class SpecTab:
         # explicitly here.
         try:
             self._refresh_spec_tab_state()
-        except Exception as exc:
+        except tk.TclError as exc:
             print(
                 f"WARN: post-setup _refresh_spec_tab_state failed: {exc}",
                 file=sys.stderr,
@@ -938,6 +942,8 @@ class SpecTab:
             analysis_result = parse_gguf_header_simple(draft_path_str)
         except Exception as e:
             analysis_result = {"path": draft_path_str, "error": str(e)}
+        if analysis_id != self._spec_draft_analysis_generation:
+            return
         self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
 
     def _drain_spec_draft_gguf_analysis(self):

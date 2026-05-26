@@ -19,7 +19,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from modules.about_tab import AboutTab, build_update_script
+from modules.about_tab import (
+    VERSION_CHECK_POLL_MS,
+    AboutTab,
+    _VERSION_CHECK_COMPLETE,
+    build_update_script,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +376,51 @@ class TestCheckVersionOnline:
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
+
+
+# ---------------------------------------------------------------------------
+# _drain_version_queue — worker completion race
+# ---------------------------------------------------------------------------
+
+class FakeAfterParent:
+    def __init__(self):
+        self.after_calls = []
+
+    def after(self, delay_ms, callback):
+        self.after_calls.append((delay_ms, callback))
+        return f"after-{len(self.after_calls)}"
+
+
+class TestDrainVersionQueue:
+    def test_empty_queue_keeps_polling_until_completion_observed(self, about):
+        """Regression: an empty queue alone is not proof the worker is done."""
+        parent = FakeAfterParent()
+        about._parent = parent
+        about._version_check_pending = True
+        about._version_after_id = "existing-after"
+        about._version_thread = MagicMock()
+        about._version_thread.is_alive.return_value = False
+        about._widget_alive = MagicMock(return_value=True)
+
+        about._drain_version_queue()
+
+        assert about._version_after_id == "after-1"
+        assert parent.after_calls == [(VERSION_CHECK_POLL_MS, about._drain_version_queue)]
+        about._version_thread.is_alive.assert_not_called()
+
+    def test_completion_sentinel_stops_polling_without_ui_change(self, about):
+        parent = FakeAfterParent()
+        about._parent = parent
+        about._version_check_pending = True
+        about._version_queue.put(_VERSION_CHECK_COMPLETE)
+        about._update_version_display = MagicMock()
+
+        about._drain_version_queue()
+
+        assert about._version_check_pending is False
+        assert parent.after_calls == []
+        assert about.version_status == "Checking..."
+        about._update_version_display.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -441,7 +441,7 @@ def get_gpu_info_static():
         # Catch potential torch errors during device query
         print(f"Error querying CUDA devices: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        return {"available": False, "message": f"Error querying CUDA devices: {e}", "device_count": 0, "devices": []}
+        return _unavailable_gpu_info(f"Error querying CUDA devices: {e}", "torch")
 
 
 def format_gpu_mapping_table(gpu_info):

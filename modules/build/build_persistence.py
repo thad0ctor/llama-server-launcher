@@ -56,6 +56,26 @@ def _safe_int(value: Any, *, default: int = 0, min_value: int = 0) -> int:
     return max(min_value, n)
 
 
+def _safe_bool(value: Any, *, default: bool = False) -> bool:
+    """Parse persisted bool-ish values without treating all strings as true."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "f", "no", "n", "off"}:
+            return False
+        if not normalized:
+            return default
+        return default
+    if isinstance(value, int | float):
+        return bool(value)
+    return default
+
+
 @dataclass
 class BuildConfig:
     name: str
@@ -90,8 +110,10 @@ class BuildConfig:
             source_dir=data.get("source_dir", ""),
             build_dir=data.get("build_dir", "build"),
             git_ref=data.get("git_ref", ""),
-            git_pull_before_build=bool(data.get("git_pull_before_build", False)),
-            clean_build=bool(data.get("clean_build", True)),
+            git_pull_before_build=_safe_bool(
+                data.get("git_pull_before_build", False), default=False
+            ),
+            clean_build=_safe_bool(data.get("clean_build", True), default=True),
             jobs=_safe_int(data.get("jobs", 0)),
             cuda_archs=data.get("cuda_archs", ""),
             env=dict(data.get("env", {}) or {}),

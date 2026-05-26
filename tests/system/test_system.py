@@ -169,6 +169,8 @@ def test_gpu_info_static_handles_device_query_exception(
 
     assert info["available"] is False
     assert info["device_count"] == 0
+    assert info["devices"] == []
+    assert info["detection_source"] == "torch"
     assert "CUDA driver exploded" in info["message"]
 
 
@@ -652,12 +654,13 @@ def test_fetch_system_info_uses_configured_venv_path(
         lambda: {"logical_cores": 8, "physical_cores": 4, "model_name": "N/A"},
     )
 
-    launcher = _FakeLauncher(venv_value="  /opt/myvenv  ")
+    launcher = _FakeLauncher(venv_value="  /should-not-be-used  ")
     # Caller (the real launcher's _start_system_info_detection) strips
     # whitespace before passing the value; we mimic that here.
     sysmod.SystemInfoManager(launcher).fetch_system_info(venv_path="/opt/myvenv")
 
     assert captured["venv"] == "/opt/myvenv"
+    assert captured["venv"] != launcher.venv_dir.get().strip()
 
 
 def test_fetch_system_info_without_venv_passes_none(

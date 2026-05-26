@@ -43,6 +43,8 @@ EVENT_CANCELLED = "cancelled" # ("cancelled", None)
 EVENT_ERROR = "error"         # ("error", message)
 
 EVENT_QUEUE_MAXSIZE = 4000
+PROC_TERMINATE_WAIT_SECONDS = 5.0
+PROC_KILL_WAIT_SECONDS = 2.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,6 +257,53 @@ class BuildRunner:
                     proc.terminate()
         except Exception:
             pass
+
+    @staticmethod
+    def _signal_kill(proc: subprocess.Popen) -> None:
+        """Best-effort forced kill of ``proc`` and any children it spawned."""
+        try:
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        timeout=PROC_KILL_WAIT_SECONDS,
+                        check=False,
+                    )
+                except Exception:
+                    proc.kill()
+            else:
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except (OSError, ProcessLookupError):
+                    pgid = proc.pid
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    proc.kill()
+        except Exception:
+            pass
+
+    def _wait_for_proc_shutdown(self, proc: subprocess.Popen) -> int:
+        """Wait for process exit, escalating if graceful termination stalls."""
+        try:
+            try:
+                return int(proc.wait(timeout=PROC_TERMINATE_WAIT_SECONDS) or 0)
+            except subprocess.TimeoutExpired:
+                self._emit_line(
+                    "Process did not exit after termination; forcing shutdown."
+                )
+                self._signal_kill(proc)
+                try:
+                    return int(proc.wait(timeout=PROC_KILL_WAIT_SECONDS) or 0)
+                except subprocess.TimeoutExpired:
+                    self._emit_line("Process did not exit after forced shutdown.")
+                    rc = proc.poll()
+                    return int(rc) if rc is not None else 1
+        finally:
+            with self._lock:
+                if self._proc is proc:
+                    self._proc = None
 
     # ---------------------------------------------------------------- driver
     def start(self, plan: BuildPlan) -> bool:
@@ -485,10 +534,7 @@ class BuildRunner:
             # events so don't put EVENT_ERROR on the queue here.
             self._emit_line(f"ERROR: Stream read error: {exc}")
 
-        proc.wait()
-        with self._lock:
-            self._proc = None
-        return int(proc.returncode or 0)
+        return self._wait_for_proc_shutdown(proc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

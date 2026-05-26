@@ -15,6 +15,12 @@ Subdivides the build feature into:
                    detach-to-Toplevel support and an update banner.
 """
 
-from .build_tab import BuildTab
+from importlib import import_module
 
 __all__ = ["BuildTab"]
+
+
+def __getattr__(name: str):
+    if name == "BuildTab":
+        return import_module(".build_tab", __name__).BuildTab
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

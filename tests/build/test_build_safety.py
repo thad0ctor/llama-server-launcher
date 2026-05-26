@@ -1,8 +1,10 @@
+import subprocess
 import sys
 import types
 
 import pytest
 
+from modules.build import build_runner
 from modules.build import detection
 from modules.build.build_runner import (
     BuildPlan,
@@ -45,6 +47,53 @@ def test_build_runner_reports_dropped_output_after_queue_catches_up():
         kind == EVENT_LINE and "skipped 1 build output line" in str(payload)
         for kind, payload in queued
     )
+
+
+def test_build_runner_shutdown_escalates_and_clears_proc(monkeypatch):
+    runner = BuildRunner()
+
+    class HangingProc:
+        pid = 12345
+        returncode = None
+
+        def __init__(self):
+            self.wait_timeouts = []
+
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            if len(self.wait_timeouts) == 1:
+                raise subprocess.TimeoutExpired(["fake-build"], timeout)
+            self.returncode = -9
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    proc = HangingProc()
+    killed = []
+
+    def record_kill(proc_to_kill):
+        killed.append(proc_to_kill)
+
+    monkeypatch.setattr(
+        BuildRunner,
+        "_signal_kill",
+        staticmethod(record_kill),
+    )
+
+    with runner._lock:
+        runner._proc = proc
+
+    rc = runner._wait_for_proc_shutdown(proc)
+
+    assert rc == -9
+    assert killed == [proc]
+    assert proc.wait_timeouts == [
+        build_runner.PROC_TERMINATE_WAIT_SECONDS,
+        build_runner.PROC_KILL_WAIT_SECONDS,
+    ]
+    with runner._lock:
+        assert runner._proc is None
 
 
 def test_recommend_jobs_does_not_default_to_all_logical_cpus(monkeypatch):

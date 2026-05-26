@@ -13,8 +13,10 @@ rather than a normal import statement.
 from __future__ import annotations
 
 import importlib.util
+import queue
 import sys
 import time
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,6 +95,66 @@ class TestParseCliArgs:
         out = capsys.readouterr().out.strip()
         # Should be one of the well-formed strings.
         assert out.startswith("llamacpp-server-launcher ")
+
+
+# ---------------------------------------------------------------------------
+# LlamaCppLauncher lazy/system-info helpers
+# ---------------------------------------------------------------------------
+
+class TestLauncherHelpers:
+    def test_lazy_tab_initialized_only_after_success(self, entry_module):
+        parent = types.SimpleNamespace(winfo_children=lambda: [])
+        entry = {
+            "parent": parent,
+            "label": "Build",
+            "initialized": False,
+        }
+        selected_tab = "tab-id"
+        launcher = types.SimpleNamespace(
+            notebook=types.SimpleNamespace(select=lambda: selected_tab),
+            _lazy_tab_registry={selected_tab: entry},
+        )
+        attempts = []
+
+        def builder(_parent):
+            attempts.append(_parent)
+            if len(attempts) == 1:
+                raise RuntimeError("first build failed")
+
+        entry["builder"] = builder
+
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+        assert entry["initialized"] is False
+
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+        assert entry["initialized"] is True
+        assert attempts == [parent, parent]
+
+    def test_system_info_drain_discards_stale_generation(self, entry_module):
+        class Alive:
+            def is_set(self):
+                return True
+
+        q = queue.Queue()
+        q.put((1, {"gpu_info": {"available": True}}, None))
+        applied = []
+        scheduled = []
+        launcher = types.SimpleNamespace(
+            _tk_alive=Alive(),
+            _system_info_after_id=None,
+            _system_info_queue=q,
+            _system_info_active_generations={1},
+            _system_info_generation=2,
+            _detection_in_progress=True,
+            _schedule_system_info_drain=lambda: scheduled.append(True),
+            _on_system_info_detection_complete=lambda **kwargs: applied.append(kwargs),
+        )
+
+        entry_module.LlamaCppLauncher._drain_system_info_queue(launcher)
+
+        assert applied == []
+        assert scheduled == []
+        assert launcher._detection_in_progress is False
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ import ctypes
 import shlex # <-- Import shlex for parameter splitting
 import math
 import time
+from types import SimpleNamespace
 
 
 def _read_version_string():
@@ -701,6 +702,8 @@ class LlamaCppLauncher:
         self._system_info_queue = queue.Queue()
         self._system_info_after_id = None
         self._system_info_thread = None
+        self._system_info_generation = 0
+        self._system_info_active_generations = set()
 
 
         # --- System Info Initialization ---
@@ -2366,7 +2369,6 @@ class LlamaCppLauncher:
         entry = registry.get(current)
         if entry is None or entry["initialized"]:
             return
-        entry["initialized"] = True
         parent = entry["parent"]
         # Tear down the placeholder and build the real UI.
         for child in parent.winfo_children():
@@ -2376,6 +2378,7 @@ class LlamaCppLauncher:
                 pass
         try:
             entry["builder"](parent)
+            entry["initialized"] = True
         except Exception as exc:
             print(
                 f"ERROR: lazy tab setup for {entry['label']!r} failed: {exc}",
@@ -4689,11 +4692,13 @@ class LlamaCppLauncher:
         consumes only captured plain strings and posts completion into a
         Python queue; the Tk thread polls that queue and applies Tk vars.
         """
-        # Prevent multiple simultaneous detection threads
-        if hasattr(self, '_detection_in_progress') and self._detection_in_progress:
-            debug_print("GPU detection already in progress, skipping new request")
-            return
-
+        generation = getattr(self, "_system_info_generation", 0) + 1
+        self._system_info_generation = generation
+        active_generations = getattr(self, "_system_info_active_generations", None)
+        if active_generations is None:
+            active_generations = set()
+            self._system_info_active_generations = active_generations
+        active_generations.add(generation)
         self._detection_in_progress = True
         try:
             current_status = self.gpu_detected_status_var.get()
@@ -4713,24 +4718,45 @@ class LlamaCppLauncher:
         except (tk.TclError, RuntimeError):
             captured_venv_path = None
 
-        def detect_system_info(venv_path=captured_venv_path):
+        def detect_system_info(
+            venv_path=captured_venv_path,
+            generation_id=generation,
+        ):
             """Background thread function to detect system info."""
             try:
-                print("DEBUG: Starting background system info detection...", file=sys.stderr)
+                print(
+                    f"DEBUG: Starting background system info detection "
+                    f"(generation {generation_id})...",
+                    file=sys.stderr,
+                )
                 # ``defer_tk_writes=True`` keeps the worker from touching
-                # Tcl: it only populates plain-Python attributes. The
-                # completion callback (main thread) applies Tk vars
-                # afterwards via ``_apply_system_info_to_tk_vars``.
-                self.system_info_manager.fetch_system_info(
+                # Tcl. Use a staging object so an older worker cannot mutate
+                # live launcher fields after a newer request supersedes it.
+                staged = SimpleNamespace()
+                SystemInfoManager(staged).fetch_system_info(
                     venv_path=venv_path, defer_tk_writes=True
                 )
-                print("DEBUG: Background system info detection completed.", file=sys.stderr)
+                staged_result = {
+                    "gpu_info": getattr(staged, "gpu_info", {}),
+                    "ram_info": getattr(staged, "ram_info", {}),
+                    "cpu_info": getattr(staged, "cpu_info", {}),
+                    "detected_gpu_devices": getattr(
+                        staged, "detected_gpu_devices", []
+                    ),
+                    "logical_cores": getattr(staged, "logical_cores", 4),
+                    "physical_cores": getattr(staged, "physical_cores", 2),
+                }
+                print(
+                    f"DEBUG: Background system info detection completed "
+                    f"(generation {generation_id}).",
+                    file=sys.stderr,
+                )
 
-                self._system_info_queue.put((None,))
+                self._system_info_queue.put((generation_id, staged_result, None))
             except Exception as e:
                 print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-                self._system_info_queue.put((str(e),))
+                self._system_info_queue.put((generation_id, None, str(e)))
 
         # Start detection in background thread
         self._system_info_thread = Thread(target=detect_system_info, daemon=True)
@@ -4757,13 +4783,31 @@ class LlamaCppLauncher:
             f"{self._system_info_queue.empty()})",
             file=sys.stderr,
         )
-        try:
-            (error_message,) = self._system_info_queue.get_nowait()
-        except queue.Empty:
-            if self._system_info_thread is not None and self._system_info_thread.is_alive():
-                self._schedule_system_info_drain()
-            return
-        self._on_system_info_detection_complete(error=error_message)
+        active_generations = getattr(self, "_system_info_active_generations", set())
+        saw_result = False
+        while True:
+            try:
+                generation, staged_result, error_message = self._system_info_queue.get_nowait()
+            except queue.Empty:
+                break
+            saw_result = True
+            active_generations.discard(generation)
+            if generation != getattr(self, "_system_info_generation", 0):
+                print(
+                    f"DEBUG: Discarding stale system info generation {generation} "
+                    f"(current {getattr(self, '_system_info_generation', 0)}).",
+                    file=sys.stderr,
+                )
+                continue
+            self._on_system_info_detection_complete(
+                generation=generation,
+                staged_result=staged_result,
+                error=error_message,
+            )
+
+        self._detection_in_progress = bool(active_generations)
+        if active_generations or (not saw_result and self._detection_in_progress):
+            self._schedule_system_info_drain()
 
     def _mark_tk_dead(self):
         """Clear the ``_tk_alive`` flag so worker threads stop dispatching
@@ -4787,16 +4831,34 @@ class LlamaCppLauncher:
         except Exception:
             pass
 
-    def _on_system_info_detection_complete(self, error=None):
+    def _on_system_info_detection_complete(
+        self,
+        *,
+        generation=None,
+        staged_result=None,
+        error=None,
+    ):
         """Handle completion of system info detection (runs on main thread)."""
         _t_start = time.perf_counter()
         print(
             f"DEBUG: _on_system_info_detection_complete ENTER "
-            f"(t={_t_start:.3f})", file=sys.stderr,
+            f"(t={_t_start:.3f}, generation={generation})", file=sys.stderr,
         )
         try:
-            # Clear detection flag (single point of clearing)
-            self._detection_in_progress = False
+            active_generations = getattr(
+                self, "_system_info_active_generations", set()
+            )
+            self._detection_in_progress = bool(active_generations)
+
+            if staged_result:
+                self.gpu_info = staged_result.get("gpu_info", {})
+                self.ram_info = staged_result.get("ram_info", {})
+                self.cpu_info = staged_result.get("cpu_info", {})
+                self.detected_gpu_devices = staged_result.get(
+                    "detected_gpu_devices", []
+                )
+                self.logical_cores = staged_result.get("logical_cores", 4)
+                self.physical_cores = staged_result.get("physical_cores", 2)
 
             # Apply the system-info Tk vars on the main thread — the worker
             # populated plain-Python attributes only (defer_tk_writes=True),
@@ -5247,7 +5309,11 @@ class LlamaCppLauncher:
             # Switching to manual mode - do this immediately without waiting for detection
             print("DEBUG: Switching to manual GPU mode", file=sys.stderr)
 
-            # Clear any ongoing detection
+            # Invalidate any auto-detection worker already in flight. Its
+            # staged result is discarded when the queue drains.
+            self._system_info_generation = getattr(
+                self, "_system_info_generation", 0
+            ) + 1
             if hasattr(self, '_detection_in_progress'):
                 self._detection_in_progress = False
 
@@ -5320,6 +5386,13 @@ class LlamaCppLauncher:
         used to write the config to disk AND spawn a GPU-detection
         subprocess, which made typing a path into the Entry visibly lag.
         """
+        if not self.manual_gpu_mode.get():
+            # The currently running probe, if any, used the previous venv
+            # snapshot. Bump immediately; the debounced handler starts the
+            # replacement probe after typing settles.
+            self._system_info_generation = getattr(
+                self, "_system_info_generation", 0
+            ) + 1
         if self._venv_dir_change_after_id is not None:
             try:
                 self.root.after_cancel(self._venv_dir_change_after_id)

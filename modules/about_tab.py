@@ -19,6 +19,7 @@ from datetime import datetime
 import shutil
 
 VERSION_CHECK_POLL_MS = 100
+_VERSION_CHECK_COMPLETE = object()
 
 
 def build_update_script(current_dir, backup_path, current_version, remote_version,
@@ -224,6 +225,7 @@ class AboutTab:
         self._version_queue = queue.Queue()
         self._version_after_id = None
         self._version_thread = None
+        self._version_check_pending = False
         self._parent = None
         # Python-level flag the background version-check thread consults
         # before touching any Tk widget. Cleared by ``_mark_dead`` (bound
@@ -342,6 +344,9 @@ class AboutTab:
             if not self._widget_alive():
                 return
             self._post_version_result("Check Failed", None)
+        finally:
+            if self._parent is not None:
+                self._version_queue.put(_VERSION_CHECK_COMPLETE)
 
     def _post_version_result(self, status, remote_version):
         if self._parent is None:
@@ -354,7 +359,11 @@ class AboutTab:
         self._version_queue.put((status, remote_version))
 
     def _schedule_version_queue_drain(self):
-        if self._version_after_id is None and self._parent is not None:
+        if (
+            self._version_after_id is None
+            and self._parent is not None
+            and self._version_check_pending
+        ):
             self._version_after_id = self._parent.after(
                 VERSION_CHECK_POLL_MS,
                 self._drain_version_queue,
@@ -362,23 +371,28 @@ class AboutTab:
 
     def _drain_version_queue(self):
         self._version_after_id = None
-        try:
-            status, remote_version = self._version_queue.get_nowait()
-        except queue.Empty:
-            if (
-                self._widget_alive()
-                and self._version_thread is not None
-                and self._version_thread.is_alive()
-            ):
-                self._schedule_version_queue_drain()
+        while True:
+            try:
+                item = self._version_queue.get_nowait()
+            except queue.Empty:
+                if self._widget_alive() and self._version_check_pending:
+                    self._schedule_version_queue_drain()
+                return
+
+            if item is _VERSION_CHECK_COMPLETE:
+                self._version_check_pending = False
+                return
+
+            status, remote_version = item
+            if not self._widget_alive():
+                return
+            self._version_check_pending = False
+            self.version_status = status
+            self.remote_version = remote_version
+            self._update_version_display()
+            if status == "Update Available":
+                self._show_update_button()
             return
-        if not self._widget_alive():
-            return
-        self.version_status = status
-        self.remote_version = remote_version
-        self._update_version_display()
-        if status == "Update Available":
-            self._show_update_button()
     
     def _update_version_display(self):
         """Update the version display with status.
@@ -597,6 +611,8 @@ class AboutTab:
         # Don't pack initially - will be shown when update is available
         
         # Start version check in background; results are applied by the Tk thread.
+        self._version_queue = queue.Queue()
+        self._version_check_pending = True
         self._version_thread = threading.Thread(target=self._check_version_online, daemon=True)
         self._version_thread.start()
         self._schedule_version_queue_drain()
