@@ -135,6 +135,7 @@ class BuildTab:
         self._rebuild_full_pending: bool = False
         self._suspend_traces: bool = False
         self._syncing_backend_dirs: bool = False
+        self._syncing_backend_selection: bool = False
 
         # ── Tk variables (state survives widget rebuilds) ──
         seed_backend = "llama.cpp"
@@ -499,11 +500,16 @@ class BuildTab:
         # Each section is laid out top-to-bottom in `scrollable`.
         scrollable.columnconfigure(0, weight=1)
         row = 0
-        self._build_section_config_bar(scrollable, row); row += 1
-        self._build_section_source(scrollable, row); row += 1
-        self._build_section_environment(scrollable, row); row += 1
-        self._build_section_flags(scrollable, row); row += 1
-        self._build_section_preview(scrollable, row); row += 1
+        self._build_section_config_bar(scrollable, row)
+        row += 1
+        self._build_section_source(scrollable, row)
+        row += 1
+        self._build_section_environment(scrollable, row)
+        row += 1
+        self._build_section_flags(scrollable, row)
+        row += 1
+        self._build_section_preview(scrollable, row)
+        row += 1
 
         # Bottom: action bar + console.
         self._build_action_bar(outer)
@@ -571,7 +577,7 @@ class BuildTab:
         ttk.Label(lf, text="Name:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self._cfg_combo = ttk.Combobox(lf, textvariable=self.var_config_name)
         self._cfg_combo.grid(row=0, column=1, sticky="ew", padx=4, pady=4)
-        self._cfg_combo.bind("<<ComboboxSelected>>", lambda *_a: None)
+        self._cfg_combo.bind("<<ComboboxSelected>>", lambda *_a: self._on_load_config())
 
         btns = ttk.Frame(lf)
         btns.grid(row=0, column=2, sticky="e", padx=4)
@@ -598,7 +604,8 @@ class BuildTab:
 
         ttk.Label(lf, text="Source dir:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         ttk.Entry(lf, textvariable=self.var_source_dir).grid(row=1, column=1, sticky="ew", padx=4)
-        src_btns = ttk.Frame(lf); src_btns.grid(row=1, column=2, sticky="e", padx=4)
+        src_btns = ttk.Frame(lf)
+        src_btns.grid(row=1, column=2, sticky="e", padx=4)
         ttk.Button(src_btns, text="Browse…", command=self._on_browse_source).pack(side="left", padx=2)
         ttk.Button(src_btns, text="Use backend dir",
                    command=self._on_use_backend_dir).pack(side="left", padx=2)
@@ -648,7 +655,8 @@ class BuildTab:
 
         # Jobs
         ttk.Label(lf, text="Parallel jobs:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        jobs_frame = ttk.Frame(lf); jobs_frame.grid(row=0, column=1, sticky="w", padx=4)
+        jobs_frame = ttk.Frame(lf)
+        jobs_frame.grid(row=0, column=1, sticky="w", padx=4)
         # validate="key" + validatecommand restricts the Spinbox to digit-only
         # keystrokes so var_jobs (IntVar) cannot be coerced to non-numeric text.
         # The lambda accepts "" (intermediate empty state while editing) plus
@@ -662,11 +670,13 @@ class BuildTab:
 
         # CUDA archs — entry + auto-detect + per-arch multi-select grid
         ttk.Label(lf, text="CUDA archs:").grid(row=1, column=0, sticky="nw", padx=6, pady=4)
-        arch_frame = ttk.Frame(lf); arch_frame.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4)
+        arch_frame = ttk.Frame(lf)
+        arch_frame.grid(row=1, column=1, columnspan=2, sticky="ew", padx=4)
         arch_frame.columnconfigure(0, weight=1)
 
         ttk.Entry(arch_frame, textvariable=self.var_cuda_archs).grid(row=0, column=0, sticky="ew")
-        arch_btns = ttk.Frame(arch_frame); arch_btns.grid(row=0, column=1, padx=4)
+        arch_btns = ttk.Frame(arch_frame)
+        arch_btns.grid(row=0, column=1, padx=4)
         ttk.Button(arch_btns, text="Detect", width=8,
                    command=self._on_autodetect_archs).pack(side="left", padx=2)
         ttk.Button(arch_btns, text="Clear", width=6,
@@ -880,7 +890,6 @@ class BuildTab:
                     print(f"WARN: visible_when predicate for {flag.key!r} raised: {exc}",
                           file=sys.stderr)
                     predicate_ok = True
-            should_show = applies and predicate_ok
             help_w = self._flag_help_widgets.get(flag.key)
             label_w = self._flag_label_widgets.get(flag.key)
             try:
@@ -988,7 +997,8 @@ class BuildTab:
                                      font=("TkFixedFont",), state="disabled")
         self._preview_text.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
 
-        btns = ttk.Frame(lf); btns.grid(row=1, column=0, sticky="e", padx=4, pady=(0, 4))
+        btns = ttk.Frame(lf)
+        btns.grid(row=1, column=0, sticky="e", padx=4, pady=(0, 4))
         ttk.Button(btns, text="Copy command",
                    command=self._on_copy_preview).pack(side="left", padx=2)
         ttk.Button(btns, text="Save as .sh…",
@@ -1055,22 +1065,29 @@ class BuildTab:
         # Fired by the radio button's command=. The radio button is a child of
         # the tab's content frame which _build_ui destroys; doing the rebuild
         # synchronously freezes Tk. Defer until the event has fully unwound.
+        self._sync_launcher_backend_from_build()
         self._schedule_rebuild()
 
     def _on_launcher_backend_changed(self, *_a) -> None:
+        if self._syncing_backend_selection:
+            return
         try:
             new_backend = self.launcher.backend_selection.get()
         except Exception:
             return
         if new_backend and new_backend != self.var_backend.get():
-            self._set_var_if_changed(self.var_backend, new_backend)
-            self._sync_source_dir_from_launcher(new_backend, prefer_current=False)
+            self._syncing_backend_selection = True
+            try:
+                self._set_var_if_changed(self.var_backend, new_backend)
+            finally:
+                self._syncing_backend_selection = False
             # Setting var_backend programmatically doesn't fire the radio
             # button's command callback, so we need to schedule the rebuild
             # ourselves — otherwise flag groups remain stuck on the old backend.
             self._schedule_rebuild()
-        elif new_backend:
+        if new_backend:
             self._sync_source_dir_from_launcher(new_backend, prefer_current=False)
+            self._refresh_saved_configs_dropdown()
 
     def _schedule_rebuild(self, *, full: bool = False) -> None:
         """Coalesce rapid rebuild requests onto a single after_idle callback.
@@ -1208,7 +1225,9 @@ class BuildTab:
 
     def _on_build_backend_var_changed(self, *_a) -> None:
         self._update_source_dir_status()
-        self._sync_source_dir_from_launcher(self.var_backend.get(), prefer_current=True)
+        self._sync_launcher_backend_from_build()
+        self._sync_source_dir_from_launcher(self.var_backend.get(), prefer_current=False)
+        self._refresh_saved_configs_dropdown()
 
     @staticmethod
     def _set_var_if_changed(var: tk.Variable, value: str) -> None:
@@ -1228,6 +1247,21 @@ class BuildTab:
 
     def _launcher_backend_settings_key(self, backend: str) -> str:
         return "last_ik_llama_dir" if backend == "ik_llama" else "last_llama_cpp_dir"
+
+    def _sync_launcher_backend_from_build(self) -> None:
+        if self._syncing_backend_selection:
+            return
+        backend = self.var_backend.get() or "llama.cpp"
+        try:
+            if self.launcher.backend_selection.get() == backend:
+                return
+        except Exception:
+            return
+        self._syncing_backend_selection = True
+        try:
+            self._set_var_if_changed(self.launcher.backend_selection, backend)
+        finally:
+            self._syncing_backend_selection = False
 
     def _sync_source_dir_from_launcher(self, backend: str, *, prefer_current: bool) -> None:
         if self._syncing_backend_dirs or backend != self.var_backend.get():
@@ -1740,10 +1774,12 @@ class BuildTab:
         for t in current:
             if t in tokens_to_remove or t in seen:
                 continue
-            seen.add(t); out.append(t)
+            seen.add(t)
+            out.append(t)
         for t in tokens_to_add:
             if t not in seen:
-                seen.add(t); out.append(t)
+                seen.add(t)
+                out.append(t)
         self._arch_sync_in_progress = True
         try:
             self.var_cuda_archs.set(";".join(out))
@@ -1818,9 +1854,11 @@ class BuildTab:
             try:
                 # Handle 2-digit (sm_86) and 3-digit (sm_120) bases.
                 if len(base) == 2:
-                    major = int(base[0]); minor = int(base[1])
+                    major = int(base[0])
+                    minor = int(base[1])
                 else:
-                    major = int(base[:2]); minor = int(base[2:])
+                    major = int(base[:2])
+                    minor = int(base[2:])
                 cc = f"{major}.{minor}"
             except ValueError:
                 continue
@@ -1834,17 +1872,21 @@ class BuildTab:
             if prefer_a and known and known.has_a_variant:
                 t = f"{base}a-real"
                 if t not in emitted:
-                    emitted.add(t); out.append(t)
+                    emitted.add(t)
+                    out.append(t)
             if prefer_f and known and known.has_f_variant:
                 t = f"{base}f-real"
                 if t not in emitted:
-                    emitted.add(t); out.append(t)
+                    emitted.add(t)
+                    out.append(t)
             t = f"{base}-real"
             if t not in emitted:
-                emitted.add(t); out.append(t)
+                emitted.add(t)
+                out.append(t)
         for t in passthrough:
             if t not in emitted:
-                emitted.add(t); out.append(t)
+                emitted.add(t)
+                out.append(t)
         self.var_cuda_archs.set(";".join(out))
         self._sync_arch_pickers_from_value()
 
@@ -1995,7 +2037,18 @@ class BuildTab:
     # ── Config save/load ────────────────────────────────────────────────
     def _refresh_saved_configs_dropdown(self) -> None:
         if hasattr(self, "_cfg_combo"):
-            self._cfg_combo["values"] = self.store.list_names()
+            names = self._saved_config_names_for_backend(self.var_backend.get())
+            self._cfg_combo["values"] = names
+            if self.var_config_name.get().strip() not in names:
+                self.var_config_name.set("")
+
+    def _saved_config_names_for_backend(self, backend: str) -> list[str]:
+        names = []
+        for name in self.store.list_names():
+            cfg = self.store.get(name)
+            if cfg is not None and cfg.backend == backend:
+                names.append(name)
+        return names
 
     def _on_load_config(self) -> None:
         name = self.var_config_name.get().strip()
@@ -2007,6 +2060,8 @@ class BuildTab:
             return
         self._apply_loaded_config(cfg)
         self.store.touch_last_used(name)
+        self._refresh_saved_configs_dropdown()
+        self.var_config_name.set(name)
         self._append_console(f"Loaded config: {name}\n", tag="stage")
 
     def _apply_loaded_config(self, cfg: BuildConfig) -> None:

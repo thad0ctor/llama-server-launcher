@@ -65,22 +65,23 @@ KNOWN_CUDA_ARCHS: list[KnownArch] = [
     # Turing
     KnownArch("7.5", "RTX 20xx / GTX 16xx / T4 (Turing)",    "Turing",   False, False, "10.0"),
     # Ampere
-    KnownArch("8.0", "A100 (Ampere datacenter)",             "Ampere",   False, False, "11.0"),
-    KnownArch("8.6", "RTX 30xx / A40 (Ampere consumer)",     "Ampere",   False, False, "11.1"),
-    KnownArch("8.7", "Jetson Orin (Ampere mobile)",          "Ampere",   False, False, "11.4"),
+    KnownArch("8.0", "A100 / A30 (Ampere datacenter)",       "Ampere",   False, False, "11.0"),
+    KnownArch("8.6", "RTX 30xx / RTX A-series / A40/A10/A16/A2 (Ampere)",
+                                                                    "Ampere",   False, False, "11.1"),
+    KnownArch("8.7", "Jetson AGX Orin / Orin NX / Orin Nano","Ampere",   False, False, "11.4"),
     # Niche sm_88 — nvcc 13 accepts it; product confirmation pending.
     KnownArch("8.8", "sm_88 (Ampere/Hopper variant)",        "Ampere",   False, False, "12.x"),
     # Ada Lovelace
-    KnownArch("8.9", "RTX 40xx / L40 (Ada)",                 "Ada",      False, False, "11.8"),
+    KnownArch("8.9", "RTX 40xx / L4/L40/L40S / RTX Ada",     "Ada",      False, False, "11.8"),
     # Hopper
-    KnownArch("9.0", "H100 / H200 (Hopper)",                 "Hopper",   True,  False, "11.8"),
+    KnownArch("9.0", "H100 / H200 / GH200 (Hopper)",         "Hopper",   True,  False, "11.8"),
     # Blackwell datacenter (sm_100/103/110) — -a and -f both valid.
-    KnownArch("10.0", "B100 / B200 (Blackwell datacenter)",  "Blackwell", True, True, "12.8"),
-    KnownArch("10.3", "GB200-class (Blackwell datacenter)",  "Blackwell", True, True, "12.9"),
-    KnownArch("11.0", "Blackwell datacenter (sm_110)",       "Blackwell", True, True, "13.0"),
+    KnownArch("10.0", "B200 / GB200 (Blackwell datacenter)", "Blackwell", True, True, "12.8"),
+    KnownArch("10.3", "B300 / GB300 (Blackwell datacenter)", "Blackwell", True, True, "12.9"),
+    KnownArch("11.0", "Jetson T5000 / T4000 (Blackwell)",    "Blackwell", True, True, "13.0"),
     # Blackwell consumer (sm_120/121)
-    KnownArch("12.0", "RTX 50xx (Blackwell consumer)",       "Blackwell", True, True, "12.8"),
-    KnownArch("12.1", "RTX 50xx refresh (Blackwell)",        "Blackwell", True, True, "12.9"),
+    KnownArch("12.0", "RTX 50xx / RTX PRO Blackwell",        "Blackwell", True, True, "12.8"),
+    KnownArch("12.1", "NVIDIA GB10 / DGX Spark",             "Blackwell", True, True, "12.9"),
 ]
 
 
