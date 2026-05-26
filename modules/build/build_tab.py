@@ -982,8 +982,11 @@ class BuildTab:
 
     # ── Action bar + console ───────────────────────────────────────────
     def _build_action_bar(self, parent: ttk.Frame) -> None:
+        ttk.Separator(parent, orient="horizontal").grid(
+            row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 6)
+        )
         bar = ttk.Frame(parent)
-        bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 0))
+        bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 0))
         bar.columnconfigure(2, weight=1)
         self._start_btn = ttk.Button(bar, text="▶ Start build",
                                      command=self._on_start_build)
@@ -1004,8 +1007,8 @@ class BuildTab:
 
     def _build_console(self, parent: ttk.Frame) -> None:
         cf_frame = ttk.LabelFrame(parent, text="Build output")
-        cf_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=8, pady=(4, 8))
-        parent.rowconfigure(3, weight=1)
+        cf_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", padx=8, pady=(4, 8))
+        parent.rowconfigure(4, weight=1)
         cf_frame.rowconfigure(0, weight=1)
         cf_frame.columnconfigure(0, weight=1)
 
