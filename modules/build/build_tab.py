@@ -107,7 +107,7 @@ class BuildTab:
         # Update-banner state.
         self._upstream_status = UpstreamStatus()
         self._upstream_check_in_flight = False
-        self._pending_status: queue.Queue[UpstreamStatus] = queue.Queue()
+        self._pending_status: queue.Queue[tuple[UpstreamStatus, bool]] = queue.Queue()
         self._pending_pull_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         # Notebook integration. Detach-to-Toplevel was removed because the
@@ -434,7 +434,7 @@ class BuildTab:
 
         outer = ttk.Frame(parent)
         outer.pack(fill="both", expand=True)
-        outer.rowconfigure(1, weight=1)
+        outer.rowconfigure(1, weight=2)
         outer.columnconfigure(0, weight=1)
 
         # Top: header bar with detach + status + update banner area.
@@ -538,7 +538,7 @@ class BuildTab:
         self._banner_btns = tk.Frame(self._banner, bg="#fff5cf")
         self._banner_btns.grid(row=1, column=0, pady=(0, 8))
         ttk.Button(self._banner_btns, text="Check",
-                   command=lambda: self.check_for_updates(do_fetch=True)) \
+                   command=lambda: self.check_for_updates(do_fetch=True, show_output=True)) \
             .pack(side="left", padx=2)
         ttk.Button(self._banner_btns, text="Pull only",
                    command=self._on_pull_only).pack(side="left", padx=2)
@@ -1005,11 +1005,11 @@ class BuildTab:
     def _build_console(self, parent: ttk.Frame) -> None:
         cf_frame = ttk.LabelFrame(parent, text="Build output")
         cf_frame.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=8, pady=(4, 8))
-        parent.rowconfigure(3, weight=2)
+        parent.rowconfigure(3, weight=1)
         cf_frame.rowconfigure(0, weight=1)
         cf_frame.columnconfigure(0, weight=1)
 
-        self._console = tk.Text(cf_frame, wrap="none", height=14,
+        self._console = tk.Text(cf_frame, wrap="none", height=8,
                                 font=("TkFixedFont",), state="disabled")
         self._console.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         sb_y = ttk.Scrollbar(cf_frame, orient="vertical", command=self._console.yview)
@@ -2119,11 +2119,20 @@ class BuildTab:
         self._append_console(f"Wrote script: {path}\n", tag="stage")
 
     # ── Update banner / upstream check ──────────────────────────────────
-    def check_for_updates(self, *, do_fetch: bool) -> None:
+    def check_for_updates(self, *, do_fetch: bool, show_output: bool = False) -> None:
         src = self.var_source_dir.get().strip()
-        if not src or self._upstream_check_in_flight:
+        if not src:
+            if show_output:
+                self._append_console("Update check skipped: no source directory selected.\n", tag="error")
+            return
+        if self._upstream_check_in_flight:
+            if show_output:
+                self._append_console("Update check already running.\n", tag="stage")
             return
         self._upstream_check_in_flight = True
+        if show_output:
+            action = "Fetching upstream and checking for updates" if do_fetch else "Checking for updates"
+            self._append_console(f"{action}...\n", tag="stage")
 
         def worker() -> None:
             # probe_upstream is best-effort, but if anything raises (e.g.
@@ -2135,7 +2144,7 @@ class BuildTab:
                 status = probe_upstream(src, do_fetch=do_fetch)
             except Exception as exc:
                 status = UpstreamStatus(error=f"probe failed: {exc}")
-            self._pending_status.put(status)
+            self._pending_status.put((status, show_output))
 
         threading.Thread(target=worker, name="UpstreamProbe", daemon=True).start()
         # Cancel any prior drain before scheduling a new one so we don't
@@ -2151,13 +2160,34 @@ class BuildTab:
         self._drain_after_id = None
         try:
             while True:
-                status = self._pending_status.get_nowait()
+                status, show_output = self._pending_status.get_nowait()
                 self._upstream_status = status
                 self._upstream_check_in_flight = False
                 self._update_status_banner_visibility()
+                if show_output:
+                    self._append_update_check_result(status)
         except queue.Empty:
             if self._upstream_check_in_flight:
                 self._drain_after_id = self.root.after(200, self._drain_pending_status)
+
+    def _append_update_check_result(self, status: UpstreamStatus) -> None:
+        if not status.is_git_repo:
+            self._append_console("Update check skipped: source directory is not a git repository.\n", tag="error")
+            return
+        if status.error:
+            self._append_console(f"Update check warning: {status.error}\n", tag="error")
+        if not status.upstream_ref:
+            return
+        if status.behind > 0:
+            self._append_console(
+                f"{status.behind} new commit(s) available on {status.upstream_ref}.\n",
+                tag="stage",
+            )
+            return
+        msg = f"Up to date with {status.upstream_ref}"
+        if status.ahead > 0:
+            msg += f" (local branch is {status.ahead} commit(s) ahead)"
+        self._append_console(f"{msg}.\n", tag="ok")
 
     def _update_status_banner_visibility(self) -> None:
         if not hasattr(self, "_banner"):
