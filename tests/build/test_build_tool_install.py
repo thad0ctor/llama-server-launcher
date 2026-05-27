@@ -111,7 +111,9 @@ def test_terminal_launcher_uses_first_available_linux_terminal(monkeypatch):
     argv = popen.call_args.args[0]
     assert argv[0] == "/usr/bin/gnome-terminal"
     assert argv[1:4] == ["--", "bash", "-lc"]
+    assert 'echo "Running command..."' in argv[4]
     assert "sudo apt-get install -y cmake" in argv[4]
+    assert "Command completed successfully." in argv[4]
 
 
 def test_terminal_launcher_uses_osascript_on_macos(monkeypatch):
@@ -124,7 +126,8 @@ def test_terminal_launcher_uses_osascript_on_macos(monkeypatch):
     argv = popen.call_args.args[0]
     assert argv[0] == "osascript"
     assert argv[1] == "-e"
-    assert 'do script "cd /tmp/project && brew install ninja"' in argv[2]
+    assert 'echo \\"Running command...\\"' in argv[2]
+    assert 'do script "cd /tmp/project && echo \\"Running command...\\"; brew install ninja;' in argv[2]
 
 
 def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
@@ -134,15 +137,11 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
 
     terminal_launcher.open_command_in_terminal("winget install --id Kitware.CMake -e")
 
-    assert popen.call_args.args[0] == [
-        "cmd",
-        "/c",
-        "start",
-        "",
-        "cmd",
-        "/k",
-        "winget install --id Kitware.CMake -e",
-    ]
+    argv = popen.call_args.args[0]
+    assert argv[:8] == ["cmd", "/v:on", "/c", "start", "", "cmd", "/v:on", "/k"]
+    assert "winget install --id Kitware.CMake -e" in argv[8]
+    assert "Running command..." in argv[8]
+    assert "Command completed successfully." in argv[8]
 
 
 def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypatch):

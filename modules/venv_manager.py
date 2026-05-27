@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -179,15 +180,44 @@ def _shell_join(args: list[str], *, platform: str | None = None) -> str:
     return " ".join(shlex.quote(arg) for arg in args)
 
 
+def default_venv_base_python_args(
+    *, platform: str | None = None
+) -> tuple[str, ...]:
+    """Return the preferred Python launcher for creating a new venv."""
+    plat = platform or sys.platform
+    exe_name = Path(sys.executable).name.lower()
+
+    if plat.startswith("win"):
+        if shutil.which("py"):
+            return ("py", "-3")
+        if shutil.which("python"):
+            return ("python",)
+        if exe_name.startswith("python"):
+            return (sys.executable,)
+        return ("python",)
+
+    for candidate in ("python3", "python"):
+        if shutil.which(candidate):
+            return (candidate,)
+    if exe_name.startswith("python"):
+        return (sys.executable,)
+    return ("python3",)
+
+
 def build_create_venv_command(
     venv_dir: str | Path,
     *,
-    base_python: str | None = None,
+    base_python: str | tuple[str, ...] | list[str] | None = None,
     platform: str | None = None,
 ) -> str:
     """Return a shell command that creates ``venv_dir``."""
-    python = base_python or sys.executable
-    args = [python, "-m", "venv", str(Path(venv_dir))]
+    if base_python is None:
+        python_args = list(default_venv_base_python_args(platform=platform))
+    elif isinstance(base_python, (tuple, list)):
+        python_args = list(base_python)
+    else:
+        python_args = [base_python]
+    args = [*python_args, "-m", "venv", str(Path(venv_dir))]
     return _shell_join(args, platform=platform)
 
 

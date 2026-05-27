@@ -85,6 +85,26 @@ def test_build_create_venv_command_quotes_windows_paths(tmp_path):
     assert f'"{target}"' in command
 
 
+def test_default_venv_base_python_args_prefers_python3_on_posix(monkeypatch):
+    monkeypatch.setattr(
+        venv_manager.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name == "python3" else None,
+    )
+
+    assert venv_manager.default_venv_base_python_args(platform="linux") == ("python3",)
+
+
+def test_default_venv_base_python_args_prefers_py_launcher_on_windows(monkeypatch):
+    monkeypatch.setattr(
+        venv_manager.shutil,
+        "which",
+        lambda name: rf"C:\Windows\{name}.exe" if name == "py" else None,
+    )
+
+    assert venv_manager.default_venv_base_python_args(platform="win32") == ("py", "-3")
+
+
 def test_build_install_dependency_command_uses_venv_python(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)

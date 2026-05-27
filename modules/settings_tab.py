@@ -456,7 +456,7 @@ class SettingsTab:
         )
         messagebox.showinfo(
             "Create venv",
-            "Opened a terminal to create the virtual environment. Refresh deps when it finishes.",
+            "Opened a terminal to create the virtual environment. The terminal will report success or failure; refresh deps when it finishes.",
         )
 
     def _on_remove_venv(self):
