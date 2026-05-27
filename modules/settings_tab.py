@@ -1,10 +1,14 @@
-"""Settings tab: UI theme + font controls, persisted via app_settings."""
+"""Settings tab: UI theme/font controls plus venv management."""
 
+import queue
 import sys
+import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 
+from modules import terminal_launcher
 from modules import ui_theme
+from modules import venv_manager
 
 
 class SettingsTab:
@@ -27,15 +31,20 @@ class SettingsTab:
         ("20",       "20"),
     ]
     FONT_SIZE_MAX = 32  # exclusive upper bound for custom override
+    VENV_PROBE_DEBOUNCE_MS = 400
 
     def __init__(self, launcher):
         self.launcher = launcher
         self.root = launcher.root
+        self.repo_dir = venv_manager.launcher_repo_dir()
 
         s = launcher.app_settings
         self.theme_mode_var = tk.StringVar(value=s.get("ui_theme_mode", "auto"))
         self.theme_name_var = tk.StringVar(value=s.get("ui_theme_name", ""))
         self.font_family_var = tk.StringVar(value=s.get("ui_font_family", ""))
+        if not hasattr(self.launcher, "venv_dir"):
+            self.launcher.venv_dir = tk.StringVar(value=s.get("last_venv_dir", ""))
+        self.venv_dir_var = self.launcher.venv_dir
 
         # Font size: convert the persisted integer to our two-part state
         # (radio choice + custom Entry). If the stored size matches a preset,
@@ -51,6 +60,21 @@ class SettingsTab:
         else:
             self.font_size_choice_var = tk.StringVar(value="0")
             self.font_size_custom_var = tk.StringVar(value="")
+        self._status_var = tk.StringVar(value="")
+        self._info_theme_var = tk.StringVar(value="")
+        self._info_font_var = tk.StringVar(value="")
+        self._venv_effective_var = tk.StringVar(value="")
+        self._venv_status_var = tk.StringVar(value="")
+        self._venv_note_var = tk.StringVar(value="")
+        self._venv_action_status_var = tk.StringVar(value="")
+        self._venv_dependencies_frame = None
+        self._venv_probe_after_id = None
+        self._venv_probe_results = queue.Queue()
+        self._venv_probe_generation = 0
+        self._venv_trace_token = self.venv_dir_var.trace_add(
+            "write",
+            lambda *_a: self._on_venv_dir_changed(),
+        )
 
     # ------------------------------------------------------------------ setup
     def setup_settings_tab(self, parent):
@@ -160,7 +184,6 @@ class SettingsTab:
             .pack(side="left", padx=(0, 8))
         row += 1
 
-        self._status_var = tk.StringVar(value="")
         ttk.Label(parent, textvariable=self._status_var,
                   foreground="#5a9", font=("TkSmallCaptionFont",)) \
             .grid(column=0, row=row, columnspan=3, sticky="w", padx=10, pady=(0, 10))
@@ -170,17 +193,80 @@ class SettingsTab:
         info_frame = ttk.LabelFrame(parent, text="Active appearance")
         info_frame.grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(10, 10))
         info_frame.columnconfigure(1, weight=1)
-        self._info_theme_var = tk.StringVar(value="")
-        self._info_font_var = tk.StringVar(value="")
         ttk.Label(info_frame, text="Theme:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
         ttk.Label(info_frame, textvariable=self._info_theme_var).grid(column=1, row=0, sticky="w", padx=6, pady=2)
         ttk.Label(info_frame, text="Font:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
         ttk.Label(info_frame, textvariable=self._info_font_var).grid(column=1, row=1, sticky="w", padx=6, pady=2)
         row += 1
 
+        ttk.Separator(parent, orient="horizontal") \
+            .grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(10, 10))
+        row += 1
+
+        self._build_venv_section(parent, row)
+        row += 1
+
         self._on_theme_mode_changed()
         self._on_font_size_choice_changed()
         self._refresh_active_info()
+        self._refresh_venv_summary()
+        self._schedule_venv_dependency_probe()
+
+    def _build_venv_section(self, parent, row):
+        lf = ttk.LabelFrame(parent, text="Python Environment")
+        lf.grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(0, 10))
+        lf.columnconfigure(1, weight=1)
+
+        ttk.Label(lf, text="Virtual environment:") \
+            .grid(column=0, row=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.venv_dir_var, width=48) \
+            .grid(column=1, row=0, columnspan=2, sticky="ew", padx=4, pady=4)
+        ttk.Label(
+            lf,
+            text="Leave blank to use the repo default venv folder.",
+            font=("TkSmallCaptionFont",),
+        ).grid(column=1, row=1, columnspan=2, sticky="w", padx=4)
+
+        ttk.Label(lf, text="Effective path:") \
+            .grid(column=0, row=2, sticky="w", padx=6, pady=4)
+        ttk.Label(lf, textvariable=self._venv_effective_var) \
+            .grid(column=1, row=2, columnspan=2, sticky="w", padx=4, pady=4)
+
+        ttk.Label(lf, text="Status:") \
+            .grid(column=0, row=3, sticky="w", padx=6, pady=4)
+        ttk.Label(lf, textvariable=self._venv_status_var) \
+            .grid(column=1, row=3, columnspan=2, sticky="w", padx=4, pady=4)
+
+        btns = ttk.Frame(lf)
+        btns.grid(column=1, row=4, columnspan=2, sticky="w", padx=4, pady=(4, 6))
+        ttk.Button(btns, text="Create venv", command=self._on_create_venv) \
+            .pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Remove venv", command=self._on_remove_venv) \
+            .pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Refresh deps", command=self._schedule_venv_dependency_probe) \
+            .pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Clear path", command=lambda: self.venv_dir_var.set("")) \
+            .pack(side="left")
+
+        ttk.Label(
+            lf,
+            textvariable=self._venv_note_var,
+            font=("TkSmallCaptionFont",),
+            foreground="#666",
+        ).grid(column=0, row=5, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+
+        deps = ttk.LabelFrame(lf, text="Managed packages")
+        deps.grid(column=0, row=6, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
+        deps.columnconfigure(1, weight=1)
+        self._venv_dependencies_frame = deps
+        self._rebuild_dependency_rows([])
+
+        ttk.Label(
+            lf,
+            textvariable=self._venv_action_status_var,
+            foreground="#5a9",
+            font=("TkSmallCaptionFont",),
+        ).grid(column=0, row=7, columnspan=3, sticky="w", padx=6, pady=(0, 6))
 
     # ------------------------------------------------------------------ events
     def _on_theme_mode_changed(self):
@@ -205,6 +291,229 @@ class SettingsTab:
         """User typed in the Custom entry — auto-select the Custom radio."""
         self.font_size_choice_var.set("custom")
         self._on_font_size_choice_changed()
+
+    def _on_venv_dir_changed(self):
+        self._refresh_venv_summary()
+        self._schedule_venv_dependency_probe()
+
+    def _refresh_venv_summary(self):
+        info = self._current_venv_info()
+        active_path = self._current_active_venv_path()
+        self._venv_effective_var.set(str(info.effective_dir))
+        if info.looks_like_venv:
+            self._venv_status_var.set("Virtual environment detected.")
+        elif info.exists:
+            self._venv_status_var.set("Directory exists but does not contain a venv Python interpreter.")
+        else:
+            self._venv_status_var.set("Virtual environment not created yet.")
+        if info.uses_default:
+            if active_path:
+                self._venv_note_var.set(
+                    f"Blank entry activates the repo default venv: {active_path}"
+                )
+            else:
+                self._venv_note_var.set(
+                    f"Blank entry creates or probes the repo default path: {info.effective_dir}"
+                )
+        else:
+            self._venv_note_var.set(
+                "Relative paths resolve from the repo root, and launch/GPU detection use this same resolved path."
+            )
+
+    def _schedule_venv_dependency_probe(self):
+        if self._venv_probe_after_id is not None:
+            try:
+                self.root.after_cancel(self._venv_probe_after_id)
+            except Exception:
+                pass
+        self._venv_probe_after_id = self.root.after(
+            self.VENV_PROBE_DEBOUNCE_MS,
+            self._start_venv_dependency_probe,
+        )
+
+    def _start_venv_dependency_probe(self):
+        self._venv_probe_after_id = None
+        info = self._current_venv_info()
+        active_path = self._current_active_venv_path()
+        generation = self._venv_probe_generation + 1
+        self._venv_probe_generation = generation
+        if not info.looks_like_venv or not active_path:
+            self._rebuild_dependency_rows([])
+            self._venv_action_status_var.set(
+                "Create a venv or point this field at an existing one to manage packages."
+            )
+            return
+        self._venv_action_status_var.set("Checking managed packages…")
+        threading.Thread(
+            target=self._probe_venv_dependencies_worker,
+            args=(generation, active_path),
+            name="SettingsVenvProbe",
+            daemon=True,
+        ).start()
+        self.root.after(75, self._drain_venv_dependency_probe)
+
+    def _probe_venv_dependencies_worker(self, generation, venv_dir):
+        try:
+            statuses = venv_manager.probe_dependencies(venv_dir)
+            self._venv_probe_results.put((generation, statuses, None))
+        except Exception as exc:
+            self._venv_probe_results.put((generation, [], exc))
+
+    def _drain_venv_dependency_probe(self):
+        try:
+            generation, statuses, error = self._venv_probe_results.get_nowait()
+        except queue.Empty:
+            self.root.after(75, self._drain_venv_dependency_probe)
+            return
+        if generation != self._venv_probe_generation:
+            return
+        if error is not None:
+            self._venv_action_status_var.set(f"Dependency probe failed: {error}")
+            self._rebuild_dependency_rows([])
+            return
+        self._rebuild_dependency_rows(statuses)
+        self._venv_action_status_var.set("Managed package status refreshed.")
+
+    def _rebuild_dependency_rows(self, statuses):
+        frame = self._venv_dependencies_frame
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        status_by_key = {row.dependency.key: row for row in statuses}
+        has_venv = self._current_venv_info().looks_like_venv and bool(
+            self._current_active_venv_path()
+        )
+        for row_index, dep in enumerate(venv_manager.MANAGED_DEPENDENCIES):
+            status = status_by_key.get(dep.key)
+            ttk.Label(frame, text=f"{dep.label}:").grid(
+                column=0, row=row_index, sticky="nw", padx=4, pady=4,
+            )
+            ttk.Label(
+                frame,
+                text=self._format_dependency_status(dep, status),
+                font=("TkSmallCaptionFont",),
+            ).grid(column=1, row=row_index, sticky="w", padx=4, pady=4)
+            btns = ttk.Frame(frame)
+            btns.grid(column=2, row=row_index, sticky="e", padx=4, pady=4)
+            ttk.Button(
+                btns,
+                text="Install",
+                command=lambda d=dep: self._on_install_dependency(d),
+                state="normal" if has_venv else "disabled",
+            ).pack(side="left", padx=(0, 4))
+            ttk.Button(
+                btns,
+                text="Remove",
+                command=lambda d=dep: self._on_remove_dependency(d),
+                state="normal" if has_venv else "disabled",
+            ).pack(side="left")
+
+    @staticmethod
+    def _format_dependency_status(dependency, status):
+        parts = [dependency.description]
+        if status is None:
+            parts.append("Status unavailable until a venv is detected.")
+        elif status.available:
+            version = f" {status.version}" if status.version else ""
+            parts.append(f"Installed{version}.")
+        elif status.error:
+            parts.append(f"Not installed ({status.error}).")
+        else:
+            parts.append("Not installed.")
+        if dependency.key == "torch":
+            parts.append("Generic install uses `pip install torch`; GPU-specific wheels may need manual replacement.")
+        return " ".join(parts)
+
+    def _current_venv_info(self):
+        return venv_manager.describe_venv_target(
+            self.venv_dir_var.get(),
+            repo_dir=self.repo_dir,
+        )
+
+    def _current_active_venv_path(self):
+        return venv_manager.resolve_active_venv_path(
+            self.venv_dir_var.get(),
+            repo_dir=self.repo_dir,
+        )
+
+    def _on_create_venv(self):
+        info = self._current_venv_info()
+        try:
+            info.effective_dir.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Create venv", f"Could not prepare parent directory:\n{exc}")
+            return
+        command = venv_manager.build_create_venv_command(info.effective_dir)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        except Exception as exc:
+            messagebox.showerror("Create venv", f"Failed to open terminal:\n{exc}")
+            return
+        self.venv_dir_var.set(str(info.effective_dir))
+        self._venv_action_status_var.set(
+            f"Opened terminal to create venv at {info.effective_dir}."
+        )
+        messagebox.showinfo(
+            "Create venv",
+            "Opened a terminal to create the virtual environment. Refresh deps when it finishes.",
+        )
+
+    def _on_remove_venv(self):
+        info = self._current_venv_info()
+        if not info.exists:
+            messagebox.showinfo("Remove venv", "No virtual environment directory exists at the selected path.")
+            return
+        if not messagebox.askyesno(
+            "Remove venv",
+            f"Remove the virtual environment directory?\n\n{info.effective_dir}",
+        ):
+            return
+        command = venv_manager.build_remove_venv_command(info.effective_dir)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=info.effective_dir.parent)
+        except Exception as exc:
+            messagebox.showerror("Remove venv", f"Failed to open terminal:\n{exc}")
+            return
+        self._venv_action_status_var.set(
+            f"Opened terminal to remove venv at {info.effective_dir}."
+        )
+
+    def _on_install_dependency(self, dependency):
+        info = self._current_venv_info()
+        if not info.looks_like_venv:
+            messagebox.showerror(
+                "Install dependency",
+                "Create a venv or point this field at an existing venv first.",
+            )
+            return
+        command = venv_manager.build_install_dependency_command(info.effective_dir, dependency)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        except Exception as exc:
+            messagebox.showerror("Install dependency", f"Failed to open terminal:\n{exc}")
+            return
+        self._venv_action_status_var.set(
+            f"Opened terminal to install {dependency.package_name}."
+        )
+
+    def _on_remove_dependency(self, dependency):
+        info = self._current_venv_info()
+        if not info.looks_like_venv:
+            messagebox.showerror(
+                "Remove dependency",
+                "Create a venv or point this field at an existing venv first.",
+            )
+            return
+        command = venv_manager.build_remove_dependency_command(info.effective_dir, dependency)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        except Exception as exc:
+            messagebox.showerror("Remove dependency", f"Failed to open terminal:\n{exc}")
+            return
+        self._venv_action_status_var.set(
+            f"Opened terminal to remove {dependency.package_name}."
+        )
 
     def _validate_custom_digit(self, proposed):
         """Entry validatecommand: only allow empty or pure digit strings up to 3 chars."""

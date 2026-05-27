@@ -410,8 +410,33 @@ class ToolchainProbe:
     cmake_path: str | None = None
     cmake_version: str | None = None
     ninja_path: str | None = None
+    ninja_version: str | None = None
     ccache_path: str | None = None
     git_path: str | None = None
+    git_version: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolInstallPlan:
+    """Install command for a missing tool on the current platform."""
+    tool_key: str
+    tool_label: str
+    package_manager: str
+    command: str
+
+
+@dataclass(frozen=True)
+class BuildToolStatus:
+    """UI-friendly status row for a build prerequisite."""
+    key: str
+    label: str
+    path: str | None = None
+    version: str | None = None
+    install_plan: ToolInstallPlan | None = None
+
+    @property
+    def installed(self) -> bool:
+        return bool(self.path)
 
 
 def _which(name: str) -> str | None:
@@ -687,9 +712,147 @@ def probe_toolchain() -> ToolchainProbe:
                 probe.cmake_version = m.group(1)
 
     probe.ninja_path = _which("ninja")
+    if probe.ninja_path:
+        out = _run([probe.ninja_path, "--version"], timeout=1.5)
+        if out:
+            probe.ninja_version = (out.strip().splitlines() or [""])[0].strip() or None
     probe.ccache_path = _which("ccache")
     probe.git_path = _which("git")
+    if probe.git_path:
+        out = _run([probe.git_path, "--version"], timeout=1.5)
+        if out:
+            m = re.search(r"git version\s+(\S+)", out)
+            if m:
+                probe.git_version = m.group(1)
     return probe
+
+
+_TOOL_LABELS = {
+    "cmake": "CMake",
+    "ninja": "Ninja",
+    "git": "Git",
+}
+
+
+def install_plan_for_tool(tool_key: str) -> ToolInstallPlan | None:
+    """Return an OS-aware install command for ``tool_key`` if we know one."""
+    label = _TOOL_LABELS.get(tool_key)
+    if label is None:
+        return None
+    if sys.platform.startswith("linux"):
+        return _linux_install_plan(tool_key, label)
+    if sys.platform == "darwin":
+        return _darwin_install_plan(tool_key, label)
+    if sys.platform.startswith("win"):
+        return _windows_install_plan(tool_key, label)
+    return None
+
+
+def _linux_install_plan(tool_key: str, label: str) -> ToolInstallPlan | None:
+    packages = {
+        "apt-get": {"cmake": "cmake", "ninja": "ninja-build", "git": "git"},
+        "dnf": {"cmake": "cmake", "ninja": "ninja-build", "git": "git"},
+        "yum": {"cmake": "cmake", "ninja": "ninja-build", "git": "git"},
+        "pacman": {"cmake": "cmake", "ninja": "ninja", "git": "git"},
+        "zypper": {"cmake": "cmake", "ninja": "ninja", "git": "git"},
+        "apk": {"cmake": "cmake", "ninja": "ninja-build", "git": "git"},
+        "brew": {"cmake": "cmake", "ninja": "ninja", "git": "git"},
+    }
+    commands = {
+        "apt-get": lambda pkg: f"sudo apt-get update && sudo apt-get install -y {pkg}",
+        "dnf": lambda pkg: f"sudo dnf install -y {pkg}",
+        "yum": lambda pkg: f"sudo yum install -y {pkg}",
+        "pacman": lambda pkg: f"sudo pacman -Sy --needed {pkg}",
+        "zypper": lambda pkg: f"sudo zypper install -y {pkg}",
+        "apk": lambda pkg: f"sudo apk add {pkg}",
+        "brew": lambda pkg: f"brew install {pkg}",
+    }
+    for manager in ("apt-get", "dnf", "yum", "pacman", "zypper", "apk", "brew"):
+        if _which(manager) is None:
+            continue
+        package_name = packages[manager].get(tool_key)
+        if not package_name:
+            continue
+        return ToolInstallPlan(
+            tool_key=tool_key,
+            tool_label=label,
+            package_manager=manager,
+            command=commands[manager](package_name),
+        )
+    return None
+
+
+def _darwin_install_plan(tool_key: str, label: str) -> ToolInstallPlan | None:
+    if _which("brew") is None:
+        return None
+    package_name = {"cmake": "cmake", "ninja": "ninja", "git": "git"}.get(tool_key)
+    if package_name is None:
+        return None
+    return ToolInstallPlan(
+        tool_key=tool_key,
+        tool_label=label,
+        package_manager="brew",
+        command=f"brew install {package_name}",
+    )
+
+
+def _windows_install_plan(tool_key: str, label: str) -> ToolInstallPlan | None:
+    winget_ids = {
+        "cmake": "Kitware.CMake",
+        "ninja": "Ninja-build.Ninja",
+        "git": "Git.Git",
+    }
+    if _which("winget") is not None and tool_key in winget_ids:
+        return ToolInstallPlan(
+            tool_key=tool_key,
+            tool_label=label,
+            package_manager="winget",
+            command=(
+                "winget install "
+                f"--id {winget_ids[tool_key]} -e "
+                "--accept-package-agreements --accept-source-agreements"
+            ),
+        )
+    packages = {"cmake": "cmake", "ninja": "ninja", "git": "git"}
+    package_name = packages.get(tool_key)
+    if package_name is None:
+        return None
+    if _which("choco") is not None:
+        return ToolInstallPlan(
+            tool_key=tool_key,
+            tool_label=label,
+            package_manager="choco",
+            command=f"choco install {package_name} -y",
+        )
+    if _which("scoop") is not None:
+        return ToolInstallPlan(
+            tool_key=tool_key,
+            tool_label=label,
+            package_manager="scoop",
+            command=f"scoop install {package_name}",
+        )
+    return None
+
+
+def build_tool_statuses(probe: ToolchainProbe) -> list[BuildToolStatus]:
+    """Return installed/missing status rows for key build tools."""
+    rows = [
+        ("cmake", "CMake", probe.cmake_path, probe.cmake_version),
+        ("ninja", "Ninja", probe.ninja_path, probe.ninja_version),
+        ("git", "Git", probe.git_path, probe.git_version),
+    ]
+    out: list[BuildToolStatus] = []
+    for key, label, path, version in rows:
+        out.append(
+            BuildToolStatus(
+                key=key,
+                label=label,
+                path=path,
+                version=version,
+                install_plan=None if path else install_plan_for_tool(key),
+            )
+        )
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────

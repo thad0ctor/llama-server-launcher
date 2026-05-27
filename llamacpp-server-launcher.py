@@ -91,6 +91,7 @@ from modules.about_tab import create_about_tab
 # Import the settings tab + UI theme helpers
 from modules.settings_tab import create_settings_tab
 from modules import ui_theme
+from modules import venv_manager
 
 # Import the ik_llama configuration tab module
 from modules.ik_llama import IkLlamaTab
@@ -4630,6 +4631,17 @@ class LlamaCppLauncher:
     #  Asynchronous System Info Detection
     # ═════════════════════════════════════════════════════════════════
 
+    def _effective_venv_path(self):
+        """Return the normalized venv path used by launch and GPU detection."""
+        try:
+            raw_path = self.venv_dir.get()
+        except Exception:
+            raw_path = ""
+        return venv_manager.resolve_active_venv_path(
+            raw_path,
+            repo_dir=venv_manager.launcher_repo_dir(),
+        )
+
     def _apply_cached_gpu_info_if_any(self):
         """Populate ``self.gpu_info`` + ``self.detected_gpu_devices`` from
         the on-disk detection cache, if the venv key matches what the
@@ -4643,7 +4655,7 @@ class LlamaCppLauncher:
         except Exception:
             return False
         try:
-            venv_path = self.venv_dir.get().strip()
+            venv_path = self._effective_venv_path()
         except Exception:
             venv_path = ""
         cached = load_cached_gpu_info(config_dir, venv_path)
@@ -4672,7 +4684,7 @@ class LlamaCppLauncher:
         except Exception:
             return
         try:
-            venv_path = self.venv_dir.get().strip()
+            venv_path = self._effective_venv_path()
         except Exception:
             venv_path = ""
         gpu_info = getattr(self, "gpu_info", None)
@@ -4714,7 +4726,7 @@ class LlamaCppLauncher:
         # on the main thread so a late-completing worker can't reach back
         # into a destroyed interpreter.
         try:
-            captured_venv_path = self.venv_dir.get().strip() or None
+            captured_venv_path = self._effective_venv_path() or None
         except (tk.TclError, RuntimeError):
             captured_venv_path = None
 

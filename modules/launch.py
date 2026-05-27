@@ -18,6 +18,7 @@ from pathlib import Path
 from tkinter import messagebox, filedialog
 from threading import Thread
 
+from modules import venv_manager
 from modules.spec_launch import (
     emit_spec_args,
     emit_main_device_arg,
@@ -92,6 +93,17 @@ class LaunchManager:
 
         self._feature_probe_cache[cache_key] = supported
         return supported
+
+    def _effective_venv_path(self) -> str:
+        """Return the normalized venv path used for launch and saved scripts."""
+        try:
+            raw_path = self.launcher.venv_dir.get()
+        except Exception:
+            raw_path = ""
+        return venv_manager.resolve_active_venv_path(
+            raw_path,
+            repo_dir=venv_manager.launcher_repo_dir(),
+        )
 
     def _build_llama_cpp_fit_args(self, cmd):
         """Append upstream llama.cpp fit args: --fit on|off, --fit-ctx,
@@ -802,7 +814,7 @@ class LaunchManager:
             # build_cmd already showed an error message
             return
 
-        venv_path_str = self.launcher.venv_dir.get().strip()
+        venv_path_str = self._effective_venv_path()
         use_venv = bool(venv_path_str)
 
         tmp_path = None # Initialize tmp_path outside try/except/finally
@@ -1185,7 +1197,7 @@ class LaunchManager:
                         fh.write(f'$env:{var_name}="{var_value}"\n')
                     fh.write('\n')
 
-                venv = self.launcher.venv_dir.get().strip()
+                venv = self._effective_venv_path()
                 if venv:
                     try:
                         venv_path = Path(venv).resolve() # Resolve venv path for script
@@ -1339,7 +1351,7 @@ class LaunchManager:
                         fh.write(f'export {var_name}="{escaped_value}"\n')
                     fh.write('\n')
 
-                venv = self.launcher.venv_dir.get().strip()
+                venv = self._effective_venv_path()
                 if venv:
                     try:
                         venv_path = Path(venv).resolve() # Resolve venv path for script

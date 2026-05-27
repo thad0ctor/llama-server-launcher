@@ -35,5 +35,7 @@ def launcher_stub(tk_root):
     stub.root = tk_root
     # A fresh dict per test so cross-test mutation can't leak.
     stub.app_settings = {}
+    import tkinter as tk  # noqa: PLC0415
+    stub.venv_dir = tk.StringVar(master=tk_root, value="")
     stub._save_configs = MagicMock()
     return stub

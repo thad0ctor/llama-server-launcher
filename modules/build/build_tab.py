@@ -54,6 +54,7 @@ from .build_runner import (
     plan_to_shell_script,
     probe_upstream,
 )
+from modules import terminal_launcher
 
 
 CONSOLE_MAX_LINES = 5000
@@ -63,6 +64,7 @@ RUNNER_CATCHUP_POLL_MS = 5
 RUNNER_MAX_EVENTS_PER_POLL = 250
 RUNNER_MAX_CHARS_PER_POLL = 128 * 1024
 PULL_DRAIN_MS = 80
+DEFAULT_GENERATOR_LABEL = "cmake"
 
 
 def _truthy_flag_str(v: Any) -> bool:
@@ -163,7 +165,7 @@ class BuildTab:
         # Picker for "which detected CUDA install"; updated when var_cudacxx changes.
         self.var_cuda_pick = tk.StringVar(value="")
         # cmake -G generator. Empty = whatever cmake's platform default is.
-        self.var_generator = tk.StringVar(value="")
+        self.var_generator = tk.StringVar(value=DEFAULT_GENERATOR_LABEL)
         self.var_extra_args = tk.StringVar(value="")
         self.var_config_name = tk.StringVar(value="")
         self.var_status = tk.StringVar(value="Idle")
@@ -194,6 +196,7 @@ class BuildTab:
         # rebuild just its contents instead of the whole tab. None until
         # _build_section_environment has run.
         self._archs_grid_frame: ttk.LabelFrame | None = None
+        self._tool_install_frame: ttk.Frame | None = None
 
         # CUDA arch picker state: one BooleanVar per known CC, plus a guard
         # to suppress recursive sync between checkboxes and the text entry.
@@ -356,11 +359,65 @@ class BuildTab:
             bits.append(f"CUDA {tp.cuda_version}")
         if tp.cmake_version:
             bits.append(f"cmake {tp.cmake_version}")
+        if tp.git_version:
+            bits.append(f"git {tp.git_version}")
         if tp.ccache_path:
             bits.append("ccache")
         if tp.ninja_path:
-            bits.append("ninja")
-        self.var_toolchain_hint.set(" · ".join(bits) if bits else "no CUDA/cmake/ccache detected")
+            bits.append(f"ninja {tp.ninja_version}" if tp.ninja_version else "ninja")
+        self.var_toolchain_hint.set(
+            " · ".join(bits) if bits else "no CUDA/cmake/git/ninja/ccache detected"
+        )
+
+    @staticmethod
+    def _generator_display_value(value: str | None) -> str:
+        text = (value or "").strip()
+        return DEFAULT_GENERATOR_LABEL if not text else text
+
+    def _selected_generator_value(self) -> str:
+        text = self.var_generator.get().strip()
+        if not text or text.casefold() == DEFAULT_GENERATOR_LABEL:
+            return ""
+        return text
+
+    @staticmethod
+    def _format_build_tool_status(tool: detection.BuildToolStatus) -> str:
+        if tool.installed:
+            version = f" {tool.version}" if tool.version else ""
+            return f"detected{version} at {tool.path}"
+        if tool.install_plan is not None:
+            return f"not detected; install via {tool.install_plan.package_manager}"
+        return "not detected; no supported installer found"
+
+    def _rebuild_build_tool_rows(self) -> None:
+        frame = self._tool_install_frame
+        if frame is None or not frame.winfo_exists():
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        frame.columnconfigure(1, weight=1)
+        tools = detection.build_tool_statuses(self._toolchain)
+        for row, tool in enumerate(tools):
+            ttk.Label(frame, text=f"{tool.label}:").grid(row=row, column=0, sticky="w")
+            ttk.Label(
+                frame,
+                text=self._format_build_tool_status(tool),
+                font=("TkSmallCaptionFont",),
+            ).grid(row=row, column=1, sticky="w", padx=(6, 0))
+            btn_text = "Installed" if tool.installed else (
+                f"Install {tool.label}" if tool.install_plan else "No installer"
+            )
+            ttk.Button(
+                frame,
+                text=btn_text,
+                command=lambda k=tool.key: self._on_install_build_tool(k),
+                state="disabled" if tool.installed or tool.install_plan is None else "normal",
+            ).grid(row=row, column=2, sticky="e", padx=(8, 0))
+        ttk.Label(
+            frame,
+            text="Install commands open in a new terminal. Refresh toolchain after they finish.",
+            font=("TkSmallCaptionFont",),
+        ).grid(row=len(tools), column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     def _apply_autodetect_defaults(self) -> None:
         """Seed the flag-values dict from the auto-detected preset.
@@ -759,27 +816,34 @@ class BuildTab:
         ttk.Combobox(lf, textvariable=self.var_cxx,
                      values=tp.cxx_candidates).grid(row=6, column=1, sticky="ew", padx=4, columnspan=2)
 
+        # ── build-tool discovery / installers ──
+        ttk.Label(lf, text="Build tools:").grid(row=7, column=0, sticky="nw", padx=6, pady=(8, 4))
+        tools_frame = ttk.Frame(lf)
+        tools_frame.grid(row=7, column=1, columnspan=2, sticky="ew", padx=4, pady=(8, 4))
+        self._tool_install_frame = tools_frame
+        self._rebuild_build_tool_rows()
+
         # ── cmake generator ──
-        ttk.Label(lf, text="Generator:").grid(row=7, column=0, sticky="w", padx=6, pady=(8, 4))
-        gen_values = ["", "Ninja", "Unix Makefiles"]
+        ttk.Label(lf, text="Generator:").grid(row=8, column=0, sticky="w", padx=6, pady=(8, 4))
+        gen_values = [DEFAULT_GENERATOR_LABEL, "Ninja", "Unix Makefiles"]
         if sys.platform.startswith("win"):
             gen_values += ["Visual Studio 17 2022", "Visual Studio 16 2019", "NMake Makefiles"]
         elif sys.platform == "darwin":
             gen_values += ["Xcode"]
         ttk.Combobox(lf, textvariable=self.var_generator,
-                     values=gen_values, width=24).grid(row=7, column=1, sticky="w", padx=4)
-        hint = "Ninja is fastest"
+                     values=gen_values, width=24).grid(row=8, column=1, sticky="w", padx=4)
+        hint = "cmake uses the platform default generator; Ninja is usually fastest"
         if self._toolchain.ninja_path:
             hint += " (detected)"
         else:
             hint += " (not installed)"
-        ttk.Label(lf, text=hint + ". Empty = cmake default.",
-                  font=("TkSmallCaptionFont",)).grid(row=7, column=2, sticky="w", padx=4)
-
-        ttk.Label(lf, text="Extra cmake args:").grid(row=8, column=0, sticky="w", padx=6, pady=(8, 4))
-        ttk.Entry(lf, textvariable=self.var_extra_args).grid(row=8, column=1, sticky="ew", padx=4)
-        ttk.Label(lf, text="(passed through verbatim)",
+        ttk.Label(lf, text=hint + ".",
                   font=("TkSmallCaptionFont",)).grid(row=8, column=2, sticky="w", padx=4)
+
+        ttk.Label(lf, text="Extra cmake args:").grid(row=9, column=0, sticky="w", padx=6, pady=(8, 4))
+        ttk.Entry(lf, textvariable=self.var_extra_args).grid(row=9, column=1, sticky="ew", padx=4)
+        ttk.Label(lf, text="(passed through verbatim)",
+                  font=("TkSmallCaptionFont",)).grid(row=9, column=2, sticky="w", padx=4)
 
     # ── Flags grouped into LabelFrames ──────────────────────────────────
     def _build_section_flags(self, parent: ttk.Frame, row: int) -> None:
@@ -1592,6 +1656,7 @@ class BuildTab:
                 self._cuda_pick_combo["state"] = "readonly" if labels else "normal"
             except Exception:
                 pass
+        self._rebuild_build_tool_rows()
         # Refresh compiler comboboxes' value lists in place if we can find them.
         # (They're tied to var_cc/var_cxx; we don't track the widget refs, but
         # the values shown only matter on next dropdown open — Tk reads them
@@ -2077,6 +2142,7 @@ class BuildTab:
                 self.var_jobs.set(cfg.jobs)
             self.var_cuda_archs.set(cfg.cuda_archs)
             self.var_extra_args.set(cfg.extra_cmake_args)
+            self.var_generator.set(DEFAULT_GENERATOR_LABEL)
             env = cfg.env or {}
             if env.get("CC"):
                 self.var_cc.set(env["CC"])
@@ -2088,8 +2154,9 @@ class BuildTab:
                 self.var_cuda_root.set(env["CUDA_TOOLKIT_ROOT_DIR"])
             # UI-only state (kept off the cmake env).
             ui = cfg.ui_state or {}
-            if ui.get("generator"):
-                self.var_generator.set(ui["generator"])
+            self.var_generator.set(
+                self._generator_display_value(ui.get("generator", ""))
+            )
             if "prefer_a" in ui:
                 self.var_prefer_a_variant.set(ui["prefer_a"] == "1")
             if "prefer_f" in ui:
@@ -2099,7 +2166,10 @@ class BuildTab:
             # Migration: older configs stashed UI state inside env with __KEY__
             # markers. Read those if present so we don't lose user prefs.
             legacy_map = {
-                "__GENERATOR__": ("generator", self.var_generator.set),
+                "__GENERATOR__": (
+                    "generator",
+                    lambda v: self.var_generator.set(self._generator_display_value(v)),
+                ),
                 "__PREFER_A__": ("prefer_a", lambda v: self.var_prefer_a_variant.set(v == "1")),
                 "__PREFER_F__": ("prefer_f", lambda v: self.var_prefer_f_variant.set(v == "1")),
                 "__SHOW_DEPRECATED__": ("show_deprecated",
@@ -2142,8 +2212,9 @@ class BuildTab:
             "prefer_f": "1" if self.var_prefer_f_variant.get() else "0",
             "show_deprecated": "1" if self.var_show_deprecated_archs.get() else "0",
         }
-        if self.var_generator.get().strip():
-            ui_state["generator"] = self.var_generator.get().strip()
+        generator = self._selected_generator_value()
+        if generator:
+            ui_state["generator"] = generator
         cfg = BuildConfig(
             name=name,
             backend=self.var_backend.get(),
@@ -2623,6 +2694,37 @@ class BuildTab:
             env["CUDA_TOOLKIT_ROOT_DIR"] = cuda_root
         return env
 
+    def _on_install_build_tool(self, tool_key: str) -> None:
+        tool = next(
+            (row for row in detection.build_tool_statuses(self._toolchain) if row.key == tool_key),
+            None,
+        )
+        if tool is None:
+            messagebox.showerror("Install tool", f"Unknown build tool {tool_key!r}.")
+            return
+        if tool.installed:
+            messagebox.showinfo("Install tool", f"{tool.label} is already detected.")
+            return
+        if tool.install_plan is None:
+            messagebox.showerror(
+                "Install tool",
+                f"No supported install command was found for {tool.label} on this system.",
+            )
+            return
+        try:
+            terminal_launcher.open_command_in_terminal(tool.install_plan.command)
+        except Exception as exc:
+            messagebox.showerror("Install tool", f"Failed to open terminal: {exc}")
+            return
+        self._append_console(
+            f"Opened {tool.install_plan.package_manager} install command for {tool.label}.\n",
+            tag="stage",
+        )
+        messagebox.showinfo(
+            "Install tool",
+            f"Opened a terminal to install {tool.label}. Refresh toolchain when it finishes.",
+        )
+
     def _resolved_build_dir(self) -> str:
         src = self.var_source_dir.get().strip()
         build = self.var_build_dir.get().strip() or "build"
@@ -2664,7 +2766,7 @@ class BuildTab:
             git_ref=self.var_git_ref.get().strip(),
             git_pull_before_build=self.var_git_pull.get(),
             clean_build=self.var_clean_build.get(),
-            generator=self.var_generator.get().strip(),
+            generator=self._selected_generator_value(),
         )
 
     def _append_console(self, text: str, *, tag: str | None = None) -> None:
