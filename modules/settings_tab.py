@@ -386,6 +386,8 @@ class SettingsTab:
         )
         for row_index, dep in enumerate(venv_manager.MANAGED_DEPENDENCIES):
             status = status_by_key.get(dep.key)
+            can_install = bool(has_venv and status is not None and not status.available)
+            can_remove = bool(has_venv and status is not None and status.available)
             ttk.Label(frame, text=f"{dep.label}:").grid(
                 column=0, row=row_index, sticky="nw", padx=4, pady=4,
             )
@@ -400,23 +402,23 @@ class SettingsTab:
                 btns,
                 text="Install",
                 command=lambda d=dep: self._on_install_dependency(d),
-                state="normal" if has_venv else "disabled",
+                state="normal" if can_install else "disabled",
             ).pack(side="left", padx=(0, 4))
             ttk.Button(
                 btns,
                 text="Remove",
                 command=lambda d=dep: self._on_remove_dependency(d),
-                state="normal" if has_venv else "disabled",
+                state="normal" if can_remove else "disabled",
             ).pack(side="left")
 
     @staticmethod
     def _format_dependency_status(dependency, status):
-        parts = [dependency.description]
+        parts = ["Required." if dependency.required else "Optional.", dependency.description]
         if status is None:
             parts.append("Status unavailable until a venv is detected.")
         elif status.available:
             version = f" {status.version}" if status.version else ""
-            parts.append(f"Installed{version}.")
+            parts.append(f"✓ Installed{version}.")
         elif status.error:
             parts.append(f"Not installed ({status.error}).")
         else:

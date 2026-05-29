@@ -1,0 +1,223 @@
+"""Subprocess entrypoint for venv-backed Hugging Face operations."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+def _emit(event: str, **payload) -> None:
+    print(json.dumps({"event": event, **payload}), flush=True)
+
+
+def _load_payload(path: str) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _token_value(payload: dict):
+    token = (payload.get("token") or "").strip()
+    return token or None
+
+
+def _extract_file_size(info) -> int | None:
+    for attr in ("size", "blob_size", "lfs_size", "file_size"):
+        value = getattr(info, attr, None)
+        if isinstance(value, int):
+            return value
+    lfs = getattr(info, "lfs", None)
+    if isinstance(lfs, dict):
+        value = lfs.get("size")
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _classify(path: str) -> str:
+    path_l = path.lower()
+    name = Path(path_l).name
+    if path_l.endswith(".gguf"):
+        return "gguf"
+    if "mmproj" in name:
+        return "mmproj"
+    if path_l.endswith((".safetensors", ".bin", ".pt", ".pth")):
+        return "weights"
+    if name.endswith((".json", ".txt", ".model")):
+        return "metadata"
+    return "other"
+
+
+def run_list(payload: dict) -> int:
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    repo_id = payload["repo_id"]
+    revision = (payload.get("revision") or "").strip() or None
+    token = _token_value(payload)
+
+    _emit("status", message=f"Loading {repo_id}…")
+    refs_payload: list[dict] = []
+    try:
+        refs = api.list_repo_refs(repo_id, repo_type="model", token=token)
+    except Exception:
+        refs = None
+    if refs is not None:
+        for branch in getattr(refs, "branches", []) or []:
+            refs_payload.append(
+                {
+                    "name": getattr(branch, "name", ""),
+                    "kind": "branch",
+                    "target_commit": getattr(branch, "target_commit", "") or "",
+                }
+            )
+        for tag in getattr(refs, "tags", []) or []:
+            refs_payload.append(
+                {
+                    "name": getattr(tag, "name", ""),
+                    "kind": "tag",
+                    "target_commit": getattr(tag, "target_commit", "") or "",
+                }
+            )
+
+    try:
+        info = api.model_info(
+            repo_id,
+            revision=revision,
+            files_metadata=True,
+            token=token,
+        )
+    except TypeError:
+        info = api.model_info(
+            repo_id,
+            revision=revision,
+            token=token,
+        )
+
+    files_payload: list[dict] = []
+    for sibling in getattr(info, "siblings", []) or []:
+        path = getattr(sibling, "rfilename", None) or getattr(sibling, "path", None)
+        if not path:
+            continue
+        files_payload.append(
+            {
+                "path": path,
+                "size_bytes": _extract_file_size(sibling),
+                "kind": _classify(path),
+            }
+        )
+    files_payload.sort(key=lambda item: item["path"])
+    refs_payload.sort(key=lambda item: (item["kind"], item["name"]))
+    _emit(
+        "listing",
+        repo_id=repo_id,
+        revision=revision or "",
+        resolved_revision=getattr(info, "sha", "") or "",
+        refs=refs_payload,
+        files=files_payload,
+    )
+    _emit("complete", message=f"Loaded {len(files_payload)} files from {repo_id}.")
+    return 0
+
+
+class _ProgressTqdm:  # pragma: no cover - exercised indirectly by runtime path
+    """JSON-emitting tqdm adapter for huggingface_hub downloads."""
+
+    def __init__(self, *args, **kwargs):
+        from tqdm.auto import tqdm
+
+        self._wrapped = tqdm(*args, **kwargs)
+        self.total = getattr(self._wrapped, "total", None)
+        self.n = getattr(self._wrapped, "n", 0)
+        self.desc = getattr(self._wrapped, "desc", "") or ""
+        _emit("progress", current=self.n, total=self.total, description=self.desc)
+
+    def update(self, n=1):
+        result = self._wrapped.update(n)
+        self.n = getattr(self._wrapped, "n", self.n + n)
+        self.total = getattr(self._wrapped, "total", self.total)
+        self.desc = getattr(self._wrapped, "desc", self.desc) or ""
+        _emit("progress", current=self.n, total=self.total, description=self.desc)
+        return result
+
+    def close(self):
+        self._wrapped.close()
+        _emit("progress", current=self.n, total=self.total, description=self.desc)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+def _combined_allow_patterns(payload: dict) -> list[str] | None:
+    mode = payload.get("download_mode", "selected")
+    patterns: list[str] = []
+    if mode == "selected":
+        patterns.extend(payload.get("selected_files") or [])
+    patterns.extend(payload.get("include_patterns") or [])
+    cleaned = [item for item in patterns if item]
+    return cleaned or None
+
+
+def run_download(payload: dict) -> int:
+    from huggingface_hub import snapshot_download
+
+    repo_id = payload["repo_id"]
+    revision = (payload.get("revision") or "").strip() or None
+    token = _token_value(payload)
+    allow_patterns = _combined_allow_patterns(payload)
+    ignore_patterns = [item for item in payload.get("ignore_patterns") or [] if item] or None
+    target_dirs = [Path(path) for path in payload.get("target_dirs") or []]
+    max_workers = int(payload.get("max_workers") or 4)
+
+    if not target_dirs:
+        raise ValueError("No target directories were selected.")
+
+    for index, target_dir in enumerate(target_dirs, start=1):
+        target_dir.mkdir(parents=True, exist_ok=True)
+        _emit(
+            "target-start",
+            target=str(target_dir),
+            index=index,
+            total_targets=len(target_dirs),
+            message=f"Downloading into {target_dir}…",
+        )
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type="model",
+            revision=revision,
+            local_dir=target_dir,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
+            force_download=bool(payload.get("force_download")),
+            local_files_only=bool(payload.get("local_files_only")),
+            token=token,
+            max_workers=max_workers,
+            tqdm_class=_ProgressTqdm,
+        )
+        _emit(
+            "target-complete",
+            target=str(target_dir),
+            index=index,
+            total_targets=len(target_dirs),
+        )
+    _emit("complete", message=f"Finished downloading {repo_id}.")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) != 2 or args[0] not in {"list", "download"}:
+        print("usage: python -m modules.hf_downloader.runner <list|download> <payload.json>", file=sys.stderr)
+        return 2
+    action, payload_path = args
+    payload = _load_payload(payload_path)
+    try:
+        if action == "list":
+            return run_list(payload)
+        return run_download(payload)
+    except Exception as exc:
+        _emit("error", message=str(exc), exc_type=type(exc).__name__)
+        return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

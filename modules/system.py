@@ -98,9 +98,10 @@ MISSING_DEPS = []
 if not REQUESTS_AVAILABLE:
     MISSING_DEPS.append("requests (required for version checking and updates)")
 
-# PyTorch is the primary requirement for GPU detection and features
+# PyTorch is optional when nvidia-smi is available, but still useful as a
+# fallback path for CUDA/Metal inspection in some environments.
 if not TORCH_AVAILABLE:
-    MISSING_DEPS.append("PyTorch (required for GPU detection and CUDA features)")
+    MISSING_DEPS.append("PyTorch (optional - fallback GPU detection and CUDA features)")
 
 # Optional dependencies
 if not PSUTIL_AVAILABLE:

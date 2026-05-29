@@ -157,6 +157,15 @@ def sample_configs_file(
                 "ui_theme_name": "",
                 "ui_font_family": "",
                 "ui_font_size": 0,
+                "hf_repo_input": "",
+                "hf_repo_revision": "",
+                "hf_download_mode": "selected",
+                "hf_target_dirs": [],
+                "hf_include_patterns": "",
+                "hf_ignore_patterns": "",
+                "hf_force_download": False,
+                "hf_local_files_only": False,
+                "hf_max_workers": 4,
             },
         }
         path = tmp_path / filename

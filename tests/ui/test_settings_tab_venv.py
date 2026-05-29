@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tkinter.ttk as ttk
 from unittest.mock import MagicMock
 
 import pytest
@@ -163,5 +164,39 @@ def test_format_dependency_status_includes_version_and_torch_note():
 
     text = SettingsTab._format_dependency_status(dep, status)
 
-    assert "Installed 2.7.0." in text
+    assert "✓ Installed 2.7.0." in text
+    assert "Optional." in text
     assert "GPU-specific wheels" in text
+
+
+def test_dependency_buttons_follow_installed_state(settings_tab):
+    settings_tab._venv_dependencies_frame = ttk.Frame(settings_tab.root)
+    settings_tab._current_venv_info = lambda: MagicMock(looks_like_venv=True)
+    settings_tab._current_active_venv_path = lambda: "/tmp/test-venv"
+    statuses = [
+        venv_manager.DependencyStatus(
+            dependency=venv_manager.MANAGED_DEPENDENCIES[0],
+            available=True,
+            version="2.32.0",
+        ),
+        venv_manager.DependencyStatus(
+            dependency=venv_manager.MANAGED_DEPENDENCIES[1],
+            available=False,
+            error="not installed",
+        ),
+    ]
+
+    settings_tab._rebuild_dependency_rows(statuses)
+
+    buttons = [
+        child for child in settings_tab._venv_dependencies_frame.winfo_children()
+        if isinstance(child, ttk.Frame)
+        for grandchild in child.winfo_children()
+        if isinstance(grandchild, ttk.Button)
+    ]
+    button_state_by_text = {(button.cget("text"), index): str(button.cget("state")) for index, button in enumerate(buttons)}
+
+    assert button_state_by_text[("Install", 0)] == "disabled"
+    assert button_state_by_text[("Remove", 1)] == "normal"
+    assert button_state_by_text[("Install", 2)] == "normal"
+    assert button_state_by_text[("Remove", 3)] == "disabled"

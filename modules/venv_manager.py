@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import json
 import shlex
 import shutil
@@ -80,6 +82,11 @@ MANAGED_DEPENDENCIES: tuple[ManagedDependency, ...] = (
         description="Planned model downloads; installs the `hf` CLI.",
     ),
 )
+
+
+def required_managed_dependencies() -> tuple[ManagedDependency, ...]:
+    """Return launcher-managed dependencies that are required by default."""
+    return tuple(dep for dep in MANAGED_DEPENDENCIES if dep.required)
 
 
 def launcher_repo_dir() -> Path:
@@ -221,6 +228,34 @@ def build_create_venv_command(
     return _shell_join(args, platform=platform)
 
 
+def build_bootstrap_venv_command(
+    venv_dir: str | Path,
+    *,
+    dependencies: tuple[ManagedDependency, ...] | None = None,
+    base_python: str | tuple[str, ...] | list[str] | None = None,
+    platform: str | None = None,
+) -> str:
+    """Return a shell command that creates a venv and installs managed packages."""
+    target = Path(venv_dir)
+    create_cmd = build_create_venv_command(
+        target,
+        base_python=base_python,
+        platform=platform,
+    )
+    python_path = venv_python_candidates(target, platform=platform)[0]
+    install_list = dependencies or required_managed_dependencies()
+    packages = [dep.install_name or dep.package_name for dep in install_list]
+    upgrade_pip_cmd = _shell_join(
+        [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
+        platform=platform,
+    )
+    install_cmd = _shell_join(
+        [str(python_path), "-m", "pip", "install", *packages],
+        platform=platform,
+    )
+    return " && ".join((create_cmd, upgrade_pip_cmd, install_cmd))
+
+
 def build_install_dependency_command(
     venv_dir: str | Path,
     dependency: ManagedDependency,
@@ -358,3 +393,41 @@ def probe_dependencies(
         )
         for dependency in MANAGED_DEPENDENCIES
     ]
+
+
+def probe_current_python_dependencies(
+    dependencies: tuple[ManagedDependency, ...] | None = None,
+) -> tuple[DependencyStatus, ...]:
+    """Inspect launcher-managed dependencies in the current Python process."""
+    rows: list[DependencyStatus] = []
+    for dependency in dependencies or MANAGED_DEPENDENCIES:
+        try:
+            available = importlib.util.find_spec(dependency.import_name) is not None
+        except Exception as exc:
+            rows.append(
+                DependencyStatus(
+                    dependency=dependency,
+                    available=False,
+                    error=str(exc),
+                )
+            )
+            continue
+
+        version = None
+        error = None
+        if available:
+            try:
+                version = importlib.metadata.version(dependency.package_name)
+            except importlib.metadata.PackageNotFoundError:
+                version = None
+            except Exception as exc:
+                error = str(exc)
+        rows.append(
+            DependencyStatus(
+                dependency=dependency,
+                available=available,
+                version=version,
+                error=error,
+            )
+        )
+    return tuple(rows)

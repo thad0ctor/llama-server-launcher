@@ -1019,12 +1019,15 @@ class ConfigManager:
             messagebox.showerror("Config Load Error", f"Could not load config from:\n{self.launcher.config_path}\n\nError: {exception}\n\nUsing default settings.")
             # Reset to defaults on other load errors
             self.launcher.app_settings = {
-                "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
+                "last_llama_cpp_dir": "", "last_venv_dir": "", "venv_bootstrap_prompt_mode": "ask", "last_model_path": "",
                 "selected_mmproj_path": "",
                 "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "gpu_order": [], "custom_parameters": [],
                 "host": "127.0.0.1", "port": "8080",  # Add default network settings
                 "ui_theme_mode": "auto", "ui_theme_name": "",
                 "ui_font_family": "", "ui_font_size": 0,
+                "hf_repo_input": "", "hf_repo_revision": "", "hf_download_mode": "selected",
+                "hf_target_dirs": [], "hf_include_patterns": "", "hf_ignore_patterns": "",
+                "hf_force_download": False, "hf_local_files_only": False, "hf_max_workers": 4,
             }
             self.launcher.saved_configs = {}
             self.launcher.custom_parameters_list = [] # Reset internal list

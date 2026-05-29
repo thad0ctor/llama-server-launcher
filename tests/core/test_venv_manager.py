@@ -105,6 +105,35 @@ def test_default_venv_base_python_args_prefers_py_launcher_on_windows(monkeypatc
     assert venv_manager.default_venv_base_python_args(platform="win32") == ("py", "-3")
 
 
+def test_build_bootstrap_venv_command_installs_managed_packages(tmp_path):
+    command = venv_manager.build_bootstrap_venv_command(tmp_path / "venv", platform="linux")
+
+    assert "python3 -m venv" in command or "python -m venv" in command
+    assert "pip install --upgrade pip" in command
+    assert "pip install requests" in command
+    assert "torch" not in command
+
+
+def test_probe_current_python_dependencies_reports_availability(monkeypatch):
+    dep = venv_manager.MANAGED_DEPENDENCIES[0]
+    monkeypatch.setattr(
+        venv_manager.importlib.util,
+        "find_spec",
+        lambda name: object() if name == dep.import_name else None,
+    )
+    monkeypatch.setattr(
+        venv_manager.importlib.metadata,
+        "version",
+        lambda name: "2.32.0" if name == dep.package_name else None,
+    )
+
+    statuses = venv_manager.probe_current_python_dependencies((dep,))
+
+    assert len(statuses) == 1
+    assert statuses[0].available is True
+    assert statuses[0].version == "2.32.0"
+
+
 def test_build_install_dependency_command_uses_venv_python(tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)

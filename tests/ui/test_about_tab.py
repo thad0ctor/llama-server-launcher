@@ -310,6 +310,16 @@ class TestBuildUpdateScriptInjectionResistance:
 class TestCheckVersionOnline:
     """Branch coverage for the background network probe."""
 
+    def test_requests_missing_sets_status_without_crashing(self, about, monkeypatch):
+        about._update_version_display = MagicMock()
+        monkeypatch.setattr("modules.about_tab.REQUESTS_AVAILABLE", False)
+        monkeypatch.setattr("modules.about_tab.requests", None)
+
+        about._check_version_online()
+
+        assert about.version_status == "requests not installed"
+        about._update_version_display.assert_called_once()
+
     def test_network_failure_sets_check_failed(self, about):
         """``RequestException`` should flip status to ``Check Failed`` and
         call ``_update_version_display`` so the user knows it didn't work."""

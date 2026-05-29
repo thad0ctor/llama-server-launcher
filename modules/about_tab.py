@@ -13,10 +13,16 @@ import os
 import queue
 import shlex
 import subprocess
-import requests
 import threading
 from datetime import datetime
 import shutil
+
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    requests = None
+    REQUESTS_AVAILABLE = False
 
 VERSION_CHECK_POLL_MS = 100
 _VERSION_CHECK_COMPLETE = object()
@@ -325,6 +331,11 @@ class AboutTab:
         into Tcl, which (Python 3.13) corrupts the next root's
         interpreter and deadlocks subsequent UI tests.
         """
+        if not REQUESTS_AVAILABLE:
+            self._post_version_result("requests not installed", None)
+            if self._parent is not None:
+                self._version_queue.put(_VERSION_CHECK_COMPLETE)
+            return
         try:
             response = requests.get(self.github_version_url, timeout=10)
             if not self._widget_alive():
@@ -610,12 +621,16 @@ class AboutTab:
                                       style="Accent.TButton")  # Use accent style if available
         # Don't pack initially - will be shown when update is available
         
-        # Start version check in background; results are applied by the Tk thread.
-        self._version_queue = queue.Queue()
-        self._version_check_pending = True
-        self._version_thread = threading.Thread(target=self._check_version_online, daemon=True)
-        self._version_thread.start()
-        self._schedule_version_queue_drain()
+        if REQUESTS_AVAILABLE:
+            # Start version check in background; results are applied by the Tk thread.
+            self._version_queue = queue.Queue()
+            self._version_check_pending = True
+            self._version_thread = threading.Thread(target=self._check_version_online, daemon=True)
+            self._version_thread.start()
+            self._schedule_version_queue_drain()
+        else:
+            self.version_status = "requests not installed"
+            self._update_version_display()
         
         # Project information
         project_frame = ttk.LabelFrame(content_frame, text="Project Information", padding=15)

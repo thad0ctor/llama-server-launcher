@@ -90,8 +90,10 @@ from modules.about_tab import create_about_tab
 
 # Import the settings tab + UI theme helpers
 from modules.settings_tab import create_settings_tab
+from modules.hf_downloader import create_hf_downloader_tab
 from modules import ui_theme
 from modules import venv_manager
+from modules import terminal_launcher
 
 # Import the ik_llama configuration tab module
 from modules.ik_llama import IkLlamaTab
@@ -262,6 +264,8 @@ class LlamaCppLauncher:
         # freezes the Tk main loop at startup on multi-GPU systems.
         self._lazy_tab_registry: dict = {}
         self._lazy_tab_binding_attached = False
+        self._bootstrap_config_dirty = False
+        self.repo_dir = venv_manager.launcher_repo_dir()
 
         # --- System Info Attributes ---
         # These will be populated by SystemInfoManager later.
@@ -279,6 +283,7 @@ class LlamaCppLauncher:
             "last_llama_cpp_dir": "",
             "last_ik_llama_dir":  "",
             "last_venv_dir":      "",
+            "venv_bootstrap_prompt_mode": "ask",
             "last_model_path":    "",
             "selected_mmproj_path": "",
             "model_dirs":         [],
@@ -306,6 +311,15 @@ class LlamaCppLauncher:
             "ui_theme_name":       "",
             "ui_font_family":      "",
             "ui_font_size":        0,
+            "hf_repo_input":       "",
+            "hf_repo_revision":    "",
+            "hf_download_mode":    "selected",
+            "hf_target_dirs":      [],
+            "hf_include_patterns": "",
+            "hf_ignore_patterns":  "",
+            "hf_force_download":   False,
+            "hf_local_files_only": False,
+            "hf_max_workers":      4,
             # MTP / Speculative decoding defaults. Master off, no type.
             "spec_enabled":        False,
             "spec_type":           "none",
@@ -796,6 +810,8 @@ class LlamaCppLauncher:
         except Exception as e:
             print(f"Failed to apply saved UI preferences: {e}", file=sys.stderr)
 
+        self._maybe_prompt_for_initial_venv_setup()
+
         # build GUI
         self._create_widgets()
 
@@ -912,6 +928,10 @@ class LlamaCppLauncher:
 
         self._update_recommendations() # Call initially to set all initial recommendations
 
+        if self._bootstrap_config_dirty:
+            self._save_configs()
+            self._bootstrap_config_dirty = False
+
         # Perform initial scan (in background) if dirs exist
         if self.model_dirs:
             self._start_model_scan("Scanning on startup...", clear_ui=False)
@@ -924,6 +944,119 @@ class LlamaCppLauncher:
         self._update_template_controls_state() # Sets initial state based on self.template_source
         self._update_effective_template_display() # Sets initial displayed template based on source
 
+    def _maybe_prompt_for_initial_venv_setup(self):
+        """Offer repo-venv bootstrap when managed deps are missing."""
+        if self.app_settings.get("venv_bootstrap_prompt_mode", "ask") == "never":
+            return
+        try:
+            raw_venv_path = self.venv_dir.get()
+        except Exception:
+            raw_venv_path = ""
+        configured_venv = venv_manager.describe_venv_target(
+            raw_venv_path,
+            repo_dir=self.repo_dir,
+        )
+        if configured_venv.looks_like_venv:
+            return
+
+        statuses = venv_manager.probe_current_python_dependencies(
+            venv_manager.required_managed_dependencies()
+        )
+        missing_statuses = [status for status in statuses if not status.available]
+        if not missing_statuses:
+            return
+
+        dep_names = ", ".join(status.dependency.label for status in missing_statuses)
+        target = configured_venv.effective_dir
+        action = self._ask_initial_venv_bootstrap_action(
+            dep_names=dep_names,
+            target=target,
+        )
+        if action == "never":
+            self.app_settings["venv_bootstrap_prompt_mode"] = "never"
+            self._bootstrap_config_dirty = True
+            return
+        if action != "create":
+            return
+
+        command = venv_manager.build_bootstrap_venv_command(target)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        except Exception as exc:
+            messagebox.showerror(
+                "Create virtual environment",
+                f"Failed to open terminal for virtual environment bootstrap:\n{exc}",
+            )
+            return
+
+        self.venv_dir.set(str(target))
+        self.app_settings["last_venv_dir"] = str(target)
+        self.app_settings["venv_bootstrap_prompt_mode"] = "ask"
+        self._bootstrap_config_dirty = True
+        messagebox.showinfo(
+            "Create virtual environment",
+            "Opened a terminal to create the default repo venv and install the launcher packages.",
+        )
+
+    def _ask_initial_venv_bootstrap_action(self, *, dep_names, target):
+        """Show a three-action bootstrap prompt.
+
+        Returns one of ``create``, ``skip``, or ``never``.
+        """
+        result = {"action": "skip"}
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Create virtual environment?")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: _close("skip"))
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(
+            body,
+            text="Some required launcher Python packages are missing.",
+            font=("TkDefaultFont", 11, "bold"),
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=(
+                f"Missing required packages: {dep_names}\n\n"
+                "Optional packages like torch can be installed later from Settings.\n\n"
+                f"Create the default repo virtual environment and install them at:\n{target}"
+            ),
+            justify="left",
+            wraplength=520,
+        ).pack(anchor="w", pady=(10, 14))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+
+        def _close(action):
+            result["action"] = action
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Yes", command=lambda: _close("create")).pack(side="left")
+        ttk.Button(buttons, text="No", command=lambda: _close("skip")).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Don't ask again",
+            command=lambda: _close("never"),
+        ).pack(side="right")
+
+        dialog.update_idletasks()
+        try:
+            dialog.grab_set()
+        except Exception:
+            pass
+        self.root.wait_window(dialog)
+        return result["action"]
+
 
     # ═════════════════════════════════════════════════════════════════
     #  UI builders
@@ -935,7 +1068,7 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); hf_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main")
         nb.add(adv_frame,  text="Advanced")
         nb.add(chat_frame, text="Chat") # Add the new tab
@@ -947,6 +1080,7 @@ class LlamaCppLauncher:
         self.ik_llama_frame = ik_llama_frame
         nb.add(cfg_frame,  text="Config")
         nb.add(settings_frame, text="Settings") # UI appearance / font
+        nb.add(hf_frame, text="Hugging Face")
         # Build tab is always visible (lets you build either backend regardless of which is launched).
         # Positioned 2nd-to-last; About is always last.
         nb.add(build_frame, text="Build (beta)")
@@ -963,6 +1097,7 @@ class LlamaCppLauncher:
         self._setup_build_tab(build_frame) # Setup the Build tab
         self._setup_config_tab(cfg_frame)
         self._setup_settings_tab(settings_frame) # UI settings tab
+        self._setup_hf_downloader_tab(hf_frame)
         self._setup_about_tab(about_frame) # Setup the about tab
 
         # Update ik_llama tab visibility based on current backend selection
@@ -2315,6 +2450,12 @@ class LlamaCppLauncher:
         """Set up the Settings (UI appearance) tab."""
         self.settings_tab = create_settings_tab(self)
         self.settings_tab.setup_settings_tab(parent)
+
+    def _setup_hf_downloader_tab(self, parent):
+        """Set up the Hugging Face downloader tab (deferred build)."""
+        self.hf_downloader_tab = create_hf_downloader_tab(self)
+        self._register_lazy_tab(parent, self.hf_downloader_tab.setup_tab, "Hugging Face tab")
+        self._ensure_lazy_tab_binding()
 
     def _register_lazy_tab(self, parent, builder, label):
         """Register a tab whose heavy widget tree is built on first
