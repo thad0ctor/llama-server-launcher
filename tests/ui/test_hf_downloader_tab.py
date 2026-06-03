@@ -261,7 +261,10 @@ def test_run_process_worker_reports_start_failure(hf_launcher_stub, active_venv,
     parent = tk.Frame(hf_launcher_stub.root)
     tab.setup_tab(parent)
 
-    tab._run_process_worker(["/definitely-missing-python", "-m", "modules.hf_downloader.runner"])
+    tab._run_process_worker(
+        ["/definitely-missing-python", "-m", "modules.hf_downloader.runner"],
+        op_id=tab._op_id,
+    )
 
     event = tab._queue.get_nowait()
     assert event["event"] == "process-exit"

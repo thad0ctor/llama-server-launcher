@@ -76,6 +76,14 @@ class HuggingFaceDownloaderTab:
         self._dep_watch_after_id: str | None = None
         self._dep_watch_deadline: float = 0.0
         self._dep_watch_venv: str | None = None
+        # Generation token bumped on every _start_runner / _cancel_operation.
+        # Worker-thread events carry the op_id captured at launch; events with
+        # a stale op_id are dropped by _handle_event. Closes the race where
+        # Cancel was clicked before the subprocess handle was published to the
+        # main thread — see _run_process_worker which also self-terminates if
+        # its op_id was cancelled during startup.
+        self._op_id: int = 0
+        self._cancelled_ops: set[int] = set()
         self._trace_tokens = [
             self.repo_input_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.revision_var.trace_add("write", lambda *_a: self._persist_settings()),
@@ -422,6 +430,18 @@ class HuggingFaceDownloaderTab:
         except ValueError as exc:
             messagebox.showerror("Invalid repo", str(exc))
             return
+        # Clear any previously loaded listing so that a *failing* new load
+        # can't leave Download enabled against stale filenames from a
+        # different repo. _refresh_runtime_state() (fired after the runner
+        # exits) will recompute button state from the empty rows.
+        self._file_rows = []
+        self._file_path_by_index = []
+        self._refs = []
+        if self._revision_combo is not None:
+            self._revision_combo.config(values=())
+        if self._files_listbox is not None:
+            self._files_listbox.delete(0, tk.END)
+        self._set_button_state(self._download_button, False)
         if parsed.revision_hint and not self.revision_var.get().strip():
             self.revision_var.set(parsed.revision_hint)
         payload = {
@@ -502,7 +522,10 @@ class HuggingFaceDownloaderTab:
         if python is None:
             messagebox.showerror("No venv", "A usable venv is required for Hugging Face operations.")
             return
+        # _cancel_operation bumps self._op_id; the value after the call is the
+        # generation for *this* new run.
         self._cancel_operation(clean_only=True)
+        op_id = self._op_id
         fd, payload_path = tempfile.mkstemp(prefix="hf-downloader-", suffix=".json")
         os.close(fd)
         payload_file = Path(payload_path)
@@ -519,14 +542,14 @@ class HuggingFaceDownloaderTab:
         command = build_runner_command(python, action, payload_file)
         self._worker_thread = threading.Thread(
             target=self._run_process_worker,
-            args=(command,),
+            args=(command, op_id),
             daemon=True,
         )
         self._worker_thread.start()
         if self._queue_after_id is None:
             self._queue_after_id = self.root.after(self.POLL_MS, self._poll_queue)
 
-    def _run_process_worker(self, command: list[str]):
+    def _run_process_worker(self, command: list[str], op_id: int):
         print(f"[hf-runner] launching: {' '.join(command)}", file=sys.stderr, flush=True)
         try:
             proc = subprocess.Popen(
@@ -542,12 +565,22 @@ class HuggingFaceDownloaderTab:
             self._queue.put(
                 {
                     "event": "process-exit",
+                    "op_id": op_id,
                     "returncode": 1,
                     "stderr": str(exc),
                 }
             )
             return
         self._process = proc
+
+        # If Cancel was clicked while Popen was still launching, the main
+        # thread had no handle to terminate. Detect that here and terminate
+        # before draining the pipes.
+        if op_id in self._cancelled_ops:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
         stderr_chunks: list[str] = []
 
@@ -559,7 +592,7 @@ class HuggingFaceDownloaderTab:
                     continue
                 stderr_chunks.append(stripped)
                 print(f"[hf-runner stderr] {stripped}", file=sys.stderr, flush=True)
-                self._queue.put({"event": "stderr", "message": stripped})
+                self._queue.put({"event": "stderr", "op_id": op_id, "message": stripped})
 
         stderr_thread = threading.Thread(target=stderr_reader, daemon=True)
         stderr_thread.start()
@@ -573,8 +606,9 @@ class HuggingFaceDownloaderTab:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 print(f"[hf-runner stdout] {line}", file=sys.stderr, flush=True)
-                self._queue.put({"event": "stderr", "message": line})
+                self._queue.put({"event": "stderr", "op_id": op_id, "message": line})
                 continue
+            event["op_id"] = op_id
             self._queue.put(event)
         returncode = proc.wait()
         stderr_thread.join(timeout=2.0)
@@ -583,6 +617,7 @@ class HuggingFaceDownloaderTab:
         self._queue.put(
             {
                 "event": "process-exit",
+                "op_id": op_id,
                 "returncode": returncode,
                 "stderr": stderr_text,
             }
@@ -604,6 +639,12 @@ class HuggingFaceDownloaderTab:
             self._refresh_runtime_state()
 
     def _handle_event(self, event: dict):
+        op_id = event.get("op_id")
+        if op_id is not None and op_id != self._op_id:
+            # Stale: this event came from a worker we already cancelled or
+            # replaced. Dropping it keeps the UI consistent with what the
+            # user actually sees.
+            return
         kind = event.get("event")
         if kind == "status":
             self.status_var.set(event.get("message", ""))
@@ -679,6 +720,11 @@ class HuggingFaceDownloaderTab:
         self._refresh_runtime_state()
 
     def _cancel_operation(self, *, clean_only: bool = False):
+        # Invalidate the current op so any in-flight events from this worker
+        # are dropped by _handle_event before they can touch the UI.
+        cancelled_op = self._op_id
+        self._cancelled_ops.add(cancelled_op)
+        self._op_id += 1
         proc = self._process
         if proc is not None and proc.poll() is None:
             try:

@@ -444,6 +444,7 @@ class BuildTab:
             cuda_available=cuda_available,
             avx512_supported=avx512,
             has_ccache=bool(self._toolchain.ccache_path),
+            cuda_version=getattr(self._toolchain, "cuda_version", None),
         )
         # Merge: defaults provide a baseline, user values (in current snapshot)
         # win for any flag that exists in both. For a fresh seed at startup
@@ -2591,7 +2592,9 @@ class BuildTab:
             messagebox.showerror("Build", "Source directory is required.")
             return
         errors = cf.validate_values(
-            self.var_backend.get(), self._current_flag_values_dict()
+            self.var_backend.get(),
+            self._current_flag_values_dict(),
+            cuda_version=getattr(self._toolchain, "cuda_version", None),
         )
         if errors:
             detail = "\n".join(f"  • {label}: {msg}" for label, msg in errors)
@@ -2864,7 +2867,10 @@ class BuildTab:
         if archs:
             values["CMAKE_CUDA_ARCHITECTURES"] = archs
         args = cf.values_to_cmake_args(
-            backend, values, extra_cmake_args=self.var_extra_args.get().strip()
+            backend,
+            values,
+            extra_cmake_args=self.var_extra_args.get().strip(),
+            cuda_version=getattr(self._toolchain, "cuda_version", None),
         )
         # Also pin CUDA_TOOLKIT_ROOT_DIR via -D so it's recorded in the cache;
         # cmake otherwise auto-derives from CMAKE_CUDA_COMPILER but pinning

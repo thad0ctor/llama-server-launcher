@@ -589,11 +589,19 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
 
     if plan.git_clone_if_missing and plan.upstream_url:
         lines.append('if [ ! -d "$SRC_DIR" ]; then')
+        # _run() implicitly relies on Popen's cwd being writable; the exported
+        # script has no such caller, so create the parent explicitly.
+        lines.append('  mkdir -p "$(dirname "$SRC_DIR")"')
         lines.append(f"  git clone --recursive {shlex.quote(plan.upstream_url)} \"$SRC_DIR\"")
         lines.append("fi")
 
     if plan.git_pull_before_build:
-        lines.append('git -C "$SRC_DIR" pull --ff-only')
+        # Mirror _run()'s tolerance: a failed `git pull --ff-only` (offline,
+        # diverged history, …) must not abort the rest of the build under
+        # `set -e`. _run() just logs and continues.
+        lines.append('if ! git -C "$SRC_DIR" pull --ff-only; then')
+        lines.append('  echo "git pull failed; continuing with current checkout" >&2')
+        lines.append("fi")
 
     if plan.git_ref:
         lines.append(f'git -C "$SRC_DIR" checkout {shlex.quote(plan.git_ref)}')

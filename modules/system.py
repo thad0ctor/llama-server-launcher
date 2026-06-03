@@ -687,8 +687,10 @@ def load_cached_gpu_info(config_dir, venv_path):
     if not isinstance(gpu_info, dict):
         return None
     # Minimal shape check so a corrupt-but-valid-JSON file doesn't crash
-    # downstream UI code that assumes ``device_count`` is int + ``devices``
-    # is a list.
+    # downstream UI code that reads ``available`` unguarded and assumes
+    # ``device_count`` is int + ``devices`` is a list.
+    if not isinstance(gpu_info.get("available"), bool):
+        return None
     if not isinstance(gpu_info.get("device_count"), int):
         return None
     if not isinstance(gpu_info.get("devices"), list):

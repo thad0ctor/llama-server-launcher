@@ -387,7 +387,9 @@ class SettingsTab:
         for row_index, dep in enumerate(venv_manager.MANAGED_DEPENDENCIES):
             status = status_by_key.get(dep.key)
             can_install = bool(has_venv and status is not None and not status.available)
-            can_remove = bool(has_venv and status is not None and status.available)
+            can_remove = bool(
+                has_venv and status is not None and status.available and not dep.required
+            )
             ttk.Label(frame, text=f"{dep.label}:").grid(
                 column=0, row=row_index, sticky="nw", padx=4, pady=4,
             )
@@ -465,6 +467,14 @@ class SettingsTab:
         info = self._current_venv_info()
         if not info.exists:
             messagebox.showinfo("Remove venv", "No virtual environment directory exists at the selected path.")
+            return
+        if not info.looks_like_venv:
+            messagebox.showerror(
+                "Remove venv",
+                "The selected directory does not look like a virtual environment "
+                "(no python interpreter found under bin/ or Scripts/). Refusing to "
+                f"recursively delete:\n\n{info.effective_dir}",
+            )
             return
         if not messagebox.askyesno(
             "Remove venv",

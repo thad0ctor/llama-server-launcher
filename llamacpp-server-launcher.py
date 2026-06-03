@@ -4685,6 +4685,12 @@ class LlamaCppLauncher:
         Debounced: the trace fires once per keystroke on the Entry widget,
         but we only want one disk write after the user stops typing.
         """
+        # During bulk config loads (_suppress_autosave=True), this trace fires
+        # for transient values. Don't queue the debounced apply — by the time
+        # the 400ms timer pops, the guard has been lowered and the apply
+        # would flush mid-load state to disk.
+        if self._suppress_autosave:
+            return
         if self._backend_dir_change_after_id is not None:
             try:
                 self.root.after_cancel(self._backend_dir_change_after_id)
@@ -4696,6 +4702,10 @@ class LlamaCppLauncher:
 
     def _apply_backend_dir_change(self):
         self._backend_dir_change_after_id = None
+        # Belt-and-braces: a callback that survived a re-entered suppression
+        # window still has no business writing the config.
+        if self._suppress_autosave:
+            return
         backend = self.backend_selection.get()
         new_dir = self.current_backend_dir.get()
 
@@ -5539,6 +5549,11 @@ class LlamaCppLauncher:
         used to write the config to disk AND spawn a GPU-detection
         subprocess, which made typing a path into the Entry visibly lag.
         """
+        # Bulk config loads must not flush mid-load values or kick off a GPU
+        # probe from a transient venv path. The debounce timer would
+        # otherwise fire after _suppress_autosave was lowered.
+        if self._suppress_autosave:
+            return
         if not self.manual_gpu_mode.get():
             # The currently running probe, if any, used the previous venv
             # snapshot. Bump immediately; the debounced handler starts the
@@ -5557,6 +5572,8 @@ class LlamaCppLauncher:
 
     def _apply_venv_dir_change(self):
         self._venv_dir_change_after_id = None
+        if self._suppress_autosave:
+            return
         new_dir = self.venv_dir.get()
         if new_dir:
             self.app_settings["last_venv_dir"] = new_dir

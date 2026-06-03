@@ -931,10 +931,16 @@ class SpecTab:
         self._spec_draft_analysis_thread = t
         t.start()
         if self._spec_draft_analysis_after_id is None:
-            self._spec_draft_analysis_after_id = self.launcher.root.after(
-                SPEC_DRAFT_ANALYSIS_POLL_MS,
-                self._drain_spec_draft_gguf_analysis,
-            )
+            try:
+                self._spec_draft_analysis_after_id = self.launcher.root.after(
+                    SPEC_DRAFT_ANALYSIS_POLL_MS,
+                    self._drain_spec_draft_gguf_analysis,
+                )
+            except tk.TclError:
+                # Root was destroyed mid-flight (window closed while a
+                # background draft-analysis thread was still running). Drop
+                # the poll silently — the launcher is shutting down anyway.
+                self._spec_draft_analysis_after_id = None
 
     def _get_spec_draft_analysis_lock(self):
         lock = getattr(self, "_spec_draft_analysis_lock", None)
@@ -974,10 +980,13 @@ class SpecTab:
             self._spec_draft_analysis_thread
             and self._spec_draft_analysis_thread.is_alive()
         ) or not self._spec_draft_analysis_queue.empty():
-            self._spec_draft_analysis_after_id = self.launcher.root.after(
-                SPEC_DRAFT_ANALYSIS_POLL_MS,
-                self._drain_spec_draft_gguf_analysis,
-            )
+            try:
+                self._spec_draft_analysis_after_id = self.launcher.root.after(
+                    SPEC_DRAFT_ANALYSIS_POLL_MS,
+                    self._drain_spec_draft_gguf_analysis,
+                )
+            except tk.TclError:
+                self._spec_draft_analysis_after_id = None
 
     def _update_ui_after_spec_draft_analysis(self, analysis_result):
         """Apply analysis result to the draft slider/status (Tk thread)."""

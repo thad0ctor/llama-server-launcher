@@ -342,12 +342,20 @@ class AboutTab:
                 return
             if response.status_code == 200:
                 remote_version = response.text.strip()
-                status = (
-                    "Update Available"
-                    if self._is_version_newer(self.version, remote_version)
-                    else "Current"
-                )
-                self._post_version_result(status, remote_version)
+                # A 200 with blank/non-version text (proxy interception,
+                # broken CDN, captive portal) used to silently land in
+                # _parse_version → (0,0,0,0) and display as "Current".
+                # Reject anything that doesn't parse so the UI shows the
+                # check actually failed.
+                if not remote_version or self._parse_version(remote_version) == (0, 0, 0, 0):
+                    self._post_version_result("Check Failed", remote_version or None)
+                else:
+                    status = (
+                        "Update Available"
+                        if self._is_version_newer(self.version, remote_version)
+                        else "Current"
+                    )
+                    self._post_version_result(status, remote_version)
             else:
                 self._post_version_result("Check Failed", None)
         except requests.RequestException as e:

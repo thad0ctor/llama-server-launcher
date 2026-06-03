@@ -552,17 +552,60 @@ def default_values_for_backend(backend: str) -> dict[str, Any]:
 # Auto-detected preset — "Optimized for this system"
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_dotted_version(v: str | None) -> tuple[int, ...] | None:
+    """Coerce a "12.8" / "12.8.1" / "12" string into a comparable tuple. Returns
+    None if the input is missing or contains a non-numeric segment."""
+    if not v:
+        return None
+    parts: list[int] = []
+    for chunk in str(v).strip().split("."):
+        if not chunk:
+            return None
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return None
+    return tuple(parts) if parts else None
+
+
+def _cuda_version_satisfies(min_required: str | None, detected: str | None) -> bool:
+    """Return True iff a flag declaring ``cuda_version_min=min_required`` is
+    permitted for ``detected``.
+
+    - If the flag has no ``cuda_version_min`` set, always True.
+    - If the detected CUDA version is unknown (None), be permissive (True) so
+      callers without detection don't lose flags. The Build tab passes a
+      detected version when it has one.
+    - Otherwise compare numerically: detected >= min_required.
+    """
+    if not min_required:
+        return True
+    detected_t = _parse_dotted_version(detected)
+    if detected_t is None:
+        return True
+    min_t = _parse_dotted_version(min_required)
+    if min_t is None:
+        return True
+    return detected_t >= min_t
+
+
 def build_autodetect_values(
     backend: str,
     *,
     cuda_available: bool,
     avx512_supported: bool,
     has_ccache: bool,
+    cuda_version: str | None = None,
 ) -> dict[str, Any]:
     """Return a flag-values dict tuned for the detected system, mirroring
     the reference scripts (fast-math CUDA, FA-all-quants, LTO, P2P 512,
     AVX512 if the CPU has it). Caller is expected to additionally set
     CMAKE_CUDA_ARCHITECTURES from CudaArchInfo via detection.archs_to_cmake_value.
+
+    ``cuda_version`` (e.g. ``"12.8"``) gates the version-fenced flags such as
+    ``GGML_CUDA_COMPRESSION_MODE``. When unknown, leave the flag at its
+    schema default so the resulting preset doesn't silently inject a flag
+    the user's toolkit can't accept.
     """
     values = default_values_for_backend(backend)
 
@@ -575,7 +618,11 @@ def build_autodetect_values(
             values["GGML_CUDA_FA"] = True
             values["GGML_CUDA_GRAPHS"] = True
             values["GGML_CUDA_NCCL"] = True
-            values["GGML_CUDA_COMPRESSION_MODE"] = "speed"
+            compression_flag = _FLAG_BY_KEY.get("GGML_CUDA_COMPRESSION_MODE")
+            if compression_flag is not None and _cuda_version_satisfies(
+                compression_flag.cuda_version_min, cuda_version
+            ):
+                values["GGML_CUDA_COMPRESSION_MODE"] = "speed"
         else:
             values["GGML_CUDA_USE_GRAPHS"] = True
             values["GGML_CUDA_FORCE_MMQ"] = True
@@ -629,10 +676,16 @@ def values_to_cmake_args(
     values: dict[str, Any],
     *,
     extra_cmake_args: str = "",
+    cuda_version: str | None = None,
 ) -> list[str]:
     """Convert a flag-values dict to ``-DKEY=VAL`` strings, skipping flags
     that don't apply to ``backend`` and skipping empty STRING entries.
-    ``extra_cmake_args`` is appended verbatim after shell-split."""
+    ``extra_cmake_args`` is appended verbatim after shell-split.
+
+    Flags declaring ``cuda_version_min`` are skipped when ``cuda_version`` is
+    known and older than the required minimum (e.g. emitting
+    ``-DGGML_CUDA_COMPRESSION_MODE`` against CUDA 12.4 would fail configure).
+    Passing ``cuda_version=None`` disables the gate."""
     out: list[str] = []
     seen: set[str] = set()
     for flag in flags_for_backend(backend):
@@ -643,6 +696,8 @@ def values_to_cmake_args(
             continue
         if flag.visible_when and not flag.visible_when(values):
             # Hidden because a dependency is off; don't emit.
+            continue
+        if not _cuda_version_satisfies(flag.cuda_version_min, cuda_version):
             continue
         v = values[flag.key]
         if flag.type == BOOL:
@@ -677,13 +732,19 @@ def validate_flag_value(flag: CMakeFlag, value: Any) -> str | None:
 
 
 def validate_values(
-    backend: str, values: dict[str, Any]
+    backend: str,
+    values: dict[str, Any],
+    *,
+    cuda_version: str | None = None,
 ) -> list[tuple[str, str]]:
     """Validate every applicable, currently-visible STRING flag in ``values``.
 
     Returns a list of ``(label, message)`` tuples for flags that fail their
     validator. Flags hidden by ``visible_when`` are skipped — they aren't
-    emitted to cmake, so their value can't break the build."""
+    emitted to cmake, so their value can't break the build. Flags whose
+    ``cuda_version_min`` exceeds the supplied ``cuda_version`` are likewise
+    skipped — they won't be emitted by :func:`values_to_cmake_args`, so the
+    value can't affect the build either."""
     errors: list[tuple[str, str]] = []
     seen: set[str] = set()
     for flag in flags_for_backend(backend):
@@ -693,6 +754,8 @@ def validate_values(
         if flag.validate is None or flag.key not in values:
             continue
         if flag.visible_when and not flag.visible_when(values):
+            continue
+        if not _cuda_version_satisfies(flag.cuda_version_min, cuda_version):
             continue
         msg = validate_flag_value(flag, values[flag.key])
         if msg:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from tkinter import ttk
 from unittest.mock import MagicMock
 
@@ -8,6 +9,16 @@ import pytest
 from modules import terminal_launcher
 from modules import venv_manager
 from modules.settings_tab import SettingsTab
+
+
+# These fixtures hard-code the POSIX venv layout (``bin/python``) and assert
+# ``rm -rf`` in the generated remove command. The SettingsTab code itself is
+# cross-platform, so on Windows we skip the layout-dependent cases rather
+# than fail spuriously.
+posix_only = pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="POSIX venv layout (bin/python, rm -rf) — Windows uses Scripts/ and rmdir.",
+)
 
 
 @pytest.fixture
@@ -33,6 +44,7 @@ def test_current_venv_info_blank_uses_repo_default(settings_tab):
     assert info.effective_dir == venv_manager.default_venv_dir(repo_dir=settings_tab.repo_dir).resolve()
 
 
+@posix_only
 def test_current_active_venv_path_blank_uses_default_only_when_real_venv(settings_tab, tmp_path):
     settings_tab.repo_dir = tmp_path
     bindir = tmp_path / "venv" / "bin"
@@ -43,6 +55,7 @@ def test_current_active_venv_path_blank_uses_default_only_when_real_venv(setting
     assert settings_tab._current_active_venv_path() == str((tmp_path / "venv").resolve())
 
 
+@posix_only
 def test_current_active_venv_path_relative_matches_launcher_resolution(settings_tab, tmp_path):
     settings_tab.repo_dir = tmp_path
     bindir = tmp_path / "envs" / "custom" / "bin"
@@ -87,9 +100,15 @@ def test_remove_venv_requires_existing_directory(settings_tab, monkeypatch):
     launch_mock.assert_not_called()
 
 
+@posix_only
 def test_remove_venv_opens_terminal_after_confirmation(settings_tab, monkeypatch, tmp_path):
     venv_dir = tmp_path / "my env"
-    venv_dir.mkdir()
+    # _on_remove_venv now requires the target to look like a venv (so it can't
+    # rm -rf an arbitrary directory the user typed). Lay out a minimal POSIX
+    # venv so the success path still runs.
+    bindir = venv_dir / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "python").write_text("", encoding="utf-8")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
     monkeypatch.setattr("modules.settings_tab.messagebox.askyesno", lambda *a, **kw: True)
@@ -118,6 +137,7 @@ def test_install_dependency_requires_detected_venv(settings_tab, monkeypatch):
     launch_mock.assert_not_called()
 
 
+@posix_only
 def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monkeypatch, tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
@@ -136,6 +156,7 @@ def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monke
     assert "pip install huggingface_hub" in launch_mock.call_args.args[0]
 
 
+@posix_only
 def test_remove_dependency_opens_terminal_for_existing_venv(settings_tab, monkeypatch, tmp_path):
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)

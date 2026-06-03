@@ -36,6 +36,7 @@ import datetime as _dt
 import json
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -116,10 +117,22 @@ class BuildConfig:
             clean_build=_safe_bool(data.get("clean_build", True), default=True),
             jobs=_safe_int(data.get("jobs", 0)),
             cuda_archs=data.get("cuda_archs", ""),
-            env=dict(data.get("env", {}) or {}),
-            flag_values=dict(data.get("flag_values", {}) or {}),
+            # Defensive: a malformed persisted value ("env": "") would raise
+            # in dict(...) and _load() would then drop the entire preset.
+            # Default non-mapping values to {} so one bad field doesn't make
+            # the whole config disappear from the UI.
+            env=dict(data["env"]) if isinstance(data.get("env"), Mapping) else {},
+            flag_values=(
+                dict(data["flag_values"])
+                if isinstance(data.get("flag_values"), Mapping)
+                else {}
+            ),
             extra_cmake_args=data.get("extra_cmake_args", ""),
-            ui_state=dict(data.get("ui_state", {}) or {}),
+            ui_state=(
+                dict(data["ui_state"])
+                if isinstance(data.get("ui_state"), Mapping)
+                else {}
+            ),
             notes=data.get("notes", ""),
             created_at=data.get("created_at", ""),
             last_used_at=data.get("last_used_at", ""),
