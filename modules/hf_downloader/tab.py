@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -29,6 +30,8 @@ class HuggingFaceDownloaderTab:
     """Downloader UI backed by a selected virtual environment."""
 
     POLL_MS = 120
+    DEP_WATCH_INTERVAL_MS = 3000
+    DEP_WATCH_TIMEOUT_S = 600
 
     def __init__(self, launcher):
         self.launcher = launcher
@@ -61,12 +64,18 @@ class HuggingFaceDownloaderTab:
         self._download_button = None
         self._cancel_button = None
         self._refresh_targets_button = None
+        self._options_toggle_btn = None
+        self._options_body = None
+        self._options_expanded = False
         self._queue: queue.Queue = queue.Queue()
         self._queue_after_id = None
         self._worker_thread = None
         self._process: subprocess.Popen[str] | None = None
         self._payload_path: Path | None = None
         self._operation_name = ""
+        self._dep_watch_after_id: str | None = None
+        self._dep_watch_deadline: float = 0.0
+        self._dep_watch_venv: str | None = None
         self._trace_tokens = [
             self.repo_input_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.revision_var.trace_add("write", lambda *_a: self._persist_settings()),
@@ -150,9 +159,18 @@ class HuggingFaceDownloaderTab:
         ttk.Button(file_buttons, text="Select all", command=lambda: self._select_all_files(True)).pack(side="left", padx=(0, 6))
         ttk.Button(file_buttons, text="Clear selection", command=lambda: self._select_all_files(False)).pack(side="left")
 
-        options = ttk.LabelFrame(main, text="Download Options")
-        options.grid(column=0, row=3, columnspan=2, sticky="ew")
+        self._options_toggle_btn = ttk.Button(
+            main,
+            text="▶ Download Options",
+            command=self._toggle_options_section,
+            style="Toolbutton",
+        )
+        self._options_toggle_btn.grid(column=0, row=3, columnspan=2, sticky="w", pady=(8, 0))
+
+        options = ttk.LabelFrame(main, text="")
+        options.grid(column=0, row=4, columnspan=2, sticky="ew", pady=(4, 0))
         options.columnconfigure(1, weight=1)
+        self._options_body = options
         ttk.Label(options, text="Mode:").grid(column=0, row=0, sticky="w", padx=6, pady=4)
         ttk.Radiobutton(options, text="Selected files", value="selected", variable=self.download_mode_var).grid(
             column=1, row=0, sticky="w", padx=6, pady=4
@@ -172,9 +190,10 @@ class HuggingFaceDownloaderTab:
         )
         ttk.Label(options, text="Max workers:").grid(column=0, row=5, sticky="w", padx=6, pady=4)
         ttk.Entry(options, textvariable=self.max_workers_var, width=6).grid(column=1, row=5, sticky="w", padx=6, pady=4)
+        options.grid_remove()
 
         status = ttk.LabelFrame(main, text="Status")
-        status.grid(column=0, row=4, columnspan=2, sticky="ew", pady=(8, 0))
+        status.grid(column=0, row=5, columnspan=2, sticky="ew", pady=(8, 0))
         status.columnconfigure(0, weight=1)
         ttk.Label(status, textvariable=self.status_var).grid(column=0, row=0, sticky="w", padx=6, pady=(6, 2))
         self._progress = ttk.Progressbar(status, mode="determinate", maximum=100, value=0)
@@ -231,6 +250,8 @@ class HuggingFaceDownloaderTab:
 
     def _refresh_runtime_state(self):
         active = self._current_active_venv_path()
+        if self._dep_watch_venv and self._dep_watch_venv != active:
+            self._cancel_dependency_watch()
         if not active:
             self.venv_status_var.set("No active venv. Create one in Settings first.")
             self._set_button_state(self._install_button, False)
@@ -288,6 +309,38 @@ class HuggingFaceDownloaderTab:
             return
         button.config(state=(tk.NORMAL if enabled else tk.DISABLED))
 
+    @staticmethod
+    def _format_bytes(n) -> str:
+        try:
+            size = float(int(n))
+        except (TypeError, ValueError):
+            return str(n)
+        if size < 0:
+            size = 0.0
+        units = ("B", "KB", "MB", "GB", "TB", "PB")
+        idx = 0
+        while size >= 1024 and idx < len(units) - 1:
+            size /= 1024
+            idx += 1
+        if idx == 0:
+            return f"{int(size)} B"
+        return f"{size:.2f} {units[idx]}"
+
+    @staticmethod
+    def _looks_like_tqdm_progress(line: str) -> bool:
+        return "%|" in line or "B/s" in line or "it/s" in line
+
+    def _toggle_options_section(self):
+        if self._options_body is None or self._options_toggle_btn is None:
+            return
+        self._options_expanded = not self._options_expanded
+        if self._options_expanded:
+            self._options_body.grid()
+            self._options_toggle_btn.config(text="▼ Download Options")
+        else:
+            self._options_body.grid_remove()
+            self._options_toggle_btn.config(text="▶ Download Options")
+
     def _on_install_hf_dependency(self):
         active = self._current_active_venv_path()
         if not active:
@@ -299,7 +352,69 @@ class HuggingFaceDownloaderTab:
             platform=sys.platform,
         )
         terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
-        self.status_var.set("Opened terminal to install or update huggingface_hub in the active venv.")
+        self.status_var.set(
+            "Opened terminal to install or update huggingface_hub. Waiting for it to appear in the venv…"
+        )
+        self._start_dependency_watch(active)
+
+    def _start_dependency_watch(self, venv_path: str):
+        self._cancel_dependency_watch()
+        self._dep_watch_venv = venv_path
+        self._dep_watch_deadline = time.monotonic() + self.DEP_WATCH_TIMEOUT_S
+        self._dep_watch_after_id = self.root.after(
+            self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
+        )
+
+    def _cancel_dependency_watch(self):
+        if self._dep_watch_after_id is not None:
+            try:
+                self.root.after_cancel(self._dep_watch_after_id)
+            except Exception:
+                pass
+            self._dep_watch_after_id = None
+        self._dep_watch_venv = None
+
+    def _fire_dependency_probe(self):
+        self._dep_watch_after_id = None
+        venv_path = self._dep_watch_venv
+        if not venv_path:
+            return
+        if venv_path != self._current_active_venv_path():
+            self._dep_watch_venv = None
+            return
+        if time.monotonic() > self._dep_watch_deadline:
+            self._dep_watch_venv = None
+            return
+        dep = self._huggingface_dependency()
+
+        def worker():
+            try:
+                status = venv_manager.probe_dependency_status(
+                    venv_path, dep, platform=sys.platform
+                )
+                available = bool(status.available)
+            except Exception:
+                available = False
+            self.root.after(0, self._on_dependency_probe_result, venv_path, available)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_dependency_probe_result(self, venv_path: str, available: bool):
+        if venv_path != self._dep_watch_venv:
+            return
+        if venv_path != self._current_active_venv_path():
+            self._dep_watch_venv = None
+            return
+        if available:
+            self._dep_watch_venv = None
+            self._refresh_runtime_state()
+            return
+        if time.monotonic() > self._dep_watch_deadline:
+            self._dep_watch_venv = None
+            return
+        self._dep_watch_after_id = self.root.after(
+            self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
+        )
 
     def _on_load_repo(self):
         try:
@@ -412,6 +527,7 @@ class HuggingFaceDownloaderTab:
             self._queue_after_id = self.root.after(self.POLL_MS, self._poll_queue)
 
     def _run_process_worker(self, command: list[str]):
+        print(f"[hf-runner] launching: {' '.join(command)}", file=sys.stderr, flush=True)
         try:
             proc = subprocess.Popen(
                 command,
@@ -422,6 +538,7 @@ class HuggingFaceDownloaderTab:
                 bufsize=1,
             )
         except Exception as exc:
+            print(f"[hf-runner] failed to launch: {exc}", file=sys.stderr, flush=True)
             self._queue.put(
                 {
                     "event": "process-exit",
@@ -431,6 +548,22 @@ class HuggingFaceDownloaderTab:
             )
             return
         self._process = proc
+
+        stderr_chunks: list[str] = []
+
+        def stderr_reader():
+            assert proc.stderr is not None
+            for raw in proc.stderr:
+                stripped = raw.rstrip()
+                if not stripped:
+                    continue
+                stderr_chunks.append(stripped)
+                print(f"[hf-runner stderr] {stripped}", file=sys.stderr, flush=True)
+                self._queue.put({"event": "stderr", "message": stripped})
+
+        stderr_thread = threading.Thread(target=stderr_reader, daemon=True)
+        stderr_thread.start()
+
         assert proc.stdout is not None
         for line in proc.stdout:
             line = line.strip()
@@ -439,13 +572,14 @@ class HuggingFaceDownloaderTab:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
+                print(f"[hf-runner stdout] {line}", file=sys.stderr, flush=True)
                 self._queue.put({"event": "stderr", "message": line})
                 continue
             self._queue.put(event)
-        stderr_text = ""
-        if proc.stderr is not None:
-            stderr_text = proc.stderr.read().strip()
         returncode = proc.wait()
+        stderr_thread.join(timeout=2.0)
+        stderr_text = "\n".join(stderr_chunks).strip()
+        print(f"[hf-runner] exited with code {returncode}", file=sys.stderr, flush=True)
         self._queue.put(
             {
                 "event": "process-exit",
@@ -497,14 +631,18 @@ class HuggingFaceDownloaderTab:
         if kind == "progress":
             current = event.get("current")
             total = event.get("total")
-            desc = event.get("description") or ""
+            desc = (event.get("description") or "").strip()
             if total:
+                cur = int(current or 0)
+                tot = int(total)
                 self._progress_stop()
-                self._progress.config(mode="determinate", maximum=max(int(total), 1))
-                self._progress["value"] = int(current or 0)
-                self.progress_label_var.set(
-                    f"{int(current or 0)}/{int(total)} {desc}".strip()
-                )
+                self._progress.config(mode="determinate", maximum=max(tot, 1))
+                self._progress["value"] = cur
+                pct = (cur / tot * 100) if tot else 0
+                label = f"{self._format_bytes(cur)} / {self._format_bytes(tot)} ({pct:.1f}%)"
+                if desc:
+                    label = f"{label} · {desc}"
+                self.progress_label_var.set(label)
             elif desc:
                 self.progress_label_var.set(desc)
             return
@@ -519,7 +657,10 @@ class HuggingFaceDownloaderTab:
             self.status_var.set(event.get("message", "Completed."))
             return
         if kind == "stderr":
-            self.progress_label_var.set(event.get("message", ""))
+            message = event.get("message", "")
+            if self._looks_like_tqdm_progress(message):
+                return
+            self.progress_label_var.set(message)
             return
         if kind == "error":
             self.status_var.set(event.get("message", "Operation failed."))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import traceback
 from pathlib import Path
 
 
@@ -119,32 +120,44 @@ def run_list(payload: dict) -> int:
     return 0
 
 
-class _ProgressTqdm:  # pragma: no cover - exercised indirectly by runtime path
-    """JSON-emitting tqdm adapter for huggingface_hub downloads."""
+def _build_progress_tqdm_class():  # pragma: no cover - exercised indirectly
+    """Construct a tqdm subclass that also emits JSON progress events.
 
-    def __init__(self, *args, **kwargs):
-        from tqdm.auto import tqdm
+    Must subclass tqdm (not wrap) so class-level hooks like ``get_lock`` /
+    ``set_lock`` that huggingface_hub's thread_map uses still work.
+    """
+    from tqdm.auto import tqdm as _BaseTqdm
 
-        self._wrapped = tqdm(*args, **kwargs)
-        self.total = getattr(self._wrapped, "total", None)
-        self.n = getattr(self._wrapped, "n", 0)
-        self.desc = getattr(self._wrapped, "desc", "") or ""
-        _emit("progress", current=self.n, total=self.total, description=self.desc)
+    class _ProgressTqdm(_BaseTqdm):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            _emit(
+                "progress",
+                current=self.n,
+                total=self.total,
+                description=str(self.desc or ""),
+            )
 
-    def update(self, n=1):
-        result = self._wrapped.update(n)
-        self.n = getattr(self._wrapped, "n", self.n + n)
-        self.total = getattr(self._wrapped, "total", self.total)
-        self.desc = getattr(self._wrapped, "desc", self.desc) or ""
-        _emit("progress", current=self.n, total=self.total, description=self.desc)
-        return result
+        def update(self, n=1):
+            result = super().update(n)
+            _emit(
+                "progress",
+                current=self.n,
+                total=self.total,
+                description=str(self.desc or ""),
+            )
+            return result
 
-    def close(self):
-        self._wrapped.close()
-        _emit("progress", current=self.n, total=self.total, description=self.desc)
+        def close(self):
+            super().close()
+            _emit(
+                "progress",
+                current=self.n,
+                total=self.total,
+                description=str(self.desc or ""),
+            )
 
-    def __getattr__(self, name):
-        return getattr(self._wrapped, name)
+    return _ProgressTqdm
 
 
 def _combined_allow_patterns(payload: dict) -> list[str] | None:
@@ -167,6 +180,7 @@ def run_download(payload: dict) -> int:
     ignore_patterns = [item for item in payload.get("ignore_patterns") or [] if item] or None
     target_dirs = [Path(path) for path in payload.get("target_dirs") or []]
     max_workers = int(payload.get("max_workers") or 4)
+    tqdm_class = _build_progress_tqdm_class()
 
     if not target_dirs:
         raise ValueError("No target directories were selected.")
@@ -191,7 +205,7 @@ def run_download(payload: dict) -> int:
             local_files_only=bool(payload.get("local_files_only")),
             token=token,
             max_workers=max_workers,
-            tqdm_class=_ProgressTqdm,
+            tqdm_class=tqdm_class,
         )
         _emit(
             "target-complete",
@@ -215,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_list(payload)
         return run_download(payload)
     except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
         _emit("error", message=str(exc), exc_type=type(exc).__name__)
         return 1
 

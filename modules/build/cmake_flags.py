@@ -30,9 +30,12 @@ the ones a user would meaningfully set in the build tab.
 from __future__ import annotations
 
 import shlex
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+_IS_MACOS = sys.platform == "darwin"
 
 
 BOOL = "bool"
@@ -60,6 +63,12 @@ class CMakeFlag:
     # ride along as raw strings. ``placeholder`` is the hint shown in the
     # entry widget.
     placeholder: str = ""
+    # Optional validator for STRING flags. Given the raw entry value, returns
+    # an error message if invalid, or ``None`` if acceptable. An empty value
+    # is never passed here — empties are skipped (they fall back to the
+    # upstream cmake default), so a validator only ever sees a user-typed
+    # non-empty string.
+    validate: Callable[[str], str | None] | None = None
 
     def applies_to(self, backend: str) -> bool:
         return backend in self.backends
@@ -137,6 +146,41 @@ def _ui_on(values: dict[str, Any]) -> bool:
 
 def _cpu_on(values: dict[str, Any]) -> bool:
     return _truthy(values, "GGML_CPU")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Validators for STRING flags
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _validate_power_of_two(v: str) -> str | None:
+    """Accept a positive power of two (1, 2, 4, 8, 16, 32, …)."""
+    s = v.strip()
+    try:
+        n = int(s)
+    except ValueError:
+        return f"must be a positive power of two, got {v!r}"
+    if n <= 0 or (n & (n - 1)) != 0:
+        return f"must be a positive power of two (got {n})"
+    return None
+
+
+def _validate_positive_int(v: str) -> str | None:
+    s = v.strip()
+    try:
+        n = int(s)
+    except ValueError:
+        return f"must be a positive integer, got {v!r}"
+    if n <= 0:
+        return f"must be a positive integer (got {n})"
+    return None
+
+
+def _validate_one_or_two(v: str) -> str | None:
+    """K-quants iters/thread: ik_llama only compiles kernels for 1 or 2."""
+    s = v.strip()
+    if s not in {"1", "2"}:
+        return f"must be 1 or 2 (got {v!r})"
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,15 +295,18 @@ FLAGS: list[CMakeFlag] = [
     # ── CUDA Tuning (kernel/iter knobs — mostly ik_llama) ──
     CMakeFlag("GGML_CUDA_DMMV_X", "DMMV x-stride", "CUDA Tuning", STRING, "32",
               backends=(BACKEND_IK,), visible_when=_cuda_on,
+              validate=_validate_power_of_two,
               help="ik_llama: x-stride for the dmmv kernels. Power-of-two only."),
     CMakeFlag("GGML_CUDA_MMV_Y", "MMV y-block", "CUDA Tuning", STRING, "1",
               backends=(BACKEND_IK,), visible_when=_cuda_on,
+              validate=_validate_positive_int,
               help="ik_llama: y-block size for the mmv kernels."),
     CMakeFlag("GGML_CUDA_FORCE_DMMV", "Force DMMV", "CUDA Tuning", BOOL, False,
               backends=(BACKEND_IK,), visible_when=_cuda_on,
               help="ik_llama: prefer dmmv kernels over mmvq."),
     CMakeFlag("GGML_CUDA_KQUANTS_ITER", "K-quants iters/thread", "CUDA Tuning", STRING, "2",
               backends=(BACKEND_IK,), visible_when=_cuda_on,
+              validate=_validate_one_or_two,
               help="ik_llama: iters-per-thread for Q2_K/Q6_K. Tune for SM occupancy."),
     CMakeFlag("GGML_CUDA_MIN_BATCH_OFFLOAD", "Min batch offload", "CUDA Tuning", STRING, "32",
               backends=(BACKEND_IK,), visible_when=_cuda_on,
@@ -441,7 +488,7 @@ FLAGS: list[CMakeFlag] = [
               ],
               visible_when=_blas_on,
               help="Which BLAS implementation to use. 'Apple' on macOS uses Accelerate."),
-    CMakeFlag("GGML_ACCELERATE", "Apple Accelerate", "BLAS / Accelerated math", BOOL, True,
+    CMakeFlag("GGML_ACCELERATE", "Apple Accelerate", "BLAS / Accelerated math", BOOL, _IS_MACOS,
               help="Apple Accelerate framework. Auto-enabled on macOS; OFF elsewhere."),
 
     # ── Optimization ──
@@ -613,3 +660,41 @@ def values_to_cmake_args(
         except ValueError:
             out.extend(extra_cmake_args.split())
     return out
+
+
+def validate_flag_value(flag: CMakeFlag, value: Any) -> str | None:
+    """Run ``flag.validate`` against ``value`` and return an error message,
+    or ``None`` if the value is acceptable (or the flag has no validator).
+
+    Empty/blank values are always accepted: they are not emitted to cmake
+    (see :func:`values_to_cmake_args`) so the upstream default applies."""
+    if flag.validate is None:
+        return None
+    sv = "" if value is None else str(value).strip()
+    if not sv:
+        return None
+    return flag.validate(sv)
+
+
+def validate_values(
+    backend: str, values: dict[str, Any]
+) -> list[tuple[str, str]]:
+    """Validate every applicable, currently-visible STRING flag in ``values``.
+
+    Returns a list of ``(label, message)`` tuples for flags that fail their
+    validator. Flags hidden by ``visible_when`` are skipped — they aren't
+    emitted to cmake, so their value can't break the build."""
+    errors: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for flag in flags_for_backend(backend):
+        if flag.key in seen:
+            continue
+        seen.add(flag.key)
+        if flag.validate is None or flag.key not in values:
+            continue
+        if flag.visible_when and not flag.visible_when(values):
+            continue
+        msg = validate_flag_value(flag, values[flag.key])
+        if msg:
+            errors.append((flag.label, msg))
+    return errors

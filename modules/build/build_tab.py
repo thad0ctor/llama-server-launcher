@@ -696,6 +696,8 @@ class BuildTab:
                         variable=self.var_clean_build).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(opts, text="Auto-check for updates",
                         variable=self.var_auto_check_updates).pack(side="left", padx=(0, 12))
+        ttk.Button(opts, text="Clear CMake cache",
+                   command=self._on_clear_cache).pack(side="left", padx=(0, 12))
         ttk.Label(lf,
                   text=("Tip: if source dir doesn't exist it will be auto-cloned. "
                         "Set git ref to a branch/tag/commit, or leave blank to use the current checkout."),
@@ -1023,6 +1025,8 @@ class BuildTab:
             help_lbl = ttk.Label(parent, text=hint, font=("TkSmallCaptionFont",))
             help_lbl.grid(row=row, column=2, sticky="w", padx=8, pady=2)
         self._flag_widgets[flag.key] = w
+        if flag.type == cf.STRING and flag.validate is not None:
+            self._validate_flag_widget(flag.key)
         self._flag_help_widgets[flag.key] = help_lbl
         if name_lbl is not None:
             self._flag_label_widgets[flag.key] = name_lbl
@@ -1965,11 +1969,67 @@ class BuildTab:
         self._append_console("Applied auto-detected preset (reset overrides).\n", tag="stage")
         self._schedule_preview_refresh()
 
+    def _ensure_validation_style(self) -> None:
+        """Define the 'Invalid.TEntry' style once. Tints an entry's text and
+        field background red so a bad value (e.g. a non-power-of-two DMMV
+        x-stride) is obvious as the user types."""
+        if getattr(self, "_validation_style_ready", False):
+            return
+        try:
+            style = ttk.Style()
+            style.configure("Invalid.TEntry",
+                            foreground="#b00020", fieldbackground="#fde8e8")
+            self._validation_style_ready = True
+        except Exception:
+            # Theming can fail on exotic Tk builds — degrade to no live tint;
+            # the start-build gate still blocks invalid values.
+            self._validation_style_ready = False
+
+    def _validate_flag_widget(self, key: str) -> None:
+        """Re-check one STRING flag's value and tint its entry if invalid.
+
+        Tracks the live invalid set in ``self._invalid_flags`` purely for the
+        visual cue; the authoritative block lives in ``_on_start_build`` via
+        ``cf.validate_values``."""
+        flag = cf.get_flag(key)
+        if flag is None or flag.validate is None or flag.type != cf.STRING:
+            return
+        w = self._flag_widgets.get(key)
+        if w is None:
+            return
+        try:
+            if not w.winfo_exists():
+                return
+        except Exception:
+            return
+        var = self._flag_vars.get(key)
+        value = var.get() if var is not None else ""
+        msg = cf.validate_flag_value(flag, value)
+        invalid = getattr(self, "_invalid_flags", None)
+        if invalid is None:
+            invalid = self._invalid_flags = set()
+        if msg:
+            self._ensure_validation_style()
+            invalid.add(key)
+            try:
+                w.configure(style="Invalid.TEntry")
+            except Exception:
+                pass
+        else:
+            invalid.discard(key)
+            try:
+                w.configure(style="TEntry")
+            except Exception:
+                pass
+
     def _on_flag_changed(self, key: str, var: tk.Variable) -> None:
         # Bulk-write paths suspend the trace handler so we don't fire O(N²)
         # visibility refreshes when seeding defaults.
         if self._suspend_traces:
             return
+        # Live-validate STRING flags that carry a validator (e.g. DMMV x-stride
+        # must be a power of two). Cheap — only runs for the one changed key.
+        self._validate_flag_widget(key)
         # Update visibility chain (a flag may gate another flag). Only the
         # dependents of the changed key need a refresh; a full O(N) sweep
         # on every checkbox click was visibly laggy with 112 flags.
@@ -2530,6 +2590,17 @@ class BuildTab:
         if not plan.source_dir.strip():
             messagebox.showerror("Build", "Source directory is required.")
             return
+        errors = cf.validate_values(
+            self.var_backend.get(), self._current_flag_values_dict()
+        )
+        if errors:
+            detail = "\n".join(f"  • {label}: {msg}" for label, msg in errors)
+            messagebox.showerror(
+                "Build",
+                "Fix these invalid CUDA tuning values before building:\n\n"
+                + detail,
+            )
+            return
         self._console_buffer.clear()
         if hasattr(self, "_console"):
             self._console.configure(state="normal")
@@ -2732,6 +2803,56 @@ class BuildTab:
         if bp.is_absolute():
             return str(bp)
         return str(Path(src) / bp) if src else build
+
+    def _on_clear_cache(self) -> None:
+        """Delete CMakeCache.txt + CMakeFiles/ in the build dir so the next
+        configure re-reads every -D fresh. This is the fix for stale cache
+        variables — e.g. a previously-built DMMV x-stride lingering in the
+        cache. CMake won't overwrite an existing cache STRING on its own, and
+        compile-definition changes like DMMV_X only take effect once the old
+        object files (under CMakeFiles/) are also gone, so we remove both."""
+        if self.runner.is_running:
+            messagebox.showinfo("Clear cache", "A build is running; cancel it first.")
+            return
+        build_dir = self._resolved_build_dir().strip()
+        if not build_dir:
+            messagebox.showerror("Clear cache", "Build directory is not set.")
+            return
+        build = Path(build_dir).expanduser()
+        cache_file = build / "CMakeCache.txt"
+        cmake_files = build / "CMakeFiles"
+        if not cache_file.exists() and not cmake_files.exists():
+            messagebox.showinfo(
+                "Clear cache",
+                f"No CMake cache found in:\n{build}\n\nNothing to clear.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Clear cache",
+            "Delete the CMake cache in:\n"
+            f"{build}\n\n"
+            "Removes CMakeCache.txt and CMakeFiles/. The next build will "
+            "re-configure from scratch and recompile. Source and any compiled "
+            "binaries outside CMakeFiles/ are left untouched.\n\nProceed?",
+        ):
+            return
+        import shutil
+        removed = []
+        try:
+            if cache_file.exists():
+                cache_file.unlink()
+                removed.append("CMakeCache.txt")
+            if cmake_files.exists():
+                shutil.rmtree(cmake_files)
+                removed.append("CMakeFiles/")
+        except OSError as exc:
+            messagebox.showerror("Clear cache", f"Failed to clear cache:\n{exc}")
+            self._append_console(f"Clear cache failed: {exc}\n", tag="stage")
+            return
+        what = ", ".join(removed) if removed else "(nothing)"
+        self._append_console(
+            f"Cleared CMake cache in {build}: {what}\n", tag="stage"
+        )
 
     def _build_plan(self) -> BuildPlan | None:
         values = self._current_flag_values_dict()
