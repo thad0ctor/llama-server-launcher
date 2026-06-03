@@ -372,7 +372,7 @@ class BuildTab:
     @staticmethod
     def _generator_display_value(value: str | None) -> str:
         text = (value or "").strip()
-        return DEFAULT_GENERATOR_LABEL if not text else text
+        return text or DEFAULT_GENERATOR_LABEL
 
     def _selected_generator_value(self) -> str:
         text = self.var_generator.get().strip()

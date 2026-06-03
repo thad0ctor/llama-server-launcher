@@ -180,7 +180,13 @@ def run_download(payload: dict) -> int:
     ignore_patterns = [item for item in payload.get("ignore_patterns") or [] if item] or None
     target_dirs = [Path(path) for path in payload.get("target_dirs") or []]
     max_workers = int(payload.get("max_workers") or 4)
-    tqdm_class = _build_progress_tqdm_class()
+    try:
+        tqdm_class = _build_progress_tqdm_class()
+    except ImportError:
+        # tqdm is a transitive dep of huggingface_hub in real use; if it's
+        # absent (e.g. tests that mock the hub) fall back to upstream's
+        # default progress class and skip our JSON-emitting wrapper.
+        tqdm_class = None
 
     if not target_dirs:
         raise ValueError("No target directories were selected.")
@@ -194,19 +200,21 @@ def run_download(payload: dict) -> int:
             total_targets=len(target_dirs),
             message=f"Downloading into {target_dir}…",
         )
-        snapshot_download(
-            repo_id=repo_id,
-            repo_type="model",
-            revision=revision,
-            local_dir=target_dir,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            force_download=bool(payload.get("force_download")),
-            local_files_only=bool(payload.get("local_files_only")),
-            token=token,
-            max_workers=max_workers,
-            tqdm_class=tqdm_class,
-        )
+        kwargs = {
+            "repo_id": repo_id,
+            "repo_type": "model",
+            "revision": revision,
+            "local_dir": target_dir,
+            "allow_patterns": allow_patterns,
+            "ignore_patterns": ignore_patterns,
+            "force_download": bool(payload.get("force_download")),
+            "local_files_only": bool(payload.get("local_files_only")),
+            "token": token,
+            "max_workers": max_workers,
+        }
+        if tqdm_class is not None:
+            kwargs["tqdm_class"] = tqdm_class
+        snapshot_download(**kwargs)
         _emit(
             "target-complete",
             target=str(target_dir),

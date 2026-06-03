@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import tkinter.ttk as ttk
+from tkinter import ttk
 from unittest.mock import MagicMock
 
 import pytest
