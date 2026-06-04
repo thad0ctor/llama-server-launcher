@@ -360,13 +360,24 @@ class SettingsTab:
             self._venv_probe_results.put((generation, [], exc))
 
     def _drain_venv_dependency_probe(self):
-        try:
-            generation, statuses, error = self._venv_probe_results.get_nowait()
-        except queue.Empty:
-            self.root.after(75, self._drain_venv_dependency_probe)
-            return
-        if generation != self._venv_probe_generation:
-            return
+        # Drain stale generations first; without this, a stale entry at the
+        # head of the queue swallowed the scheduled drain and the *next*
+        # (fresh) result sat in the queue forever, leaving the UI stuck on
+        # "Checking managed packages…" until the user re-edited the venv
+        # path.
+        while True:
+            try:
+                generation, statuses, error = self._venv_probe_results.get_nowait()
+            except queue.Empty:
+                # Nothing matched yet — try again on the next tick.
+                try:
+                    self.root.after(75, self._drain_venv_dependency_probe)
+                except tk.TclError:
+                    pass
+                return
+            if generation == self._venv_probe_generation:
+                break
+            # Stale: drop and keep looking.
         if error is not None:
             self._venv_action_status_var.set(f"Dependency probe failed: {error}")
             self._rebuild_dependency_rows([])
@@ -443,6 +454,20 @@ class SettingsTab:
 
     def _on_create_venv(self):
         info = self._current_venv_info()
+        # If a venv already exists at the target, re-running ``python -m venv``
+        # over it can rewrite ``pyvenv.cfg`` against a different base
+        # interpreter and leave the env in a half-rebuilt state. Confirm
+        # explicitly rather than silently re-bootstrapping.
+        if info.exists and info.looks_like_venv:
+            if not messagebox.askyesno(
+                "Create venv",
+                "A virtual environment already exists at:\n\n"
+                f"{info.effective_dir}\n\n"
+                "Re-running `python -m venv` will rewrite its configuration "
+                "(activators, pyvenv.cfg) and may leave it in an inconsistent "
+                "state if the system python has changed. Proceed anyway?",
+            ):
+                return
         try:
             info.effective_dir.parent.mkdir(parents=True, exist_ok=True)
         except Exception as exc:

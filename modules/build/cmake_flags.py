@@ -283,9 +283,10 @@ FLAGS: list[CMakeFlag] = [
     CMakeFlag("GGML_CUDA_NO_VMM", "Disable CUDA VMM", "CUDA", BOOL, False,
               visible_when=_cuda_on,
               help="Skip CUDA Virtual Memory Management. Try this if you see VMM allocation errors."),
-    CMakeFlag("GGML_CUDA_NCCL", "NCCL collectives", "CUDA", BOOL, True,
+    CMakeFlag("GGML_CUDA_NCCL", "NCCL collectives", "CUDA", BOOL, False,
               backends=(BACKEND_LLAMA,), visible_when=_cuda_on,
-              help="llama.cpp only: enable NVIDIA Collective Comm. Library for multi-GPU."),
+              help="llama.cpp only: enable NVIDIA Collective Comm. Library for multi-GPU. "
+                   "Requires libnccl-dev; default off because single-GPU builds don't need it."),
     CMakeFlag("GGML_CUDA_COMPRESSION_MODE", "PTX compression", "CUDA", ENUM, "size",
               choices=["none", "speed", "balance", "size"],
               backends=(BACKEND_LLAMA,), visible_when=_cuda_on,
@@ -489,6 +490,9 @@ FLAGS: list[CMakeFlag] = [
               visible_when=_blas_on,
               help="Which BLAS implementation to use. 'Apple' on macOS uses Accelerate."),
     CMakeFlag("GGML_ACCELERATE", "Apple Accelerate", "BLAS / Accelerated math", BOOL, _IS_MACOS,
+              # Hide on Linux/Windows — Accelerate is a macOS-only framework
+              # and the checkbox does nothing on other platforms.
+              visible_when=lambda _v: _IS_MACOS,
               help="Apple Accelerate framework. Auto-enabled on macOS; OFF elsewhere."),
 
     # ── Optimization ──
@@ -596,6 +600,7 @@ def build_autodetect_values(
     avx512_supported: bool,
     has_ccache: bool,
     cuda_version: str | None = None,
+    cuda_device_count: int = 0,
 ) -> dict[str, Any]:
     """Return a flag-values dict tuned for the detected system, mirroring
     the reference scripts (fast-math CUDA, FA-all-quants, LTO, P2P 512,
@@ -606,6 +611,9 @@ def build_autodetect_values(
     ``GGML_CUDA_COMPRESSION_MODE``. When unknown, leave the flag at its
     schema default so the resulting preset doesn't silently inject a flag
     the user's toolkit can't accept.
+
+    ``cuda_device_count`` gates multi-GPU-only flags like ``GGML_CUDA_NCCL``
+    (which pulls in libnccl-dev and has no value on a single-GPU machine).
     """
     values = default_values_for_backend(backend)
 
@@ -617,7 +625,11 @@ def build_autodetect_values(
         if backend == BACKEND_LLAMA:
             values["GGML_CUDA_FA"] = True
             values["GGML_CUDA_GRAPHS"] = True
-            values["GGML_CUDA_NCCL"] = True
+            # NCCL only makes sense with >=2 CUDA devices and requires
+            # libnccl-dev to be installed. Default off on single-GPU
+            # systems so the build doesn't fail looking for the lib.
+            if cuda_device_count >= 2:
+                values["GGML_CUDA_NCCL"] = True
             compression_flag = _FLAG_BY_KEY.get("GGML_CUDA_COMPRESSION_MODE")
             if compression_flag is not None and _cuda_version_satisfies(
                 compression_flag.cuda_version_min, cuda_version
@@ -710,8 +722,13 @@ def values_to_cmake_args(
             if sv:
                 out.append(f"-D{flag.key}={sv}")
     if extra_cmake_args.strip():
+        # ``posix=True`` (the default) treats ``\`` as an escape, which
+        # mangles Windows paths like ``-DCMAKE_PREFIX_PATH=C:\path\to\lib``
+        # into ``-DCMAKE_PREFIX_PATH=C:pathtoli``. Use platform-appropriate
+        # quoting rules.
+        import os as _os
         try:
-            out.extend(shlex.split(extra_cmake_args))
+            out.extend(shlex.split(extra_cmake_args, posix=(_os.name != "nt")))
         except ValueError:
             out.extend(extra_cmake_args.split())
     return out

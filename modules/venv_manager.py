@@ -79,6 +79,11 @@ MANAGED_DEPENDENCIES: tuple[ManagedDependency, ...] = (
         label="huggingface_hub / hf",
         package_name="huggingface_hub",
         import_name="huggingface_hub",
+        # The bare ``huggingface_hub`` distribution does not register the
+        # ``hf`` console script unless the ``[cli]`` extra is requested.
+        # Pin the extra here so the description (which advertises the CLI)
+        # actually matches what gets installed.
+        install_name="huggingface_hub[cli]",
         description="Model downloads; installs the `hf` CLI.",
     ),
 )
@@ -180,10 +185,27 @@ def resolve_active_venv_path(
     return str(info.effective_dir) if info.looks_like_venv else ""
 
 
+def _win_cmd_quote(arg: str) -> str:
+    """Wrap ``arg`` in double quotes for a cmd.exe command line.
+
+    ``subprocess.list2cmdline`` only quotes args that contain whitespace or
+    double quotes, so a path like ``C:\\projects&work\\venv`` passes through
+    unquoted — and cmd then parses the embedded ``&`` as a command
+    separator. That turns a routine ``rmdir /s /q <path>`` into a deletion
+    of just ``C:\\projects`` followed by an attempt to execute
+    ``work\\venv`` as a fresh command. Force-quoting every argument makes
+    every cmd metacharacter inert.
+    """
+    return '"' + arg.replace('"', '""') + '"'
+
+
 def _shell_join(args: list[str], *, platform: str | None = None) -> str:
     plat = platform or sys.platform
     if plat.startswith("win"):
-        return subprocess.list2cmdline(args)
+        # Always double-quote each arg so embedded cmd metacharacters
+        # (& | ^ < > and friends) can't break out of the intended
+        # command. See _win_cmd_quote for the rationale.
+        return " ".join(_win_cmd_quote(arg) for arg in args)
     return " ".join(shlex.quote(arg) for arg in args)
 
 
@@ -294,7 +316,9 @@ def build_remove_venv_command(
     target = str(Path(venv_dir))
     plat = platform or sys.platform
     if plat.startswith("win"):
-        return subprocess.list2cmdline(["rmdir", "/s", "/q", target])
+        # Force-quote so a venv path containing cmd metacharacters can't
+        # break out of the rmdir invocation.
+        return " ".join(_win_cmd_quote(s) for s in ["rmdir", "/s", "/q", target])
     return _shell_join(["rm", "-rf", target], platform=plat)
 
 

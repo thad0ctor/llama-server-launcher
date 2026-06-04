@@ -125,6 +125,10 @@ class BuildTab:
         self._toolchain_refresh_queue: queue.Queue = queue.Queue()
         self._toolchain_refresh_after_id: str | None = None
         self._pull_only_in_flight = False
+        # Published by ``_run_pull_only_worker`` once the Popen succeeds so a
+        # future Cancel/teardown path can signal the child. Cleared when
+        # the worker returns.
+        self._pull_only_proc: subprocess.Popen | None = None
         self._cuda_arch_cache: list[detection.CudaArchInfo] | None = None
         self._cuda_arch_cache_avx512 = False
 
@@ -452,6 +456,7 @@ class BuildTab:
             avx512_supported=avx512,
             has_ccache=bool(self._toolchain.ccache_path),
             cuda_version=getattr(self._toolchain, "cuda_version", None),
+            cuda_device_count=len(cuda_infos) if cuda_infos else 0,
         )
         # Merge: defaults provide a baseline, user values (in current snapshot)
         # win for any flag that exists in both. For a fresh seed at startup
@@ -2204,6 +2209,13 @@ class BuildTab:
 
     def _apply_loaded_config(self, cfg: BuildConfig) -> None:
         self._suspend_traces = True
+        # Also block the backend-dir mirror cascade so that loading a saved
+        # config to inspect/edit it doesn't silently overwrite the
+        # launcher's persistent backend root directories (``llama_cpp_dir``
+        # / ``ik_llama_dir`` and the corresponding ``last_*_dir`` settings).
+        # That write should only happen at Start build time, not on Load.
+        previous_syncing = self._syncing_backend_dirs
+        self._syncing_backend_dirs = True
         try:
             self.var_backend.set(cfg.backend)
             self.var_source_dir.set(cfg.source_dir)
@@ -2257,6 +2269,7 @@ class BuildTab:
             self._sync_flag_widgets_from_values()
         finally:
             self._suspend_traces = False
+            self._syncing_backend_dirs = previous_syncing
         # Defer the rebuild — this method is called from a button command.
         # Use full rebuild because a loaded config may have changed
         # ui_state preferences that affect non-flag sections.
@@ -2391,7 +2404,14 @@ class BuildTab:
         if not path:
             return
         try:
-            Path(path).write_text(plan_to_shell_script(plan), encoding="utf-8")
+            # Force LF line endings — Windows ``text`` mode would emit CRLF
+            # by default, and a bash script with ``\r`` after ``#!/bin/bash``
+            # breaks WSL/Git Bash execution. Also disrupts ``set -e``.
+            Path(path).write_text(
+                plan_to_shell_script(plan),
+                encoding="utf-8",
+                newline="\n",
+            )
             os.chmod(path, 0o755)
         except Exception as exc:
             messagebox.showerror("Save script", str(exc))
@@ -2520,11 +2540,33 @@ class BuildTab:
 
     def _run_pull_only_worker(self, src: str) -> None:
         try:
-            proc = subprocess.Popen(
-                ["git", "pull", "--ff-only"], cwd=src,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
-            )
+            # ``stdin=DEVNULL`` so a private-repo HTTPS prompt for
+            # credentials cannot block the worker forever. ``GIT_TERMINAL_PROMPT=0``
+            # extends the same guarantee to the git binary itself.
+            # ``encoding`` + ``errors`` prevent a non-UTF-8 system locale
+            # from killing the line iterator on a weirdly encoded commit
+            # message. ``CREATE_NO_WINDOW`` keeps the brief console flash
+            # off Windows desktops.
+            env = dict(os.environ)
+            env.setdefault("GIT_TERMINAL_PROMPT", "0")
+            popen_kwargs: dict = {
+                "cwd": src,
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "bufsize": 1,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "env": env,
+            }
+            if sys.platform.startswith("win"):
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(["git", "pull", "--ff-only"], **popen_kwargs)
+            # Publish the handle so a future Cancel button or teardown can
+            # signal this subprocess. (Currently the UI has no cancel for
+            # the pull-only path; this preallocates the hook.)
+            self._pull_only_proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:
                 self._pending_pull_events.put(("line", line.rstrip("\n") + "\n"))
@@ -2532,6 +2574,8 @@ class BuildTab:
             self._pending_pull_events.put(("done", rc))
         except Exception as exc:
             self._pending_pull_events.put(("error", str(exc)))
+        finally:
+            self._pull_only_proc = None
 
     def _schedule_pull_drain(self) -> None:
         if self._pull_drain_after_id is None:
@@ -2589,8 +2633,26 @@ class BuildTab:
                 tag="stage",
             )
             return
+        # Force git_pull_before_build=True for THIS build only. ``_build_plan``
+        # (called inside ``_on_start_build``) reads ``self.var_git_pull`` and
+        # bakes it into the BuildPlan synchronously; once the runner is in
+        # flight the variable can safely be restored to the user's
+        # previous preference. Without the restore, every later Start build
+        # silently pulls too — a permanent preference change from a
+        # one-shot button.
+        previous_git_pull = self.var_git_pull.get()
         self.var_git_pull.set(True)
-        self._on_start_build()
+        try:
+            self._on_start_build()
+        finally:
+            try:
+                self.root.after_idle(lambda: self.var_git_pull.set(previous_git_pull))
+            except tk.TclError:
+                # Root torn down — best effort restore inline.
+                try:
+                    self.var_git_pull.set(previous_git_pull)
+                except Exception:
+                    pass
 
     # ── Action bar handlers ────────────────────────────────────────────
     def _on_start_build(self) -> None:
@@ -2603,6 +2665,26 @@ class BuildTab:
         if not plan.source_dir.strip():
             messagebox.showerror("Build", "Source directory is required.")
             return
+        # Block when the configured source dir exists but isn't a git
+        # checkout. The runner would otherwise skip ``git clone`` (because
+        # the dir already exists), then ``git checkout``/``git pull`` would
+        # fail deep in the pipeline with cryptic errors. The red banner
+        # warning beside the source-dir entry has been in place; this
+        # mirrors it as a hard gate on Start.
+        try:
+            src_path = Path(plan.source_dir).expanduser()
+            if src_path.exists() and not (src_path / ".git").exists():
+                if not messagebox.askyesno(
+                    "Build",
+                    f"The source directory:\n\n{src_path}\n\nexists but is not "
+                    "a git checkout. The build will skip clone and any later "
+                    "``git pull`` / ``git checkout`` will fail. Continue anyway?",
+                ):
+                    return
+        except Exception:
+            # Path resolution failed for some reason — let the build run
+            # and surface the real error rather than mask it here.
+            pass
         errors = cf.validate_values(
             self.var_backend.get(),
             self._current_flag_values_dict(),

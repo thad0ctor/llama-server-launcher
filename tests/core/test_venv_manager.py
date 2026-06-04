@@ -151,10 +151,8 @@ def test_build_install_dependency_command_uses_venv_python(tmp_path):
 
 
 def test_build_install_dependency_command_quotes_windows_python(tmp_path):
-    # Use a venv path with a space — that's the only case where
-    # subprocess.list2cmdline (used by _shell_join on Windows) actually adds
-    # double-quotes around the exe path. A space-free tmp path passes
-    # through unquoted, so the assertion needs whitespace to be meaningful.
+    # Every arg is force-quoted on Windows now (defence against cmd
+    # metacharacter injection through paths containing ``&``/``|``/etc.).
     base = tmp_path / "venv with space"
     scripts = base / "Scripts"
     scripts.mkdir(parents=True)
@@ -168,14 +166,32 @@ def test_build_install_dependency_command_quotes_windows_python(tmp_path):
     )
 
     assert f'"{exe}"' in command
-    assert "pip install huggingface_hub" in command
+    # huggingface_hub[cli] is the actual install_name; bare "huggingface_hub"
+    # would skip the entry-point. Both forms must round-trip quoted.
+    assert '"pip" "install"' in command
+    assert "huggingface_hub" in command
 
 
 def test_build_remove_venv_command_windows_uses_rmdir(tmp_path):
     command = venv_manager.build_remove_venv_command(tmp_path / "my env", platform="win32")
 
-    assert command.startswith("rmdir /s /q ")
+    # Every cmd arg is quoted to neutralize metacharacters in path strings;
+    # see _win_cmd_quote in modules/venv_manager.py.
+    assert command.startswith('"rmdir" "/s" "/q" ')
     assert f'"{tmp_path / "my env"}"' in command
+
+
+def test_build_remove_venv_command_neutralizes_cmd_metacharacters(tmp_path):
+    """A path with ``&`` must not be able to break out of rmdir on Windows."""
+    evil = tmp_path / "proj&work" / "venv"
+
+    command = venv_manager.build_remove_venv_command(evil, platform="win32")
+
+    # The full path must appear inside a single quoted token, with no
+    # bare ``&`` outside quotes that cmd would parse as a separator.
+    assert f'"{evil}"' in command
+    # No unquoted ``&`` between args.
+    assert "& " not in command.replace(f'"{evil}"', "")
 
 
 def test_build_remove_venv_command_posix_uses_rm_rf(tmp_path):

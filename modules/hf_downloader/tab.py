@@ -82,6 +82,12 @@ class HuggingFaceDownloaderTab:
         # Cancel was clicked before the subprocess handle was published to the
         # main thread — see _run_process_worker which also self-terminates if
         # its op_id was cancelled during startup.
+        # ``_process_lock`` guards the cross-thread publish/check of
+        # ``_process`` and ``_cancelled_ops``: the worker assigns
+        # ``_process = proc`` and the main thread reads it from
+        # ``_cancel_operation``. Without a lock there is a window where the
+        # main thread sees ``None`` and never terminates the child.
+        self._process_lock = threading.Lock()
         self._op_id: int = 0
         self._cancelled_ops: set[int] = set()
         self._trace_tokens = [
@@ -369,9 +375,14 @@ class HuggingFaceDownloaderTab:
         self._cancel_dependency_watch()
         self._dep_watch_venv = venv_path
         self._dep_watch_deadline = time.monotonic() + self.DEP_WATCH_TIMEOUT_S
-        self._dep_watch_after_id = self.root.after(
-            self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
-        )
+        try:
+            self._dep_watch_after_id = self.root.after(
+                self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
+            )
+        except tk.TclError:
+            # Tk root already destroyed (e.g. tab teardown during install).
+            self._dep_watch_after_id = None
+            self._dep_watch_venv = None
 
     def _cancel_dependency_watch(self):
         if self._dep_watch_after_id is not None:
@@ -403,7 +414,12 @@ class HuggingFaceDownloaderTab:
                 available = bool(status.available)
             except Exception:
                 available = False
-            self.root.after(0, self._on_dependency_probe_result, venv_path, available)
+            try:
+                self.root.after(0, self._on_dependency_probe_result, venv_path, available)
+            except (tk.TclError, RuntimeError):
+                # Tk root destroyed while probe was in flight — drop the
+                # result silently; the watch is over.
+                pass
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -420,9 +436,13 @@ class HuggingFaceDownloaderTab:
         if time.monotonic() > self._dep_watch_deadline:
             self._dep_watch_venv = None
             return
-        self._dep_watch_after_id = self.root.after(
-            self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
-        )
+        try:
+            self._dep_watch_after_id = self.root.after(
+                self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
+            )
+        except tk.TclError:
+            self._dep_watch_after_id = None
+            self._dep_watch_venv = None
 
     def _on_load_repo(self):
         try:
@@ -551,15 +571,26 @@ class HuggingFaceDownloaderTab:
 
     def _run_process_worker(self, command: list[str], op_id: int):
         print(f"[hf-runner] launching: {' '.join(command)}", file=sys.stderr, flush=True)
+        # ``CREATE_NO_WINDOW`` on Windows suppresses the brief flashing
+        # console for the runner subprocess. ``encoding`` + ``errors`` guard
+        # against a non-UTF-8 system locale crashing the line iterator
+        # midway through a download. ``stdin=DEVNULL`` makes sure the child
+        # cannot ever steal the parent terminal (git credential prompts,
+        # interactive HF auth prompts, etc.).
+        popen_kwargs: dict = {
+            "cwd": self.repo_dir,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "bufsize": 1,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if sys.platform.startswith("win"):
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
-            proc = subprocess.Popen(
-                command,
-                cwd=self.repo_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            proc = subprocess.Popen(command, **popen_kwargs)
         except Exception as exc:
             print(f"[hf-runner] failed to launch: {exc}", file=sys.stderr, flush=True)
             self._queue.put(
@@ -571,12 +602,15 @@ class HuggingFaceDownloaderTab:
                 }
             )
             return
-        self._process = proc
-
+        # Publish the handle under the lock so _cancel_operation, which
+        # reads it on the Tk thread, can never observe a torn state.
+        with self._process_lock:
+            self._process = proc
+            cancelled_at_start = op_id in self._cancelled_ops
         # If Cancel was clicked while Popen was still launching, the main
         # thread had no handle to terminate. Detect that here and terminate
         # before draining the pipes.
-        if op_id in self._cancelled_ops:
+        if cancelled_at_start:
             try:
                 proc.terminate()
             except Exception:
@@ -633,8 +667,22 @@ class HuggingFaceDownloaderTab:
                 break
             drained = True
             self._handle_event(event)
-        if self._process is not None or not self._queue.empty():
-            self._queue_after_id = self.root.after(self.POLL_MS, self._poll_queue)
+        # Keep polling while either the process is still tracked OR the
+        # worker thread is still alive (it may still emit one final
+        # ``process-exit`` after the main thread already cleared
+        # ``self._process``) OR the queue isn't empty. Without the
+        # worker-alive check, a late ``process-exit`` event after Cancel
+        # was orphaned and the runtime state never got refreshed.
+        worker_alive = bool(
+            self._worker_thread is not None and self._worker_thread.is_alive()
+        )
+        if self._process is not None or worker_alive or not self._queue.empty():
+            try:
+                self._queue_after_id = self.root.after(self.POLL_MS, self._poll_queue)
+            except tk.TclError:
+                # Tk root destroyed mid-poll (e.g. app teardown). Drop the
+                # next tick rather than letting the exception escape.
+                self._queue_after_id = None
         elif drained:
             self._refresh_runtime_state()
 
@@ -713,22 +761,67 @@ class HuggingFaceDownloaderTab:
         returncode = int(event.get("returncode") or 0)
         stderr = event.get("stderr", "")
         self._progress_stop()
+        # Remember any final progress string so a successful run doesn't
+        # blank out the "Completed target N/N" message in
+        # _cleanup_process_state.
+        final_progress_label = self.progress_label_var.get() if returncode == 0 else ""
+        op_name = self._operation_name
         if returncode != 0:
             detail = stderr or self.status_var.get() or f"exit code {returncode}"
-            self.status_var.set(f"{self._operation_name} failed: {detail}")
+            self.status_var.set(f"{op_name} failed: {detail}")
+        else:
+            # Don't overwrite a more-specific terminal message that an
+            # earlier ``complete`` event already wrote (e.g. "Finished
+            # downloading TheBloke/...").
+            current = self.status_var.get() or ""
+            if not current or current.lower().startswith(("downloading", "loading", "operation cancelled")):
+                if op_name == "download":
+                    self.status_var.set("Download finished.")
+                elif op_name == "list":
+                    self.status_var.set("Repo loaded.")
+                else:
+                    self.status_var.set("Operation finished.")
         self._cleanup_process_state()
+        if final_progress_label:
+            self.progress_label_var.set(final_progress_label)
         self._refresh_runtime_state()
+
+    # Cap to keep _cancelled_ops from growing unbounded across the app
+    # lifetime. Anything older than this many cancelled ops can no longer
+    # produce queue events because the worker would have exited long ago.
+    _CANCELLED_OPS_CAP = 64
 
     def _cancel_operation(self, *, clean_only: bool = False):
         # Invalidate the current op so any in-flight events from this worker
         # are dropped by _handle_event before they can touch the UI.
-        cancelled_op = self._op_id
-        self._cancelled_ops.add(cancelled_op)
-        self._op_id += 1
-        proc = self._process
+        with self._process_lock:
+            cancelled_op = self._op_id
+            self._cancelled_ops.add(cancelled_op)
+            # Bound the set: drop the lowest op_ids first.
+            if len(self._cancelled_ops) > self._CANCELLED_OPS_CAP:
+                excess = len(self._cancelled_ops) - self._CANCELLED_OPS_CAP
+                for stale in sorted(self._cancelled_ops)[:excess]:
+                    self._cancelled_ops.discard(stale)
+            self._op_id += 1
+            proc = self._process
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
+            except Exception:
+                pass
+            # If terminate() is ignored (POSIX child blocked in a C
+            # extension; Windows handles terminate cleanly) escalate.
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
             except Exception:
                 pass
         if not clean_only:
@@ -738,7 +831,8 @@ class HuggingFaceDownloaderTab:
             self._refresh_runtime_state()
 
     def _cleanup_process_state(self):
-        self._process = None
+        with self._process_lock:
+            self._process = None
         self._operation_name = ""
         self._progress_stop()
         self._set_button_state(self._cancel_button, False)

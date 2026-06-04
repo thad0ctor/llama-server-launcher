@@ -975,6 +975,16 @@ class LlamaCppLauncher:
         if action == "never":
             self.app_settings["venv_bootstrap_prompt_mode"] = "never"
             self._bootstrap_config_dirty = True
+            # Save immediately — if the user quits before any later
+            # autosave fires, the "Don't ask again" preference would be
+            # lost and we'd re-prompt on next launch.
+            try:
+                self._save_configs()
+            except Exception as exc:
+                print(
+                    f"WARN: failed to persist bootstrap-prompt 'never' choice: {exc}",
+                    file=sys.stderr,
+                )
             return
         if action != "create":
             return
@@ -993,6 +1003,15 @@ class LlamaCppLauncher:
         self.app_settings["last_venv_dir"] = str(target)
         self.app_settings["venv_bootstrap_prompt_mode"] = "ask"
         self._bootstrap_config_dirty = True
+        # Persist the chosen venv path immediately so a crash or quit
+        # between here and the next autosave doesn't lose it.
+        try:
+            self._save_configs()
+        except Exception as exc:
+            print(
+                f"WARN: failed to persist bootstrap-prompt 'create' state: {exc}",
+                file=sys.stderr,
+            )
         messagebox.showinfo(
             "Create virtual environment",
             "Opened a terminal to create the default repo venv and install the launcher packages.",

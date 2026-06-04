@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -50,18 +51,41 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
 
     if sys.platform.startswith("linux"):
         term_command = _bash_hold_open(command)
-        terminals: list[tuple[str, list[str]]] = [
-            ("gnome-terminal", ["--", "bash", "-lc", term_command]),
-            ("konsole", ["--noclose", "-e", "bash", "-lc", term_command]),
-            ("xfce4-terminal", ["--hold", "-e", f"bash -lc {shlex.quote(term_command)}"]),
-            ("xterm", ["-hold", "-e", "bash", "-lc", term_command]),
-            ("x-terminal-emulator", ["-e", "bash", "-lc", term_command]),
-        ]
-        for terminal_name, terminal_args in terminals:
+        # Preference order:
+        #   1. ``$TERMINAL`` if the user set it (explicit intent wins).
+        #   2. Debian's ``x-terminal-emulator`` alternative, which the
+        #      user/distro picks once and every well-behaved app respects.
+        #   3. Specific emulators in priority order, biased toward what's
+        #      typically installed on each desktop. Without this, a system
+        #      that happens to have xterm installed alongside konsole on
+        #      KDE used to silently get xterm.
+        emulator_args: dict[str, list[str]] = {
+            "gnome-terminal": ["--", "bash", "-lc", term_command],
+            "konsole": ["--noclose", "-e", "bash", "-lc", term_command],
+            "xfce4-terminal": ["--hold", "-e", f"bash -lc {shlex.quote(term_command)}"],
+            "x-terminal-emulator": ["-e", "bash", "-lc", term_command],
+            "xterm": ["-hold", "-e", "bash", "-lc", term_command],
+        }
+        env_terminal = os.environ.get("TERMINAL", "").strip()
+        ordered_names: list[str] = []
+        if env_terminal:
+            ordered_names.append(env_terminal)
+        ordered_names.append("x-terminal-emulator")
+        ordered_names.extend(["gnome-terminal", "konsole", "xfce4-terminal", "xterm"])
+        seen: set[str] = set()
+        for terminal_name in ordered_names:
+            if terminal_name in seen:
+                continue
+            seen.add(terminal_name)
             terminal_path = shutil.which(terminal_name)
             if terminal_path is None:
                 continue
-            subprocess.Popen([str(Path(terminal_path).resolve()), *terminal_args], cwd=cwd_text)
+            # An emulator not in our argument map (e.g. user-set $TERMINAL
+            # pointing at something exotic) gets a safe default of ``-e``.
+            args = emulator_args.get(
+                terminal_name, ["-e", "bash", "-lc", term_command]
+            )
+            subprocess.Popen([str(Path(terminal_path).resolve()), *args], cwd=cwd_text)
             return
         raise FileNotFoundError("No supported terminal emulator found")
 

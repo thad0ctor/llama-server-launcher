@@ -153,7 +153,9 @@ def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monke
     settings_tab._on_install_dependency(dep)
 
     launch_mock.assert_called_once()
-    assert "pip install huggingface_hub" in launch_mock.call_args.args[0]
+    cmd_str = launch_mock.call_args.args[0]
+    assert "pip" in cmd_str and "install" in cmd_str
+    assert "huggingface_hub[cli]" in cmd_str
 
 
 @posix_only
