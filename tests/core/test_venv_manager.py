@@ -151,13 +151,18 @@ def test_build_install_dependency_command_uses_venv_python(tmp_path):
 
 
 def test_build_install_dependency_command_quotes_windows_python(tmp_path):
-    scripts = tmp_path / "Scripts"
+    # Use a venv path with a space — that's the only case where
+    # subprocess.list2cmdline (used by _shell_join on Windows) actually adds
+    # double-quotes around the exe path. A space-free tmp path passes
+    # through unquoted, so the assertion needs whitespace to be meaningful.
+    base = tmp_path / "venv with space"
+    scripts = base / "Scripts"
     scripts.mkdir(parents=True)
     exe = scripts / "python.exe"
     exe.write_text("", encoding="utf-8")
 
     command = venv_manager.build_install_dependency_command(
-        tmp_path,
+        base,
         venv_manager.MANAGED_DEPENDENCIES[3],
         platform="win32",
     )

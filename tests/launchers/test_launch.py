@@ -1158,8 +1158,14 @@ class TestSaveShScript:
         # Path quoted with double quotes to preserve the space.
         assert f'source "{activate}"' in text
 
-    def test_no_venv_means_no_source_line(self, manager, launcher_mock, tmp_path):
+    def test_no_venv_means_no_source_line(self, manager, launcher_mock, tmp_path, monkeypatch):
         launcher_mock.venv_dir.set("")
+        # resolve_active_venv_path() falls back to <launcher_repo_dir>/venv
+        # when the launcher's venv_dir is blank — and in a dev checkout that
+        # path is the real launcher venv. Force the fallback to point at a
+        # directory that demonstrably isn't a venv.
+        from modules import venv_manager as _vm
+        monkeypatch.setattr(_vm, "launcher_repo_dir", lambda: tmp_path)
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
         assert "source " not in text

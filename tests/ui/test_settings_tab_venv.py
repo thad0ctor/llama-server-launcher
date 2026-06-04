@@ -209,15 +209,21 @@ def test_dependency_buttons_follow_installed_state(settings_tab):
 
     settings_tab._rebuild_dependency_rows(statuses)
 
+    # The outer-comprehension variable was wrong here — yielded ``child``
+    # (a Frame) instead of ``grandchild`` (a Button), so ``cget("text")``
+    # raised TclError. Pull the buttons out and then iterate them.
     buttons = [
-        child for child in settings_tab._venv_dependencies_frame.winfo_children()
+        grandchild
+        for child in settings_tab._venv_dependencies_frame.winfo_children()
         if isinstance(child, ttk.Frame)
         for grandchild in child.winfo_children()
         if isinstance(grandchild, ttk.Button)
     ]
     button_state_by_text = {(button.cget("text"), index): str(button.cget("state")) for index, button in enumerate(buttons)}
 
+    # requests is required → Remove must be disabled even when installed.
+    # torch is optional and not installed → Install is normal, Remove disabled.
     assert button_state_by_text[("Install", 0)] == "disabled"
-    assert button_state_by_text[("Remove", 1)] == "normal"
+    assert button_state_by_text[("Remove", 1)] == "disabled"
     assert button_state_by_text[("Install", 2)] == "normal"
     assert button_state_by_text[("Remove", 3)] == "disabled"

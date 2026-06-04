@@ -169,11 +169,6 @@ def test_initial_venv_bootstrap_prompt_opens_terminal_when_managed_deps_are_miss
         lambda target: f"bootstrap {target}",
     )
     monkeypatch.setattr(entry_module.terminal_launcher, "open_command_in_terminal", launch_mock)
-    monkeypatch.setattr(
-        entry_module.LlamaCppLauncher,
-        "_ask_initial_venv_bootstrap_action",
-        lambda self, **kwargs: "create",
-    )
     monkeypatch.setattr(entry_module.messagebox, "showinfo", info_mock)
     monkeypatch.setattr(entry_module.messagebox, "showerror", MagicMock())
     stub = SimpleNamespace(
@@ -182,6 +177,11 @@ def test_initial_venv_bootstrap_prompt_opens_terminal_when_managed_deps_are_miss
         venv_dir=_Var(""),
         _bootstrap_config_dirty=False,
         _effective_venv_path=lambda: "",
+        # _maybe_prompt_for_initial_venv_setup looks the bootstrap-action
+        # callable up via ``self._ask_initial_venv_bootstrap_action``; with a
+        # SimpleNamespace stub, attribute lookup never reaches the patched
+        # class, so attach it directly to the instance.
+        _ask_initial_venv_bootstrap_action=lambda **kwargs: "create",
     )
 
     entry_module.LlamaCppLauncher._maybe_prompt_for_initial_venv_setup(stub)
@@ -217,11 +217,6 @@ def test_initial_venv_bootstrap_prompt_uses_configured_path_when_not_a_real_venv
         "build_bootstrap_venv_command",
         lambda chosen: f"bootstrap {chosen}",
     )
-    monkeypatch.setattr(
-        entry_module.LlamaCppLauncher,
-        "_ask_initial_venv_bootstrap_action",
-        lambda self, **kwargs: "create",
-    )
     monkeypatch.setattr(entry_module.terminal_launcher, "open_command_in_terminal", launch_mock)
     monkeypatch.setattr(entry_module.messagebox, "showinfo", MagicMock())
     monkeypatch.setattr(entry_module.messagebox, "showerror", MagicMock())
@@ -231,6 +226,7 @@ def test_initial_venv_bootstrap_prompt_uses_configured_path_when_not_a_real_venv
         venv_dir=_Var(str(target)),
         _bootstrap_config_dirty=False,
         _effective_venv_path=lambda: str(target),
+        _ask_initial_venv_bootstrap_action=lambda **kwargs: "create",
     )
 
     entry_module.LlamaCppLauncher._maybe_prompt_for_initial_venv_setup(stub)
@@ -286,11 +282,6 @@ def test_initial_venv_bootstrap_prompt_does_not_suppress_retry_on_terminal_error
     monkeypatch.setattr(entry_module.venv_manager, "launcher_repo_dir", lambda: tmp_path)
     monkeypatch.setattr(entry_module.venv_manager, "build_bootstrap_venv_command", lambda target: f"bootstrap {target}")
     monkeypatch.setattr(entry_module.terminal_launcher, "open_command_in_terminal", MagicMock(side_effect=OSError("no terminal")))
-    monkeypatch.setattr(
-        entry_module.LlamaCppLauncher,
-        "_ask_initial_venv_bootstrap_action",
-        lambda self, **kwargs: "create",
-    )
     monkeypatch.setattr(entry_module.messagebox, "showinfo", MagicMock())
     error_mock = MagicMock()
     monkeypatch.setattr(entry_module.messagebox, "showerror", error_mock)
@@ -300,6 +291,7 @@ def test_initial_venv_bootstrap_prompt_does_not_suppress_retry_on_terminal_error
         venv_dir=_Var(""),
         _bootstrap_config_dirty=False,
         _effective_venv_path=lambda: "",
+        _ask_initial_venv_bootstrap_action=lambda **kwargs: "create",
     )
 
     entry_module.LlamaCppLauncher._maybe_prompt_for_initial_venv_setup(stub)
@@ -324,13 +316,13 @@ def test_initial_venv_bootstrap_prompt_no_keeps_prompt_enabled(
     )
     prompt_mock = MagicMock(return_value="skip")
     monkeypatch.setattr(entry_module.venv_manager, "probe_current_python_dependencies", lambda *_args: statuses)
-    monkeypatch.setattr(entry_module.LlamaCppLauncher, "_ask_initial_venv_bootstrap_action", prompt_mock)
     stub = SimpleNamespace(
         app_settings={"venv_bootstrap_prompt_mode": "ask"},
         repo_dir=tmp_path,
         venv_dir=_Var(""),
         _bootstrap_config_dirty=False,
         _effective_venv_path=lambda: "",
+        _ask_initial_venv_bootstrap_action=prompt_mock,
     )
 
     entry_module.LlamaCppLauncher._maybe_prompt_for_initial_venv_setup(stub)
@@ -354,17 +346,13 @@ def test_initial_venv_bootstrap_prompt_never_disables_future_prompts(
         ),
     )
     monkeypatch.setattr(entry_module.venv_manager, "probe_current_python_dependencies", lambda *_args: statuses)
-    monkeypatch.setattr(
-        entry_module.LlamaCppLauncher,
-        "_ask_initial_venv_bootstrap_action",
-        lambda self, **kwargs: "never",
-    )
     stub = SimpleNamespace(
         app_settings={"venv_bootstrap_prompt_mode": "ask"},
         repo_dir=tmp_path,
         venv_dir=_Var(""),
         _bootstrap_config_dirty=False,
         _effective_venv_path=lambda: "",
+        _ask_initial_venv_bootstrap_action=lambda **kwargs: "never",
     )
 
     entry_module.LlamaCppLauncher._maybe_prompt_for_initial_venv_setup(stub)
