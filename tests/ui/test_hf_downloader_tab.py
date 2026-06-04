@@ -84,7 +84,9 @@ def test_setup_enables_install_and_load_with_hf_ready(hf_launcher_stub, active_v
     assert str(tab._load_button.cget("state")) == "normal"
     assert "1.0.0" in tab.venv_status_var.get()
     assert str((repo_dir / "downloads").resolve()) in tab._selected_target_vars
-    assert str(python).endswith("python")
+    # ``.stem`` strips the ``.exe`` extension so this works on both Windows
+    # (``python.exe``) and POSIX (``python``).
+    assert python.stem == "python"
 
 
 def test_install_button_uses_active_venv(hf_launcher_stub, active_venv, monkeypatch):
