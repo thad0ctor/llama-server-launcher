@@ -438,7 +438,14 @@ class BuildTab:
             self._cuda_arch_cache_avx512 = self._cpu_has_avx512()
         cuda_infos = self._cuda_arch_cache
         avx512 = self._cuda_arch_cache_avx512
-        cuda_available = bool(cuda_infos) and self._toolchain.nvcc_path is not None
+        # Treat CUDA hardware presence as sufficient to seed CUDA defaults.
+        # nvcc may not be on PATH or in any of the toolkit-probe locations
+        # yet — that's a fixable user configuration issue (and the preview
+        # already shows the "no CUDA toolkit detected" warning when
+        # GGML_CUDA is on). Holding GGML_CUDA / CMAKE_CUDA_FLAGS off until
+        # nvcc is auto-discovered hides the user's hardware intent and
+        # leaves the build tab silent about it.
+        cuda_available = bool(cuda_infos)
         defaults = cf.build_autodetect_values(
             self.var_backend.get(),
             cuda_available=cuda_available,
@@ -1018,8 +1025,13 @@ class BuildTab:
         else:
             name_lbl = ttk.Label(parent, text=flag.label + ":")
             name_lbl.grid(row=row, column=0, sticky="w", padx=6, pady=2)
-            w = ttk.Entry(parent, textvariable=var, width=24)
-            w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+            # Wide entry that also stretches with the column (the parent's
+            # column 1 has weight=1). Without sticky="ew" a long value like
+            # ``--use_fast_math -O3 --restrict --gpu-architecture=sm_120``
+            # gets visually clipped to the leading 24 chars and the field
+            # feels like it can't accept input.
+            w = ttk.Entry(parent, textvariable=var, width=40)
+            w.grid(row=row, column=1, sticky="ew", padx=4, pady=2)
             hint = flag.help
             if flag.placeholder:
                 hint = f"{flag.help} (e.g. {flag.placeholder})"
