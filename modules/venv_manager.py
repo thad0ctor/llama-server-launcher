@@ -79,7 +79,7 @@ MANAGED_DEPENDENCIES: tuple[ManagedDependency, ...] = (
         label="huggingface_hub / hf",
         package_name="huggingface_hub",
         import_name="huggingface_hub",
-        description="Planned model downloads; installs the `hf` CLI.",
+        description="Model downloads; installs the `hf` CLI.",
     ),
 )
 
