@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from unittest.mock import MagicMock
 
@@ -18,11 +19,23 @@ def hf_launcher_stub(launcher_stub, tmp_path):
 
 @pytest.fixture
 def active_venv(tmp_path):
+    """Lay out a venv that ``looks_like_venv`` will accept on this platform.
+
+    Windows expects ``venv/Scripts/python.exe``; POSIX expects
+    ``venv/bin/python``. The earlier hard-coded POSIX layout caused
+    ``_current_active_venv_path()`` to return "" on Windows, which routed
+    tests into a blocking ``messagebox.showerror`` and wedged the runner.
+    """
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
-    bindir = repo_dir / "venv" / "bin"
+    if sys.platform.startswith("win"):
+        bindir = repo_dir / "venv" / "Scripts"
+        exe_name = "python.exe"
+    else:
+        bindir = repo_dir / "venv" / "bin"
+        exe_name = "python"
     bindir.mkdir(parents=True)
-    python = bindir / "python"
+    python = bindir / exe_name
     python.write_text("", encoding="utf-8")
     return repo_dir, python
 

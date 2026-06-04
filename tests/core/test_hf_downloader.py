@@ -98,14 +98,18 @@ def test_summarize_repo_listing_defaults_to_one_preferred_gguf_and_mmproj():
 
 
 def test_build_runner_command_uses_module_entrypoint(tmp_path):
-    argv = helpers.build_runner_command("/tmp/venv/bin/python", "list", tmp_path / "payload.json")
+    python_path = tmp_path / "venv" / "bin" / "python"
+    argv = helpers.build_runner_command(python_path, "list", tmp_path / "payload.json")
 
+    # ``build_runner_command`` round-trips paths through ``Path(...)``, which
+    # on Windows substitutes backslashes. Compare against the same
+    # platform-normalized representation rather than the raw POSIX literal.
     assert argv == [
-        "/tmp/venv/bin/python",
+        str(python_path),
         "-m",
         "modules.hf_downloader.runner",
         "list",
-        str((tmp_path / "payload.json").resolve()),
+        str(tmp_path / "payload.json"),
     ]
 
 

@@ -10,6 +10,10 @@ Provides:
 - ``tk_root``:              a single hidden ``tkinter.Tk`` root reused across tests
                             that need to instantiate ``tk.BooleanVar``/``tk.StringVar``.
                             Skipped cleanly when no DISPLAY is available.
+- ``_silence_tk_messagebox``: autouse — replaces every ``tkinter.messagebox``
+                              dialog with a no-op so a test that unexpectedly
+                              triggers a popup can't block the runner forever
+                              (Windows CI used to hang here for 6 hours).
 
 All fixtures are defined here (rather than in a module-local conftest) so sibling
 test suites under ``tests/launchers`` and ``tests/system`` can reuse them.
@@ -21,6 +25,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -173,6 +178,31 @@ def sample_configs_file(
         return path
 
     return _factory
+
+
+@pytest.fixture(autouse=True)
+def _silence_tk_messagebox(monkeypatch):
+    """Replace every ``tkinter.messagebox`` dialog with a no-op.
+
+    Native ``MessageBox`` calls on Windows runners block the test thread
+    forever — there's no human to click OK. Even with ``pytest-timeout``
+    the wedged test eats a slot in the matrix. This autouse fixture
+    intercepts every entry point unconditionally so a test that
+    accidentally trips into a popup never blocks.
+
+    ``askyesno`` / ``askokcancel`` default to ``True`` so that any test
+    relying on the user confirming proceeds along the happy path.
+    """
+    import tkinter.messagebox as mb
+
+    monkeypatch.setattr(mb, "showinfo", MagicMock(), raising=False)
+    monkeypatch.setattr(mb, "showwarning", MagicMock(), raising=False)
+    monkeypatch.setattr(mb, "showerror", MagicMock(), raising=False)
+    monkeypatch.setattr(mb, "askyesno", MagicMock(return_value=True), raising=False)
+    monkeypatch.setattr(mb, "askyesnocancel", MagicMock(return_value=True), raising=False)
+    monkeypatch.setattr(mb, "askokcancel", MagicMock(return_value=True), raising=False)
+    monkeypatch.setattr(mb, "askquestion", MagicMock(return_value="yes"), raising=False)
+    monkeypatch.setattr(mb, "askretrycancel", MagicMock(return_value=False), raising=False)
 
 
 @pytest.fixture(scope="session")

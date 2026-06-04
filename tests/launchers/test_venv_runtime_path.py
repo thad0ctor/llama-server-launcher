@@ -19,6 +19,24 @@ if str(REPO_ROOT) not in sys.path:
 ENTRY_PATH = REPO_ROOT / "llamacpp-server-launcher.py"
 
 
+def _make_platform_venv(base: Path) -> Path:
+    """Create a venv-shaped directory under ``base`` for the current platform.
+
+    Windows expects ``Scripts/python.exe``; POSIX expects ``bin/python``.
+    Returns the venv directory path.
+    """
+    venv = base / "venv"
+    if sys.platform.startswith("win"):
+        bindir = venv / "Scripts"
+        exe = bindir / "python.exe"
+    else:
+        bindir = venv / "bin"
+        exe = bindir / "python"
+    bindir.mkdir(parents=True)
+    exe.write_text("", encoding="utf-8")
+    return venv
+
+
 class _Var:
     def __init__(self, value=""):
         self._value = value
@@ -44,9 +62,7 @@ def test_apply_cached_gpu_info_uses_normalized_active_venv_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    bindir = tmp_path / "venv" / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "python").write_text("", encoding="utf-8")
+    _make_platform_venv(tmp_path)
     monkeypatch.setattr(entry_module.venv_manager, "launcher_repo_dir", lambda: tmp_path)
     captured = {}
     cached = {
@@ -100,9 +116,7 @@ def test_start_system_info_detection_passes_normalized_active_venv_path(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    bindir = tmp_path / "venv" / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "python").write_text("", encoding="utf-8")
+    _make_platform_venv(tmp_path)
     monkeypatch.setattr(entry_module.venv_manager, "launcher_repo_dir", lambda: tmp_path)
     captured = {}
 
