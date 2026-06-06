@@ -183,6 +183,14 @@ def _validate_one_or_two(v: str) -> str | None:
     return None
 
 
+def _validate_zero_or_one(v: str) -> str | None:
+    """Boolean-as-int knob (e.g. ``GGML_CUDA_FUSION``)."""
+    s = v.strip()
+    if s not in {"0", "1"}:
+        return f"must be 0 or 1 (got {v!r})"
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Flag catalogue
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +284,7 @@ FLAGS: list[CMakeFlag] = [
               help="Always use cuBLAS instead of MMQ. Faster for very large batches; uses more VRAM."),
     CMakeFlag("GGML_CUDA_PEER_MAX_BATCH_SIZE", "Peer max batch size", "CUDA", STRING, "128",
               visible_when=_cuda_on,
+              validate=_validate_positive_int,
               help="Largest batch that uses peer-to-peer copy in multi-GPU setups."),
     CMakeFlag("GGML_CUDA_NO_PEER_COPY", "Disable P2P copies", "CUDA", BOOL, False,
               visible_when=_cuda_on,
@@ -311,6 +320,7 @@ FLAGS: list[CMakeFlag] = [
               help="ik_llama: iters-per-thread for Q2_K/Q6_K. Tune for SM occupancy."),
     CMakeFlag("GGML_CUDA_MIN_BATCH_OFFLOAD", "Min batch offload", "CUDA Tuning", STRING, "32",
               backends=(BACKEND_IK,), visible_when=_cuda_on,
+              validate=_validate_positive_int,
               help="ik_llama: smallest batch size that triggers GPU offload."),
     CMakeFlag("GGML_CUDA_F16", "CUDA F16 intermediates", "CUDA Tuning", BOOL, False,
               backends=(BACKEND_IK,), visible_when=_cuda_on,
@@ -320,6 +330,7 @@ FLAGS: list[CMakeFlag] = [
               help="ik_llama: when no MMQ kernel is available, fall back to BF16 cuBLAS."),
     CMakeFlag("GGML_CUDA_FUSION", "CUDA fusion (0/1)", "CUDA Tuning", STRING, "1",
               backends=(BACKEND_IK,), visible_when=_cuda_on,
+              validate=_validate_zero_or_one,
               help="ik_llama: enable kernel fusion. Set to 0 to disable."),
 
     # ── IK_LLAMA IQK CPU kernels ──
@@ -451,6 +462,7 @@ FLAGS: list[CMakeFlag] = [
               help="Optimized ARM matmul kernels via KleidiAI."),
     CMakeFlag("GGML_SCHED_MAX_COPIES", "Pipeline copies", "CPU Backend", STRING, "4",
               backends=(BACKEND_LLAMA,),
+              validate=_validate_positive_int,
               help="Max input copies for pipeline parallelism. Higher = more memory, slightly higher throughput."),
 
     # ── CPU SIMD ──

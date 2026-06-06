@@ -76,6 +76,24 @@ class SettingsTab:
             lambda *_a: self._on_venv_dir_changed(),
         )
 
+    def teardown(self) -> None:
+        """Release the launcher-owned ``venv_dir`` write trace.
+
+        SettingsTab attaches a trace to the launcher's StringVar but the
+        var outlives the tab, so without an explicit teardown the trace
+        callback keeps a reference to this SettingsTab forever and
+        writes to (possibly destroyed) Tk widgets on every later
+        ``venv_dir.set(...)``. Safe to call multiple times.
+        """
+        token = getattr(self, "_venv_trace_token", None)
+        if token is None:
+            return
+        try:
+            self.venv_dir_var.trace_remove("write", token)
+        except Exception:
+            pass
+        self._venv_trace_token = None
+
     # ------------------------------------------------------------------ setup
     def setup_settings_tab(self, parent):
         parent.columnconfigure(1, weight=1)
@@ -515,6 +533,16 @@ class SettingsTab:
         self._venv_action_status_var.set(
             f"Opened terminal to remove venv at {info.effective_dir}."
         )
+        # Clear the dependency table immediately so the UI doesn't keep
+        # showing "installed" rows for packages whose venv is being
+        # deleted in another terminal. Schedule a refresh ~2 s later so
+        # the table catches up once the rm completes; the user can also
+        # click Refresh deps manually.
+        self._rebuild_dependency_rows([])
+        try:
+            self.root.after(2000, self._schedule_venv_dependency_probe)
+        except tk.TclError:
+            pass
 
     def _on_install_dependency(self, dependency):
         info = self._current_venv_info()

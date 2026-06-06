@@ -191,8 +191,26 @@ def run_download(payload: dict) -> int:
     if not target_dirs:
         raise ValueError("No target directories were selected.")
 
+    # Pre-flight: confirm every target directory is writable before any
+    # network I/O. A typo in the repo_id used to silently ``mkdir`` empty
+    # directories under each target and then fail with a confusing HF
+    # error; verifying write access here keeps the failure local and
+    # actionable, and avoids leaving stub directories behind.
+    for target_dir in target_dirs:
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise OSError(f"Cannot create target directory {target_dir}: {exc}") from exc
+        probe = target_dir / ".hf-download-write-test"
+        try:
+            probe.write_bytes(b"")
+            probe.unlink()
+        except OSError as exc:
+            raise OSError(
+                f"Target directory {target_dir} is not writable: {exc}"
+            ) from exc
+
     for index, target_dir in enumerate(target_dirs, start=1):
-        target_dir.mkdir(parents=True, exist_ok=True)
         _emit(
             "target-start",
             target=str(target_dir),

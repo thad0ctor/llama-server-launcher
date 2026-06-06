@@ -407,16 +407,32 @@ def probe_dependencies(
     platform: str | None = None,
     timeout: float = 2.5,
 ) -> list[DependencyStatus]:
-    """Inspect all managed dependencies inside ``venv_dir``."""
-    return [
-        probe_dependency_status(
+    """Inspect all managed dependencies inside ``venv_dir`` in parallel.
+
+    Each probe spawns its own ``python -c`` subprocess; running them
+    sequentially used to block the calling worker thread for up to
+    ``len(MANAGED_DEPENDENCIES) * timeout`` seconds on a slow venv (~10 s
+    with the default 2.5 s timeout). The dependencies are independent so
+    we parallelize with a small thread pool and preserve the input order.
+    """
+    deps = list(MANAGED_DEPENDENCIES)
+    if not deps:
+        return []
+    # ``ThreadPoolExecutor.map`` preserves the input order and surfaces
+    # per-call exceptions when the result is iterated. Cap workers so
+    # we don't fork-bomb a venv when MANAGED_DEPENDENCIES grows.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _probe(dep: ManagedDependency) -> DependencyStatus:
+        return probe_dependency_status(
             venv_dir,
-            dependency,
+            dep,
             platform=platform,
             timeout=timeout,
         )
-        for dependency in MANAGED_DEPENDENCIES
-    ]
+
+    with ThreadPoolExecutor(max_workers=min(len(deps), 4)) as pool:
+        return list(pool.map(_probe, deps))
 
 
 def probe_current_python_dependencies(

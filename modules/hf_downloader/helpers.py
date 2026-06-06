@@ -158,11 +158,31 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
     parts = [part for part in parsed.path.split("/") if part]
     if not parts:
         raise ValueError("Repo URL did not contain a repository path.")
+    # ``huggingface.co/datasets/<owner>/<repo>`` and
+    # ``huggingface.co/spaces/<owner>/<repo>`` look superficially valid
+    # but the downloader runner uses ``repo_type="model"``, so silently
+    # treating them as a model called ``datasets/<owner>`` (or
+    # ``spaces/<owner>``) would produce baffling errors halfway through.
+    # Reject them up front with an actionable message.
+    if parts[0] in {"datasets", "spaces"}:
+        kind = parts[0]
+        raise ValueError(
+            f"This is a HuggingFace {kind} URL; this tab only downloads "
+            "model repos. Paste a ``huggingface.co/<owner>/<repo>`` URL."
+        )
     if parts[0] in {"models", "model"}:
         parts = parts[1:]
     if len(parts) < 2:
         raise ValueError("Repo URL must include both owner and repo name.")
     repo_id = "/".join(parts[:2])
+    # Repo IDs containing path separators / drive letters / illegal Windows
+    # filename chars would break the target_dir / repo_id materialization
+    # downstream. Reject early.
+    if any(ch in repo_id for ch in '<>:"|?*'):
+        raise ValueError(
+            f"Repo ID {repo_id!r} contains characters that are not legal on "
+            "Windows filesystems; check the URL for stray text."
+        )
     revision_hint = ""
     if len(parts) >= 4 and parts[2] in {"tree", "blob"}:
         remainder = parts[3:]

@@ -90,13 +90,34 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         raise FileNotFoundError("No supported terminal emulator found")
 
     if sys.platform == "darwin":
-        script_command = _bash_hold_open(command)
+        # Write the bash payload to a temp ``.command`` script and have
+        # Terminal.app run that, instead of splicing the entire bash
+        # script through layered AppleScript+shell quoting (which is
+        # fragile for paths with backticks, dollar signs, newlines, etc.).
+        # The script self-deletes after running so the temp file doesn't
+        # accumulate.
+        import tempfile
+
+        bash_payload = _bash_hold_open(command)
         if cwd_text:
-            script_command = f"cd {shlex.quote(cwd_text)} && {script_command}"
-        script_command = script_command.replace("\\", "\\\\").replace('"', '\\"')
+            bash_payload = f"cd {shlex.quote(cwd_text)} && {bash_payload}"
+        fd, script_path = tempfile.mkstemp(suffix=".command", prefix="llama-launcher-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/bash\n")
+                fh.write(f"trap 'rm -f {shlex.quote(script_path)}' EXIT\n")
+                fh.write(bash_payload)
+                fh.write("\n")
+            os.chmod(script_path, 0o755)
+        except Exception:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+            raise
         applescript = (
             'tell application "Terminal"\n'
-            f'    do script "{script_command}"\n'
+            f'    do script "{shlex.quote(script_path)}"\n'
             "    activate\n"
             "end tell\n"
         )

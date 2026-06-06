@@ -46,12 +46,20 @@ class HuggingFaceDownloaderTab:
         self.force_download_var = tk.BooleanVar(value=bool(settings.get("hf_force_download", False)))
         self.local_files_only_var = tk.BooleanVar(value=bool(settings.get("hf_local_files_only", False)))
         self.max_workers_var = tk.StringVar(value=str(settings.get("hf_max_workers", 4)))
+        # Re-entry guard so the validating trace below doesn't recurse when
+        # it normalizes its own value.
+        self._max_workers_validating = False
         self.token_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Create/select a venv, install huggingface_hub, then load a repo.")
         self.venv_var = launcher.venv_dir
         self.venv_status_var = tk.StringVar(value="")
         self.progress_label_var = tk.StringVar(value="")
         self._selected_target_vars: dict[str, tk.BooleanVar] = {}
+        # (var, trace_token) pairs so ``_refresh_target_rows`` can
+        # ``trace_remove`` on the old vars before discarding them — without
+        # this, every refresh leaks the trace callback and the var it
+        # references.
+        self._selected_target_trace_tokens: list[tuple[tk.BooleanVar, str]] = []
         self._file_rows: list[HfRepoFile] = []
         self._file_path_by_index: list[str] = []
         self._refs: list[str] = []
@@ -98,6 +106,10 @@ class HuggingFaceDownloaderTab:
             self.ignore_patterns_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.force_download_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.local_files_only_var.trace_add("write", lambda *_a: self._persist_settings()),
+            # Validate-and-clamp on every keystroke so a bad value can't be
+            # persisted to settings (and so the next launch doesn't load
+            # a malformed string). Then persist the (normalized) value.
+            self.max_workers_var.trace_add("write", lambda *_a: self._validate_max_workers()),
             self.max_workers_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.venv_var.trace_add("write", lambda *_a: self._refresh_runtime_state()),
         ]
@@ -293,6 +305,16 @@ class HuggingFaceDownloaderTab:
             return
         for child in self._target_container.winfo_children():
             child.destroy()
+        # Remove the write traces on the old per-row BooleanVars before we
+        # drop the references, otherwise each refresh leaks a trace
+        # callback whose closure still holds ``self`` — the old vars never
+        # get garbage-collected and Tk keeps them alive in the interpreter.
+        for old_var, token in self._selected_target_trace_tokens:
+            try:
+                old_var.trace_remove("write", token)
+            except Exception:
+                pass
+        self._selected_target_trace_tokens = []
         selected_paths = tuple(self.launcher.app_settings.get("hf_target_dirs", []))
         state = collect_target_directory_options(
             list(getattr(self.launcher, "model_dirs", [])),
@@ -308,7 +330,8 @@ class HuggingFaceDownloaderTab:
             return
         for row, option in enumerate(state.options):
             var = tk.BooleanVar(value=option.selected)
-            var.trace_add("write", lambda *_a: self._persist_settings())
+            token = var.trace_add("write", lambda *_a: self._persist_settings())
+            self._selected_target_trace_tokens.append((var, token))
             self._selected_target_vars[str(option.path)] = var
             ttk.Checkbutton(
                 self._target_container,
@@ -340,9 +363,53 @@ class HuggingFaceDownloaderTab:
             return f"{int(size)} B"
         return f"{size:.2f} {units[idx]}"
 
+    # Bound max workers to a sensible range; 32 is generous (HF's default
+    # is 8 and few networks benefit from more parallelism than that).
+    _MAX_WORKERS_FLOOR = 1
+    _MAX_WORKERS_CEILING = 32
+
+    def _validate_max_workers(self) -> None:
+        """Normalize ``max_workers_var`` to an int in the allowed range.
+
+        Empty input is left blank so the user can clear and retype.
+        Non-numeric input is silently corrected to the floor value; the
+        clamp also runs at the Download click as a final safety net.
+        """
+        if self._max_workers_validating:
+            return
+        raw = self.max_workers_var.get().strip()
+        if not raw:
+            return  # Allow empty while editing.
+        try:
+            value = int(raw)
+        except ValueError:
+            value = self._MAX_WORKERS_FLOOR
+        clamped = max(self._MAX_WORKERS_FLOOR, min(self._MAX_WORKERS_CEILING, value))
+        normalized = str(clamped)
+        if normalized == raw:
+            return
+        # Set under the re-entry flag so this trace handler doesn't recurse.
+        self._max_workers_validating = True
+        try:
+            self.max_workers_var.set(normalized)
+        finally:
+            self._max_workers_validating = False
+
     @staticmethod
     def _looks_like_tqdm_progress(line: str) -> bool:
-        return "%|" in line or "B/s" in line or "it/s" in line
+        # Match a real tqdm progress bar, not arbitrary error messages
+        # that happen to mention bytes-per-second. tqdm always emits a
+        # ``NN%|`` percent prefix or a bar character (``█``) inside the
+        # rendered bar — both are rare in genuine stderr exceptions.
+        if "%|" in line:
+            return True
+        if "█" in line and "|" in line:
+            return True
+        # Final fallback: throughput suffix only if the line also carries
+        # a tqdm-style ETA bracket like ``[00:12<00:34, ...]``.
+        if ("B/s" in line or "it/s" in line) and "[" in line and "<" in line:
+            return True
+        return False
 
     def _toggle_options_section(self):
         if self._options_body is None or self._options_toggle_btn is None:

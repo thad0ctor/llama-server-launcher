@@ -321,28 +321,47 @@ class BuildRunner:
         return True
 
     # ---------------------------------------------------------------- events
+    def _take_dropped_count(self) -> int:
+        """Atomically read-and-clear ``_dropped_output_lines``.
+
+        Without the lock, ``_emit_line`` (reader thread) and ``_emit_event``
+        (worker thread) could read-modify-write the counter concurrently and
+        either double-emit the "[launcher skipped N lines]" notice or lose
+        a few counts. Guarding read+clear behind ``_lock`` makes the
+        counter sequentially consistent.
+        """
+        with self._lock:
+            n = self._dropped_output_lines
+            self._dropped_output_lines = 0
+            return n
+
+    def _bump_dropped_count(self) -> None:
+        with self._lock:
+            self._dropped_output_lines += 1
+
     def _emit_line(self, text: str) -> None:
-        if self._dropped_output_lines:
-            dropped = self._dropped_output_lines
+        dropped = self._take_dropped_count()
+        if dropped:
             notice = (
                 f"[launcher skipped {dropped} build output line(s) "
                 "while the UI caught up]"
             )
             try:
                 self.events.put_nowait((EVENT_LINE, notice))
-                self._dropped_output_lines = 0
             except queue.Full:
-                self._dropped_output_lines += 1
+                # Couldn't even fit the notice — re-credit the count plus
+                # one for the line we're about to drop.
+                with self._lock:
+                    self._dropped_output_lines += dropped + 1
                 return
         try:
             self.events.put_nowait((EVENT_LINE, text))
         except queue.Full:
-            self._dropped_output_lines += 1
+            self._bump_dropped_count()
 
     def _emit_event(self, kind: str, payload: object) -> None:
-        if self._dropped_output_lines:
-            dropped = self._dropped_output_lines
-            self._dropped_output_lines = 0
+        dropped = self._take_dropped_count()
+        if dropped:
             self.events.put((
                 EVENT_LINE,
                 f"[launcher skipped {dropped} build output line(s) "

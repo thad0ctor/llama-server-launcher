@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -181,8 +182,29 @@ class BuildTab:
         # exist yet and will be auto-cloned on build.
         self.var_source_status = tk.StringVar(value="")
         self.var_source_status_color = tk.StringVar(value="#666")
-        self.var_auto_check_updates = tk.BooleanVar(value=True)
-        self.var_autoscroll = tk.BooleanVar(value=True)
+        # Both checkboxes are durable user preferences; seed them from the
+        # launcher's app_settings so the value persists across restarts.
+        app_settings = getattr(launcher, "app_settings", None) or {}
+        self.var_auto_check_updates = tk.BooleanVar(
+            value=bool(app_settings.get("build_auto_check_updates", True))
+        )
+        self.var_autoscroll = tk.BooleanVar(
+            value=bool(app_settings.get("build_console_autoscroll", True))
+        )
+        # Persist on change via a write trace. ``_save_configs`` is a no-op
+        # for missing app_settings keys so this is safe even early in init.
+        self.var_auto_check_updates.trace_add(
+            "write",
+            lambda *_a: self._persist_build_ui_pref(
+                "build_auto_check_updates", self.var_auto_check_updates.get()
+            ),
+        )
+        self.var_autoscroll.trace_add(
+            "write",
+            lambda *_a: self._persist_build_ui_pref(
+                "build_console_autoscroll", self.var_autoscroll.get()
+            ),
+        )
 
         # Lazy-initialised on first setup_tab().
         self._flag_vars: dict[str, tk.Variable] = {}
@@ -351,6 +373,29 @@ class BuildTab:
         except (TypeError, ValueError, tk.TclError):
             return default
         return max(minimum, v)
+
+    def _persist_build_ui_pref(self, key: str, value: bool) -> None:
+        """Write ``key`` into ``launcher.app_settings`` and trigger a save.
+
+        Used by the auto-update-check and console-autoscroll traces so the
+        toggles survive restart. Best-effort: a missing launcher /
+        app_settings / _save_configs means we silently skip rather than
+        raise.
+        """
+        try:
+            settings = self.launcher.app_settings
+        except Exception:
+            return
+        try:
+            settings[key] = bool(value)
+        except Exception:
+            return
+        save = getattr(self.launcher, "_save_configs", None)
+        if callable(save):
+            try:
+                save()
+            except Exception:
+                pass
 
     def _refresh_jobs_hint(self) -> None:
         reco = detection.recommend_jobs()
@@ -2292,6 +2337,18 @@ class BuildTab:
     def _persist_current_as(self, name: str) -> None:
         if not name:
             return
+        # Confirm before silently overwriting a different preset with the
+        # same name. ``_on_save_config`` (no Save-as dialog) re-saves the
+        # currently loaded config so we only prompt when the name was
+        # typed into the Save-as box.
+        existing = self.store.get(name)
+        current_name = self.var_config_name.get().strip()
+        if existing is not None and name != current_name:
+            if not messagebox.askyesno(
+                "Save build config",
+                f"A saved config named {name!r} already exists.\n\nOverwrite it?",
+            ):
+                return
         # Build the UI-state dict separately so it never reaches cmake_env.
         ui_state: dict[str, str] = {
             "prefer_a": "1" if self.var_prefer_a_variant.get() else "0",
@@ -2933,7 +2990,6 @@ class BuildTab:
             "binaries outside CMakeFiles/ are left untouched.\n\nProceed?",
         ):
             return
-        import shutil
         removed = []
         try:
             if cache_file.exists():

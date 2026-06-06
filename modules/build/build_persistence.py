@@ -21,7 +21,6 @@ Each entry on disk:
           },
           "flag_values": { "GGML_CUDA": true, "GGML_LTO": true, ... },
           "extra_cmake_args": "",                # free-form passthrough
-          "notes": "",
           "created_at": "2026-05-18T12:34:56Z",
           "last_used_at": "2026-05-18T12:34:56Z"
         },
@@ -94,7 +93,6 @@ class BuildConfig:
     # UI-only state (generator selection, -a/-f preferences, etc.). Kept
     # separate from ``env`` so it never leaks to the cmake subprocess.
     ui_state: dict[str, str] = field(default_factory=dict)
-    notes: str = ""
     created_at: str = ""
     last_used_at: str = ""
 
@@ -133,7 +131,6 @@ class BuildConfig:
                 if isinstance(data.get("ui_state"), Mapping)
                 else {}
             ),
-            notes=data.get("notes", ""),
             created_at=data.get("created_at", ""),
             last_used_at=data.get("last_used_at", ""),
         )

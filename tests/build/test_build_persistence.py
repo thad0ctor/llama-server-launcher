@@ -94,7 +94,6 @@ def _populated_build_config(name: str = "round-trip") -> BuildConfig:
             "prefer_f": "0",
             "show_deprecated": "1",
         },
-        notes="My production preset for the 5090 box.",
         created_at="2026-05-18T12:34:56Z",
         last_used_at="2026-06-03T20:00:00Z",
     )
