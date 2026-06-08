@@ -359,7 +359,19 @@ def collect_target_directory_options(
     selected_paths: tuple[str, ...] = (),
 ) -> DownloadTargetsState:
     """Build checkbox rows for active model directories with free-space info."""
-    normalized_selected = {str(Path(path).expanduser().resolve()) for path in selected_paths if path}
+    # ``Path(path).expanduser().resolve()`` can raise on malformed entries
+    # (a Windows path containing NUL, an empty-after-strip surrogate, etc).
+    # The previous set-comprehension would surface that as a hard error and
+    # block the entire Download tab from rendering. Skip individual bad
+    # entries so the "select the first live option" fallback still works.
+    normalized_selected: set[str] = set()
+    for path in selected_paths:
+        if not path:
+            continue
+        try:
+            normalized_selected.add(str(Path(path).expanduser().resolve()))
+        except (OSError, ValueError, TypeError, RuntimeError):
+            continue
     options: list[TargetDirectoryOption] = []
     for index, raw_path in enumerate(model_dirs):
         path = Path(raw_path).expanduser().resolve()

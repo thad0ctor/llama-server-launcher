@@ -973,19 +973,20 @@ class HuggingFaceDownloaderTab:
             self._refs = [ref.name for ref in refs]
             if self._revision_combo is not None:
                 self._revision_combo.config(values=self._refs)
-            # Auto-populate ONLY when the user submitted with a non-empty
-            # revision and then cleared the box mid-flight. If they
-            # submitted blank, the runner resolved the listing against the
-            # repo's *default* branch — but ``_refs[0]`` is just the first
-            # alphabetically-sorted ref, which might be a different branch
-            # entirely. Overwriting a blank ``revision_var`` here would
-            # silently retarget the next download at the wrong ref.
+            # Auto-restore ONLY when the user submitted with a non-empty
+            # revision and then cleared the box mid-flight. Restore the
+            # exact value they submitted (``_last_requested_revision``)
+            # rather than ``_refs[0]`` — ``_refs`` is alphabetically
+            # sorted, so its first entry can be a completely different
+            # branch/tag than the one the runner actually listed, which
+            # would silently retarget the next download at the wrong ref.
+            requested_revision = getattr(self, "_last_requested_revision", "").strip()
             if (
                 not self.revision_var.get().strip()
-                and getattr(self, "_last_requested_revision", "").strip()
+                and requested_revision
                 and self._refs
             ):
-                self.revision_var.set(self._refs[0])
+                self.revision_var.set(requested_revision)
             self._file_rows = list(files)
             self._file_path_by_index = [row.path for row in self._file_rows]
             if self._files_listbox is not None:

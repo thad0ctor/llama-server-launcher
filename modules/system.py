@@ -776,6 +776,17 @@ def load_cached_gpu_info(config_dir, venv_path):
     # crash startup despite passing the top-level shape checks above.
     if any(not isinstance(device, dict) for device in devices):
         return None
+    # Downstream code keys off ``gpu["id"]`` (launch.py, spec_launch.py,
+    # gpu mapping UI) and assumes it's a real launcher index. A
+    # hand-edited cache with ``{"name": "A100"}`` (no id) or
+    # ``{"id": "0"}`` (string id) would either KeyError or compare
+    # against ints incorrectly. ``bool`` is intentionally excluded — a
+    # bool slipping through as an "id" would point at GPU 0/1 by
+    # accident.
+    for device in devices:
+        device_id = device.get("id")
+        if not isinstance(device_id, int) or isinstance(device_id, bool):
+            return None
     return gpu_info
 
 
