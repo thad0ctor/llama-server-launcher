@@ -520,6 +520,12 @@ class ConfigManager:
                 file=sys.stderr,
             )
             saved_predefined = default_predefined_key
+            # Persist the remapped value back into the in-memory config
+            # so the next ``_save_configs`` writes the corrected key.
+            # Without this, the old (now-invalid) name keeps coming back
+            # from disk on every restart and re-triggers the warning.
+            if isinstance(cfg, dict):
+                cfg["predefined_template_name"] = saved_predefined
         self.launcher.predefined_template_name.set(saved_predefined)
 
         self.launcher.custom_template_string.set(cfg.get("custom_template_string", ""))

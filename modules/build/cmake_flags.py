@@ -665,11 +665,13 @@ def build_autodetect_values(
             # tripped up everyone without libnccl-dev.)
             compression_flag = _FLAG_BY_KEY.get("GGML_CUDA_COMPRESSION_MODE")
             # Strict gate: only AUTO-enable a version-fenced flag when we
-            # actually know the toolkit version. The shared
-            # ``_cuda_version_satisfies`` helper is permissive on missing
-            # detection (so manual toggles aren't dropped); here we add an
-            # explicit ``is not None`` check so an undetected CUDA install
-            # doesn't get this flag silently injected.
+            # actually know the toolkit version. ``_cuda_version_satisfies``
+            # is now ALSO fail-closed on unknown detection by default
+            # (matches the emit / validate paths), but keeping the
+            # explicit ``cuda_version is not None`` guard here documents
+            # the autodetect-side intent — an undetected CUDA install
+            # must not get version-fenced flags silently injected, even
+            # if a future refactor changes the helper's defaults again.
             if (
                 compression_flag is not None
                 and cuda_version is not None

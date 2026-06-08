@@ -531,12 +531,16 @@ def _resolve_draft_device_value(launcher):
         # entries, so a non-CUDA backend can match.
         if manual_mode or no_filter:
             return override
-        is_cuda_override = bool(
-            re.fullmatch(
-                r"CUDA\d+(?:,CUDA\d+)*", override, flags=re.IGNORECASE
-            )
+        # Detect ANY CUDA token, not just pure-CUDA lists. A mixed
+        # override like ``CUDA0,Vulkan1`` is still remap-sensitive
+        # because the ``CUDA0`` half points through the remapped
+        # ``CUDA_VISIBLE_DEVICES`` set — only fully non-CUDA overrides
+        # (``Vulkan0`` / ``Metal0`` / ``SYCL1`` …) are safe to pass
+        # through unchanged.
+        has_cuda_token = bool(
+            re.search(r"CUDA\d+", override, flags=re.IGNORECASE)
         )
-        if not is_cuda_override:
+        if not has_cuda_token:
             # Non-CUDA backend tokens (Vulkan0, Metal0, SYCL1, …) —
             # ``CUDA_VISIBLE_DEVICES`` doesn't touch them, so the
             # filtering rationale doesn't apply.

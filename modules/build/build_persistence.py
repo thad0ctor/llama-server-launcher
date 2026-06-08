@@ -173,6 +173,32 @@ class BuildConfig:
                 out[key] = val
             return out
 
+        def _coerce_ui_state(raw: Any) -> dict[str, str]:
+            """Coerce ``ui_state`` to a real ``dict[str, str]``.
+
+            ``BuildConfig.ui_state`` is typed ``dict[str, str]`` and the
+            consumers (collapse / expand state setters on the UI side)
+            assume strings — a hand-edited preset with
+            ``{"adv_open": true}`` used to flow through as a raw bool
+            and crash ``ttk`` widget config calls. Drop keys that aren't
+            str, and stringify values (or drop them if even ``str()``
+            fails — exotic types like cycles).
+            """
+            if not isinstance(raw, Mapping):
+                return {}
+            out: dict[str, str] = {}
+            for k, v in raw.items():
+                if not isinstance(k, str):
+                    continue
+                if v is None:
+                    out[k] = ""
+                    continue
+                try:
+                    out[k] = str(v)
+                except Exception:
+                    continue
+            return out
+
         # Clamp malformed persisted backends to the default. A hand-edited
         # ``"backend": "gpu"`` (or ``""``) would otherwise propagate
         # through every downstream consumer — backend-scoped flag lookup,
@@ -209,11 +235,7 @@ class BuildConfig:
                 else {}
             ),
             extra_cmake_args=_as_str(data.get("extra_cmake_args"), ""),
-            ui_state=(
-                dict(data["ui_state"])
-                if isinstance(data.get("ui_state"), Mapping)
-                else {}
-            ),
+            ui_state=_coerce_ui_state(data.get("ui_state")),
             created_at=_as_str(data.get("created_at"), ""),
             last_used_at=_as_str(data.get("last_used_at"), ""),
         )
@@ -291,8 +313,16 @@ class BuildConfigStore:
             )
             return False
         if isinstance(configs, dict):
-            for name, data in configs.items():
-                if not isinstance(name, str) or not isinstance(data, dict):
+            for raw_name, data in configs.items():
+                if not isinstance(raw_name, str) or not isinstance(data, dict):
+                    continue
+                # ``save()`` / ``rename()`` already reject blank names;
+                # the loader must agree or a JSON-edited file with
+                # ``{"   ": {...}}`` would survive the round-trip and
+                # become an unselectable phantom entry. Trim here so the
+                # in-memory key matches what ``save`` would produce.
+                name = raw_name.strip()
+                if not name:
                     continue
                 try:
                     self._cache[name] = BuildConfig.from_json(name, data)
