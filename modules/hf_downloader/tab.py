@@ -312,7 +312,21 @@ class HuggingFaceDownloaderTab:
         # the kill actually lands, so ``self._process is None`` alone
         # would briefly re-enable buttons before the worker is gone.
         watching = bool(self._dep_watch_venv) and self._dep_watch_venv == active
-        idle = self._process is None and not self._terminating and not watching
+        # Also block on the worker thread itself. If Cancel wins the
+        # startup race before ``_run_process_worker`` publishes
+        # ``self._process``, BOTH ``self._process is None`` AND
+        # ``_terminating == False`` hold, but the worker thread may
+        # still be spawning or tearing down the subprocess. Without
+        # this check, Load/Download briefly re-enable mid-shutdown.
+        worker_alive = bool(
+            self._worker_thread is not None and self._worker_thread.is_alive()
+        )
+        idle = (
+            self._process is None
+            and not self._terminating
+            and not watching
+            and not worker_alive
+        )
         if status.available:
             version = f" (v{status.version})" if status.version else ""
             self.venv_status_var.set(f"{active}{version}")

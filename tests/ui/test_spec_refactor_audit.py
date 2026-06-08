@@ -567,8 +567,10 @@ class TestLoadOrderResync:
     """
 
     def test_resync_is_called_during_init(self, entry_module, tmp_path, monkeypatch):
-        """Patch the resync helper to record invocations and confirm
-        it's invoked exactly once during __init__."""
+        """Patch the resync helper to record invocations and confirm it
+        runs at least once during ``__init__`` — the launcher may also
+        re-resync on subsequent config-load cascades, which is fine.
+        The contract under test is "called", not "called exactly once"."""
         import modules.spec_persistence as sp
 
         cfg_path = tmp_path / "configs.json"

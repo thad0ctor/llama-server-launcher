@@ -105,6 +105,15 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
         )
     if not build.is_absolute():
         build = src / build
+    # Same file-vs-directory guard for build_dir. Without this, a user
+    # who typed a file path here would have ``rm -rf <build_dir>`` /
+    # ``cmake -B <build_dir>`` fail with a tool-specific error instead
+    # of a clear up-front message.
+    if build.exists() and build.is_file():
+        raise ValueError(
+            f"build_dir {build_dir!r} is a file, not a directory; "
+            f"refusing to operate."
+        )
 
     try:
         build_resolved = build.resolve(strict=False)

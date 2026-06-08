@@ -147,6 +147,20 @@ class LaunchManager:
                 file=sys.stderr,
             )
             return None
+        # Non-zero exit AND non-empty output is usually a usage error
+        # spat to stderr (``error: unknown argument: --help``, etc.) —
+        # memoizing that blob would let ``_backend_supports_flag`` decide
+        # flag support by pattern-matching the error message. Skip the
+        # cache; let the next probe retry with a freshly-built binary
+        # or recovered environment.
+        if result.returncode != 0:
+            print(
+                f"DEBUG: Feature probe rc={result.returncode} for {exe_path}; "
+                f"output looks like an error message — not caching so a later "
+                f"call can retry against a fixed binary",
+                file=sys.stderr,
+            )
+            return None
         self._help_text_cache[sig] = help_text
         return help_text
 

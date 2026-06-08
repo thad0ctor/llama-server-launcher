@@ -79,6 +79,29 @@ def test_collect_target_directory_options_honors_saved_selection(tmp_path):
     assert state.selected_paths == (str(second.resolve()),)
 
 
+def test_collect_target_directory_options_falls_back_when_saved_selection_is_stale(tmp_path):
+    """If every persisted ``selected_paths`` entry no longer matches a
+    current model_dir (user removed the dir from Settings, or moved
+    disks), fall back to checking the first live option so Download
+    always opens with at least one target selected.
+    """
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    stale = tmp_path / "removed-from-settings"  # never created
+
+    state = helpers.collect_target_directory_options(
+        [first, second],
+        selected_paths=(str(stale.resolve()),),
+    )
+
+    # First live option auto-selected as the fallback.
+    assert state.options[0].selected is True
+    assert state.options[1].selected is False
+    assert state.selected_paths == (str(first.resolve()),)
+
+
 def test_summarize_repo_listing_defaults_to_one_preferred_gguf_and_mmproj():
     refs, files = helpers.summarize_repo_listing(
         [{"name": "main", "kind": "branch"}],
