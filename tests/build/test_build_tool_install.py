@@ -116,7 +116,7 @@ def test_terminal_launcher_uses_first_available_linux_terminal(monkeypatch):
     assert "Command completed successfully." in argv[4]
 
 
-def test_terminal_launcher_uses_osascript_on_macos(monkeypatch):
+def test_terminal_launcher_uses_osascript_on_macos(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal_launcher.sys, "platform", "darwin")
     popen = MagicMock()
     monkeypatch.setattr(terminal_launcher.subprocess, "Popen", popen)
@@ -126,8 +126,31 @@ def test_terminal_launcher_uses_osascript_on_macos(monkeypatch):
     argv = popen.call_args.args[0]
     assert argv[0] == "osascript"
     assert argv[1] == "-e"
-    assert 'echo \\"Running command...\\"' in argv[2]
-    assert 'do script "cd /tmp/project && echo \\"Running command...\\"; brew install ninja;' in argv[2]
+    # The macOS path now writes the bash payload to a temp ``.command``
+    # script and tells Terminal.app to ``do script <script_path>`` —
+    # safer than splicing the body through layered AppleScript+shell
+    # quoting. Assert the new structure (not the prior inline shell).
+    assert 'tell application "Terminal"' in argv[2]
+    assert 'do script "' in argv[2]
+    assert ".command" in argv[2]
+    # Pull the script path out of the AppleScript and read it back to
+    # confirm the bash payload actually got the user's command + cwd.
+    import re as _re
+    m = _re.search(r"do script \"([^\"]+\.command)\"", argv[2])
+    assert m, f"Could not extract script path from {argv[2]!r}"
+    script_path = m.group(1)
+    try:
+        with open(script_path, encoding="utf-8") as fh:
+            contents = fh.read()
+        assert "cd /tmp/project" in contents
+        assert "brew install ninja" in contents
+        assert 'echo "Running command..."' in contents
+    finally:
+        try:
+            import os as _os
+            _os.unlink(script_path)
+        except OSError:
+            pass
 
 
 def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):

@@ -279,19 +279,19 @@ def collect_target_directory_options(
         except Exception:
             free_bytes = None
         if normalized_selected:
-            selected = str(path) in normalized_selected
+            is_selected = str(path) in normalized_selected
         else:
-            selected = index == 0
+            is_selected = index == 0
         options.append(
             TargetDirectoryOption(
                 path=path,
                 free_bytes=free_bytes,
                 exists=exists,
-                selected=selected,
+                selected=is_selected,
             )
         )
-    selected = tuple(str(option.path) for option in options if option.selected)
-    return DownloadTargetsState(options=tuple(options), selected_paths=selected)
+    selected_paths_tuple = tuple(str(option.path) for option in options if option.selected)
+    return DownloadTargetsState(options=tuple(options), selected_paths=selected_paths_tuple)
 
 
 def build_runner_command(

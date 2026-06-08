@@ -513,6 +513,13 @@ def _cuda_search_paths() -> list[str]:
         ):
             if not os.path.isdir(base):
                 continue
+            # ``base`` itself may be a CUDA toolkit root (typical for
+            # ``~/cuda`` where the user dropped the toolkit straight in).
+            # Without this check we'd skip past ``~/cuda/bin/nvcc`` because
+            # the child-enumeration below only matches ``cuda*`` names.
+            direct_nvcc = _nvcc_in_root(base)
+            if direct_nvcc:
+                add(direct_nvcc)
             try:
                 for entry in os.listdir(base):
                     full = os.path.join(base, entry)

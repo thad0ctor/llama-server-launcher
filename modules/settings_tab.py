@@ -69,6 +69,11 @@ class SettingsTab:
         self._venv_action_status_var = tk.StringVar(value="")
         self._venv_dependencies_frame = None
         self._venv_probe_after_id = None
+        # Drain callback id is tracked separately so ``teardown`` can cancel
+        # an in-flight drain. Without this, a probe that lands in the
+        # queue after the tab is torn down used to call
+        # ``_rebuild_dependency_rows`` against destroyed widgets.
+        self._venv_probe_drain_after_id = None
         self._venv_probe_results = queue.Queue()
         self._venv_probe_generation = 0
         self._venv_trace_token = self.venv_dir_var.trace_add(
@@ -86,13 +91,22 @@ class SettingsTab:
         ``venv_dir.set(...)``. Safe to call multiple times.
         """
         token = getattr(self, "_venv_trace_token", None)
-        if token is None:
-            return
-        try:
-            self.venv_dir_var.trace_remove("write", token)
-        except Exception:
-            pass
-        self._venv_trace_token = None
+        if token is not None:
+            try:
+                self.venv_dir_var.trace_remove("write", token)
+            except Exception:
+                pass
+            self._venv_trace_token = None
+        # Cancel any in-flight ``after()`` callbacks so they don't fire
+        # against destroyed widgets after teardown.
+        for attr in ("_venv_probe_after_id", "_venv_probe_drain_after_id"):
+            after_id = getattr(self, attr, None)
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     # ------------------------------------------------------------------ setup
     def setup_settings_tab(self, parent):
@@ -368,7 +382,22 @@ class SettingsTab:
             name="SettingsVenvProbe",
             daemon=True,
         ).start()
-        self.root.after(75, self._drain_venv_dependency_probe)
+        self._schedule_venv_probe_drain()
+
+    def _schedule_venv_probe_drain(self):
+        """Track the drain ``after()`` id so teardown can cancel it."""
+        prior = getattr(self, "_venv_probe_drain_after_id", None)
+        if prior is not None:
+            try:
+                self.root.after_cancel(prior)
+            except Exception:
+                pass
+        try:
+            self._venv_probe_drain_after_id = self.root.after(
+                75, self._drain_venv_dependency_probe
+            )
+        except tk.TclError:
+            self._venv_probe_drain_after_id = None
 
     def _probe_venv_dependencies_worker(self, generation, venv_dir):
         try:
@@ -378,6 +407,9 @@ class SettingsTab:
             self._venv_probe_results.put((generation, [], exc))
 
     def _drain_venv_dependency_probe(self):
+        # Clear the tracked id at the top so a fresh ``_schedule_venv_probe_drain``
+        # call doesn't get cancelled by ``teardown`` after we already started.
+        self._venv_probe_drain_after_id = None
         # Drain stale generations first; without this, a stale entry at the
         # head of the queue swallowed the scheduled drain and the *next*
         # (fresh) result sat in the queue forever, leaving the UI stuck on
@@ -388,10 +420,7 @@ class SettingsTab:
                 generation, statuses, error = self._venv_probe_results.get_nowait()
             except queue.Empty:
                 # Nothing matched yet — try again on the next tick.
-                try:
-                    self.root.after(75, self._drain_venv_dependency_probe)
-                except tk.TclError:
-                    pass
+                self._schedule_venv_probe_drain()
                 return
             if generation == self._venv_probe_generation:
                 break

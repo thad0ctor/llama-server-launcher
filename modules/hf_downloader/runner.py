@@ -37,10 +37,14 @@ def _extract_file_size(info) -> int | None:
 def _classify(path: str) -> str:
     path_l = path.lower()
     name = Path(path_l).name
-    if path_l.endswith(".gguf"):
-        return "gguf"
+    # Check ``mmproj`` BEFORE generic ``.gguf`` — multimodal projector files
+    # like ``mmproj-model-f16.gguf`` end in ``.gguf`` too, and downstream
+    # logic that trusts the emitted ``kind`` needs to see them as
+    # ``mmproj`` rather than ordinary weight shards.
     if "mmproj" in name:
         return "mmproj"
+    if path_l.endswith(".gguf"):
+        return "gguf"
     if path_l.endswith((".safetensors", ".bin", ".pt", ".pth")):
         return "weights"
     if name.endswith((".json", ".txt", ".model")):

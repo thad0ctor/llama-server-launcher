@@ -2254,13 +2254,13 @@ class BuildTab:
 
     def _apply_loaded_config(self, cfg: BuildConfig) -> None:
         self._suspend_traces = True
-        # Also block the backend-dir mirror cascade so that loading a saved
-        # config to inspect/edit it doesn't silently overwrite the
-        # launcher's persistent backend root directories (``llama_cpp_dir``
-        # / ``ik_llama_dir`` and the corresponding ``last_*_dir`` settings).
-        # That write should only happen at Start build time, not on Load.
-        previous_syncing = self._syncing_backend_dirs
-        self._syncing_backend_dirs = True
+        # Loading a saved Build config IS expected to propagate the recorded
+        # source/build dirs through the normal Build↔Main mirror so the user
+        # sees the loaded paths in the Main tab and ``app_settings`` reflects
+        # the new ``last_*_dir`` values. The mirror is the same one exercised
+        # by direct edits to ``var_source_dir`` (tests:
+        # ``test_build_source_updates_active_main_root_dir`` and
+        # ``test_build_source_updates_selected_backend_root``).
         try:
             self.var_backend.set(cfg.backend)
             self.var_source_dir.set(cfg.source_dir)
@@ -2314,7 +2314,6 @@ class BuildTab:
             self._sync_flag_widgets_from_values()
         finally:
             self._suspend_traces = False
-            self._syncing_backend_dirs = previous_syncing
         # Defer the rebuild — this method is called from a button command.
         # Use full rebuild because a loaded config may have changed
         # ui_state preferences that affect non-flag sections.

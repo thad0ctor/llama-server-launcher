@@ -265,7 +265,14 @@ def build_bootstrap_venv_command(
         platform=platform,
     )
     python_path = venv_python_candidates(target, platform=platform)[0]
-    install_list = dependencies or required_managed_dependencies()
+    # An explicit ``dependencies=()`` (or ``[]``) must be honored as "no
+    # managed installs" — using ``or`` collapsed empty tuples to the
+    # required-deps default and silently overrode the caller's intent.
+    install_list = (
+        required_managed_dependencies()
+        if dependencies is None
+        else dependencies
+    )
     packages = [dep.install_name or dep.package_name for dep in install_list]
     upgrade_pip_cmd = _shell_join(
         [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],

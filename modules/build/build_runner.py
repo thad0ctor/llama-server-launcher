@@ -84,6 +84,11 @@ class BuildPlan:
 
 def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Path]:
     """Resolve source/build paths and reject directories unsafe to delete."""
+    # Reject empty inputs before resolving; ``Path("").expanduser()`` becomes
+    # ``Path(".")``, which would have the runner / saved script silently
+    # operating on the process CWD.
+    if not str(source_dir).strip():
+        raise ValueError("source_dir is empty; refusing to operate.")
     if not str(build_dir).strip():
         raise ValueError("build_dir is empty; refusing to operate.")
 
@@ -492,20 +497,33 @@ class BuildRunner:
         \\n boundaries and emitted as separate lines.
         """
         try:
-            popen_kwargs: dict[str, object] = {
-                "cwd": cwd,
-                "env": env,
-                "stdin": subprocess.DEVNULL,  # prevent git/credential prompts from blocking the build forever
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.STDOUT,
-                "bufsize": 0,         # raw mode; we do our own buffering below
-            }
+            # Build the Popen call with explicit, typed kwargs (rather
+            # than ``**dict[str, object]``) so mypy can match the overload.
+            # ``stdin=DEVNULL`` prevents git/credential prompts from blocking
+            # the build forever; ``bufsize=0`` keeps reads raw so we can do
+            # our own line splitting below.
             if os.name == "nt":
-                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # type: ignore[attr-defined]
+                )
             else:
-                popen_kwargs["start_new_session"] = True
-
-            proc = subprocess.Popen(cmd, **popen_kwargs)
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                    start_new_session=True,
+                )
         except FileNotFoundError as exc:
             # _run is the sole emitter of terminal events; here we only emit
             # a diagnostic line and return a non-zero rc so _run can decide.

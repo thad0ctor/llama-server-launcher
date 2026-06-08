@@ -555,7 +555,17 @@ class HuggingFaceDownloaderTab:
             messagebox.showerror("No files selected", "Select at least one file or switch to repo snapshot mode.")
             return
         try:
-            max_workers = max(1, int(self.max_workers_var.get().strip() or "4"))
+            # Clamp to BOTH ends of the configured range. The keystroke
+            # validator (``_validate_max_workers``) already enforces this
+            # for new input, but a value persisted before that validator
+            # existed could be arbitrarily high — bypass that and we'd
+            # spawn ``parsed_workers`` parallel downloads with no upper
+            # bound.
+            parsed_workers = int(self.max_workers_var.get().strip() or "4")
+            max_workers = max(
+                self._MAX_WORKERS_FLOOR,
+                min(self._MAX_WORKERS_CEILING, parsed_workers),
+            )
         except ValueError:
             messagebox.showerror("Invalid workers", "Max workers must be a positive integer.")
             return
