@@ -856,6 +856,10 @@ class LlamaCppLauncher:
         self.n_cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to mmproj_enabled to update default config name if needed
         self.mmproj_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Also re-run the mmproj selection UI refresh whenever the checkbox
+        # is toggled so the dropdown appears/disappears in lock-step with
+        # the checkbox state (visible only when auto-detection is enabled).
+        self.mmproj_enabled.trace_add("write", lambda *args: self._refresh_mmproj_selection())
         self.jinja_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -3382,9 +3386,36 @@ class LlamaCppLauncher:
             return []
 
     def _refresh_mmproj_selection(self, model_path_str=None):
-        """Updates mmproj selection UI and selected path for the active model."""
+        """Updates mmproj selection UI and selected path for the active model.
+
+        Visibility rules:
+          * Checkbox OFF → dropdown + label hidden; no ``--mmproj`` emitted
+            (gated in ``modules/launch.py``); selection cleared so a later
+            re-enable starts from a known state.
+          * Checkbox ON + no candidates → dropdown hidden, status notes
+            none were detected for the model dir.
+          * Checkbox ON + ≥1 candidate → dropdown always visible so the
+            user can override the auto-pick (previously the dropdown only
+            appeared when multiple candidates existed, leaving the user
+            no UI hook to override the single-candidate auto-pick).
+        """
         if model_path_str is None:
             model_path_str = self.model_path.get().strip()
+
+        # Checkbox gating short-circuit. When auto-mmproj is disabled, the
+        # downstream emission path skips ``--mmproj`` regardless, so we
+        # tear down the selector UI to make that obvious.
+        if not self.mmproj_enabled.get():
+            self.mmproj_candidates = []
+            self.mmproj_display_to_path = {}
+            self.mmproj_selector_var.set("")
+            self.selected_mmproj_path.set("")
+            self.mmproj_status_var.set("Automatic mmproj detection disabled.")
+            if hasattr(self, "mmproj_selector_label"):
+                self.mmproj_selector_label.grid_remove()
+            if hasattr(self, "mmproj_selector_combo"):
+                self.mmproj_selector_combo.grid_remove()
+            return
 
         self.mmproj_candidates = self._find_mmproj_candidates_for_model(model_path_str)
         self.mmproj_display_to_path = {}
@@ -3426,14 +3457,21 @@ class LlamaCppLauncher:
                 break
         self.mmproj_selector_var.set(selected_display)
 
+        # Always surface the dropdown when the checkbox is on so the user
+        # can override the auto-pick — including the single-candidate case
+        # which previously had no UI for overriding.
+        self.mmproj_selector_label.grid()
+        self.mmproj_selector_combo.grid()
         if len(self.mmproj_candidates) > 1:
-            self.mmproj_status_var.set(f"Multiple mmproj files found ({len(self.mmproj_candidates)}). Select one.")
-            self.mmproj_selector_label.grid()
-            self.mmproj_selector_combo.grid()
+            self.mmproj_status_var.set(
+                f"Multiple mmproj files found ({len(self.mmproj_candidates)}). "
+                f"Currently using: {Path(selected_path).name}. Override below if needed."
+            )
         else:
-            self.mmproj_status_var.set(f"Using mmproj: {self.mmproj_candidates[0].name}")
-            self.mmproj_selector_label.grid_remove()
-            self.mmproj_selector_combo.grid_remove()
+            self.mmproj_status_var.set(
+                f"Auto-detected mmproj: {self.mmproj_candidates[0].name}. "
+                f"Override below if needed."
+            )
 
     def _on_mmproj_selected(self, event=None):
         """Stores the selected mmproj path from the dropdown."""
