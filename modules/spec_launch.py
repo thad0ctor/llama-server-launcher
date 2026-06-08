@@ -379,12 +379,29 @@ def _resolve_draft_device_value(launcher):
     # detected we keep the list (the "no filter" pass-through below stays
     # the documented escape hatch for hand-edited configs).
     if detected_count > 0:
-        valid_draft_indices = [d for d in draft_indices if 0 <= d < detected_count]
-        if valid_draft_indices != draft_indices:
+        # Coerce persisted entries to int FIRST. JSON round-trips that hit
+        # ``json.loads`` on hand-edited files can leave string ints like
+        # ``"1"`` in the list; the old ``0 <= d < detected_count`` check
+        # would TypeError on those and crash the whole launch. Drop
+        # anything that can't be coerced (with a warning so the user can
+        # see why their selection shrunk).
+        valid_draft_indices: list[int] = []
+        skipped: list = []
+        for raw_idx in draft_indices:
+            try:
+                idx = int(raw_idx)
+            except (TypeError, ValueError):
+                skipped.append(raw_idx)
+                continue
+            if 0 <= idx < detected_count:
+                valid_draft_indices.append(idx)
+            else:
+                skipped.append(raw_idx)
+        if skipped:
             print(
-                f"WARNING: spec_draft_selected_gpus contained indices outside "
-                f"[0, {detected_count}); dropping out-of-range entries: "
-                f"{sorted(set(draft_indices) - set(valid_draft_indices))}",
+                f"WARNING: spec_draft_selected_gpus contained entries outside "
+                f"[0, {detected_count}) or not coercible to int; dropping: "
+                f"{skipped}",
                 file=sys.stderr,
             )
         draft_indices = valid_draft_indices

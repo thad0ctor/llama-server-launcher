@@ -1321,15 +1321,28 @@ class LaunchManager:
                             fh.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Add exit code on failure and pause
 
                         else:
-                            # Format warning message with all checked paths
+                            # Same hardening as the activate line above: emit
+                            # the venv/path strings as PS single-quoted
+                            # literals so ``$env:TEMP`` or ``$(...)`` in the
+                            # path text can't be expanded when the saved
+                            # script runs.
                             checked_paths = [str(p) for p in possible_scripts]
-                            fh.write(f'Write-Warning "Virtual environment activation script not found in venv: {venv}"\n')
-                            fh.write(f'Write-Warning "Checked locations: {", ".join(checked_paths)}"\n')
+                            warning_msg = (
+                                f"Virtual environment activation script not found in venv: {venv}"
+                            )
+                            checked_msg = f"Checked locations: {', '.join(checked_paths)}"
+                            fh.write(
+                                f"Write-Warning '{self._ps_escape_single_quoted(warning_msg)}'\n"
+                            )
+                            fh.write(
+                                f"Write-Warning '{self._ps_escape_single_quoted(checked_msg)}'\n"
+                            )
                             fh.write('Write-Warning "Note: PowerShell scripts work on Windows, Linux, and macOS with PowerShell Core installed."\n\n')
                     except Exception as path_ex:
-                         # Format path for warning message
-                         warn_venv_path = venv.replace("'", "''")
-                         fh.write(f'Write-Warning "Could not process venv path \'{warn_venv_path}\': {path_ex}"\n\n')
+                        warn_msg = f"Could not process venv path '{venv}': {path_ex}"
+                        fh.write(
+                            f"Write-Warning '{self._ps_escape_single_quoted(warn_msg)}'\n\n"
+                        )
 
                 fh.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
@@ -1454,20 +1467,36 @@ class LaunchManager:
                             activate_script = venv_path / "Scripts" / "activate"
 
                         if activate_script.exists():
-                            fh.write(f'echo "Activating virtual environment: {venv}"\n')
                             # Use ``shlex.quote`` (POSIX single-quote form)
-                            # so the saved script doesn't expand ``$HOME``,
-                            # backticks, or ``$(...)`` from the venv path
-                            # at run time — ``launch_server`` already does
-                            # this; the saved script must source the SAME
-                            # activator literally.
+                            # for EVERY user-controlled path that ends up
+                            # in the saved bash script. Without this, the
+                            # "Activating…", "Warning…" and exception echo
+                            # lines used to interpolate the raw venv text
+                            # into double-quoted bash strings, so a path
+                            # containing ``$VAR``/``$(...)``/backticks
+                            # would be evaluated when the saved script
+                            # ran — i.e. before the safe ``source`` line.
                             quoted_activate_path = shlex.quote(str(activate_script))
+                            activating_msg = shlex.quote(
+                                f"Activating virtual environment: {venv}"
+                            )
+                            fh.write(f"printf '%s\\n' {activating_msg}\n")
                             fh.write(f'source {quoted_activate_path} || {{ echo "Failed to activate venv"; exit 1; }}\n\n')
                         else:
-                            fh.write(f'echo "Warning: Virtual environment activation script not found at: {activate_script}"\n')
-                            fh.write(f'echo "Also checked: {venv_path / "bin" / "activate"} and {venv_path / "Scripts" / "activate"}"\n\n')
+                            warn_msg = shlex.quote(
+                                f"Warning: Virtual environment activation script not found at: {activate_script}"
+                            )
+                            also_msg = shlex.quote(
+                                f"Also checked: {venv_path / 'bin' / 'activate'} "
+                                f"and {venv_path / 'Scripts' / 'activate'}"
+                            )
+                            fh.write(f"printf '%s\\n' {warn_msg}\n")
+                            fh.write(f"printf '%s\\n' {also_msg}\n\n")
                     except Exception as path_ex:
-                         fh.write(f'echo "Warning: Could not process venv path \'{venv}\': {path_ex}"\n\n')
+                        exc_msg = shlex.quote(
+                            f"Warning: Could not process venv path '{venv}': {path_ex}"
+                        )
+                        fh.write(f"printf '%s\\n' {exc_msg}\n\n")
 
                 # Get backend information for script header
                 backend = self.launcher.backend_selection.get()

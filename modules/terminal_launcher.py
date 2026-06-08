@@ -143,7 +143,22 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write("#!/bin/bash\n")
-                fh.write(f"trap 'rm -f {shlex.quote(script_path)}' EXIT\n")
+                # Embedding ``shlex.quote(script_path)`` inside an outer
+                # single-quoted ``trap '...'`` string breaks the moment
+                # the path contains a single quote — ``shlex.quote``
+                # emits ``'foo'\''bar'`` which ends the outer trap quote
+                # mid-sequence. ``tempfile.mkstemp`` doesn't normally
+                # produce such paths today, but defending the boundary
+                # is cheap: assign the path to a shell variable first
+                # (single-quoted by Python — and ``shlex.quote`` already
+                # handles arbitrary content there), then reference the
+                # variable inside the trap body with double-quoted
+                # expansion. The trap body is a single-quoted string so
+                # ``$LLAMA_LAUNCHER_SCRIPT_PATH`` survives until trap fires.
+                fh.write(
+                    f"LLAMA_LAUNCHER_SCRIPT_PATH={shlex.quote(script_path)}\n"
+                )
+                fh.write('trap \'rm -f "$LLAMA_LAUNCHER_SCRIPT_PATH"\' EXIT\n')
                 fh.write(bash_payload)
                 fh.write("\n")
             os.chmod(script_path, 0o755)

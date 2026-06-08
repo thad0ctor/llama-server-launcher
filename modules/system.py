@@ -55,12 +55,16 @@ if _INHERITED_CUDA_VISIBLE_DEVICES is not None:
         file=sys.stderr,
     )
 
-# Add debug prints for Python environment
-print("\n=== Python Environment Debug Info ===", file=sys.stderr)
-print(f"Python executable: {sys.executable}", file=sys.stderr)
-print(f"Python version: {sys.version}", file=sys.stderr)
-print(f"sys.path: {sys.path}", file=sys.stderr)
-print("===================================\n", file=sys.stderr)
+# Optional debug prints for Python environment. Gated behind an explicit
+# env flag because the unconditional dump (a) leaks usernames / home paths
+# into stderr on every import and (b) clutters non-debug output. Set
+# ``LLAMA_LAUNCHER_DEBUG_ENV=1`` to re-enable.
+if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+    print("\n=== Python Environment Debug Info ===", file=sys.stderr)
+    print(f"Python executable: {sys.executable}", file=sys.stderr)
+    print(f"Python version: {sys.version}", file=sys.stderr)
+    print(f"sys.path: {sys.path}", file=sys.stderr)
+    print("===================================\n", file=sys.stderr)
 
 # Torch is intentionally imported lazily. Importing the module and especially
 # calling torch.cuda.is_available() can initialize CUDA on the Tk main thread
