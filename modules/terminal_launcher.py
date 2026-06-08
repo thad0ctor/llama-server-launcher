@@ -69,28 +69,48 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         env_terminal_raw = os.environ.get("TERMINAL", "").strip()
         # ``$TERMINAL`` is conventionally a name (``gnome-terminal``), but
         # users sometimes set it to an absolute path
-        # (``/usr/local/bin/gnome-terminal``). Look up our argument template
-        # by the basename so a path-form $TERMINAL still gets the right
-        # ``-- bash -lc`` / ``--hold -e ...`` form instead of falling
-        # through to the safe-default ``-e`` invocation.
-        env_terminal = Path(env_terminal_raw).name if env_terminal_raw else ""
-        ordered_names: list[str] = []
-        if env_terminal:
-            ordered_names.append(env_terminal)
-        ordered_names.append("x-terminal-emulator")
-        ordered_names.extend(["gnome-terminal", "konsole", "xfce4-terminal", "xterm"])
+        # (``/opt/homebrew/bin/kitty``). Use TWO values per entry:
+        #   * launch name  – passed to ``shutil.which`` / used directly
+        #     when absolute. Without this, a user-set
+        #     ``TERMINAL=/opt/homebrew/bin/kitty`` was stripped to
+        #     ``"kitty"`` and ``shutil.which`` then looked it up on PATH,
+        #     ignoring the user's explicit choice if PATH didn't have it.
+        #   * arg-template key – basename used to look up
+        #     ``emulator_args`` so a path-form $TERMINAL still gets the
+        #     right ``-- bash -lc`` / ``--hold -e ...`` form instead of
+        #     falling through to the safe-default ``-e``.
+        env_terminal_key = Path(env_terminal_raw).name if env_terminal_raw else ""
+        ordered_terms: list[tuple[str, str]] = []
+        if env_terminal_raw:
+            ordered_terms.append(
+                (env_terminal_raw, env_terminal_key or env_terminal_raw)
+            )
+        ordered_terms.extend(
+            [
+                ("x-terminal-emulator", "x-terminal-emulator"),
+                ("gnome-terminal", "gnome-terminal"),
+                ("konsole", "konsole"),
+                ("xfce4-terminal", "xfce4-terminal"),
+                ("xterm", "xterm"),
+            ]
+        )
         seen: set[str] = set()
-        for terminal_name in ordered_names:
+        for terminal_name, terminal_key in ordered_terms:
             if terminal_name in seen:
                 continue
             seen.add(terminal_name)
-            terminal_path = shutil.which(terminal_name)
+            if os.path.isabs(terminal_name):
+                terminal_path = (
+                    terminal_name if Path(terminal_name).exists() else None
+                )
+            else:
+                terminal_path = shutil.which(terminal_name)
             if terminal_path is None:
                 continue
             # An emulator not in our argument map (e.g. user-set $TERMINAL
             # pointing at something exotic) gets a safe default of ``-e``.
             args = emulator_args.get(
-                terminal_name, ["-e", "bash", "-lc", term_command]
+                terminal_key, ["-e", "bash", "-lc", term_command]
             )
             subprocess.Popen([str(Path(terminal_path).resolve()), *args], cwd=cwd_text)
             return

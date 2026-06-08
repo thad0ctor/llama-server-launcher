@@ -150,7 +150,14 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
     Never raises.
     """
     status = UpstreamStatus()
-    src = Path(source_dir or "")
+    # Refuse to fall through to ``Path(".")`` when no source has been
+    # configured. Without this guard, running the launcher from inside a
+    # git checkout would silently probe (and even ``git fetch``) the
+    # current working directory repo and surface its upstream state in
+    # the Build tab's update banner.
+    if not str(source_dir or "").strip():
+        return status
+    src = Path(source_dir)
     # .git can be a directory (regular repo) or a regular file (worktree /
     # submodule). exists() covers both.
     if not src.is_dir() or not (src / ".git").exists():

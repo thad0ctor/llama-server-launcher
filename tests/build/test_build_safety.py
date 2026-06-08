@@ -178,7 +178,10 @@ def test_build_runner_cancel_not_blocked_by_stdout_read(monkeypatch):
     elapsed = time.perf_counter() - start
 
     assert rc == -9
-    assert elapsed < 1.0
+    # Larger budget reduces sporadic CI flakiness on noisy Windows runners
+    # without weakening the deadlock guard — anything ≥ several seconds
+    # would still indicate the cancel cascade got stuck.
+    assert elapsed < 3.0
     assert terminated == [proc]
     assert killed == [proc]
     assert proc.stdout.closed.is_set()

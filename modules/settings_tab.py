@@ -535,6 +535,28 @@ class SettingsTab:
                 "state if the system python has changed. Proceed anyway?",
             ):
                 return
+        elif info.exists:
+            # Target exists but isn't a venv — ``python -m venv`` will
+            # happily drop ``bin/``, ``lib/``, and ``pyvenv.cfg`` into the
+            # existing folder, mixing venv files into whatever was already
+            # there. The Remove venv flow then refuses to clean it up
+            # (looks_like_venv stays False because of the foreign files).
+            # Require explicit confirmation if the folder is non-empty.
+            try:
+                has_contents = any(info.effective_dir.iterdir())
+            except OSError:
+                # If we can't list it, err on the safe side: prompt.
+                has_contents = True
+            if has_contents and not messagebox.askyesno(
+                "Create venv",
+                "The selected directory already exists and is not a "
+                "virtual environment:\n\n"
+                f"{info.effective_dir}\n\n"
+                "Creating a venv here will mix venv files into that folder, "
+                "and Remove venv will later refuse to clean it up. "
+                "Proceed anyway?",
+            ):
+                return
         try:
             info.effective_dir.parent.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
@@ -611,6 +633,10 @@ class SettingsTab:
         # window doesn't try to ``after_cancel`` a callback that's already
         # firing.
         self._venv_remove_refresh_after_id = None
+        # Refresh the summary too — without this, the "Virtual environment
+        # detected." label stays stuck even after the directory was deleted
+        # in another terminal, until the user manually edits the path.
+        self._refresh_venv_summary()
         self._schedule_venv_dependency_probe()
 
     def _on_install_dependency(self, dependency):

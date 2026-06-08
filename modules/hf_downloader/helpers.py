@@ -131,6 +131,19 @@ def parse_pattern_lines(raw: str) -> tuple[str, ...]:
     return tuple(rows)
 
 
+def _validate_repo_id(repo_id: str) -> None:
+    """Reject repo ids with characters that would break the
+    ``target_dir / repo_id`` materialization downstream on Windows. Called
+    from every ``normalize_repo_input`` branch so all input shapes
+    (``hf://``, bare, ``https://``) reject the same set consistently.
+    """
+    if any(ch in repo_id for ch in '<>:"|?*'):
+        raise ValueError(
+            f"Repo ID {repo_id!r} contains characters that are not legal on "
+            "Windows filesystems; check the URL for stray text."
+        )
+
+
 def normalize_repo_input(raw: str) -> ParsedRepoInput:
     """Normalize a model repo input field into repo id + revision hint."""
     text = (raw or "").strip()
@@ -154,7 +167,9 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
             )
         if len(parts) < 2:
             raise ValueError("Repo input must include both owner and repo name.")
-        return ParsedRepoInput(repo_id="/".join(parts[:2]))
+        repo_id = "/".join(parts[:2])
+        _validate_repo_id(repo_id)
+        return ParsedRepoInput(repo_id=repo_id)
 
     if "://" not in text:
         parts = [part for part in text.split("/") if part]
@@ -170,7 +185,9 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
             )
         if len(parts) < 2:
             raise ValueError("Repo input must include both owner and repo name.")
-        return ParsedRepoInput(repo_id="/".join(parts[:2]))
+        repo_id = "/".join(parts[:2])
+        _validate_repo_id(repo_id)
+        return ParsedRepoInput(repo_id=repo_id)
 
     parsed = urlparse(text)
     if parsed.netloc not in {"huggingface.co", "www.huggingface.co"}:
@@ -195,14 +212,7 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
     if len(parts) < 2:
         raise ValueError("Repo URL must include both owner and repo name.")
     repo_id = "/".join(parts[:2])
-    # Repo IDs containing path separators / drive letters / illegal Windows
-    # filename chars would break the target_dir / repo_id materialization
-    # downstream. Reject early.
-    if any(ch in repo_id for ch in '<>:"|?*'):
-        raise ValueError(
-            f"Repo ID {repo_id!r} contains characters that are not legal on "
-            "Windows filesystems; check the URL for stray text."
-        )
+    _validate_repo_id(repo_id)
     revision_hint = ""
     if len(parts) >= 4 and parts[2] in {"tree", "blob"}:
         remainder = parts[3:]

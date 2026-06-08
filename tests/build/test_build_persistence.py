@@ -24,9 +24,20 @@ assert "modules.build.build_tab" in sys.modules
     # Pin cwd to the repo root so the child can import ``modules`` regardless
     # of where pytest was launched from. Previously this depended on the
     # parent process CWD, which broke when running from outside the repo.
-    result = subprocess.run([sys.executable, "-c", code], text=True, cwd=_REPO_ROOT)
+    # Capture output so an import traceback in the child surfaces in the
+    # failure message instead of silently producing an opaque ``rc != 0``.
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        text=True,
+        cwd=_REPO_ROOT,
+        capture_output=True,
+    )
 
-    assert result.returncode == 0
+    assert result.returncode == 0, (
+        f"child exited rc={result.returncode}\n"
+        f"--- stdout ---\n{result.stdout}\n"
+        f"--- stderr ---\n{result.stderr}"
+    )
 
 
 def test_build_config_bool_fields_parse_persisted_strings():

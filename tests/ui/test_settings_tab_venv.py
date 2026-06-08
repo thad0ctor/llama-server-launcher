@@ -87,12 +87,29 @@ def test_create_venv_uses_default_repo_path_when_blank(settings_tab, monkeypatch
     error_mock.assert_not_called()
 
 
-def test_remove_venv_requires_existing_directory(settings_tab, monkeypatch):
+def _managed_dep(key):
+    """Find a ``ManagedDependency`` by its stable ``key`` field.
+
+    Indexing ``MANAGED_DEPENDENCIES`` by position (``[0]``, ``[3]``…) used
+    to be brittle: adding/reordering dependencies silently rewired which
+    test exercised which package without surfacing as a test failure.
+    """
+    for dep in venv_manager.MANAGED_DEPENDENCIES:
+        if dep.key == key:
+            return dep
+    raise AssertionError(f"no managed dependency named {key!r}")
+
+
+def test_remove_venv_requires_existing_directory(settings_tab, monkeypatch, tmp_path):
     info_mock = MagicMock()
     launch_mock = MagicMock()
     monkeypatch.setattr("modules.settings_tab.messagebox.showinfo", info_mock)
     monkeypatch.setattr(terminal_launcher, "open_command_in_terminal", launch_mock)
-    settings_tab.venv_dir_var.set("/tmp/does-not-exist")
+    # Use the test's own tmp_path so this test isn't coupled to whatever
+    # the runner's ``/tmp/does-not-exist`` happens to be on a given CI
+    # image (a leftover from a prior failing run could exist).
+    missing = tmp_path / "does-not-exist"
+    settings_tab.venv_dir_var.set(str(missing))
 
     settings_tab._on_remove_venv()
 
@@ -124,7 +141,7 @@ def test_remove_venv_opens_terminal_after_confirmation(settings_tab, monkeypatch
 
 
 def test_install_dependency_requires_detected_venv(settings_tab, monkeypatch):
-    dep = venv_manager.MANAGED_DEPENDENCIES[0]
+    dep = _managed_dep("requests")
     error_mock = MagicMock()
     launch_mock = MagicMock()
     monkeypatch.setattr("modules.settings_tab.messagebox.showerror", error_mock)
@@ -143,7 +160,7 @@ def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monke
     bindir.mkdir(parents=True)
     python = bindir / "python"
     python.write_text("", encoding="utf-8")
-    dep = venv_manager.MANAGED_DEPENDENCIES[3]
+    dep = _managed_dep("huggingface_hub")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
     monkeypatch.setattr("modules.settings_tab.messagebox.showerror", MagicMock())
@@ -164,7 +181,7 @@ def test_remove_dependency_opens_terminal_for_existing_venv(settings_tab, monkey
     bindir.mkdir(parents=True)
     python = bindir / "python"
     python.write_text("", encoding="utf-8")
-    dep = venv_manager.MANAGED_DEPENDENCIES[2]
+    dep = _managed_dep("psutil")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
     monkeypatch.setattr("modules.settings_tab.messagebox.showerror", MagicMock())
@@ -178,7 +195,7 @@ def test_remove_dependency_opens_terminal_for_existing_venv(settings_tab, monkey
 
 
 def test_format_dependency_status_includes_version_and_torch_note():
-    dep = venv_manager.MANAGED_DEPENDENCIES[1]
+    dep = _managed_dep("torch")
     status = venv_manager.DependencyStatus(
         dependency=dep,
         available=True,
@@ -198,12 +215,12 @@ def test_dependency_buttons_follow_installed_state(settings_tab):
     settings_tab._current_active_venv_path = lambda: "/tmp/test-venv"
     statuses = [
         venv_manager.DependencyStatus(
-            dependency=venv_manager.MANAGED_DEPENDENCIES[0],
+            dependency=_managed_dep("requests"),
             available=True,
             version="2.32.0",
         ),
         venv_manager.DependencyStatus(
-            dependency=venv_manager.MANAGED_DEPENDENCIES[1],
+            dependency=_managed_dep("torch"),
             available=False,
             error="not installed",
         ),

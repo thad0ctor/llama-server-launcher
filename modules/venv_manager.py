@@ -307,9 +307,10 @@ def build_install_dependency_command(
     platform: str | None = None,
 ) -> str:
     """Return a shell command that installs ``dependency`` into ``venv_dir``."""
-    python = locate_venv_python(venv_dir, platform=platform)
+    target = resolve_venv_dir(str(venv_dir), repo_dir=launcher_repo_dir())
+    python = locate_venv_python(target, platform=platform)
     if python is None:
-        python = venv_python_candidates(venv_dir, platform=platform)[0]
+        python = venv_python_candidates(target, platform=platform)[0]
     pkg = dependency.install_name or dependency.package_name
     args = [str(python), "-m", "pip", "install", pkg]
     return _shell_join(args, platform=platform)
@@ -322,9 +323,10 @@ def build_remove_dependency_command(
     platform: str | None = None,
 ) -> str:
     """Return a shell command that uninstalls ``dependency`` from ``venv_dir``."""
-    python = locate_venv_python(venv_dir, platform=platform)
+    target = resolve_venv_dir(str(venv_dir), repo_dir=launcher_repo_dir())
+    python = locate_venv_python(target, platform=platform)
     if python is None:
-        python = venv_python_candidates(venv_dir, platform=platform)[0]
+        python = venv_python_candidates(target, platform=platform)[0]
     args = [str(python), "-m", "pip", "uninstall", "-y", dependency.package_name]
     return _shell_join(args, platform=platform)
 
@@ -344,18 +346,15 @@ def build_remove_venv_command(
     raw = str(venv_dir or "")
     if not raw.strip():
         raise ValueError("Refusing to remove an empty venv path.")
-    target_path = Path(raw).expanduser()
-    # Resolve the target before comparing — the literal-only check used to
-    # let dangerous aliases through:
-    #   - ``"."`` and ``".."`` against a non-resolved ``Path(".")`` only
-    #     matched the exact literal, missing ``"./"``, ``"foo/.."``, etc.
-    #   - ``~`` would expand to a real path that bypassed the literal
-    #     guard but the resolved path equals ``Path.home()`` — exactly the
-    #     thing we want to refuse.
+    # ``resolve_venv_dir`` applies the module's repo-relative + expanduser
+    # normalization, so a relative entry like ``"venv"`` or ``"~/.venvs/x"``
+    # resolves the same way the rest of the module sees it. The safety
+    # check below then compares the resolved Path against cwd / home /
+    # repo / filesystem root — all the targets we refuse to ``rm -rf``.
     try:
-        resolved_target = target_path.resolve(strict=False)
+        resolved_target = resolve_venv_dir(raw, repo_dir=launcher_repo_dir())
     except OSError:
-        resolved_target = target_path
+        resolved_target = Path(raw).expanduser()
     try:
         cwd_resolved = Path.cwd().resolve(strict=False)
     except OSError:

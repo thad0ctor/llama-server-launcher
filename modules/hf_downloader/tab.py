@@ -481,7 +481,16 @@ class HuggingFaceDownloaderTab:
             self._dep_watch_venv = None
             return
         if time.monotonic() > self._dep_watch_deadline:
+            # Deadline crossed between poll ticks — close the watch with a
+            # visible status so the panel doesn't stay stuck on the earlier
+            # "Waiting for it to appear…" message. Mirrors the timeout
+            # branch in ``_on_dependency_probe_result``.
+            self.status_var.set(
+                "Timed out waiting for huggingface_hub to appear. "
+                "Refresh deps to probe again."
+            )
             self._dep_watch_venv = None
+            self._refresh_runtime_state()
             return
         dep = self._huggingface_dependency()
 

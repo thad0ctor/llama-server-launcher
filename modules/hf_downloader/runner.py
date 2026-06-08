@@ -164,6 +164,20 @@ def _build_progress_tqdm_class():  # pragma: no cover - exercised indirectly
     return _ProgressTqdm
 
 
+def _normalize_path_list(value) -> list[Path]:
+    """Coerce a payload field to ``list[Path]`` at the runner boundary.
+
+    Same rationale as ``_normalize_pattern_list``: a CLI/manual payload
+    with ``"target_dirs": "/models"`` would otherwise iterate
+    character-by-character and create junk single-letter directories.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, Path)):
+        value = [value]
+    return [Path(item) for item in value if isinstance(item, (str, Path)) and str(item)]
+
+
 def _normalize_pattern_list(value) -> list[str]:
     """Coerce a payload field to ``list[str]`` at the runner boundary.
 
@@ -198,7 +212,7 @@ def run_download(payload: dict) -> int:
     token = _token_value(payload)
     allow_patterns = _combined_allow_patterns(payload)
     ignore_patterns = _normalize_pattern_list(payload.get("ignore_patterns")) or None
-    target_dirs = [Path(path) for path in payload.get("target_dirs") or []]
+    target_dirs = _normalize_path_list(payload.get("target_dirs"))
     # Validate + clamp at the runner boundary. The UI clamps too, but this
     # module is also reachable via ``python -m modules.hf_downloader.runner
     # download <payload.json>`` from the CLI, where a hand-written payload
