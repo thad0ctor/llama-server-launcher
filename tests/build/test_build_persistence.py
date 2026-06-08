@@ -141,19 +141,16 @@ def test_build_config_round_trip_through_disk_preserves_every_field(tmp_path):
     cfg_out = reloaded_store.get("round-trip-A")
 
     assert cfg_out is not None, "saved config did not survive reload"
-    # ``created_at`` / ``last_used_at`` may be mutated by the store on
-    # save (timestamp injection). Compare everything else exactly, then
-    # check those two are non-empty strings.
-    excluded = {"created_at", "last_used_at"}
+    # ``BuildConfigStore.save`` only fills the timestamps when they are
+    # blank, so a pre-populated ``cfg_in`` should round-trip them
+    # verbatim. Compare every field (including ``created_at`` /
+    # ``last_used_at``) exactly so any regression that mutates a populated
+    # timestamp on save surfaces here.
     for field in dataclasses.fields(BuildConfig):
-        if field.name in excluded:
-            continue
         assert getattr(cfg_out, field.name) == getattr(cfg_in, field.name), (
             f"field {field.name!r} did not round-trip: "
             f"in={getattr(cfg_in, field.name)!r} out={getattr(cfg_out, field.name)!r}"
         )
-    assert isinstance(cfg_out.created_at, str) and cfg_out.created_at
-    assert isinstance(cfg_out.last_used_at, str) and cfg_out.last_used_at
 
 
 def test_build_config_round_trip_two_configs_in_same_file(tmp_path):

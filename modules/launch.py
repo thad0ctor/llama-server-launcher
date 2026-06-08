@@ -748,15 +748,17 @@ class LaunchManager:
 
     @staticmethod
     def _ps_quote_arg(arg):
-        """Quote a single command-line argument for a PowerShell command line.
+        """Quote a single command-line argument as a PowerShell literal.
 
-        Uses double quotes and escapes internal double quotes by doubling them
-        (the convention PS expects when an arg is passed to a native exe), and
-        escapes backticks by doubling them first so they don't double-escape
-        into literal backticks.
+        Uses a SINGLE-quoted PS literal (with embedded single quotes
+        doubled, ``'`` → ``''``). Earlier this used double quotes plus
+        backtick-escaping, but PS double-quoted strings still expand
+        ``$VAR`` / ``$(...)`` BEFORE passing the value to the native exe,
+        so a user-controlled argument (model path, custom parameter
+        value) could be rewritten by PowerShell before the server saw
+        it. Single quotes are fully literal.
         """
-        escaped = arg.replace('`', '``').replace('"', '""')
-        return f'"{escaped}"'
+        return f"'{LaunchManager._ps_escape_single_quoted(arg)}'"
 
     def _build_ps_cmd_parts(self, cmd_list):
         """Build a list of PowerShell-quoted command tokens from ``cmd_list``.

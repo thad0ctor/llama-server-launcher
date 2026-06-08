@@ -69,12 +69,21 @@ class TestPsEscapeOrdering:
             "/usr/local/bin/llama"
         )
 
-    def test_ps_quote_arg_uses_doubled_double_quotes(self, manager):
-        # Native-exe style: embedded " becomes "" (not `")
-        assert manager._ps_quote_arg('a"b') == '"a""b"'
+    def test_ps_quote_arg_single_quoted_form(self, manager):
+        # ``_ps_quote_arg`` now emits a SINGLE-quoted PS literal so user
+        # arguments containing ``$VAR`` / ``$(...)`` can't be expression-
+        # expanded by PowerShell before reaching the native exe. Embedded
+        # single quotes get doubled (the PS escape inside ``'...'``);
+        # backticks and double quotes survive verbatim.
+        assert manager._ps_quote_arg("a'b") == "'a''b'"
+        # Embedded ``"`` is literal in single-quoted form — no escaping needed.
+        assert manager._ps_quote_arg('a"b') == "'a\"b'"
 
-    def test_ps_quote_arg_escapes_backticks(self, manager):
-        assert manager._ps_quote_arg('a`b') == '"a``b"'
+    def test_ps_quote_arg_backticks_pass_through(self, manager):
+        # Backticks aren't special inside PS single-quoted literals, so
+        # they survive verbatim. (They were escaped under the old
+        # double-quoted form; the new form doesn't need that.)
+        assert manager._ps_quote_arg("a`b") == "'a`b'"
 
 
 # ============================================================================
@@ -123,13 +132,15 @@ class TestBuildPsCmdParts:
             f"Template value duplicated in PS cmd parts: {parts!r}"
         )
 
-    def test_non_template_args_double_quoted(self, manager):
+    def test_non_template_args_single_quoted(self, manager):
         parts = manager._build_ps_cmd_parts(
             ["/bin/llama-server", "-m", "/path with space/model.gguf"]
         )
-        # "-m" and the model path both double-quoted.
-        assert parts[1] == '"-m"'
-        assert parts[2] == '"/path with space/model.gguf"'
+        # ``_ps_quote_arg`` now emits SINGLE-quoted PS literals so values
+        # like ``$env:TEMP/model.gguf`` can't be expression-expanded by
+        # PowerShell before they reach the server exe.
+        assert parts[1] == "'-m'"
+        assert parts[2] == "'/path with space/model.gguf'"
 
     def test_multiple_chat_templates_if_ever_present(self, manager):
         # Pathological but valid input. Both occurrences must get single

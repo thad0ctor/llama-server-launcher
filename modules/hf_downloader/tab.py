@@ -992,25 +992,33 @@ class HuggingFaceDownloaderTab:
             self._op_id += 1
             proc = self._process
         if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-            # If terminate() is ignored (POSIX child blocked in a C
-            # extension; Windows handles terminate cleanly) escalate.
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            # Don't block the Tk main thread on the terminate-wait-kill
+            # escalation: a stubborn child could freeze the UI for up to
+            # 7 s (5 s terminate + 2 s kill wait). Run the escalation on
+            # a daemon thread and let the Tk event loop keep ticking;
+            # ``_run_process_worker`` will see ``proc.returncode`` and
+            # post the ``process-exit`` event for ``_poll_queue`` to
+            # consume.
+            def _async_terminate(_proc=proc):
                 try:
-                    proc.kill()
+                    _proc.terminate()
                 except Exception:
                     pass
                 try:
-                    proc.wait(timeout=2)
+                    _proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        _proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        _proc.wait(timeout=2)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
-            except Exception:
-                pass
+
+            threading.Thread(target=_async_terminate, daemon=True).start()
         if not clean_only:
             self.status_var.set("Operation cancelled.")
         self._cleanup_process_state()

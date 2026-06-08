@@ -400,8 +400,12 @@ class ConfigManager:
         finally:
             self.launcher._suppress_autosave = prior_suppress
         # Single explicit save now that every traced var is settled.
-        self.launcher._save_configs()
-        messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
+        # Only confirm the load when the save actually reached disk —
+        # without this gate the "Loaded" toast could fire on top of a
+        # "Config Save Error" dialog produced by the save itself.
+        saved = self.launcher._save_configs()
+        if saved:
+            messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
 
     def _apply_loaded_configuration(self, name, cfg):
         """Mutates launcher state from a named-config dict.
@@ -1035,11 +1039,18 @@ class ConfigManager:
         else:
             self.configs_loaded_successfully = True
 
-    def save_configs(self):
-        """Saves the app settings and configurations to file."""
+    def save_configs(self) -> bool:
+        """Saves the app settings and configurations to file.
+
+        Returns ``True`` when the on-disk state was actually updated,
+        ``False`` when the call was a no-op (disabled / suppressed) or
+        when every write attempt failed. Callers (load_configuration's
+        "Loaded" toast, manual Save buttons) check this to avoid
+        confirming a save that never reached disk.
+        """
         if self.launcher.config_path.name in ("null", "NUL"):
              print("Config saving is disabled.", file=sys.stderr)
-             return
+             return False
 
         if getattr(self.launcher, "_suppress_autosave", False) is True:
             # The launcher temporarily silences autosaves during startup
@@ -1051,7 +1062,7 @@ class ConfigManager:
             # launchers, which auto-vivify attribute access into Mock
             # objects (truthy), and ``is True`` distinguishes a real
             # boolean from that case so test runs still hit the write path.
-            return
+            return False
 
 
         # Validate and clean up model_dirs paths before saving
@@ -1142,7 +1153,7 @@ class ConfigManager:
                         f"empty. To prevent data loss, the existing file was not modified.\n\n"
                         f"File preserved at:\n{self.launcher.config_path}"
                     )
-                    return
+                    return False
             except (OSError, json.JSONDecodeError):
                 pass  # If we can't read/parse the existing file, let the save proceed.
 
@@ -1152,6 +1163,7 @@ class ConfigManager:
             # A successful save means the on-disk state is now authoritative, so
             # clear the load-failure flag and trust in-memory state from here on.
             self.configs_loaded_successfully = True
+            return True
         except Exception as exc:
             print(f"Config Save Error: Failed to save settings to {self.launcher.config_path}\nError: {exc}", file=sys.stderr)
             # Attempt fallback only if the initial path wasn't already a fallback
@@ -1164,15 +1176,19 @@ class ConfigManager:
                       try:
                          self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                          messagebox.showwarning("Config Save Info", f"Could not write to original location.\nSettings stored in:\n{self.launcher.config_path}")
+                         return True
                       except Exception as final_exc:
                           print(f"Config Save Error: Failed to save settings to fallback {self.launcher.config_path}\nError: {final_exc}", file=sys.stderr)
                           messagebox.showerror("Config Save Error", f"Failed to save settings to fallback location:\n{self.launcher.config_path}\n\nError: {final_exc}")
+                          return False
                  else:
                       # If fallback path was the same or invalid, show error for original path
                       messagebox.showerror("Config Save Error", f"Failed to save settings to:\n{original_path}\n\nError: {exc}")
+                      return False
             else:
                  # If the original path was already a fallback, just report the error
                  messagebox.showerror("Config Save Error", f"Failed to save settings to:\n{self.launcher.config_path}\n\nError: {exc}")
+                 return False
 
     @staticmethod
     def _sanitize_config_name(name):

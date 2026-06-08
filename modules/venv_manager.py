@@ -60,6 +60,19 @@ class VenvTargetInfo:
         """
         if self.python_path is None:
             return False
+        # Mirror the stricter interpreter check used by
+        # ``_path_looks_like_venv``: an actual regular file, and
+        # executable on POSIX. A symlink-to-directory or non-executable
+        # marker file at ``bin/python`` used to pass this gate, which
+        # let activation/auto-selection target the wrong directory.
+        if not self.python_path.is_file():
+            return False
+        name = self.python_path.name.lower()
+        if not name.endswith(".exe"):
+            # POSIX: require +x. Windows: ``.exe`` is the executable
+            # marker (``os.access(X_OK)`` is unreliable there).
+            if not os.access(str(self.python_path), os.X_OK):
+                return False
         if not (self.effective_dir / "pyvenv.cfg").is_file():
             return False
         # Different layouts ship different activators (bash vs cmd vs PS,

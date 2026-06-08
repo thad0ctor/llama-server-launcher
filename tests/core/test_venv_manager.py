@@ -49,6 +49,7 @@ def test_resolve_active_venv_path_blank_uses_default_when_venv_exists(tmp_path):
     # activator + python). Lay them all out so the resolved-active-path
     # heuristic still considers this a real venv.
     import os as _os
+    import sys as _sys
 
     venv_root = tmp_path / "venv"
     bindir = venv_root / "bin"
@@ -56,8 +57,12 @@ def test_resolve_active_venv_path_blank_uses_default_when_venv_exists(tmp_path):
     python = bindir / "python"
     python.write_text("", encoding="utf-8")
     # ``_path_looks_like_venv`` additionally requires the interpreter to be
-    # an executable regular file on POSIX.
-    _os.chmod(python, 0o755)
+    # an executable regular file on POSIX. ``chmod`` is a no-op on Windows
+    # in this layout (this test uses the ``linux`` platform override
+    # below), but calling it unconditionally could trip CI on platforms
+    # where the bit is reset or the call raises on a non-POSIX FS.
+    if not _sys.platform.startswith("win"):
+        _os.chmod(python, 0o755)
     (bindir / "activate").write_text("# mock\n", encoding="utf-8")
     (venv_root / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
 

@@ -58,6 +58,33 @@ _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eag
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA: frozenset[str] = frozenset()  # mtp uses main GPUs
 
 
+def _coerce_strict_gpu_index(raw):
+    """Return ``raw`` as an int if it's a clean integer index, else ``None``.
+
+    Rejects:
+      * ``bool`` (a ``True`` in ``spec_draft_selected_gpus`` would otherwise
+        coerce to ``int(True) == 1`` and silently shadow GPU 1)
+      * ``float`` and complex (``1.5`` round-trips to 1; a typo, not a GPU)
+      * Strings that aren't a strict ``[+-]?\\d+`` form (``"1.0"`` ,
+        ``"1e0"``, ``"0x1"``, ``"1 "`` all rejected — JSON-edited configs
+        shouldn't ship those, and accepting them silently masks data
+        corruption).
+    """
+    import re as _re
+
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        if _re.fullmatch(r"[+-]?\d+", raw):
+            try:
+                return int(raw)
+            except ValueError:
+                return None
+    return None
+
+
 def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
     """Return True iff ``spec_type`` is a variant that loads a SEPARATE
     draft model and therefore wants its own GPU subset / device flag.
@@ -193,9 +220,8 @@ def get_effective_visible_gpu_indices(launcher):
     draft_indices: list[int] = []
     dropped: list = []
     for raw_idx in draft_indices_raw:
-        try:
-            idx = int(raw_idx)
-        except (TypeError, ValueError):
+        idx = _coerce_strict_gpu_index(raw_idx)
+        if idx is None:
             dropped.append(raw_idx)
             continue
         if detected_count > 0 and not (0 <= idx < detected_count):
@@ -425,9 +451,8 @@ def _resolve_draft_device_value(launcher):
         valid_draft_indices: list[int] = []
         skipped: list = []
         for raw_idx in draft_indices:
-            try:
-                idx = int(raw_idx)
-            except (TypeError, ValueError):
+            idx = _coerce_strict_gpu_index(raw_idx)
+            if idx is None:
                 skipped.append(raw_idx)
                 continue
             if 0 <= idx < detected_count:

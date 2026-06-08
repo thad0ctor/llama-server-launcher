@@ -196,15 +196,25 @@ class TestShellInjectionPowerShell:
             "Regression of backtick double-escape bug: found ```\""
         )
 
-    def test_custom_param_with_backtick_escaped_only_once(
+    def test_custom_param_with_backtick_passes_through_single_quoted(
         self, manager, launcher_mock, tmp_path
     ):
+        """Custom args containing backticks now ride inside SINGLE-quoted
+        PS literals (per ``_ps_quote_arg`` rewrite). PowerShell treats
+        backticks as ordinary characters inside ``'...'``, so the value
+        round-trips verbatim — no escaping doubles, no risk of the
+        backtick-double-escape regression the old form had.
+        """
         launcher_mock.custom_parameters_list = ["--weird val`ue"]
         out = tmp_path / "b.ps1"
         text = _save_ps1_and_read(manager, launcher_mock, out)
-        # Exactly one doubled backtick (``) per original `, never triple.
-        assert "val``ue" in text
-        assert "val```ue" not in text
+        # shlex.split splits ``--weird val`ue`` into two tokens. Each
+        # rides inside its own single-quoted PS literal verbatim — no
+        # backtick doubling.
+        assert "'--weird'" in text
+        assert "'val`ue'" in text
+        # No PowerShell expansion sequence introduced by escaping mishaps.
+        assert "val``ue" not in text
 
 
 # ---------------------------------------------------------------------------

@@ -201,7 +201,14 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
             return ParsedRepoInput(repo_id=repo_id)
 
     parsed = urlparse(text)
-    if parsed.netloc not in {"huggingface.co", "www.huggingface.co"}:
+    # ``urlparse`` preserves the case of the netloc, so a URL like
+    # ``https://HuggingFace.co/owner/repo`` (perfectly legal — hostnames
+    # are case-insensitive) used to fall through the set check and be
+    # rejected. ``parsed.hostname`` is RFC-3986-lowercased, with port
+    # stripped; fall back to the original netloc lowered if hostname is
+    # ``None`` (e.g. malformed input).
+    host = (parsed.hostname or parsed.netloc or "").lower()
+    if host not in {"huggingface.co", "www.huggingface.co"}:
         raise ValueError("Only huggingface.co repo URLs are supported.")
     parts = [part for part in parsed.path.split("/") if part]
     if not parts:
