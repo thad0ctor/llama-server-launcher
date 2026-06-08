@@ -164,7 +164,12 @@ class BuildConfig:
             name=name,
             backend=raw_backend,
             source_dir=_as_str(data.get("source_dir"), ""),
-            build_dir=_as_str(data.get("build_dir"), "build"),
+            # Collapse blank/whitespace-only persisted ``build_dir`` back to
+            # the documented default. Without this, a hand-edited preset
+            # with ``"build_dir": ""`` loaded successfully and then died
+            # downstream in ``_resolve_safe_build_paths`` with
+            # ``build_dir is empty``.
+            build_dir=(_as_str(data.get("build_dir"), "build").strip() or "build"),
             git_ref=_as_str(data.get("git_ref"), ""),
             git_pull_before_build=_safe_bool(
                 data.get("git_pull_before_build", False), default=False

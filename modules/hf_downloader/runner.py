@@ -200,7 +200,12 @@ def _parse_bool(value) -> bool:
         return bool(value)
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes", "y", "on"}
-    return bool(value)
+    # Unknown payload types (list/dict/object) → False. The previous
+    # ``bool(value)`` fallback flipped a non-empty list/dict to True,
+    # which would silently enable a destructive flag like
+    # ``force_download`` if a hand-edited JSON payload shipped an
+    # accidentally-list-valued entry.
+    return False
 
 
 def _normalize_path_list(value) -> list[Path]:

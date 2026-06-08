@@ -575,11 +575,17 @@ class SettingsTab:
         except Exception as exc:
             messagebox.showerror("Create venv", f"Could not prepare parent directory:\n{exc}")
             return
-        command = venv_manager.build_create_venv_command(info.effective_dir)
         try:
+            # Build the command AND launch in the same try/except so a
+            # ``_shell_join``/path-validation ``ValueError`` raised
+            # inside ``build_create_venv_command`` reaches the user as
+            # a clear messagebox instead of bubbling up through the Tk
+            # callback (which on Python 3.13 can corrupt the next
+            # Tcl interp).
+            command = venv_manager.build_create_venv_command(info.effective_dir)
             terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
         except Exception as exc:
-            messagebox.showerror("Create venv", f"Failed to open terminal:\n{exc}")
+            messagebox.showerror("Create venv", f"Failed to create venv:\n{exc}")
             return
         self.venv_dir_var.set(str(info.effective_dir))
         self._venv_action_status_var.set(
@@ -608,11 +614,14 @@ class SettingsTab:
             f"Remove the virtual environment directory?\n\n{info.effective_dir}",
         ):
             return
-        command = venv_manager.build_remove_venv_command(info.effective_dir)
         try:
+            # Wrap both build + launch so ``_shell_join`` rejections
+            # (``%``/``!``) or path-resolution ValueErrors raised inside
+            # ``build_remove_venv_command`` surface as a messagebox.
+            command = venv_manager.build_remove_venv_command(info.effective_dir)
             terminal_launcher.open_command_in_terminal(command, cwd=info.effective_dir.parent)
         except Exception as exc:
-            messagebox.showerror("Remove venv", f"Failed to open terminal:\n{exc}")
+            messagebox.showerror("Remove venv", f"Failed to remove venv:\n{exc}")
             return
         self._venv_action_status_var.set(
             f"Opened terminal to remove venv at {info.effective_dir}."
@@ -660,11 +669,11 @@ class SettingsTab:
                 "Create a venv or point this field at an existing venv first.",
             )
             return
-        command = venv_manager.build_install_dependency_command(info.effective_dir, dependency)
         try:
+            command = venv_manager.build_install_dependency_command(info.effective_dir, dependency)
             terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
         except Exception as exc:
-            messagebox.showerror("Install dependency", f"Failed to open terminal:\n{exc}")
+            messagebox.showerror("Install dependency", f"Failed to install dependency:\n{exc}")
             return
         self._venv_action_status_var.set(
             f"Opened terminal to install {dependency.package_name}."
@@ -678,11 +687,11 @@ class SettingsTab:
                 "Create a venv or point this field at an existing venv first.",
             )
             return
-        command = venv_manager.build_remove_dependency_command(info.effective_dir, dependency)
         try:
+            command = venv_manager.build_remove_dependency_command(info.effective_dir, dependency)
             terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
         except Exception as exc:
-            messagebox.showerror("Remove dependency", f"Failed to open terminal:\n{exc}")
+            messagebox.showerror("Remove dependency", f"Failed to remove dependency:\n{exc}")
             return
         self._venv_action_status_var.set(
             f"Opened terminal to remove {dependency.package_name}."

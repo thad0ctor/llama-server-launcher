@@ -427,33 +427,19 @@ def _path_looks_like_venv(path: Path) -> bool:
     arbitrary Path directly for the same three markers (python + pyvenv.cfg
     + activator) so command builders that only have a resolved path can
     apply the same gate.
+
+    Reuses ``locate_venv_python`` for the interpreter check so this
+    helper, ``VenvTargetInfo.looks_like_venv``, and every command
+    builder agree on which paths count as a real venv — otherwise a
+    directory accepted by the Settings tab could be rejected by
+    ``build_remove_venv_command`` (or vice versa) and the user would
+    see an opaque ``ValueError`` bubble through a Tk callback.
     """
     if not path.is_dir():
         return False
     if not (path / "pyvenv.cfg").is_file():
         return False
-    python_candidates = (
-        path / "bin" / "python",
-        path / "bin" / "python3",
-        path / "Scripts" / "python.exe",
-        path / "Scripts" / "python3.exe",
-    )
-
-    def _is_real_interpreter(p: Path) -> bool:
-        # Tighter than the previous ``p.exists()``: a directory named
-        # ``bin/python`` would have satisfied that, and ``rm -rf`` against
-        # that crafted layout could delete unrelated content. Require an
-        # actual regular file, and on POSIX additionally require it to be
-        # executable. On Windows we settle for "exists and is a file"
-        # because the ``.exe`` extension is the executable marker (and
-        # ``os.access(X_OK)`` is unreliable there).
-        if not p.is_file():
-            return False
-        if p.name.lower().endswith(".exe"):
-            return True
-        return os.access(str(p), os.X_OK)
-
-    if not any(_is_real_interpreter(p) for p in python_candidates):
+    if locate_venv_python(path) is None:
         return False
     activator_candidates = (
         path / "bin" / "activate",

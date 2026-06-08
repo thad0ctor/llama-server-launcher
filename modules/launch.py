@@ -792,10 +792,12 @@ class LaunchManager:
     def _build_ps_cmd_parts(self, cmd_list):
         """Build a list of PowerShell-quoted command tokens from ``cmd_list``.
 
-        The first element is treated as the executable path and rendered with
-        ``& "..."``. ``--chat-template`` followed by its value is single-quoted
-        (with embedded single quotes doubled) so that backslashes, ``$``, ``
-        ``` ``, etc. in the Jinja template are preserved verbatim.
+        Every token is a SINGLE-quoted PS literal (with embedded single
+        quotes doubled via ``_ps_escape_single_quoted``). The first
+        element is rendered as ``& '<exe>'``; ``--chat-template`` and
+        every other argument follows the same single-quoted form so
+        backslashes, ``$``/``$(...)``, backticks, etc. survive verbatim
+        without PowerShell expansion before reaching the native exe.
 
         Any malformed ``--chat-template`` (missing value) raises ``ValueError``
         to signal the caller; upstream ``build_cmd`` is expected to have

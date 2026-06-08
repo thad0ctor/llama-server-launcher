@@ -301,12 +301,18 @@ class HuggingFaceDownloaderTab:
         python = self._current_venv_python()
         dep = self._huggingface_dependency()
         status = venv_manager.probe_dependency_status(active, dep, platform=sys.platform)
-        # Treat runtime as busy while the cancel-terminate daemon thread
-        # is still reaping the subprocess. ``_cleanup_process_state``
-        # clears ``self._process`` before the kill actually lands, so
-        # ``self._process is None`` alone would briefly re-enable Load /
-        # Download / Install before the worker is really gone.
-        idle = self._process is None and not self._terminating
+        # Treat runtime as busy while EITHER (a) the cancel-terminate
+        # daemon thread is still reaping the subprocess, OR (b) an
+        # ``Install / Update huggingface_hub`` dependency-watch is in
+        # flight against THIS active venv. The latter polls the venv
+        # for the package; clicking Load/Download/Install on top of
+        # that watch can race the eventual ``_on_dependency_probe_result``
+        # update or trigger a duplicate pip install.
+        # ``_cleanup_process_state`` clears ``self._process`` before
+        # the kill actually lands, so ``self._process is None`` alone
+        # would briefly re-enable buttons before the worker is gone.
+        watching = bool(self._dep_watch_venv) and self._dep_watch_venv == active
+        idle = self._process is None and not self._terminating and not watching
         if status.available:
             version = f" (v{status.version})" if status.version else ""
             self.venv_status_var.set(f"{active}{version}")
@@ -487,6 +493,14 @@ class HuggingFaceDownloaderTab:
             # Tk root already destroyed (e.g. tab teardown during install).
             self._dep_watch_after_id = None
             self._dep_watch_venv = None
+        # Refresh button state now that ``_dep_watch_venv`` is set, so
+        # Load / Download / Install grey out immediately for the duration
+        # of the watch (otherwise they only flip on the next external
+        # state change).
+        try:
+            self._refresh_runtime_state()
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _cancel_dependency_watch(self):
         if self._dep_watch_after_id is not None:

@@ -274,9 +274,17 @@ class ConfigManager:
                 self.launcher.root.after_cancel(pending)
             except Exception:
                 pass
-        self._default_name_regen_after_id = self.launcher.root.after(
-            10, self._fire_default_name_regen
-        )
+        # Guard the schedule too — a trace firing during launcher
+        # teardown (config-load cascade hitting destroyed widgets) can
+        # raise ``tk.TclError`` from ``after()``. Clear the handle on
+        # failure so the next call retries instead of leaving a stale
+        # id around.
+        try:
+            self._default_name_regen_after_id = self.launcher.root.after(
+                10, self._fire_default_name_regen
+            )
+        except Exception:
+            self._default_name_regen_after_id = None
 
     def _fire_default_name_regen(self):
         """Trailing callback for the debounced regen. Clears the pending
