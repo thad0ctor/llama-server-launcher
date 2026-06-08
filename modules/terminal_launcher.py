@@ -122,9 +122,18 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
             except OSError:
                 pass
             raise
+        # ``shlex.quote`` produces POSIX shell quoting (single quotes),
+        # but this value goes INSIDE an AppleScript double-quoted string.
+        # If the path contained a double quote, the AppleScript itself
+        # would break. Escape for AppleScript instead: backslash, then
+        # double-quote. (``tempfile.mkstemp`` won't normally generate
+        # those characters in 2026, but defending the boundary is cheap
+        # and avoids a latent injection vector if mkstemp's prefix is
+        # ever made user-controllable.)
+        escaped_path = script_path.replace("\\", "\\\\").replace('"', '\\"')
         applescript = (
             'tell application "Terminal"\n'
-            f'    do script "{shlex.quote(script_path)}"\n'
+            f'    do script "{escaped_path}"\n'
             "    activate\n"
             "end tell\n"
         )

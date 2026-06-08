@@ -726,8 +726,18 @@ def emit_reasoning_args(launcher, cmd, supports_flag=None):
             return True
         try:
             ok = bool(supports_flag(flag))
-        except Exception:
-            return True  # probe failure -> emit; the server will surface a real error
+        except Exception as exc:
+            # Fail closed: the whole reason this gating exists is to keep
+            # an unknown reasoning flag from crashing the server at
+            # startup. If the probe itself blew up (e.g. the exe is
+            # missing, the help cache stat raised), the safer move is to
+            # SKIP the flag, not optimistically emit it.
+            print(
+                f"WARNING: failed to probe support for {flag!r}: {exc}; "
+                f"skipping for safety.",
+                file=sys.stderr,
+            )
+            return False
         if not ok:
             print(
                 f"WARNING: target server binary does not advertise {flag!r}; "

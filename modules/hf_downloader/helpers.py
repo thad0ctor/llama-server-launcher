@@ -158,6 +158,16 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
 
     if "://" not in text:
         parts = [part for part in text.split("/") if part]
+        # Same dataset/space rejection the ``hf://`` and ``https://``
+        # branches do — otherwise bare ``datasets/<owner>/<repo>`` would
+        # silently truncate to the bogus model id ``datasets/<owner>``
+        # and fail much later in the runner.
+        if parts and parts[0] in {"datasets", "spaces"}:
+            kind = parts[0]
+            raise ValueError(
+                f"This is a HuggingFace {kind} URL; this tab only downloads "
+                "model repos."
+            )
         if len(parts) < 2:
             raise ValueError("Repo input must include both owner and repo name.")
         return ParsedRepoInput(repo_id="/".join(parts[:2]))

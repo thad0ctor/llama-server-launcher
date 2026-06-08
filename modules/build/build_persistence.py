@@ -235,8 +235,17 @@ class BuildConfigStore:
             cfg.created_at = _utcnow_iso()
         if not cfg.last_used_at:
             cfg.last_used_at = cfg.created_at
+        # Capture prior state so a failed ``_save`` can roll back the
+        # in-memory mutation. Without this, an UPDATE that fails to reach
+        # disk would still appear to have taken effect in-session and then
+        # silently revert on restart.
+        prior = self._cache.get(cfg.name)
         self._cache[cfg.name] = cfg
-        self._save()
+        if not self._save():
+            if prior is not None:
+                self._cache[cfg.name] = prior
+            else:
+                self._cache.pop(cfg.name, None)
 
     def touch_last_used(self, name: str) -> None:
         if not self._load():
@@ -244,8 +253,12 @@ class BuildConfigStore:
         cfg = self._cache.get(name)
         if cfg is None:
             return
+        prior_last_used = cfg.last_used_at
         cfg.last_used_at = _utcnow_iso()
-        self._save()
+        if not self._save():
+            # Roll back the timestamp bump so a write that didn't reach
+            # disk doesn't leave memory believing it did.
+            cfg.last_used_at = prior_last_used
 
     def delete(self, name: str) -> bool:
         if not self._load():
