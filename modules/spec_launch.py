@@ -55,7 +55,7 @@ _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
 # draft-mtp. Only the explicit draft-model variants need separate GPU
 # handling.
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3"})
-_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA = frozenset()  # mtp uses main GPUs
+_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA: frozenset[str] = frozenset()  # mtp uses main GPUs
 
 
 def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):

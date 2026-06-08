@@ -134,7 +134,11 @@ def test_runner_list_emits_refs_and_files(monkeypatch, capsys):
 
     class FakeInfo:
         sha = "deadbeef"
-        siblings = [FakeSibling("model.gguf", 123), FakeSibling("README.md", 4)]
+        siblings = [
+            FakeSibling("model.gguf", 123),
+            FakeSibling("README.md", 4),
+            FakeSibling("mmproj-myname.gguf", 64),
+        ]
 
     class FakeApi:
         def list_repo_refs(self, repo_id, repo_type=None, token=None):
@@ -155,8 +159,13 @@ def test_runner_list_emits_refs_and_files(monkeypatch, capsys):
     assert lines[-2]["event"] == "listing"
     assert lines[-2]["resolved_revision"] == "deadbeef"
     assert lines[-2]["refs"][0]["name"] == "main"
-    assert lines[-2]["files"][0]["path"] == "README.md"
-    assert lines[-2]["files"][1]["path"] == "model.gguf"
+    files_by_path = {row["path"]: row for row in lines[-2]["files"]}
+    assert set(files_by_path) == {"README.md", "mmproj-myname.gguf", "model.gguf"}
+    # mmproj must classify as ``mmproj`` (not generic ``gguf``) so the UI
+    # picks them up as multimodal projectors instead of as another weight
+    # quant.
+    assert files_by_path["mmproj-myname.gguf"]["kind"] == "mmproj"
+    assert files_by_path["model.gguf"]["kind"] == "gguf"
 
 
 def test_runner_download_passes_patterns_and_targets(monkeypatch, tmp_path, capsys):
