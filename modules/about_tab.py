@@ -121,7 +121,7 @@ for dir in {q_current_dir}/*; do
                 echo "Skipping $dirname (cache/git/static data)"
                 ;;
             *)
-                if [ ! -f {q_current_dir}/.gitignore ] || ! grep -Fxq -- "$dirname" {q_current_dir}/.gitignore 2>/dev/null; then
+                if [ ! -f {q_current_dir}/.gitignore ] || ! printf '%s\n%s\n%s\n%s\n' "$dirname" "$dirname/" "/$dirname" "/$dirname/" | grep -Fxqf - {q_current_dir}/.gitignore 2>/dev/null; then
                     echo "Backing up directory: $dirname"
                     cp -r "$dir" {q_backup_path}/
                 fi

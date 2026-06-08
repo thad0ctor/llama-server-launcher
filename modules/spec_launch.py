@@ -79,8 +79,6 @@ def _coerce_strict_gpu_index(raw):
         shouldn't ship those, and accepting them silently masks data
         corruption).
     """
-    import re as _re
-
     if isinstance(raw, bool):
         return None
     if isinstance(raw, int):
@@ -89,7 +87,7 @@ def _coerce_strict_gpu_index(raw):
         # (or silently pass through a config-corruption sentinel).
         return raw if raw >= 0 else None
     if isinstance(raw, str):
-        if _re.fullmatch(r"[+-]?\d+", raw):
+        if re.fullmatch(r"[+-]?\d+", raw):
             try:
                 value = int(raw)
             except ValueError:

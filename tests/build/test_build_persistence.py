@@ -26,12 +26,24 @@ assert "modules.build.build_tab" in sys.modules
     # parent process CWD, which broke when running from outside the repo.
     # Capture output so an import traceback in the child surfaces in the
     # failure message instead of silently producing an opaque ``rc != 0``.
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        text=True,
-        cwd=_REPO_ROOT,
-        capture_output=True,
-    )
+    # ``timeout=10`` so the import-isolation probe can't hang the whole
+    # test session on a deadlocked child (which has happened to pytest
+    # before — see test_build_safety's deadlock-guard).
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            text=True,
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        import pytest as _pytest
+
+        _pytest.fail(
+            f"import-isolation child timed out after {exc.timeout}s; "
+            f"stdout={exc.stdout!r} stderr={exc.stderr!r}"
+        )
 
     assert result.returncode == 0, (
         f"child exited rc={result.returncode}\n"

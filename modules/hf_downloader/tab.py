@@ -79,6 +79,14 @@ class HuggingFaceDownloaderTab:
         self._queue_after_id = None
         self._worker_thread = None
         self._process: subprocess.Popen[str] | None = None
+        # ``True`` while ``_cancel_operation`` is mid-flight — the daemon
+        # ``_async_terminate`` thread can take up to 7 s to actually
+        # kill a stubborn child, and ``_cleanup_process_state`` clears
+        # ``self._process`` before then. ``_refresh_runtime_state``
+        # treats the runtime as busy while this is set so the Load /
+        # Download / Install buttons stay disabled until the worker is
+        # really gone.
+        self._terminating: bool = False
         self._payload_path: Path | None = None
         self._operation_name = ""
         self._dep_watch_after_id: str | None = None
@@ -293,11 +301,17 @@ class HuggingFaceDownloaderTab:
         python = self._current_venv_python()
         dep = self._huggingface_dependency()
         status = venv_manager.probe_dependency_status(active, dep, platform=sys.platform)
+        # Treat runtime as busy while the cancel-terminate daemon thread
+        # is still reaping the subprocess. ``_cleanup_process_state``
+        # clears ``self._process`` before the kill actually lands, so
+        # ``self._process is None`` alone would briefly re-enable Load /
+        # Download / Install before the worker is really gone.
+        idle = self._process is None and not self._terminating
         if status.available:
             version = f" (v{status.version})" if status.version else ""
             self.venv_status_var.set(f"{active}{version}")
-            self._set_button_state(self._load_button, self._process is None)
-            self._set_button_state(self._download_button, self._process is None and bool(self._file_rows))
+            self._set_button_state(self._load_button, idle)
+            self._set_button_state(self._download_button, idle and bool(self._file_rows))
         else:
             detail = status.error or "not installed"
             self.venv_status_var.set(f"{active} [huggingface_hub missing: {detail}]")
@@ -307,7 +321,7 @@ class HuggingFaceDownloaderTab:
         # ``pip install`` into the same venv concurrently with a list or
         # download can corrupt the env (and pip itself complains loudly).
         self._set_button_state(
-            self._install_button, python is not None and self._process is None
+            self._install_button, python is not None and idle
         )
         self._refresh_target_rows()
 
@@ -1026,6 +1040,13 @@ class HuggingFaceDownloaderTab:
             # ``_run_process_worker`` will see ``proc.returncode`` and
             # post the ``process-exit`` event for ``_poll_queue`` to
             # consume.
+            # Mark termination-in-progress so ``_refresh_runtime_state``
+            # keeps the action buttons disabled until the daemon thread
+            # actually finishes. Otherwise the user could click Load /
+            # Download in the gap between ``_process = None`` (set in
+            # ``_cleanup_process_state`` below) and the actual SIGKILL.
+            self._terminating = True
+
             def _async_terminate(_proc=proc):
                 try:
                     _proc.terminate()
@@ -1044,6 +1065,15 @@ class HuggingFaceDownloaderTab:
                         pass
                 except Exception:
                     pass
+                # Re-arm the button-gating once the worker is actually
+                # gone. ``root.after(0, ...)`` hops back to the Tk
+                # thread so ``_refresh_runtime_state`` can safely poke
+                # widgets.
+                try:
+                    self.root.after(0, self._on_terminate_done)
+                except (tk.TclError, RuntimeError):
+                    # Tk torn down before the daemon finished — drop.
+                    self._terminating = False
 
             threading.Thread(target=_async_terminate, daemon=True).start()
         if not clean_only:
@@ -1051,6 +1081,18 @@ class HuggingFaceDownloaderTab:
         self._cleanup_process_state()
         if not clean_only:
             self._refresh_runtime_state()
+
+    def _on_terminate_done(self):
+        """Called on the Tk thread once ``_async_terminate`` has actually
+        reaped the subprocess. Drops the ``_terminating`` flag and
+        re-runs ``_refresh_runtime_state`` so the Load / Download /
+        Install buttons come back at the right moment.
+        """
+        self._terminating = False
+        try:
+            self._refresh_runtime_state()
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _cleanup_process_state(self):
         with self._process_lock:

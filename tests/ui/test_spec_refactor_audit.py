@@ -448,10 +448,11 @@ class TestEmissionParity:
     def test_spec_args_emitted_per_combination(self, real_launcher, backend, spec_type, extras, expected_flags):
         launcher, _ = real_launcher
         launcher.backend_selection.set(backend)
-        # spec_enabled must be True for any --spec-* emission. For the
-        # "none" baseline case, we still set it True to confirm the
-        # type=none early-exit holds.
-        launcher.spec_enabled.set(spec_type != "none")
+        # spec_enabled stays True even for the "none" baseline so the
+        # ``spec_type == "none"`` early-exit path inside
+        # ``emit_spec_args`` is the thing being tested — not the
+        # spec_enabled=False short-circuit.
+        launcher.spec_enabled.set(True)
         launcher.spec_type.set(spec_type)
         for k, v in extras.items():
             getattr(launcher, k).set(v)
@@ -833,6 +834,11 @@ class TestRedirectIntegrity:
         tab._spec_draft_analysis_generation = 1
         tab._spec_draft_analysis_queue = queue.Queue()
         tab._spec_draft_analysis_lock = Lock()
+        # ``_run_spec_draft_gguf_analysis`` calls
+        # ``self._get_spec_draft_analysis_lock()`` (the idiomatic form
+        # after the recent CR nitpick). The stub needs that method or
+        # the production code crashes with AttributeError.
+        tab._get_spec_draft_analysis_lock = lambda: tab._spec_draft_analysis_lock
 
         def parse_and_supersede(path):
             tab._spec_draft_analysis_generation = 2

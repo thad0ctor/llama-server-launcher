@@ -945,7 +945,7 @@ class SpecTab:
 
     def _start_spec_draft_gguf_analysis(self, draft_path_str):
         """Start draft GGUF parsing and poll results from the Tk thread."""
-        with SpecTab._get_spec_draft_analysis_lock(self):
+        with self._get_spec_draft_analysis_lock():
             self._spec_draft_analysis_generation += 1
             analysis_id = self._spec_draft_analysis_generation
         t = Thread(
@@ -978,12 +978,12 @@ class SpecTab:
         """Background worker that parses the draft GGUF. No Tk calls here."""
         try:
             if analysis_id is None:
-                with SpecTab._get_spec_draft_analysis_lock(self):
+                with self._get_spec_draft_analysis_lock():
                     analysis_id = self._spec_draft_analysis_generation
             analysis_result = parse_gguf_header_simple(draft_path_str)
         except Exception as e:
             analysis_result = {"path": draft_path_str, "error": str(e)}
-        with SpecTab._get_spec_draft_analysis_lock(self):
+        with self._get_spec_draft_analysis_lock():
             if analysis_id != self._spec_draft_analysis_generation:
                 return
             self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
