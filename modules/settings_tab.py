@@ -51,7 +51,13 @@ class SettingsTab:
         self.theme_mode_var = tk.StringVar(value=s.get("ui_theme_mode", "auto"))
         self.theme_name_var = tk.StringVar(value=s.get("ui_theme_name", ""))
         self.font_family_var = tk.StringVar(value=s.get("ui_font_family", ""))
-        if not hasattr(self.launcher, "venv_dir"):
+        # MagicMock / unrelated assignments could leave ``launcher.venv_dir``
+        # set to a non-StringVar (a plain str, a Mock, or None). Anything
+        # other than a real ``tk.StringVar`` would break the trace_add /
+        # .get() / .set() calls downstream. ``isinstance`` is the only safe
+        # check here — ``hasattr`` alone passes for an auto-vivified Mock.
+        existing_venv_dir = getattr(self.launcher, "venv_dir", None)
+        if not isinstance(existing_venv_dir, tk.StringVar):
             self.launcher.venv_dir = tk.StringVar(value=s.get("last_venv_dir", ""))
         self.venv_dir_var = self.launcher.venv_dir
 

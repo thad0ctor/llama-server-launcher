@@ -205,9 +205,17 @@ def get_effective_visible_gpu_indices(launcher):
     if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return main_ordered
     try:
-        draft_indices_raw = list(
-            launcher.app_settings.get("spec_draft_selected_gpus", []) or []
-        )
+        raw_value = launcher.app_settings.get("spec_draft_selected_gpus", [])
+        # ``list(some_string)`` would iterate character-by-character and
+        # surface ``"0,1"`` as ``["0", ",", "1"]`` — every entry would then
+        # silently fail ``_coerce_strict_gpu_index`` and the draft GPU
+        # subset would shrink to ``[]``. Only true list/tuple inputs make
+        # sense here; everything else is a config-corruption signal we
+        # discard up front.
+        if isinstance(raw_value, (list, tuple)):
+            draft_indices_raw = list(raw_value)
+        else:
+            draft_indices_raw = []
     except Exception:
         draft_indices_raw = []
     # Coerce persisted entries to int up front. A JSON-edited config can

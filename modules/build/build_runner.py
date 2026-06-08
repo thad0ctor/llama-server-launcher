@@ -444,6 +444,14 @@ class BuildRunner:
                 self._emit_event(EVENT_ERROR, str(exc))
                 return
 
+            # Non-interactive git env shared by every live ``git`` invocation
+            # below. Without ``GIT_TERMINAL_PROMPT=0`` a private repo, an
+            # expired credential helper, or an SSH host-key prompt can wedge
+            # the build forever waiting on stdin (which we already redirect to
+            # DEVNULL, so the prompt would just hang). Mirrors the upstream
+            # ``probe_upstream`` fetch.
+            git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
             # Stage: clone if needed
             if not src.exists():
                 if not plan.git_clone_if_missing:
@@ -457,6 +465,7 @@ class BuildRunner:
                 rc = self._stream(
                     ["git", "clone", "--recursive", plan.upstream_url, str(src)],
                     cwd=str(src.parent),
+                    env=git_env,
                 )
                 if self._cancel.is_set():
                     self._emit_event(EVENT_CANCELLED, None)
@@ -466,7 +475,11 @@ class BuildRunner:
                     return
             elif plan.git_pull_before_build:
                 self._emit_stage("git pull --ff-only")
-                rc = self._stream(["git", "pull", "--ff-only"], cwd=str(src))
+                rc = self._stream(
+                    ["git", "pull", "--ff-only"],
+                    cwd=str(src),
+                    env=git_env,
+                )
                 if self._cancel.is_set():
                     self._emit_event(EVENT_CANCELLED, None)
                     return
@@ -476,14 +489,22 @@ class BuildRunner:
             # Stage: optional checkout
             if plan.git_ref:
                 self._emit_stage(f"git checkout {plan.git_ref}")
-                rc = self._stream(["git", "checkout", plan.git_ref], cwd=str(src))
+                rc = self._stream(
+                    ["git", "checkout", plan.git_ref],
+                    cwd=str(src),
+                    env=git_env,
+                )
                 if self._cancel.is_set():
                     self._emit_event(EVENT_CANCELLED, None)
                     return
                 if rc != 0:
                     self._emit_event(EVENT_DONE, rc)
                     return
-                rc = self._stream(["git", "submodule", "update", "--init", "--recursive"], cwd=str(src))
+                rc = self._stream(
+                    ["git", "submodule", "update", "--init", "--recursive"],
+                    cwd=str(src),
+                    env=git_env,
+                )
                 if self._cancel.is_set():
                     self._emit_event(EVENT_CANCELLED, None)
                     return

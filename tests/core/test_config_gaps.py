@@ -299,10 +299,15 @@ class TestLoadConfiguration:
     ):
         cfg = _full_cfg(predefined_template_name="unknown")
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
-        # Template exists in the saved config, so it's loaded as-is
+        # Saved name no longer exists in chat_templates.json (legacy
+        # alias was cleaned up). _apply_loaded_configuration must
+        # remap to the first available key so .set() doesn't leave
+        # the launcher referencing a non-existent template (which
+        # would emit a blank ``--chat-template`` and round-trip the
+        # invalid name back to disk).
         with patch("modules.config.messagebox"):
             cm.load_configuration()
-        assert launcher.predefined_template_name.get() == "unknown"
+        assert launcher.predefined_template_name.get() == "ChatML"
 
         # And when the saved name is missing entirely, the first key wins.
         cfg2 = _full_cfg()

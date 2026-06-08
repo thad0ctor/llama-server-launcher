@@ -501,7 +501,25 @@ class ConfigManager:
         # Default the predefined name to the *first* key in _all_templates if not found
         # This handles cases where the saved name might no longer exist in _all_templates
         default_predefined_key = list(self.launcher._all_templates.keys())[0] if self.launcher._all_templates else ""
-        self.launcher.predefined_template_name.set(cfg.get("predefined_template_name", default_predefined_key))
+        # Saved predefined_template_name MIGHT reference a label that was
+        # removed from chat_templates.json (legacy alias cleanup). Remap
+        # to the default so ``_update_effective_template_display`` doesn't
+        # silently emit an empty ``--chat-template`` and ``current_cfg``
+        # round-trips a valid name back to disk.
+        saved_predefined = cfg.get("predefined_template_name", default_predefined_key)
+        if (
+            saved_predefined
+            and saved_predefined not in self.launcher._all_templates
+            and default_predefined_key
+        ):
+            print(
+                f"WARNING: saved predefined_template_name {saved_predefined!r} "
+                f"is no longer in chat_templates.json; remapping to "
+                f"{default_predefined_key!r}.",
+                file=sys.stderr,
+            )
+            saved_predefined = default_predefined_key
+        self.launcher.predefined_template_name.set(saved_predefined)
 
         self.launcher.custom_template_string.set(cfg.get("custom_template_string", ""))
         self.launcher.jinja_enabled.set(cfg.get("jinja_enabled", False))

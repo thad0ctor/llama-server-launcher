@@ -251,7 +251,17 @@ class TestBuildUpdateScriptBasic:
         assert expected in s
         # And shlex.split of the array-literal body should yield the raw
         # pattern as a single token — proving nothing leaked out.
-        array_line = next(line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=("))
+        # ``next(...)`` without a default raises ``StopIteration`` if
+        # ``build_update_script`` ever stops emitting this line — exactly
+        # the regression this test is meant to catch. The ``None``
+        # default + explicit assert turns that into a readable failure.
+        array_line = next(
+            (line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")),
+            None,
+        )
+        assert array_line is not None, (
+            "EXCLUDE_ARGS=(...) missing from build_update_script output"
+        )
         inner = array_line[len("EXCLUDE_ARGS=(") : -1]
         tokens = shlex.split(inner)
         assert "don't_touch/*.tmp" in tokens

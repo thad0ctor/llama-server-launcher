@@ -907,6 +907,16 @@ class SpecTab:
                 )
             except Exception:
                 pass
+        elif manual_mode:
+            # Manual GPU mode disables CUDA<i> draft device emission.
+            # Any leftover value (e.g. "CUDA0,CUDA1" from a previous
+            # non-manual session) would otherwise survive in
+            # ``spec_draft_device`` and trick ``_resolve_draft_device_value``
+            # into treating it as a deliberate override.
+            try:
+                self.spec_draft_device.set("")
+            except Exception:
+                pass
 
         # Re-apply enable/disable rules now that children exist. Safe to call
         # before _spec_sections is populated (the method short-circuits).

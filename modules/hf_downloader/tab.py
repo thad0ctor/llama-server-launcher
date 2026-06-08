@@ -63,6 +63,13 @@ class HuggingFaceDownloaderTab:
         self._file_rows: list[HfRepoFile] = []
         self._file_path_by_index: list[str] = []
         self._refs: list[str] = []
+        # Revision the user submitted via ``_on_load_repo``. The listing
+        # handler reads this to decide whether to auto-populate the
+        # ``revision_var`` field from ``_refs[0]`` — only safe when the
+        # request itself was blank (otherwise the user explicitly typed a
+        # ref and clearing the box mid-flight is a deliberate edit, not
+        # something the listing handler should silently overwrite).
+        self._last_requested_revision: str = ""
         self._target_container = None
         self._files_listbox = None
         self._revision_combo = None
@@ -630,9 +637,16 @@ class HuggingFaceDownloaderTab:
         # the subprocess's lifetime; a credential there would be visible
         # to anyone with read access to ``/tmp`` (and to forensic disk
         # reads after the process exits).
+        requested_revision = self.revision_var.get().strip()
+        # Captured so the ``listing`` handler can tell whether the user
+        # explicitly typed a revision (in which case it must NOT silently
+        # rewrite the field to ``_refs[0]`` if the user clears the box
+        # between submit and response) or really left it blank for the
+        # runner to resolve.
+        self._last_requested_revision = requested_revision
         payload = {
             "repo_id": parsed.repo_id,
-            "revision": self.revision_var.get().strip(),
+            "revision": requested_revision,
         }
         self.status_var.set(f"Loading {parsed.repo_id}…")
         self._start_runner("list", payload)
@@ -953,7 +967,16 @@ class HuggingFaceDownloaderTab:
             self._refs = [ref.name for ref in refs]
             if self._revision_combo is not None:
                 self._revision_combo.config(values=self._refs)
-            if not self.revision_var.get().strip() and self._refs:
+            # Only auto-populate when the user submitted with a blank
+            # revision AND has not typed something into the field since.
+            # If they submitted "main" then cleared the box mid-flight, we
+            # respect the blank — silently filling it with ``_refs[0]``
+            # would be a confusing override.
+            if (
+                not self.revision_var.get().strip()
+                and not getattr(self, "_last_requested_revision", "").strip()
+                and self._refs
+            ):
                 self.revision_var.set(self._refs[0])
             self._file_rows = list(files)
             self._file_path_by_index = [row.path for row in self._file_rows]
