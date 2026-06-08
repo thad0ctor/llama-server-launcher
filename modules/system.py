@@ -271,7 +271,13 @@ def get_gpu_info_with_venv(venv_path=None):
     attempts.append(f"nvidia-smi: {smi_info.get('message', 'unknown error')}")
     print(f"DEBUG: nvidia-smi GPU detection unavailable: {smi_info.get('message', 'unknown error')}", file=sys.stderr)
 
-    if venv_path and Path(venv_path).exists():
+    # Call ``get_gpu_info_from_venv`` whenever a venv was configured, even
+    # when the directory doesn't exist yet — the helper returns a
+    # standardized "torch-venv / Python executable not found in venv"
+    # marker that's worth surfacing in ``attempts``. Skipping the call
+    # here used to silently hide a configured-but-missing venv from the
+    # diagnostic message at the bottom of this function.
+    if venv_path:
         venv_info = get_gpu_info_from_venv(venv_path)
         if venv_info.get("available"):
             print(

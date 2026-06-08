@@ -782,7 +782,20 @@ class SpecTab:
 
         gpu_info = getattr(self.launcher, "gpu_info", {})
         count = gpu_info.get("device_count", 0) if isinstance(gpu_info, dict) else 0
-        loaded_selected = set(self.launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
+        # Strictly coerce persisted indices to ``int`` before membership
+        # checks. Without this, a saved ``"1"`` (string) wouldn't match
+        # GPU 1 (int), and ``True``/``1.0`` would silently match GPU 1 —
+        # the checkbox state ended up corrupted, and the value written
+        # back to ``app_settings`` at lines below propagated the corruption.
+        # Mirror ``modules.spec_launch._coerce_strict_gpu_index``.
+        from modules.spec_launch import _coerce_strict_gpu_index as _coerce_idx
+
+        raw_persisted = self.launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+        loaded_selected: set[int] = set()
+        for raw_idx in raw_persisted:
+            idx = _coerce_idx(raw_idx)
+            if idx is not None:
+                loaded_selected.add(idx)
         detected_devices = getattr(self.launcher, "detected_gpu_devices", [])
         # Manual GPU mode disables draft device emission entirely — the
         # manual GPU list isn't real CUDA hardware, so we can't tell the

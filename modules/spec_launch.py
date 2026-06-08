@@ -409,17 +409,11 @@ def _resolve_draft_device_value(launcher):
     if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return ""
 
-    draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
+    raw_draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
     if manual_mode:
         # Ignore the detected-GPU checkbox state but keep the raw override
         # path below alive.
-        draft_indices = []
-    if not draft_indices:
-        # No checkbox selection → fall back to the free-text override.
-        try:
-            return launcher.spec_draft_device.get().strip()
-        except Exception:
-            return ""
+        raw_draft_indices = []
     # Effective visible GPU list (main ∪ draft). Single source of truth
     # shared with LaunchManager._resolve_cuda_visible_devices_action so
     # the env var the script exports and the indices emitted here can't
@@ -432,49 +426,36 @@ def _resolve_draft_device_value(launcher):
             detected_count = int(gpu_info.get("device_count", 0) or 0)
     except Exception:
         detected_count = 0
-    # Non-UI sanitization: clamp persisted indices to ``[0, detected_count)``
-    # so a stale ``spec_draft_selected_gpus`` (e.g. saved on a 4-GPU host,
-    # now running on a 2-GPU host) can't leak ``CUDA4`` /
-    # ``CUDA<out-of-range>`` into the command line. SpecTab does the same
-    # clamp when its UI is built, but the tab is lazy — the first launch
-    # before the user opens Spec used to consume the raw list. Index 0
-    # always exists when there's at least one device; if no devices are
-    # detected we keep the list (the "no filter" pass-through below stays
-    # the documented escape hatch for hand-edited configs).
-    if detected_count > 0:
-        # Coerce persisted entries to int FIRST. JSON round-trips that hit
-        # ``json.loads`` on hand-edited files can leave string ints like
-        # ``"1"`` in the list; the old ``0 <= d < detected_count`` check
-        # would TypeError on those and crash the whole launch. Drop
-        # anything that can't be coerced (with a warning so the user can
-        # see why their selection shrunk).
-        valid_draft_indices: list[int] = []
-        skipped: list = []
-        for raw_idx in draft_indices:
-            idx = _coerce_strict_gpu_index(raw_idx)
-            if idx is None:
-                skipped.append(raw_idx)
-                continue
-            if 0 <= idx < detected_count:
-                valid_draft_indices.append(idx)
-            else:
-                skipped.append(raw_idx)
-        if skipped:
-            print(
-                f"WARNING: spec_draft_selected_gpus contained entries outside "
-                f"[0, {detected_count}) or not coercible to int; dropping: "
-                f"{skipped}",
-                file=sys.stderr,
-            )
-        draft_indices = valid_draft_indices
-        if not draft_indices:
-            # Sanitization left nothing — fall back to the free-text
-            # override, same as if the persisted list was empty to begin
-            # with.
-            try:
-                return launcher.spec_draft_device.get().strip()
-            except Exception:
-                return ""
+    # Strict coercion runs UNCONDITIONALLY (even when detected_count == 0)
+    # so a saved value like ``["1"]`` or ``[True]`` can't fall through to
+    # the raw-token emission below as ``CUDA1`` / ``CUDATrue``. The range
+    # clamp ``0 <= idx < detected_count`` is the only piece that's gated
+    # behind ``detected_count > 0``; everything else (type checks, drop
+    # warning, fallback to free-text override) applies in both branches.
+    draft_indices: list[int] = []
+    skipped: list = []
+    for raw_idx in raw_draft_indices:
+        idx = _coerce_strict_gpu_index(raw_idx)
+        if idx is None:
+            skipped.append(raw_idx)
+            continue
+        if detected_count > 0 and not (0 <= idx < detected_count):
+            skipped.append(raw_idx)
+            continue
+        draft_indices.append(idx)
+    if skipped:
+        print(
+            f"WARNING: spec_draft_selected_gpus contained invalid entries; "
+            f"dropping: {skipped}",
+            file=sys.stderr,
+        )
+    if not draft_indices:
+        # No usable checkbox selection → fall back to the free-text
+        # override, same as if the persisted list was empty to begin with.
+        try:
+            return launcher.spec_draft_device.get().strip()
+        except Exception:
+            return ""
     # If no filter is in effect (no selection at all, or the user selected
     # every detected GPU), launcher indices pass through unchanged.
     no_filter = (not effective_ordered) or (

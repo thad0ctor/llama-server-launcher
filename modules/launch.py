@@ -729,6 +729,22 @@ class LaunchManager:
         else:
             return ["llama-server", "ik-llama-server", "ik_llama_server"]
 
+    _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @classmethod
+    def _is_valid_env_var_name(cls, name) -> bool:
+        """Conservative POSIX/shell env-var name check.
+
+        Variable names that fail this pattern would inject arbitrary
+        characters into the generated PowerShell/bash lines (a name like
+        ``"foo;rm -rf"`` produces a working second command in PS, and
+        ``"foo=bar"`` in bash truncates the assignment). Refuse to emit
+        rather than escape — env var names are conventionally identifiers
+        and the launcher's env-vars manager already restricts them, this
+        is defense in depth for hand-edited configs.
+        """
+        return isinstance(name, str) and bool(cls._ENV_VAR_NAME_RE.match(name))
+
     @staticmethod
     def _ps_escape_double_quoted(s):
         """Escape a string so it is safe inside a PowerShell double-quoted literal.
@@ -982,6 +998,12 @@ class LaunchManager:
                     if env_vars:
                         f.write('Write-Host "Setting environmental variables..." -ForegroundColor DarkCyan\n')
                         for var_name, var_value in env_vars.items():
+                            if not self._is_valid_env_var_name(var_name):
+                                print(
+                                    f"WARNING: skipping env var with invalid name {var_name!r}",
+                                    file=sys.stderr,
+                                )
+                                continue
                             # Single-quoted PS literal so a user-supplied
                             # value containing ``$env:...``, ``$(...)``,
                             # backticks, or ``"`` can't change script
@@ -1104,6 +1126,12 @@ class LaunchManager:
                 if env_vars:
                     commands.append('echo "Setting environmental variables..."')
                     for var_name, var_value in env_vars.items():
+                        if not self._is_valid_env_var_name(var_name):
+                            print(
+                                f"WARNING: skipping env var with invalid name {var_name!r}",
+                                file=sys.stderr,
+                            )
+                            continue
                         # Escape the four metacharacters that bash processes
                         # inside a ``"..."`` string: ``\``, ``"``, ``$``, and
                         # backtick. Order matters — backslash first so the
@@ -1308,6 +1336,12 @@ class LaunchManager:
                 if env_vars:
                     fh.write('Write-Host "Setting environmental variables..." -ForegroundColor DarkCyan\n')
                     for var_name, var_value in env_vars.items():
+                        if not self._is_valid_env_var_name(var_name):
+                            print(
+                                f"WARNING: skipping env var with invalid name {var_name!r}",
+                                file=sys.stderr,
+                            )
+                            continue
                         # Same single-quoted form the live launcher uses
                         # so saved scripts can't be hijacked by a value
                         # containing PowerShell expansion sequences.
@@ -1470,6 +1504,12 @@ class LaunchManager:
                 if env_vars:
                     fh.write('echo "Setting environmental variables..."\n')
                     for var_name, var_value in env_vars.items():
+                        if not self._is_valid_env_var_name(var_name):
+                            print(
+                                f"WARNING: skipping env var with invalid name {var_name!r}",
+                                file=sys.stderr,
+                            )
+                            continue
                         # Escape the four metacharacters bash processes inside
                         # ``"..."``: backslash FIRST (so the backslashes we
                         # insert for the rest don't get doubled), then ``"``,

@@ -233,6 +233,11 @@ class AboutTab:
         self._version_thread = None
         self._version_check_pending = False
         self._parent = None
+        # Generation token so a stale background check from a prior mount
+        # can't post results / COMPLETE into the new run's queue. Each
+        # ``setup_about_tab`` bumps this; worker threads stamp every
+        # outgoing item and the drain rejects mismatches.
+        self._version_generation = 0
         # Python-level flag the background version-check thread consults
         # before touching any Tk widget. Cleared by ``_mark_dead`` (bound
         # to the parent frame's ``<Destroy>`` event in ``setup_about_tab``)
@@ -320,7 +325,7 @@ class AboutTab:
         except Exception:
             return False
 
-    def _check_version_online(self):
+    def _check_version_online(self, generation=None):
         """Check version against GitHub repository.
 
         Runs in a daemon background thread. Every Tk-mutating helper is
@@ -330,11 +335,22 @@ class AboutTab:
         and leak a ``RuntimeError: main thread is not in main loop``
         into Tcl, which (Python 3.13) corrupts the next root's
         interpreter and deadlocks subsequent UI tests.
+
+        ``generation`` is the per-mount token captured at the time this
+        thread was spawned. The drain rejects results from a generation
+        that no longer matches ``self._version_generation`` so a stale
+        in-flight check from a prior mount can't leak status text or
+        COMPLETE into the new run.
         """
+        # Default to the current generation when called without one (the
+        # historical sync no-parent code path). New callers always pass
+        # the captured value.
+        if generation is None:
+            generation = self._version_generation
         if not REQUESTS_AVAILABLE:
-            self._post_version_result("requests not installed", None)
+            self._post_version_result(generation, "requests not installed", None)
             if self._parent is not None:
-                self._version_queue.put(_VERSION_CHECK_COMPLETE)
+                self._version_queue.put((generation, _VERSION_CHECK_COMPLETE))
             return
         try:
             response = requests.get(self.github_version_url, timeout=10)
@@ -348,26 +364,26 @@ class AboutTab:
                 # Reject anything that doesn't parse so the UI shows the
                 # check actually failed.
                 if not remote_version or self._parse_version(remote_version) == (0, 0, 0, 0):
-                    self._post_version_result("Check Failed", remote_version or None)
+                    self._post_version_result(generation, "Check Failed", remote_version or None)
                 else:
                     status = (
                         "Update Available"
                         if self._is_version_newer(self.version, remote_version)
                         else "Current"
                     )
-                    self._post_version_result(status, remote_version)
+                    self._post_version_result(generation, status, remote_version)
             else:
-                self._post_version_result("Check Failed", None)
+                self._post_version_result(generation, "Check Failed", None)
         except requests.RequestException as e:
             print(f"Error checking version: {e}", file=sys.stderr)
             if not self._widget_alive():
                 return
-            self._post_version_result("Check Failed", None)
+            self._post_version_result(generation, "Check Failed", None)
         finally:
             if self._parent is not None:
-                self._version_queue.put(_VERSION_CHECK_COMPLETE)
+                self._version_queue.put((generation, _VERSION_CHECK_COMPLETE))
 
-    def _post_version_result(self, status, remote_version):
+    def _post_version_result(self, generation, status, remote_version):
         if self._parent is None:
             self.version_status = status
             self.remote_version = remote_version
@@ -375,7 +391,7 @@ class AboutTab:
             if status == "Update Available":
                 self._show_update_button()
             return
-        self._version_queue.put((status, remote_version))
+        self._version_queue.put((generation, status, remote_version))
 
     def _schedule_version_queue_drain(self):
         if (
@@ -405,11 +421,24 @@ class AboutTab:
                     self._schedule_version_queue_drain()
                 return
 
-            if item is _VERSION_CHECK_COMPLETE:
+            # Every item posted by a worker is now ``(generation, ...)``.
+            # Drop items whose generation no longer matches — a stale
+            # check from a prior mount that resolved late shouldn't
+            # change current UI or clear the new-run pending flag.
+            if not (isinstance(item, tuple) and len(item) >= 2):
+                # Defensive: a bare COMPLETE sentinel from old code path.
+                if item is _VERSION_CHECK_COMPLETE:
+                    self._version_check_pending = False
+                    return
+                continue
+            item_generation = item[0]
+            if item_generation != self._version_generation:
+                continue
+            if item[1] is _VERSION_CHECK_COMPLETE:
                 self._version_check_pending = False
                 return
 
-            status, remote_version = item
+            _, status, remote_version = item
             if not self._widget_alive():
                 return
             self.version_status = status
@@ -602,6 +631,10 @@ class AboutTab:
         self._alive.set()
         self._version_after_id = None
         self._version_check_pending = False
+        # Bump the per-mount generation so any still-in-flight check
+        # from a prior mount (background worker hasn't returned yet)
+        # is rejected when its result tries to post into the queue.
+        self._version_generation += 1
         self._parent = parent
         # Bind the parent's <Destroy> so background workers know to stop
         # touching widgets before Tcl tears them down. Without this, the
@@ -654,9 +687,18 @@ class AboutTab:
         
         if REQUESTS_AVAILABLE:
             # Start version check in background; results are applied by the Tk thread.
+            # ``_version_queue`` is recreated so any stale items left in
+            # the old queue from a prior generation can't leak through —
+            # the drain ALSO filters by generation, this is just belt
+            # and braces.
             self._version_queue = queue.Queue()
             self._version_check_pending = True
-            self._version_thread = threading.Thread(target=self._check_version_online, daemon=True)
+            generation = self._version_generation
+            self._version_thread = threading.Thread(
+                target=self._check_version_online,
+                args=(generation,),
+                daemon=True,
+            )
             self._version_thread.start()
             self._schedule_version_queue_drain()
         else:

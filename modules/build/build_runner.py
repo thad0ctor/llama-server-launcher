@@ -668,12 +668,32 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
     lines.append(f"BUILD_DIR={build_q}")
     lines.append("")
 
+    # Mirror ``_run()``'s precondition checks. Without these the exported
+    # script silently proceeds into ``cmake -S`` against a non-existent
+    # SRC_DIR (which then fails much further down with a confusing cmake
+    # error message), and a misconfigured clone (clone-if-missing requested
+    # but no upstream URL) would silently skip the clone and produce the
+    # same downstream failure.
     if plan.git_clone_if_missing and plan.upstream_url:
         lines.append('if [ ! -d "$SRC_DIR" ]; then')
         # _run() implicitly relies on Popen's cwd being writable; the exported
         # script has no such caller, so create the parent explicitly.
         lines.append('  mkdir -p "$(dirname "$SRC_DIR")"')
         lines.append(f"  git clone --recursive {shlex.quote(plan.upstream_url)} \"$SRC_DIR\"")
+        lines.append("fi")
+    elif plan.git_clone_if_missing and not plan.upstream_url:
+        # Misconfiguration — clone requested without a URL. Fail with a
+        # clear message rather than letting the next ``git -C "$SRC_DIR"``
+        # invocation surface as a generic "not a git repository" error.
+        lines.append('if [ ! -d "$SRC_DIR" ]; then')
+        lines.append('  echo "ERROR: git_clone_if_missing is set but no upstream URL was configured." >&2')
+        lines.append("  exit 1")
+        lines.append("fi")
+    else:
+        # No clone requested — SRC_DIR must already exist.
+        lines.append('if [ ! -d "$SRC_DIR" ]; then')
+        lines.append('  echo "ERROR: source directory does not exist: $SRC_DIR" >&2')
+        lines.append("  exit 1")
         lines.append("fi")
 
     if plan.git_pull_before_build:

@@ -615,7 +615,12 @@ class ConfigManager:
 
         # Ask for confirmation
         if messagebox.askyesno("Confirm Deletion", confirm_msg):
-            # Delete the configurations
+            # Snapshot pre-delete state so we can roll back if the save
+            # to disk fails. Without this, a write failure would leave
+            # ``saved_configs`` showing fewer entries than what's on
+            # disk; restarting would resurrect the "deleted" configs.
+            prior_configs = dict(self.launcher.saved_configs)
+
             deleted_count = 0
             for name in selected_names:
                 if name in self.launcher.saved_configs:
@@ -623,14 +628,15 @@ class ConfigManager:
                     deleted_count += 1
 
             if deleted_count > 0:
-                # Only confirm the delete to the user when the disk write
-                # actually succeeded. ``save_configs`` shows its own
-                # error dialog on failure; we just shouldn't ALSO
-                # optimistically show "Deleted" on top of it.
                 saved = self.launcher._save_configs()
-                self.launcher._update_config_listbox()
                 if saved:
+                    self.launcher._update_config_listbox()
                     messagebox.showinfo("Deleted", result_msg)
+                else:
+                    # Roll back the in-memory delete so the session view
+                    # matches what's actually on disk.
+                    self.launcher.saved_configs = prior_configs
+                    self.launcher._update_config_listbox()
             else:
                 messagebox.showerror("Error", "No configurations were found to delete.")
 
@@ -811,7 +817,11 @@ class ConfigManager:
             if not messagebox.askyesno("Confirm Import", import_summary):
                 return
 
-            # Perform the import
+            # Snapshot pre-import state so a save failure can roll back
+            # the new entries — otherwise the session view shows imports
+            # that vanish on restart.
+            prior_configs = dict(self.launcher.saved_configs)
+
             imported_count = 0
             for config_name, config_data in configs_to_import.items():
                 try:
@@ -828,18 +838,17 @@ class ConfigManager:
                     print(f"WARNING: Failed to import config '{config_name}': {e}", file=sys.stderr)
 
             if imported_count > 0:
-                # Only confirm "imported" when the save actually reached
-                # disk — otherwise the imports are in-memory only and
-                # will vanish on restart, which is worse than no import.
                 saved = self.launcher._save_configs()
-                # Update the listbox
-                self.update_config_listbox()
-
                 if saved:
+                    self.update_config_listbox()
                     messagebox.showinfo(
                         "Import Successful",
                         f"Successfully imported {imported_count} configuration(s).",
                     )
+                else:
+                    # Save failed — roll back the in-memory imports.
+                    self.launcher.saved_configs = prior_configs
+                    self.update_config_listbox()
             else:
                 messagebox.showerror("Import Error", "No configurations were successfully imported.")
 
@@ -1185,6 +1194,11 @@ class ConfigManager:
                  if self.launcher.config_path != original_path and self.launcher.config_path.name not in ("null", "NUL"):
                       try:
                          self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                         # Mirror the latch flip from the primary-path
+                         # success branch: a successful fallback write
+                         # IS authoritative, so subsequent saves should
+                         # trust in-memory state going forward.
+                         self.configs_loaded_successfully = True
                          messagebox.showwarning("Config Save Info", f"Could not write to original location.\nSettings stored in:\n{self.launcher.config_path}")
                          return True
                       except Exception as final_exc:
@@ -1269,11 +1283,26 @@ class ConfigManager:
             self.launcher.config_name.set(name)
 
         current_cfg = self.current_cfg()
+        # Snapshot pre-save state so a write failure can roll back the
+        # in-memory mutation. ``save_configs`` shows its own error
+        # dialog; we just need to make sure ``saved_configs`` doesn't
+        # diverge from disk after a failure.
+        prior_entry = (
+            self.launcher.saved_configs[name]
+            if name in self.launcher.saved_configs
+            else None
+        )
+        name_existed = name in self.launcher.saved_configs
         self.launcher.saved_configs[name] = current_cfg
-        # Gate the "Saved" toast on the disk write actually succeeding —
-        # ``save_configs`` shows its own error dialog on failure and
-        # we don't want to stack a misleading success message on top.
         saved = self.save_configs()
-        self.update_config_listbox()
         if saved:
+            self.update_config_listbox()
             messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")
+        else:
+            # Roll back. If the entry didn't exist before, remove it;
+            # otherwise restore the prior value verbatim.
+            if name_existed:
+                self.launcher.saved_configs[name] = prior_entry
+            else:
+                self.launcher.saved_configs.pop(name, None)
+            self.update_config_listbox()
