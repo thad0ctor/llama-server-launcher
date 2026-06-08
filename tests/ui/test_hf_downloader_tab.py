@@ -42,6 +42,13 @@ def active_venv(tmp_path):
     bindir.mkdir(parents=True)
     python = bindir / exe_name
     python.write_text("", encoding="utf-8")
+    # ``_path_looks_like_venv`` now requires the interpreter to be an
+    # executable regular file (POSIX). On Windows the ``.exe`` extension
+    # is the marker so chmod is unnecessary.
+    if not sys.platform.startswith("win"):
+        import os as _os
+
+        _os.chmod(python, 0o755)
     # Both markers ``looks_like_venv`` now requires.
     (venv_dir / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
     activator.write_text("# mock\n", encoding="utf-8")
@@ -300,9 +307,7 @@ def test_run_process_worker_reports_start_failure(hf_launcher_stub, active_venv,
     assert event["stderr"]
 
 
-def test_cancel_before_worker_publishes_process_does_not_pin_handle(
-    hf_launcher_stub, active_venv, monkeypatch
-):
+def test_cancel_before_worker_publishes_process_does_not_pin_handle(hf_launcher_stub, active_venv, monkeypatch):
     """Cancel that wins the race against ``self._process = proc`` must not
     leave a stale handle pinned on the tab.
 

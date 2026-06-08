@@ -178,12 +178,37 @@ def get_effective_visible_gpu_indices(launcher):
     # either raise on heterogeneous int+str sorts or silently fail to
     # match a main-set membership check. Mirrors the same sanitization
     # in ``_resolve_draft_device_value``.
+    # Additionally clamp to the host's detected device count so a stale
+    # config saved on a 4-GPU host can't leak ``CUDA7`` into the
+    # ``CUDA_VISIBLE_DEVICES`` union exported by
+    # ``LaunchManager._resolve_cuda_visible_devices_action`` — that
+    # method consumes this list directly.
+    detected_count = 0
+    try:
+        gpu_info = getattr(launcher, "gpu_info", {})
+        if isinstance(gpu_info, dict):
+            detected_count = int(gpu_info.get("device_count", 0) or 0)
+    except Exception:
+        detected_count = 0
     draft_indices: list[int] = []
+    dropped: list = []
     for raw_idx in draft_indices_raw:
         try:
-            draft_indices.append(int(raw_idx))
+            idx = int(raw_idx)
         except (TypeError, ValueError):
+            dropped.append(raw_idx)
             continue
+        if detected_count > 0 and not (0 <= idx < detected_count):
+            dropped.append(raw_idx)
+            continue
+        draft_indices.append(idx)
+    if dropped:
+        print(
+            f"WARNING: dropping invalid draft GPU indices from "
+            f"spec_draft_selected_gpus in get_effective_visible_gpu_indices: "
+            f"{dropped}",
+            file=sys.stderr,
+        )
     if not draft_indices:
         return main_ordered
     # Don't auto-create a CUDA_VISIBLE_DEVICES filter when the user hasn't

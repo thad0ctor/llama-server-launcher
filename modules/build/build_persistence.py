@@ -121,7 +121,16 @@ class BuildConfig:
                 return default
 
         def _coerce_env(raw: Any) -> dict[str, str]:
-            """Coerce both keys and values of the env mapping to str."""
+            """Coerce both keys and values of the env mapping to str and
+            drop entries that POSIX / Windows env-var APIs would refuse.
+
+            ``subprocess.Popen`` and shell rendering both reject names
+            containing ``=`` (which would split the assignment) or NUL
+            (which terminates the C-level env entry), and reject any
+            value containing NUL. Filtering here means a hand-edited
+            preset with ``{"FOO=BAR": "x"}`` or ``{"X": "a\\0b"}`` no
+            longer causes a confusing failure at run time.
+            """
             if not isinstance(raw, Mapping):
                 return {}
             out: dict[str, str] = {}
@@ -130,17 +139,30 @@ class BuildConfig:
                     key = str(k)
                 except Exception:
                     continue
+                if not key or "=" in key or "\0" in key:
+                    continue
                 if v is None:
                     continue
                 try:
-                    out[key] = str(v)
+                    val = str(v)
                 except Exception:
                     continue
+                if "\0" in val:
+                    continue
+                out[key] = val
             return out
 
+        # Clamp malformed persisted backends to the default. A hand-edited
+        # ``"backend": "gpu"`` (or ``""``) would otherwise propagate
+        # through every downstream consumer — backend-scoped flag lookup,
+        # BuildPlan.upstream_url, etc. — and surface as a confusing
+        # KeyError much later.
+        raw_backend = _as_str(data.get("backend"), "llama.cpp")
+        if raw_backend not in {"llama.cpp", "ik_llama"}:
+            raw_backend = "llama.cpp"
         return cls(
             name=name,
-            backend=_as_str(data.get("backend"), "llama.cpp"),
+            backend=raw_backend,
             source_dir=_as_str(data.get("source_dir"), ""),
             build_dir=_as_str(data.get("build_dir"), "build"),
             git_ref=_as_str(data.get("git_ref"), ""),

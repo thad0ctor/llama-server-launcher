@@ -39,6 +39,13 @@ def _make_platform_venv(base: Path) -> Path:
         activator = bindir / "activate"
     bindir.mkdir(parents=True)
     exe.write_text("", encoding="utf-8")
+    # ``_path_looks_like_venv`` now requires the interpreter to be a
+    # real executable file. On POSIX that's chmod +x; on Windows the
+    # ``.exe`` extension is the marker.
+    if not sys.platform.startswith("win"):
+        import os as _os
+
+        _os.chmod(exe, 0o755)
     activator.write_text("# mock\n", encoding="utf-8")
     (venv / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
     return venv
@@ -302,7 +309,9 @@ def test_initial_venv_bootstrap_prompt_does_not_suppress_retry_on_terminal_error
     monkeypatch.setattr(entry_module.venv_manager, "probe_current_python_dependencies", lambda *_args: statuses)
     monkeypatch.setattr(entry_module.venv_manager, "launcher_repo_dir", lambda: tmp_path)
     monkeypatch.setattr(entry_module.venv_manager, "build_bootstrap_venv_command", lambda target: f"bootstrap {target}")
-    monkeypatch.setattr(entry_module.terminal_launcher, "open_command_in_terminal", MagicMock(side_effect=OSError("no terminal")))
+    monkeypatch.setattr(
+        entry_module.terminal_launcher, "open_command_in_terminal", MagicMock(side_effect=OSError("no terminal"))
+    )
     monkeypatch.setattr(entry_module.messagebox, "showinfo", MagicMock())
     error_mock = MagicMock()
     monkeypatch.setattr(entry_module.messagebox, "showerror", error_mock)

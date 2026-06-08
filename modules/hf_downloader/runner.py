@@ -231,7 +231,7 @@ def run_download(payload: dict) -> int:
         raise ValueError(
             "'selected' download mode requires at least one selected_file or "
             "include_pattern; got an empty selection. To download the whole "
-            "repo set ``download_mode`` to ``all``."
+            "repo set ``download_mode`` to ``snapshot``."
         )
     ignore_patterns = _normalize_pattern_list(payload.get("ignore_patterns")) or None
     target_dirs = _normalize_path_list(payload.get("target_dirs"))

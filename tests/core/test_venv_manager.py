@@ -48,10 +48,16 @@ def test_resolve_active_venv_path_blank_uses_default_when_venv_exists(tmp_path):
     # ``looks_like_venv`` now requires the full marker set (pyvenv.cfg +
     # activator + python). Lay them all out so the resolved-active-path
     # heuristic still considers this a real venv.
+    import os as _os
+
     venv_root = tmp_path / "venv"
     bindir = venv_root / "bin"
     bindir.mkdir(parents=True)
-    (bindir / "python").write_text("", encoding="utf-8")
+    python = bindir / "python"
+    python.write_text("", encoding="utf-8")
+    # ``_path_looks_like_venv`` additionally requires the interpreter to be
+    # an executable regular file on POSIX.
+    _os.chmod(python, 0o755)
     (bindir / "activate").write_text("# mock\n", encoding="utf-8")
     (venv_root / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
 

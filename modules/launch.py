@@ -967,7 +967,13 @@ class LaunchManager:
                     if env_vars:
                         f.write('Write-Host "Setting environmental variables..." -ForegroundColor DarkCyan\n')
                         for var_name, var_value in env_vars.items():
-                            f.write(f'$env:{var_name}="{var_value}"\n')
+                            # Single-quoted PS literal so a user-supplied
+                            # value containing ``$env:...``, ``$(...)``,
+                            # backticks, or ``"`` can't change script
+                            # behavior — PS double-quoted strings would
+                            # have interpolated those.
+                            escaped_value = self._ps_escape_single_quoted(str(var_value))
+                            f.write(f"$env:{var_name}='{escaped_value}'\n")
                         f.write('\n')
 
                     if use_venv:
@@ -1287,7 +1293,11 @@ class LaunchManager:
                 if env_vars:
                     fh.write('Write-Host "Setting environmental variables..." -ForegroundColor DarkCyan\n')
                     for var_name, var_value in env_vars.items():
-                        fh.write(f'$env:{var_name}="{var_value}"\n')
+                        # Same single-quoted form the live launcher uses
+                        # so saved scripts can't be hijacked by a value
+                        # containing PowerShell expansion sequences.
+                        escaped_value = self._ps_escape_single_quoted(str(var_value))
+                        fh.write(f"$env:{var_name}='{escaped_value}'\n")
                     fh.write('\n')
 
                 venv = self._effective_venv_path()

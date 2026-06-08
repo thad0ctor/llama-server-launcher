@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -408,7 +409,22 @@ def _path_looks_like_venv(path: Path) -> bool:
         path / "Scripts" / "python.exe",
         path / "Scripts" / "python3.exe",
     )
-    if not any(p.exists() for p in python_candidates):
+
+    def _is_real_interpreter(p: Path) -> bool:
+        # Tighter than the previous ``p.exists()``: a directory named
+        # ``bin/python`` would have satisfied that, and ``rm -rf`` against
+        # that crafted layout could delete unrelated content. Require an
+        # actual regular file, and on POSIX additionally require it to be
+        # executable. On Windows we settle for "exists and is a file"
+        # because the ``.exe`` extension is the executable marker (and
+        # ``os.access(X_OK)`` is unreliable there).
+        if not p.is_file():
+            return False
+        if p.name.lower().endswith(".exe"):
+            return True
+        return os.access(str(p), os.X_OK)
+
+    if not any(_is_real_interpreter(p) for p in python_candidates):
         return False
     activator_candidates = (
         path / "bin" / "activate",

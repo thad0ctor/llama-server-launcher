@@ -536,26 +536,30 @@ class SettingsTab:
             ):
                 return
         elif info.exists:
-            # Target exists but isn't a venv — ``python -m venv`` will
-            # happily drop ``bin/``, ``lib/``, and ``pyvenv.cfg`` into the
-            # existing folder, mixing venv files into whatever was already
-            # there. The Remove venv flow then refuses to clean it up
-            # (looks_like_venv stays False because of the foreign files).
-            # Require explicit confirmation if the folder is non-empty.
+            # Target exists but isn't a venv. The previous behavior was to
+            # prompt and proceed if the user confirmed; that left the user
+            # one accidental click from mixing venv files into an
+            # arbitrary project directory which Remove venv would then
+            # refuse to clean up. Refuse outright when the directory is
+            # non-empty — point the user at an empty/new path instead.
             try:
                 has_contents = any(info.effective_dir.iterdir())
             except OSError:
-                # If we can't list it, err on the safe side: prompt.
+                # If we can't list it (permission error, race), err on
+                # the safe side and refuse rather than proceeding.
                 has_contents = True
-            if has_contents and not messagebox.askyesno(
-                "Create venv",
-                "The selected directory already exists and is not a "
-                "virtual environment:\n\n"
-                f"{info.effective_dir}\n\n"
-                "Creating a venv here will mix venv files into that folder, "
-                "and Remove venv will later refuse to clean it up. "
-                "Proceed anyway?",
-            ):
+            if has_contents:
+                messagebox.showerror(
+                    "Create venv",
+                    "The selected directory already exists and is not a "
+                    "virtual environment:\n\n"
+                    f"{info.effective_dir}\n\n"
+                    "Refusing to bootstrap a venv inside a non-empty "
+                    "non-venv directory — venv files would mix with the "
+                    "existing contents and Remove venv would later refuse "
+                    "to clean it up. Point ``Venv dir`` at an empty or "
+                    "new path.",
+                )
                 return
         try:
             info.effective_dir.parent.mkdir(parents=True, exist_ok=True)

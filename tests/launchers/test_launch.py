@@ -1362,7 +1362,11 @@ class TestSavePs1Script:
         }
         out = tmp_path / "launch.ps1"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert '$env:FOO="bar"' in text
+        # Env-var values are emitted as SINGLE-quoted PS literals so a
+        # value containing ``$env:...`` / ``$(...)`` / backticks can't be
+        # expression-expanded by PowerShell. Bare ``bar`` round-trips
+        # unchanged in the single-quoted form.
+        assert "$env:FOO='bar'" in text
 
     def test_ps1_chat_template_single_quoted(self, manager, launcher_mock, tmp_path):
         launcher_mock.template_source.set("custom")

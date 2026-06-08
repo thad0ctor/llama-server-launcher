@@ -157,7 +157,11 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
     # the Build tab's update banner.
     if not str(source_dir or "").strip():
         return status
-    src = Path(source_dir)
+    # ``~/repos/foo`` is a valid value in the Build tab's source-dir entry;
+    # without ``expanduser`` ``Path("~/...")`` would be treated as a
+    # literal child directory of cwd, the ``.git`` check would fail, and
+    # the probe would silently return "not a git repo".
+    src = Path(source_dir).expanduser()
     # .git can be a directory (regular repo) or a regular file (worktree /
     # submodule). exists() covers both.
     if not src.is_dir() or not (src / ".git").exists():

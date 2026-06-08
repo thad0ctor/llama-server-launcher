@@ -91,10 +91,16 @@ def _make_fake_venv(root):
     previously only created ``bin/python`` need the other two too.
     Returns the path to the python interpreter so callers can re-use it.
     """
+    import os as _os
+
     bindir = root / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     python = bindir / "python"
     python.write_text("", encoding="utf-8")
+    # ``_path_looks_like_venv`` now requires the python interpreter to be
+    # an executable regular file (POSIX), so chmod +x. Without this the
+    # remove-venv flow refuses to operate on the test fixture.
+    _os.chmod(python, 0o755)
     (bindir / "activate").write_text("# mock\n", encoding="utf-8")
     (root / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
     return python

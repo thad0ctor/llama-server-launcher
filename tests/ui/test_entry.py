@@ -46,6 +46,7 @@ def entry_module():
 # parse_cli_args
 # ---------------------------------------------------------------------------
 
+
 class TestParseCliArgs:
     """Validate that --help / --version exit cleanly instead of opening GUI."""
 
@@ -100,6 +101,7 @@ class TestParseCliArgs:
 # ---------------------------------------------------------------------------
 # LlamaCppLauncher lazy/system-info helpers
 # ---------------------------------------------------------------------------
+
 
 class TestLauncherHelpers:
     def test_lazy_tab_initialized_only_after_success(self, entry_module):
@@ -161,6 +163,7 @@ class TestLauncherHelpers:
 # _read_version_string
 # ---------------------------------------------------------------------------
 
+
 class TestReadVersionString:
     def test_reads_shipped_version(self, entry_module):
         """There's a version file in the repo — the helper should surface it
@@ -170,8 +173,7 @@ class TestReadVersionString:
         assert isinstance(result, str)
         assert result  # non-empty
 
-    def test_returns_unknown_on_missing_file(self, entry_module, monkeypatch,
-                                             tmp_path):
+    def test_returns_unknown_on_missing_file(self, entry_module, monkeypatch, tmp_path):
         """Simulate a partial install (no ``config/version``) by repointing
         ``__file__`` at a tmp dir. Must degrade gracefully, not raise."""
         # The helper uses Path(__file__).resolve().parent / "config" / "version".
@@ -183,8 +185,7 @@ class TestReadVersionString:
         result = entry_module._read_version_string()
         assert result == "unknown"
 
-    def test_handles_empty_version_file(self, entry_module, monkeypatch,
-                                        tmp_path):
+    def test_handles_empty_version_file(self, entry_module, monkeypatch, tmp_path):
         """Empty file is treated the same as missing — 'unknown'."""
         fake_module_path = tmp_path / "launcher.py"
         fake_module_path.write_text("")
@@ -205,9 +206,7 @@ class TestReadVersionString:
 
         assert entry_module._read_version_string() == "2024-01-01-1"
 
-    def test_non_utf8_bytes_fall_back_to_unknown(
-        self, entry_module, monkeypatch, tmp_path
-    ):
+    def test_non_utf8_bytes_fall_back_to_unknown(self, entry_module, monkeypatch, tmp_path):
         """A malformed version file (non-UTF-8 bytes) must not crash
         ``--version``. ``Path.read_text(encoding='utf-8')`` raises
         ``UnicodeDecodeError`` which is NOT an ``OSError``; if the helper
@@ -226,6 +225,7 @@ class TestReadVersionString:
 # ---------------------------------------------------------------------------
 # LlamaCppLauncher.cleanup
 # ---------------------------------------------------------------------------
+
 
 class TestCleanup:
     """Static helper that deletes a temp file after a short delay.

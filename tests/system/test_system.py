@@ -148,6 +148,7 @@ def test_gpu_info_static_sets_cuda_device_order_env(
     sysmod.get_gpu_info_static()
 
     import os
+
     assert os.environ.get("CUDA_DEVICE_ORDER") == "PCI_BUS_ID"
 
 
@@ -194,9 +195,7 @@ def test_gpu_info_with_venv_none_falls_back_to_static(
     assert sysmod.get_gpu_info_with_venv("") is sentinel
 
 
-def test_gpu_info_with_venv_missing_path_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_with_venv_missing_path_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = {"available": False, "device_count": 0, "devices": [], "message": "fallback"}
     monkeypatch.setattr(
         sysmod,
@@ -228,9 +227,7 @@ def test_gpu_info_with_venv_prefers_nvidia_smi(
     static.assert_not_called()
 
 
-def test_gpu_info_from_venv_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Build a fake venv layout with a python binary that exists.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -246,9 +243,7 @@ def test_gpu_info_from_venv_success(
             {"id": 1, "name": "GPU1", "total_memory_gb": 16},
         ],
     }
-    fake_result = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout=json.dumps(expected), stderr=""
-    )
+    fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(expected), stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
     monkeypatch.setattr(sys, "platform", "linux")
 
@@ -269,16 +264,12 @@ def _forbid_static_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def _explode() -> dict:
-        raise AssertionError(
-            "get_gpu_info_static must NOT be invoked from get_gpu_info_from_venv"
-        )
+        raise AssertionError("get_gpu_info_static must NOT be invoked from get_gpu_info_from_venv")
 
     monkeypatch.setattr(sysmod, "get_gpu_info_static", _explode)
 
 
-def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_empty_stdout_triggers_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "python").write_text("")
@@ -295,17 +286,13 @@ def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
     assert "message" in info
 
 
-def test_gpu_info_from_venv_bad_json_triggers_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_bad_json_triggers_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
     python_exe.chmod(0o755)
 
-    fake_result = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="not-json!!", stderr=""
-    )
+    fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="not-json!!", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
     _forbid_static_fallback(monkeypatch)
 
@@ -321,9 +308,7 @@ def test_gpu_info_from_venv_nonzero_return_code_triggers_fallback(
     python_exe.write_text("")
     python_exe.chmod(0o755)
 
-    fake_result = subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: torch"
-    )
+    fake_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: torch")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
     _forbid_static_fallback(monkeypatch)
 
@@ -331,9 +316,7 @@ def test_gpu_info_from_venv_nonzero_return_code_triggers_fallback(
     assert info["available"] is False
 
 
-def test_gpu_info_from_venv_subprocess_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_subprocess_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -349,9 +332,7 @@ def test_gpu_info_from_venv_subprocess_timeout(
     assert info["available"] is False
 
 
-def test_gpu_info_from_venv_permission_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -496,6 +477,7 @@ def test_cpu_info_with_psutil(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cpu_info_with_psutil_none_logical(monkeypatch: pytest.MonkeyPatch) -> None:
     """psutil can return None for logical cores on some platforms."""
+
     def cpu_count(logical=True):
         return None
 
@@ -511,6 +493,7 @@ def test_cpu_info_with_psutil_none_logical(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_cpu_info_with_psutil_none_physical_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Logical known, physical returns None -> estimate as logical // 2."""
+
     def cpu_count(logical=True):
         return 12 if logical else None
 
@@ -557,6 +540,7 @@ def test_cpu_info_psutil_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class _Var:
     """Minimal stand-in for tkinter StringVar used by the launcher."""
+
     def __init__(self, value=""):
         self._v = value
 
@@ -586,8 +570,7 @@ def test_fetch_system_info_populates_launcher_attributes(
         "devices": [{"id": 0, "name": "GPU0"}],
         "message": "ok",
     }
-    fake_ram = {"total_ram_bytes": 1, "total_ram_gb": 1,
-                "available_ram_bytes": 1, "available_ram_gb": 1}
+    fake_ram = {"total_ram_bytes": 1, "total_ram_gb": 1, "available_ram_bytes": 1, "available_ram_gb": 1}
     fake_cpu = {"logical_cores": 12, "physical_cores": 6, "model_name": "N/A"}
 
     monkeypatch.setattr(sysmod, "get_gpu_info_with_venv", lambda v: fake_gpu)
@@ -622,9 +605,7 @@ def test_fetch_system_info_sets_status_when_gpu_unavailable(
         "message": "No CUDA",
     }
     monkeypatch.setattr(sysmod, "get_gpu_info_with_venv", lambda v: fake_gpu)
-    monkeypatch.setattr(
-        sysmod, "get_ram_info_static", lambda: {"total_ram_gb": 0, "available_ram_gb": 0}
-    )
+    monkeypatch.setattr(sysmod, "get_ram_info_static", lambda: {"total_ram_gb": 0, "available_ram_gb": 0})
     monkeypatch.setattr(
         sysmod,
         "get_cpu_info_static",
