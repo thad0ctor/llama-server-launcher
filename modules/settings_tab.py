@@ -593,7 +593,12 @@ class SettingsTab:
         except Exception as exc:
             messagebox.showerror("Create venv", f"Failed to create venv:\n{exc}")
             return
-        self.venv_dir_var.set(str(info.effective_dir))
+        # Do NOT overwrite the user's typed value with the resolved
+        # absolute path. If they left the field blank or used a relative
+        # repo-anchored value (``venv``, ``./venv``), preserve that
+        # intent so the next launch/launcher continues to resolve it
+        # against the active repo_dir. ``info.effective_dir`` is only
+        # used internally for the actual ``python -m venv`` invocation.
         self._venv_action_status_var.set(
             f"Opened terminal to create venv at {info.effective_dir}."
         )

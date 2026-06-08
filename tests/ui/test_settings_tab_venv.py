@@ -75,7 +75,12 @@ def test_create_venv_uses_default_repo_path_when_blank(settings_tab, monkeypatch
     settings_tab._on_create_venv()
 
     expected = venv_manager.default_venv_dir(repo_dir=settings_tab.repo_dir)
-    assert settings_tab.venv_dir_var.get() == str(expected)
+    # ``_on_create_venv`` resolves blanks against ``repo_dir`` for the
+    # actual ``python -m venv`` invocation, but must NOT overwrite the
+    # user's typed value with the resolved absolute path. Leaving the
+    # field blank preserves the user's intent so the next launch keeps
+    # resolving against the active repo_dir (not a hard-coded checkout).
+    assert settings_tab.venv_dir_var.get() == ""
     launch_mock.assert_called_once()
     assert launch_mock.call_args.kwargs["cwd"] == settings_tab.repo_dir
     assert str(expected) in launch_mock.call_args.args[0]

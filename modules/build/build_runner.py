@@ -724,6 +724,23 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
     lines.append(f"BUILD_DIR={build_q}")
     lines.append("")
 
+    # Refuse to proceed if either path EXISTS but is a regular file
+    # (or another non-directory shape — symlink to file, socket, etc).
+    # ``_resolve_safe_build_paths`` only runs at script-GENERATION time;
+    # this guard handles the case where the same SRC/BUILD path got
+    # repurposed between script export and script execution. Without
+    # the guard, the script would happily continue into ``git`` or
+    # ``rm -rf "$BUILD_DIR"`` against the wrong thing.
+    lines.append('if [ -e "$SRC_DIR" ] && [ ! -d "$SRC_DIR" ]; then')
+    lines.append('  echo "ERROR: source path is not a directory: $SRC_DIR" >&2')
+    lines.append("  exit 1")
+    lines.append("fi")
+    lines.append('if [ -e "$BUILD_DIR" ] && [ ! -d "$BUILD_DIR" ]; then')
+    lines.append('  echo "ERROR: build path is not a directory: $BUILD_DIR" >&2')
+    lines.append("  exit 1")
+    lines.append("fi")
+    lines.append("")
+
     # Mirror ``_run()``'s precondition checks. Without these the exported
     # script silently proceeds into ``cmake -S`` against a non-existent
     # SRC_DIR (which then fails much further down with a confusing cmake

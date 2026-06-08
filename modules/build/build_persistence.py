@@ -34,11 +34,20 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
+
+# POSIX identifier-style env var name. ``cmake_env`` keys flow through
+# ``shlex.quote``/PowerShell escaping into generated shell scripts; an
+# entry like ``{"CC FLAGS": "x"}`` would emit ``CC FLAGS="x"`` which
+# bash parses as a quoted command. ``{"CC;echo pwned": "x"}`` is even
+# worse. Restrict keys to the canonical name shape here so the script
+# emitter doesn't need its own escape audit.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 SCHEMA_VERSION = 1
@@ -140,6 +149,12 @@ class BuildConfig:
                 except Exception:
                     continue
                 if not key or "=" in key or "\0" in key:
+                    continue
+                # Strict env-var identifier: rejects shell-unsafe shapes
+                # ("CC FLAGS", "CC;echo pwned", "PATH$X") that the
+                # script emitter would otherwise concatenate verbatim
+                # into ``export …`` / ``$env:… = …`` lines.
+                if not _ENV_NAME_RE.match(key):
                     continue
                 if v is None:
                     continue

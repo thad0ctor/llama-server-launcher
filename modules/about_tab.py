@@ -121,9 +121,30 @@ for dir in {q_current_dir}/*; do
                 echo "Skipping $dirname (cache/git/static data)"
                 ;;
             *)
-                if [ ! -f {q_current_dir}/.gitignore ] || ! printf '%s\n%s\n%s\n%s\n' "$dirname" "$dirname/" "/$dirname" "/$dirname/" | grep -Fxqf - {q_current_dir}/.gitignore 2>/dev/null; then
+                # Prefer ``git check-ignore`` so globbed/anchored
+                # rules ("build-*", "venv*/", "/dist") are recognised
+                # exactly as the user's working tree treats them; the
+                # old printf-into-grep -Fxqf only matched literal
+                # entries and would happily back up an ignored
+                # ``build-cuda`` because the .gitignore line is
+                # ``build-*``. Fall back to the literal-line scan
+                # when git is unavailable or the working tree is not
+                # a git checkout — preserves the historical behaviour
+                # for the bundled .zip release path.
+                ignored=0
+                if command -v git >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} rev-parse --is-inside-work-tree >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} check-ignore -q -- "$dirname" 2>/dev/null; then
+                    ignored=1
+                elif [ -f {q_current_dir}/.gitignore ] \\
+                     && printf '%s\\n%s\\n%s\\n%s\\n' "$dirname" "$dirname/" "/$dirname" "/$dirname/" | grep -Fxqf - {q_current_dir}/.gitignore 2>/dev/null; then
+                    ignored=1
+                fi
+                if [ "$ignored" = "0" ]; then
                     echo "Backing up directory: $dirname"
                     cp -r "$dir" {q_backup_path}/
+                else
+                    echo "Skipping $dirname (gitignored)"
                 fi
                 ;;
         esac
