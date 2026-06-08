@@ -1287,12 +1287,8 @@ class ConfigManager:
         # in-memory mutation. ``save_configs`` shows its own error
         # dialog; we just need to make sure ``saved_configs`` doesn't
         # diverge from disk after a failure.
-        prior_entry = (
-            self.launcher.saved_configs[name]
-            if name in self.launcher.saved_configs
-            else None
-        )
         name_existed = name in self.launcher.saved_configs
+        prior_entry = self.launcher.saved_configs.get(name)
         self.launcher.saved_configs[name] = current_cfg
         saved = self.save_configs()
         if saved:
