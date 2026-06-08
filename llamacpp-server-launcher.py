@@ -2254,7 +2254,18 @@ class LlamaCppLauncher:
             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
 
 
-        # Initial state update based on self.template_source (called in __init__)
+        # Initial UI state — the earlier call in ``__init__`` ran BEFORE
+        # this tab existed (the ``hasattr`` guards short-circuited), so
+        # without this call the predefined combobox kept its constructed
+        # ``state="readonly"`` and the custom-template text widget kept
+        # its default NORMAL state regardless of which radio is selected.
+        # That made the dropdown look clickable even when the user has
+        # "Use Custom Template" checked. Sync now that the widgets exist.
+        self._update_template_controls_state()
+        # Same for the effective template display + help text + status —
+        # all of those derive from the radio state.
+        self._update_effective_template_display()
+        self._update_template_help_text()
 
 
     def _update_fit_fields_state(self, *args):
