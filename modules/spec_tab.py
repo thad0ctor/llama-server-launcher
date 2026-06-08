@@ -791,6 +791,15 @@ class SpecTab:
         from modules.spec_launch import _coerce_strict_gpu_index as _coerce_idx
 
         raw_persisted = self.launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+        # Mirror the launch path (``spec_launch._resolve_draft_device_value``
+        # and ``get_effective_visible_gpu_indices``): only iterate
+        # genuine sequences. A persisted ``"0,1"`` string would
+        # otherwise iterate character-by-character into
+        # ``["0", ",", "1"]`` and either crash ``_coerce_idx`` or
+        # silently drop every entry. A bare scalar would raise on
+        # ``for raw_idx in raw_persisted``.
+        if not isinstance(raw_persisted, (list, tuple)):
+            raw_persisted = []
         loaded_selected: set[int] = set()
         for raw_idx in raw_persisted:
             idx = _coerce_idx(raw_idx)

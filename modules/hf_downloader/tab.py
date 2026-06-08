@@ -57,6 +57,15 @@ class HuggingFaceDownloaderTab:
         self._max_workers_validating = False
         self.token_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Create/select a venv, install huggingface_hub, then load a repo.")
+        # Mirror SettingsTab's normalization (see settings_tab.py). The
+        # MagicMock-based test fixtures auto-vivify ``launcher.venv_dir``
+        # as a Mock that quacks like an attribute but doesn't satisfy
+        # ``isinstance(..., tk.StringVar)``; without this guard the
+        # downstream ``trace_add`` / ``.get()`` / ``.set()`` calls
+        # below would either silently no-op or crash.
+        existing_venv_dir = getattr(launcher, "venv_dir", None)
+        if not isinstance(existing_venv_dir, tk.StringVar):
+            launcher.venv_dir = tk.StringVar(value=settings.get("last_venv_dir", ""))
         self.venv_var = launcher.venv_dir
         self.venv_status_var = tk.StringVar(value="")
         self.progress_label_var = tk.StringVar(value="")
@@ -981,10 +990,17 @@ class HuggingFaceDownloaderTab:
             # branch/tag than the one the runner actually listed, which
             # would silently retarget the next download at the wrong ref.
             requested_revision = getattr(self, "_last_requested_revision", "").strip()
+            # Restore even when ``self._refs`` is empty: the listing
+            # runner can return zero refs for a repo with no branches/
+            # tags reported (or a payload that just didn't include
+            # them) yet still resolve files against the submitted
+            # revision. Tying restore to ``self._refs`` here would
+            # silently leave the field blank in that case and the
+            # next download would re-resolve against the default
+            # branch instead of the user's submitted ref.
             if (
                 not self.revision_var.get().strip()
                 and requested_revision
-                and self._refs
             ):
                 self.revision_var.set(requested_revision)
             self._file_rows = list(files)

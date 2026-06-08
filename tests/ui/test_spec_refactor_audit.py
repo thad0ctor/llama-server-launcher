@@ -853,6 +853,16 @@ class TestRedirectIntegrity:
         assert entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
 
     def test_stale_draft_analysis_is_dropped_at_enqueue(self, entry_module, monkeypatch):
+        """Race-condition regression: when a newer selection bumps
+        ``_spec_draft_analysis_generation`` *while* the parser is mid-
+        run, the stale result must be discarded at enqueue time (rather
+        than overwriting the queue with a result the UI no longer
+        wants). The monkeypatched ``parse_and_supersede`` simulates the
+        race by mutating the generation counter inside
+        ``parse_gguf_header_simple`` — so by the time
+        ``_run_spec_draft_gguf_analysis`` reaches its post-parse
+        generation check, the result is already stale.
+        """
         import modules.spec_tab as spec_mod
 
         tab = type("SpecTabStub", (), {})()
@@ -866,6 +876,11 @@ class TestRedirectIntegrity:
         tab._get_spec_draft_analysis_lock = lambda: tab._spec_draft_analysis_lock
 
         def parse_and_supersede(path):
+            # Simulates a concurrent newer selection bumping the
+            # generation counter while THIS parse is still running.
+            # When ``_run_spec_draft_gguf_analysis`` re-checks the
+            # generation post-parse, it must notice the bump and drop
+            # the result instead of enqueueing it.
             tab._spec_draft_analysis_generation = 2
             return {"path": path}
 

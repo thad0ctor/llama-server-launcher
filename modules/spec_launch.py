@@ -484,6 +484,16 @@ def _resolve_draft_device_value(launcher):
             f"dropping: {skipped}",
             file=sys.stderr,
         )
+    # ``no_filter`` is shared by both the free-text-override fallback
+    # (below) and the checkbox-derived path further down — both need
+    # the SAME canonical-order predicate so a non-canonical reorder
+    # of all-GPUs-selected can't bypass the CUDA_VISIBLE_DEVICES
+    # remap in either branch.
+    no_filter = (not effective_ordered) or (
+        detected_count > 0
+        and len(effective_ordered) == detected_count
+        and list(effective_ordered) == list(range(detected_count))
+    )
     if not draft_indices:
         # No usable checkbox selection → fall back to the free-text
         # override, same as if the persisted list was empty to begin with.
@@ -511,10 +521,6 @@ def _resolve_draft_device_value(launcher):
         # silently targets a different physical GPU than the user
         # typed. Manual mode keeps the override as a power-user
         # affordance (no filtering happens). Otherwise drop it.
-        no_filter = (not effective_ordered) or (
-            detected_count > 0 and len(effective_ordered) == detected_count
-            and list(effective_ordered) == list(range(detected_count))
-        )
         if manual_mode or no_filter:
             return override
         print(
@@ -526,11 +532,12 @@ def _resolve_draft_device_value(launcher):
             file=sys.stderr,
         )
         return ""
-    # If no filter is in effect (no selection at all, or the user selected
-    # every detected GPU), launcher indices pass through unchanged.
-    no_filter = (not effective_ordered) or (
-        detected_count > 0 and len(effective_ordered) == detected_count
-    )
+    # ``no_filter`` is the shared canonical-order predicate computed
+    # above. See its docstring for why the earlier length-only test
+    # was wrong — e.g. ``effective_ordered=[2,0,1]`` with
+    # detected_count=3 would have hit a fast pass-through and emitted
+    # ``CUDA0/1/2`` directly, targeting different physical devices
+    # than the user picked.
     parts = []
     if no_filter:
         for d in draft_indices:

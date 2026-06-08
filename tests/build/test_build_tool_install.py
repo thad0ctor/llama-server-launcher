@@ -1,44 +1,15 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-import tkinter as tk
 
 from modules import terminal_launcher
 from modules.build import detection
 from modules.build.build_persistence import BuildConfig
-from modules.build.build_tab import BuildTab, DEFAULT_GENERATOR_LABEL
+from modules.build.build_tab import DEFAULT_GENERATOR_LABEL
 
-
-def _make_launcher(tk_root, tmp_path):
-    app_settings = {}
-    launcher = SimpleNamespace(
-        root=tk_root,
-        config_path=str(tmp_path / "launcher_config.json"),
-        app_settings=app_settings,
-        backend_selection=tk.StringVar(value="llama.cpp"),
-        current_backend_dir=tk.StringVar(value="/repos/main-llama"),
-        llama_cpp_dir=tk.StringVar(value="/repos/main-llama"),
-        ik_llama_dir=tk.StringVar(value="/repos/main-ik"),
-    )
-
-    def sync_current_backend_dir(*_args):
-        if launcher.backend_selection.get() == "ik_llama":
-            launcher.current_backend_dir.set(launcher.ik_llama_dir.get())
-        else:
-            launcher.current_backend_dir.set(launcher.llama_cpp_dir.get())
-
-    launcher.backend_selection.trace_add("write", sync_current_backend_dir)
-    return launcher
-
-
-def _make_build_tab(tk_root, tmp_path, monkeypatch):
-    monkeypatch.setattr(tk_root, "after", lambda *_args: "after-id")
-    monkeypatch.setattr(tk_root, "after_idle", lambda *_args: "idle-id")
-    monkeypatch.setattr(tk_root, "after_cancel", lambda *_args: None)
-    launcher = _make_launcher(tk_root, tmp_path)
-    return launcher, BuildTab(launcher)
+# Shared helpers live in ``tests/build/conftest.py`` so this file and
+# ``test_build_tab_sync.py`` can't drift independently.
+from tests.build.conftest import make_build_tab as _make_build_tab  # noqa: F401
 
 
 def test_linux_install_plan_uses_apt_for_missing_ninja(monkeypatch):
