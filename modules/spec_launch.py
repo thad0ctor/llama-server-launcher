@@ -497,11 +497,32 @@ def _resolve_draft_device_value(launcher):
         # passed verbatim into the command line. Empty → empty (no flag).
         if not override:
             return ""
-        if _re_csv_cuda.fullmatch(override):
+        if not _re_csv_cuda.fullmatch(override):
+            print(
+                f"WARNING: spec_draft_device override {override!r} doesn't match "
+                f"``CUDA<int>[,CUDA<int>…]`` form; dropping.",
+                file=sys.stderr,
+            )
+            return ""
+        # When the host has GPU filtering active (a reorder /
+        # subset that produces a non-canonical ``effective_ordered``)
+        # the binary sees physical CUDA indices remapped through
+        # CUDA_VISIBLE_DEVICES — so a raw override like ``CUDA2``
+        # silently targets a different physical GPU than the user
+        # typed. Manual mode keeps the override as a power-user
+        # affordance (no filtering happens). Otherwise drop it.
+        no_filter = (not effective_ordered) or (
+            detected_count > 0 and len(effective_ordered) == detected_count
+            and list(effective_ordered) == list(range(detected_count))
+        )
+        if manual_mode or no_filter:
             return override
         print(
-            f"WARNING: spec_draft_device override {override!r} doesn't match "
-            f"``CUDA<int>[,CUDA<int>…]`` form; dropping.",
+            f"WARNING: spec_draft_device override {override!r} ignored because "
+            f"GPU filtering/reorder is active (effective_ordered="
+            f"{list(effective_ordered)}). The literal CUDA indices in the "
+            f"override would target the wrong post-CUDA_VISIBLE_DEVICES "
+            f"device. Use the draft-GPU checkboxes instead.",
             file=sys.stderr,
         )
         return ""

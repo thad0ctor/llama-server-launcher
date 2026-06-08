@@ -154,7 +154,13 @@ class BuildConfig:
                 # ("CC FLAGS", "CC;echo pwned", "PATH$X") that the
                 # script emitter would otherwise concatenate verbatim
                 # into ``export …`` / ``$env:… = …`` lines.
-                if not _ENV_NAME_RE.match(key):
+                # ``fullmatch`` (not ``match``) so a key like ``FOO;bar``
+                # can't pass because ``match`` only anchors at start. The
+                # regex already includes ``$``, so this is intent-clarifying
+                # rather than fixing live behaviour — but if the regex is
+                # ever edited to drop the ``$``, ``match`` would silently
+                # admit shell-unsafe trailing characters.
+                if not _ENV_NAME_RE.fullmatch(key):
                     continue
                 if v is None:
                     continue

@@ -716,7 +716,17 @@ class TestExtraAdversarialConfigs:
 
             partial = []
             emit_spec_args(launcher, "ik_llama", partial)
-            assert "--spec-type" not in partial, f"emission must reject wrong-backend spec_type; got {partial!r}"
+            # Tightened from a ``--spec-type`` membership check: every
+            # ``--spec-*`` and ``--draft-*`` flag must be suppressed, not
+            # just the type token. A regression that leaks
+            # ``--spec-temp`` or ``--draft-model`` would otherwise slip
+            # past the previous narrow check.
+            leaked = [arg for arg in partial if isinstance(arg, str)
+                      and (arg.startswith("--spec-") or arg.startswith("--draft-"))]
+            assert not leaked, (
+                f"emission must reject EVERY spec/draft flag on wrong "
+                f"backend; got leaked={leaked!r} partial={partial!r}"
+            )
         finally:
             root.destroy()
 
@@ -758,7 +768,15 @@ class TestExtraAdversarialConfigs:
     def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(self, entry_module, tmp_path, monkeypatch):
         """``spec_draft_selected_gpus=[999, "abc", True]`` -> only valid
         ints survive. (True is a bool subclass and must NOT pass through
-        since it's not a meaningful GPU index.)"""
+        since it's not a meaningful GPU index.)
+
+        Note: this test runs without real CUDA hardware, so the
+        post-detection device_count is 0 and the range-clamp in
+        SpecTab sanitization drops EVERYTHING, including ``999``.
+        The test asserts the type-filter contract (the only piece
+        that's exercise-able here); a separate test with mocked GPU
+        detection would be needed to exercise valid-index survival.
+        """
         cfg_path = tmp_path / "configs.json"
         self._write(
             cfg_path,
@@ -783,6 +801,8 @@ class TestExtraAdversarialConfigs:
                 assert isinstance(entry, int) and not isinstance(
                     entry, bool
                 ), f"non-int / bool survived filter: {cleaned!r}"
+            # ``"abc"`` and bool ``True`` must not have leaked through
+            # — regression guard for the type-filter contract.
             assert "abc" not in cleaned and True not in cleaned
         finally:
             root.destroy()

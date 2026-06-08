@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -301,16 +302,69 @@ def classify_repo_file(path: str) -> str:
     return "other"
 
 
+_SHARD_SUFFIX_RE = re.compile(r"-(\d+)-of-(\d+)$", re.IGNORECASE)
+
+
+def _shard_siblings(primary: str, candidates: list[str]) -> list[str]:
+    """Return every shard that belongs to the same sharded weight as
+    ``primary``, in the listing's original order.
+
+    A sharded GGUF / safetensors set is named like
+    ``model.Q4_K_M-00001-of-00003.gguf``. Picking a default by
+    ``min(_gguf_sort_key)`` selects ONE shard; without the rest the
+    download is unusable (the binary fails to load with "missing
+    tensor"). We extract the shard stem (everything before
+    ``-NNNNN-of-NNNNN``) plus the suffix, then yield every candidate
+    whose stem + suffix matches and whose ``-of-NNNNN`` total agrees.
+    Non-sharded primaries fall through to a single-element list.
+    """
+    primary_path = Path(primary)
+    suffix = primary_path.suffix.lower()
+    stem = primary_path.stem
+    match = _SHARD_SUFFIX_RE.search(stem)
+    if not match:
+        return [primary]
+    total = match.group(2)
+    base_stem = stem[: match.start()]
+    parent_str = str(primary_path.parent).replace("\\", "/")
+    siblings: list[str] = []
+    for path in candidates:
+        cand = Path(path)
+        if cand.suffix.lower() != suffix:
+            continue
+        # Keep shards within the same logical directory only —
+        # otherwise an unrelated ``vocab-00001-of-00003.gguf`` in a
+        # subfolder would join the set.
+        if str(cand.parent).replace("\\", "/") != parent_str:
+            continue
+        cand_stem = cand.stem
+        cand_match = _SHARD_SUFFIX_RE.search(cand_stem)
+        if not cand_match:
+            continue
+        if cand_match.group(2) != total:
+            continue
+        if cand_stem[: cand_match.start()] != base_stem:
+            continue
+        siblings.append(path)
+    return siblings or [primary]
+
+
 def default_selected_repo_paths(paths: list[str]) -> tuple[str, ...]:
     """Choose safe default file selections from a repo listing."""
     ggufs = [path for path in paths if classify_repo_file(path) == "gguf"]
     mmproj = [path for path in paths if classify_repo_file(path) == "mmproj"]
     if ggufs:
         primary = min(ggufs, key=_gguf_sort_key)
-        return tuple(dict.fromkeys([primary, *mmproj]))
+        # Expand to all shard siblings so sharded GGUFs download as a
+        # complete set (the loader fails with "missing tensor"
+        # otherwise).
+        primary_with_shards = _shard_siblings(primary, ggufs)
+        return tuple(dict.fromkeys([*primary_with_shards, *mmproj]))
     weights = [path for path in paths if classify_repo_file(path) == "weights"]
     if weights:
-        return tuple(weights[:1])
+        # Same shard-set expansion for safetensors / *.bin.
+        primary_weight_shards = _shard_siblings(weights[0], weights)
+        return tuple(dict.fromkeys(primary_weight_shards))
     return tuple(paths[:1])
 
 
