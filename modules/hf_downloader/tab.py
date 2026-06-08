@@ -583,10 +583,14 @@ class HuggingFaceDownloaderTab:
         # user's most recent intent must win.
         if parsed.revision_hint:
             self.revision_var.set(parsed.revision_hint)
+        # Token deliberately NOT in the payload — see ``_start_runner``
+        # for the env-var handoff. The temp JSON file lives on disk for
+        # the subprocess's lifetime; a credential there would be visible
+        # to anyone with read access to ``/tmp`` (and to forensic disk
+        # reads after the process exits).
         payload = {
             "repo_id": parsed.repo_id,
             "revision": self.revision_var.get().strip(),
-            "token": self.token_var.get().strip(),
         }
         self.status_var.set(f"Loading {parsed.repo_id}…")
         self._start_runner("list", payload)
@@ -643,7 +647,8 @@ class HuggingFaceDownloaderTab:
         payload = {
             "repo_id": parsed.repo_id,
             "revision": self.revision_var.get().strip(),
-            "token": self.token_var.get().strip(),
+            # Token NOT in payload — handed to the subprocess via env
+            # (see ``_start_runner``) so it never lands on disk.
             "download_mode": self.download_mode_var.get(),
             "selected_files": selected_files,
             "include_patterns": include_patterns,
@@ -726,16 +731,23 @@ class HuggingFaceDownloaderTab:
         # ``pip install`` into the same venv mid-operation.
         self._set_button_state(self._install_button, False)
         command = build_runner_command(python, action, payload_file)
+        # Capture the HF token here (Tk-thread only) and hand it to the
+        # worker as an arg. The worker injects it into the child's env
+        # so the credential never lands in the on-disk payload JSON.
+        try:
+            hf_token = (self.token_var.get() or "").strip()
+        except Exception:
+            hf_token = ""
         self._worker_thread = threading.Thread(
             target=self._run_process_worker,
-            args=(command, op_id),
+            args=(command, op_id, hf_token),
             daemon=True,
         )
         self._worker_thread.start()
         if self._queue_after_id is None:
             self._queue_after_id = self.root.after(self.POLL_MS, self._poll_queue)
 
-    def _run_process_worker(self, command: list[str], op_id: int):
+    def _run_process_worker(self, command: list[str], op_id: int, hf_token: str = ""):
         print(f"[hf-runner] launching: {' '.join(command)}", file=sys.stderr, flush=True)
         # ``CREATE_NO_WINDOW`` on Windows suppresses the brief flashing
         # console for the runner subprocess. ``encoding`` + ``errors`` guard
@@ -743,6 +755,14 @@ class HuggingFaceDownloaderTab:
         # midway through a download. ``stdin=DEVNULL`` makes sure the child
         # cannot ever steal the parent terminal (git credential prompts,
         # interactive HF auth prompts, etc.).
+        # Build a child env that inherits the parent's, then injects
+        # ``HF_TOKEN`` if the user supplied one. Done here (not in the
+        # payload JSON) so the token never lands on disk — see
+        # ``_token_value`` in runner.py for the resolution order.
+        child_env = os.environ.copy()
+        if hf_token:
+            child_env["HF_TOKEN"] = hf_token
+            child_env.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
         popen_kwargs: dict = {
             "cwd": self.repo_dir,
             "stdin": subprocess.DEVNULL,
@@ -752,6 +772,7 @@ class HuggingFaceDownloaderTab:
             "bufsize": 1,
             "encoding": "utf-8",
             "errors": "replace",
+            "env": child_env,
         }
         if sys.platform.startswith("win"):
             popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)

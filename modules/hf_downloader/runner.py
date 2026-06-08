@@ -18,6 +18,25 @@ def _load_payload(path: str) -> dict:
 
 
 def _token_value(payload: dict):
+    """Resolve the HF auth token for ``snapshot_download`` / list calls.
+
+    Priority order:
+      1. ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` in the environment
+         (set by the parent process; never written to the temp payload
+         file). This is the preferred channel — the payload JSON lives
+         on disk for the lifetime of the subprocess and could be
+         exposed by ``ps``/``lsof`` / forensic disk reads.
+      2. ``payload["token"]`` for backwards compatibility with old
+         callers that haven't been updated.
+    Empty / unset → ``None`` (anonymous Hub access).
+    """
+    env_token = (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or ""
+    ).strip()
+    if env_token:
+        return env_token
     token = (payload.get("token") or "").strip()
     return token or None
 
