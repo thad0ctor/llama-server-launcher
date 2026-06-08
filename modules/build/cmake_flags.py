@@ -744,10 +744,12 @@ def values_to_cmake_args(
     that don't apply to ``backend`` and skipping empty STRING entries.
     ``extra_cmake_args`` is appended verbatim after shell-split.
 
-    Flags declaring ``cuda_version_min`` are skipped when ``cuda_version`` is
-    known and older than the required minimum (e.g. emitting
-    ``-DGGML_CUDA_COMPRESSION_MODE`` against CUDA 12.4 would fail configure).
-    Passing ``cuda_version=None`` disables the gate."""
+    Flags declaring ``cuda_version_min`` are skipped when
+    ``_cuda_version_satisfies`` says the toolkit can't accept them. The
+    helper now defaults to FAIL-CLOSED: passing ``cuda_version=None``
+    causes every version-fenced flag to be SKIPPED (so an undetected
+    toolkit can't get a 12.8+-only flag silently injected). Pass an
+    actual detected version string to enable the flags."""
     out: list[str] = []
     seen: set[str] = set()
     for flag in flags_for_backend(backend):
@@ -804,14 +806,19 @@ def validate_values(
     *,
     cuda_version: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Validate every applicable, currently-visible STRING flag in ``values``.
+    """Validate every applicable, currently-visible flag in ``values`` —
+    STRING flags via ``flag.validate`` AND ENUM flags against
+    ``flag.choices``. A hand-edited preset with
+    ``"GGML_CUDA_COMPRESSION_MODE": "garbage"`` is now rejected here
+    instead of blowing up at cmake-configure time.
 
-    Returns a list of ``(label, message)`` tuples for flags that fail their
-    validator. Flags hidden by ``visible_when`` are skipped — they aren't
-    emitted to cmake, so their value can't break the build. Flags whose
-    ``cuda_version_min`` exceeds the supplied ``cuda_version`` are likewise
-    skipped — they won't be emitted by :func:`values_to_cmake_args`, so the
-    value can't affect the build either."""
+    Returns a list of ``(label, message)`` tuples for flags that fail
+    validation. Flags hidden by ``visible_when`` are skipped — they
+    aren't emitted to cmake, so their value can't break the build.
+    Flags whose ``cuda_version_min`` exceeds the supplied
+    ``cuda_version`` are likewise skipped (and the same
+    fail-closed-on-unknown semantics apply as in
+    :func:`values_to_cmake_args`)."""
     errors: list[tuple[str, str]] = []
     seen: set[str] = set()
     for flag in flags_for_backend(backend):

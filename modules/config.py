@@ -406,9 +406,19 @@ class ConfigManager:
         # rather than be left in an inconsistent state where the
         # disk version still holds the OLD template name but memory
         # holds the NEW one.
+        # Capture BOTH whether the key was present AND its original
+        # value. ``cfg.get(...)`` collapses "missing" and "None" into
+        # the same sentinel; we need to distinguish them so the
+        # rollback below can restore the EXACT pre-apply shape
+        # (including removing a key that
+        # ``_apply_loaded_configuration`` may have INSERTED via the
+        # legacy-alias remap).
+        had_original_predefined = (
+            isinstance(cfg, dict) and "predefined_template_name" in cfg
+        )
         original_predefined = (
             cfg.get("predefined_template_name")
-            if isinstance(cfg, dict)
+            if had_original_predefined
             else None
         )
         # Silence per-var save traces for the duration of the ~50 .set()
@@ -432,16 +442,20 @@ class ConfigManager:
         else:
             # Restore the original predefined_template_name in the
             # in-memory config so memory matches what's still on disk.
-            # Without this, the next time the user opens the dialog the
-            # listbox could show a remapped name that the on-disk file
-            # doesn't actually have, leading to confusing "Config Save
-            # Error" loops on subsequent edits.
-            if (
-                isinstance(cfg, dict)
-                and original_predefined is not None
-                and cfg.get("predefined_template_name") != original_predefined
-            ):
-                cfg["predefined_template_name"] = original_predefined
+            # Two cases:
+            # * The key WAS originally present: write the original
+            #   value back (covers the legacy-alias remap case where
+            #   the value changed mid-flight).
+            # * The key was NOT originally present: pop the key the
+            #   apply path may have inserted. ``original_predefined``
+            #   is ``None`` in this case, so a ``cfg["…"] = None``
+            #   write would actually be wrong — we'd be persisting a
+            #   key that wasn't there before.
+            if isinstance(cfg, dict):
+                if had_original_predefined:
+                    cfg["predefined_template_name"] = original_predefined
+                else:
+                    cfg.pop("predefined_template_name", None)
 
     def _apply_loaded_configuration(self, name, cfg):
         """Mutates launcher state from a named-config dict.
@@ -534,13 +548,15 @@ class ConfigManager:
         # to the default so ``_update_effective_template_display`` doesn't
         # silently emit an empty ``--chat-template`` and ``current_cfg``
         # round-trips a valid name back to disk.
-        saved_predefined = cfg.get("predefined_template_name", default_predefined_key)
+        raw_saved_predefined = cfg.get("predefined_template_name", default_predefined_key)
         # Coerce non-string values (a JSON-edited ``null``,
         # ``false``, or a number) to the default. The downstream
         # ``predefined_template_name.set`` is a ``tk.StringVar.set``
         # which would either AttributeError or stringify the value
         # into a name that doesn't match any template key.
-        if not isinstance(saved_predefined, str):
+        if isinstance(raw_saved_predefined, str):
+            saved_predefined = raw_saved_predefined
+        else:
             saved_predefined = default_predefined_key
         if (
             saved_predefined
@@ -554,12 +570,17 @@ class ConfigManager:
                 file=sys.stderr,
             )
             saved_predefined = default_predefined_key
-            # Persist the remapped value back into the in-memory config
-            # so the next ``_save_configs`` writes the corrected key.
-            # Without this, the old (now-invalid) name keeps coming back
-            # from disk on every restart and re-triggers the warning.
-            if isinstance(cfg, dict):
-                cfg["predefined_template_name"] = saved_predefined
+        # Persist BOTH the legacy-alias remap AND the non-string
+        # coercion back into the in-memory config so the next
+        # ``_save_configs`` writes the corrected key. Without this,
+        # a JSON-edited ``"predefined_template_name": null`` would
+        # be silently fixed on every load but never actually
+        # written back to disk.
+        if (
+            isinstance(cfg, dict)
+            and raw_saved_predefined != saved_predefined
+        ):
+            cfg["predefined_template_name"] = saved_predefined
         self.launcher.predefined_template_name.set(saved_predefined)
 
         self.launcher.custom_template_string.set(cfg.get("custom_template_string", ""))

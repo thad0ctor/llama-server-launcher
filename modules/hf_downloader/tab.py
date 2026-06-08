@@ -542,23 +542,26 @@ class HuggingFaceDownloaderTab:
         if not active:
             messagebox.showerror("No venv", "Create or select a usable venv in Settings first.")
             return
-        command = venv_manager.build_install_dependency_command(
-            active,
-            self._huggingface_dependency(),
-            platform=sys.platform,
-        )
+        # Build the command AND launch in the same try/except.
+        # ``build_install_dependency_command`` performs venv path /
+        # platform validation that can raise ``ValueError`` (and
+        # ``_shell_join`` raises on Windows ``%``/``!`` injection),
+        # which would otherwise unwind the Tk callback and leave the
+        # tab in a broken state. Mirror the same recoverable-error
+        # pattern Settings tab uses around venv command builders.
         try:
+            command = venv_manager.build_install_dependency_command(
+                active,
+                self._huggingface_dependency(),
+                platform=sys.platform,
+            )
             terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
         except Exception as exc:
-            # Failing to spawn the terminal (no supported emulator,
-            # permission denied, etc.) used to bubble up and leave the tab
-            # in a broken state. Surface a recoverable error and bail
-            # without arming the dependency watch loop.
             messagebox.showerror(
                 "Install / update huggingface_hub",
-                f"Failed to open terminal:\n{exc}",
+                f"Failed to start huggingface_hub install:\n{exc}",
             )
-            self.status_var.set("Failed to open terminal for huggingface_hub install.")
+            self.status_var.set("Failed to start huggingface_hub install.")
             return
         self.status_var.set(
             "Opened terminal to install or update huggingface_hub. Waiting for it to appear in the venv…"

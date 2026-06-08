@@ -1686,10 +1686,19 @@ class LaunchManager:
                          bash_cmd_parts.append(shlex.quote(current_arg))
                          i += 1
 
-                fh.write(" ".join(bash_cmd_parts) + "\n\n")
-
-                # Check exit code after the command
+                # ``set -e`` was emitted at the top of the script, so a
+                # bare ``<launch-cmd>`` followed by ``exit_code=$?`` /
+                # ``if [ $exit_code -ne 0 ]…`` would abort the script
+                # at the launch line on any non-zero exit and the
+                # error-reporting block would never run. Disable
+                # errexit just around the launch call so the diagnostic
+                # block (with its targeted echo + ``exit $exit_code``)
+                # is the actual handler.
+                fh.write('set +e\n')
+                fh.write(" ".join(bash_cmd_parts) + "\n")
                 fh.write('exit_code=$?\n')
+                fh.write('set -e\n\n')
+                # Check exit code after the command
                 fh.write('if [ $exit_code -ne 0 ]; then\n')
                 fh.write('    echo "Error: llama-server exited with error code: $exit_code" >&2\n')
                 fh.write('    exit $exit_code\n')

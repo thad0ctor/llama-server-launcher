@@ -484,6 +484,12 @@ def _resolve_draft_device_value(launcher):
             f"dropping: {skipped}",
             file=sys.stderr,
         )
+    # Deduplicate (preserving first-occurrence order) so a stale
+    # config with ``[1, "1"]`` or ``[2, 2]`` doesn't emit ``CUDA1,CUDA1``.
+    # The binary errors on duplicate device entries; better to silently
+    # collapse than to surface a confusing "device specified twice"
+    # message at launch.
+    draft_indices = list(dict.fromkeys(draft_indices))
     # ``no_filter`` is shared by both the free-text-override fallback
     # (below) and the checkbox-derived path further down — both need
     # the SAME canonical-order predicate so a non-canonical reorder

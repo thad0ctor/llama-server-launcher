@@ -112,8 +112,15 @@ find {q_current_dir} -maxdepth 1 -type f "${{EXCLUDE_ARGS[@]}}" -name "*.py" -pr
 "${{EXCLUDE_ARGS[@]}}" -name "*.md" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
 "${{EXCLUDE_ARGS[@]}}" -name ".git*" -print -exec cp {{}} {q_backup_path}/ \\; 2>/dev/null || true
 
-# Backup important directories (excluding .git, __pycache__, etc.)
-for dir in {q_current_dir}/*; do
+# Backup important directories (excluding .git, __pycache__, etc.).
+# Iterate both visible and dotted entries so hidden dirs like
+# ``.github`` (workflow files) get backed up too. Without dotglob /
+# the explicit ``.[!.]*`` pattern, the original ``{q_current_dir}/*``
+# glob skipped every dot-directory and a self-update silently lost
+# them. ``[ -e "$dir" ]`` guards against the literal patterns
+# expanding when nothing matches.
+for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
+    [ -e "$dir" ] || continue
     if [ -d "$dir" ]; then
         dirname=$(basename "$dir")
         case "$dirname" in

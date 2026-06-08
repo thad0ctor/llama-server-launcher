@@ -54,8 +54,13 @@ def _cmd_keep_open(command: str) -> list[str]:
     )
     # cmd.exe requires CRLF line endings in .cmd files for reliable
     # parsing; ``newline=""`` + explicit ``\r\n`` ensures that even
-    # on POSIX hosts running cross-platform tooling.
-    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+    # on POSIX hosts running cross-platform tooling. Use
+    # ``utf-8-sig`` so cmd.exe sees a UTF-8 BOM and parses non-ASCII
+    # paths / commands correctly — without the BOM cmd would
+    # interpret the file with the active code page (usually CP1252
+    # on US-English Windows) and corrupt anything outside that
+    # subset.
+    with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as fh:
         fh.write("@echo off\r\n")
         fh.write("echo Running command...\r\n")
         fh.write(f"{command}\r\n")
