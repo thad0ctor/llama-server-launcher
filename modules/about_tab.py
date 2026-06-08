@@ -383,10 +383,17 @@ class AboutTab:
             and self._parent is not None
             and self._version_check_pending
         ):
-            self._version_after_id = self._parent.after(
-                VERSION_CHECK_POLL_MS,
-                self._drain_version_queue,
-            )
+            try:
+                self._version_after_id = self._parent.after(
+                    VERSION_CHECK_POLL_MS,
+                    self._drain_version_queue,
+                )
+            except tk.TclError:
+                # Parent was destroyed between the worker thread queuing
+                # a result and this scheduler running. Drop the schedule
+                # and leave ``_version_after_id`` at ``None`` so future
+                # teardown logic doesn't try to ``after_cancel`` a bad id.
+                self._version_after_id = None
 
     def _drain_version_queue(self):
         self._version_after_id = None

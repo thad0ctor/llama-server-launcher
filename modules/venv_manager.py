@@ -195,13 +195,40 @@ def _win_cmd_quote(arg: str) -> str:
     of just ``C:\\projects`` followed by an attempt to execute
     ``work\\venv`` as a fresh command. Force-quoting every argument makes
     every cmd metacharacter inert.
+
+    NOTE: ``cmd.exe`` STILL performs ``%VAR%`` expansion inside double-quoted
+    strings (and ``!VAR!`` when delayed expansion is enabled). Quoting alone
+    can't disarm those — a path like ``%TEMP%\\evil`` gets rewritten before
+    the target command sees it. The caller in :func:`_shell_join` therefore
+    refuses Windows args containing ``%`` or ``!`` outright; this helper
+    handles the no-expansion metacharacter set.
     """
     return '"' + arg.replace('"', '""') + '"'
+
+
+_WIN_CMD_EXPANSION_CHARS = ("%", "!")
 
 
 def _shell_join(args: list[str], *, platform: str | None = None) -> str:
     plat = platform or sys.platform
     if plat.startswith("win"):
+        # cmd.exe expands ``%VAR%`` inside double-quoted strings and ``!VAR!``
+        # when delayed expansion is enabled — neither is disarmed by
+        # quoting. Reject early instead of emitting a single ``cmd.exe``
+        # string that could silently rewrite the target path
+        # (``rmdir /s /q "%TEMP%\foo"`` becomes ``rmdir /s /q "C:\Users\u\...\foo"``).
+        # Callers that genuinely need a path containing these chars must
+        # switch to an args-list / ``shell=False`` Popen invocation instead
+        # of using this single-string composer.
+        for arg in args:
+            if any(ch in arg for ch in _WIN_CMD_EXPANSION_CHARS):
+                raise ValueError(
+                    "Refusing to emit a cmd.exe command containing "
+                    f"variable-expansion characters ('%' or '!'): {arg!r}. "
+                    "cmd.exe expands these even inside quoted strings, which "
+                    "can retarget the command after the path has been "
+                    "safety-checked."
+                )
         # Always double-quote each arg so embedded cmd metacharacters
         # (& | ^ < > and friends) can't break out of the intended
         # command. See _win_cmd_quote for the rationale.

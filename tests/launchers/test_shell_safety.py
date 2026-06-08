@@ -125,8 +125,17 @@ class TestShellInjectionBash:
 
         out = tmp_path / "l.sh"
         text = _save_sh_and_read(manager, launcher_mock, out)
-        # source "<venv>/bin/activate" - double quotes preserve spaces.
-        assert f'source "{venv / "bin" / "activate"}"' in text
+        # The script uses ``shlex.quote`` to render the activator path —
+        # for a path containing spaces that produces single-quoted POSIX
+        # form (which also disables ``$``/``$(...)`` expansion). The
+        # invariant under test is that the path appears verbatim after
+        # ``source`` in whichever shell-safe form shlex picks, not that
+        # double quotes specifically were used.
+        import shlex
+        quoted = shlex.quote(str(venv / "bin" / "activate"))
+        assert f"source {quoted}" in text, (
+            f"Expected shlex-quoted activate path in script, got:\n{text}"
+        )
 
     @pytest.mark.skipif(
         sys.platform == "win32",

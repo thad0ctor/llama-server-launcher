@@ -369,6 +369,33 @@ def _resolve_draft_device_value(launcher):
             detected_count = int(gpu_info.get("device_count", 0) or 0)
     except Exception:
         detected_count = 0
+    # Non-UI sanitization: clamp persisted indices to ``[0, detected_count)``
+    # so a stale ``spec_draft_selected_gpus`` (e.g. saved on a 4-GPU host,
+    # now running on a 2-GPU host) can't leak ``CUDA4`` /
+    # ``CUDA<out-of-range>`` into the command line. SpecTab does the same
+    # clamp when its UI is built, but the tab is lazy — the first launch
+    # before the user opens Spec used to consume the raw list. Index 0
+    # always exists when there's at least one device; if no devices are
+    # detected we keep the list (the "no filter" pass-through below stays
+    # the documented escape hatch for hand-edited configs).
+    if detected_count > 0:
+        valid_draft_indices = [d for d in draft_indices if 0 <= d < detected_count]
+        if valid_draft_indices != draft_indices:
+            print(
+                f"WARNING: spec_draft_selected_gpus contained indices outside "
+                f"[0, {detected_count}); dropping out-of-range entries: "
+                f"{sorted(set(draft_indices) - set(valid_draft_indices))}",
+                file=sys.stderr,
+            )
+        draft_indices = valid_draft_indices
+        if not draft_indices:
+            # Sanitization left nothing — fall back to the free-text
+            # override, same as if the persisted list was empty to begin
+            # with.
+            try:
+                return launcher.spec_draft_device.get().strip()
+            except Exception:
+                return ""
     # If no filter is in effect (no selection at all, or the user selected
     # every detected GPU), launcher indices pass through unchanged.
     no_filter = (not effective_ordered) or (

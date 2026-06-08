@@ -257,6 +257,25 @@ def test_gpu_info_from_venv_success(
     assert info == expected
 
 
+def _forbid_static_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``get_gpu_info_static`` raise if invoked.
+
+    Used by the failure-path tests below to lock in the
+    "orchestrator owns the in-process torch fallback" contract.
+    Without this, a regression where ``get_gpu_info_from_venv`` re-acquires
+    its old habit of calling ``get_gpu_info_static`` internally (which
+    ``get_gpu_info_with_venv`` then calls AGAIN as the final fallback)
+    would slip through every venv-failure test below.
+    """
+
+    def _explode() -> dict:
+        raise AssertionError(
+            "get_gpu_info_static must NOT be invoked from get_gpu_info_from_venv"
+        )
+
+    monkeypatch.setattr(sysmod, "get_gpu_info_static", _explode)
+
+
 def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -267,9 +286,7 @@ def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
 
     fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
-
-    sentinel = {"available": False, "device_count": 0, "devices": [], "message": "s"}
-    monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     # Fallback path should be hit and we get a dict back with message about
@@ -290,11 +307,7 @@ def test_gpu_info_from_venv_bad_json_triggers_fallback(
         args=[], returncode=0, stdout="not-json!!", stderr=""
     )
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
@@ -312,11 +325,7 @@ def test_gpu_info_from_venv_nonzero_return_code_triggers_fallback(
         args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: torch"
     )
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
@@ -334,11 +343,7 @@ def test_gpu_info_from_venv_subprocess_timeout(
         raise subprocess.TimeoutExpired(cmd="python", timeout=30)
 
     monkeypatch.setattr(subprocess, "run", raise_timeout)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
@@ -356,11 +361,7 @@ def test_gpu_info_from_venv_permission_error(
         raise PermissionError("no access")
 
     monkeypatch.setattr(subprocess, "run", raise_perm)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
@@ -378,13 +379,7 @@ def test_gpu_info_from_venv_missing_python_exe_returns_unavailable(
     """
     # If anything still calls get_gpu_info_static here, fail the test
     # immediately rather than silently re-running CUDA init.
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("get_gpu_info_static must NOT be invoked from get_gpu_info_from_venv")
-        ),
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False

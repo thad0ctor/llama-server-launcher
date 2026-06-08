@@ -726,8 +726,25 @@ class LaunchManager:
         backtick we inject to escape `"` gets double-escaped by the second pass
         and emerges as `` `` `` (literal backtick) plus an unescaped `"`, which
         prematurely terminates the string.
+
+        WARNING: double-quoted strings still interpolate ``$var`` and
+        ``$(...)``. Don't use this for values where the literal text must
+        survive verbatim (e.g. file paths used for ``. <path>``); use
+        :meth:`_ps_escape_single_quoted` instead.
         """
         return s.replace('`', '``').replace('"', '`"')
+
+    @staticmethod
+    def _ps_escape_single_quoted(s):
+        """Escape a string so it is safe inside a PowerShell single-quoted literal.
+
+        Single-quoted strings in PowerShell are fully literal: ``$``/``$(...)``
+        / backticks all pass through unchanged. Only the single quote itself
+        needs escaping, and the escape is doubling: ``it's`` → ``it''s``.
+        Use this for any user-controlled path interpolated into a script
+        (activation paths, log messages) where the text MUST NOT be evaluated.
+        """
+        return s.replace("'", "''")
 
     @staticmethod
     def _ps_quote_arg(arg):
@@ -965,13 +982,13 @@ class LaunchManager:
                         # Use dot-sourcing (. .\path\to\Activate.ps1) to activate in the current shell
                         # Format path with forward slashes for PowerShell compatibility and quote it
                         ps_act_path = str(act_script.as_posix())
-                        # Escape backticks FIRST, then double-quotes. Doing it in the
-                        # other order double-escapes any backtick inserted during the
-                        # quote replacement (turning `" into ``", which PS parses as
-                        # a literal backtick followed by an unescaped quote).
-                        quoted_ps_act_path = f'"{self._ps_escape_double_quoted(ps_act_path)}"'
+                        # Single-quoted PS literal so ``$VAR`` / ``$(...)`` /
+                        # backticks in the path can't be expanded or executed
+                        # before the dot-source runs.
+                        quoted_ps_act_path = f"'{self._ps_escape_single_quoted(ps_act_path)}'"
+                        quoted_ps_venv_str = f"'{self._ps_escape_single_quoted(venv_path_str)}'"
 
-                        f.write(f'Write-Host "Activating virtual environment: {venv_path_str}" -ForegroundColor Cyan\n')
+                        f.write(f'Write-Host "Activating virtual environment: " -NoNewline -ForegroundColor Cyan; Write-Host {quoted_ps_venv_str} -ForegroundColor Cyan\n')
                         # Use try/catch to report activation errors but continue
                         f.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Use global:LASTEXITCODE and pause on error
 
@@ -1292,9 +1309,13 @@ class LaunchManager:
                             # Use literal path syntax for PowerShell activation script source
                             # Ensure path is correctly formatted for PowerShell ('/' separators often work better)
                             ps_act_path = str(act_script.as_posix())
-                            quoted_ps_act_path = f'"{self._ps_escape_double_quoted(ps_act_path)}"'
+                            # Single-quoted PS literal so the path text
+                            # survives ``$VAR`` / ``$(...)`` / backticks
+                            # verbatim — see ``_ps_escape_single_quoted``.
+                            quoted_ps_act_path = f"'{self._ps_escape_single_quoted(ps_act_path)}'"
+                            quoted_ps_venv = f"'{self._ps_escape_single_quoted(str(venv))}'"
 
-                            fh.write(f'Write-Host "Activating virtual environment: {venv}" -ForegroundColor Cyan\n')
+                            fh.write(f'Write-Host "Activating virtual environment: " -NoNewline -ForegroundColor Cyan; Write-Host {quoted_ps_venv} -ForegroundColor Cyan\n')
                             # Use 'try/catch' to report activation errors but continue if not critical
                             # Use a quoted string for the path in the command
                             fh.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Add exit code on failure and pause
@@ -1434,8 +1455,13 @@ class LaunchManager:
 
                         if activate_script.exists():
                             fh.write(f'echo "Activating virtual environment: {venv}"\n')
-                            # Quote the path to handle spaces
-                            quoted_activate_path = f'"{activate_script}"'
+                            # Use ``shlex.quote`` (POSIX single-quote form)
+                            # so the saved script doesn't expand ``$HOME``,
+                            # backticks, or ``$(...)`` from the venv path
+                            # at run time — ``launch_server`` already does
+                            # this; the saved script must source the SAME
+                            # activator literally.
+                            quoted_activate_path = shlex.quote(str(activate_script))
                             fh.write(f'source {quoted_activate_path} || {{ echo "Failed to activate venv"; exit 1; }}\n\n')
                         else:
                             fh.write(f'echo "Warning: Virtual environment activation script not found at: {activate_script}"\n')

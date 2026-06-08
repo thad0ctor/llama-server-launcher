@@ -1201,8 +1201,16 @@ class TestSaveShScript:
 
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        # Path quoted with double quotes to preserve the space.
-        assert f'source "{activate}"' in text
+        # The script uses ``shlex.quote`` for the activator path — for a
+        # path containing a space that's single-quoted POSIX form, which
+        # (unlike the old double-quoted form) also prevents ``$VAR`` /
+        # ``$(...)`` / backtick expansion at script-run time. Assert the
+        # quoted form actually emitted, not a specific quote style.
+        import shlex
+        quoted = shlex.quote(str(activate))
+        assert f"source {quoted}" in text, (
+            f"Expected shlex-quoted activate path in script, got:\n{text}"
+        )
 
     def test_no_venv_means_no_source_line(self, manager, launcher_mock, tmp_path, monkeypatch):
         launcher_mock.venv_dir.set("")

@@ -297,7 +297,12 @@ class HuggingFaceDownloaderTab:
             self.venv_status_var.set(f"{active} [huggingface_hub missing: {detail}]")
             self._set_button_state(self._load_button, False)
             self._set_button_state(self._download_button, False)
-        self._set_button_state(self._install_button, python is not None)
+        # Disable Install/Update while an HF runner is active — running
+        # ``pip install`` into the same venv concurrently with a list or
+        # download can corrupt the env (and pip itself complains loudly).
+        self._set_button_state(
+            self._install_button, python is not None and self._process is None
+        )
         self._refresh_target_rows()
 
     def _refresh_target_rows(self):

@@ -100,9 +100,20 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
                 continue
             seen.add(terminal_name)
             if os.path.isabs(terminal_name):
-                terminal_path = (
-                    terminal_name if Path(terminal_name).exists() else None
-                )
+                # Absolute ``$TERMINAL`` must be a real, executable regular
+                # file. Otherwise (broken symlink, directory entry, no +x)
+                # treat it like "not installed" and fall through to the
+                # next emulator candidate — better than ``Popen`` raising
+                # ``PermissionError`` halfway down the loop with the
+                # remaining candidates unexamined.
+                candidate = Path(terminal_name)
+                if (
+                    candidate.is_file()
+                    and os.access(str(candidate), os.X_OK)
+                ):
+                    terminal_path = str(candidate)
+                else:
+                    terminal_path = None
             else:
                 terminal_path = shutil.which(terminal_name)
             if terminal_path is None:
