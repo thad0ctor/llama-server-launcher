@@ -365,11 +365,13 @@ def collect_target_directory_options(
     # block the entire Download tab from rendering. Skip individual bad
     # entries so the "select the first live option" fallback still works.
     normalized_selected: set[str] = set()
-    for path in selected_paths:
-        if not path:
+    for selected_path_str in selected_paths:
+        if not selected_path_str:
             continue
         try:
-            normalized_selected.add(str(Path(path).expanduser().resolve()))
+            normalized_selected.add(
+                str(Path(selected_path_str).expanduser().resolve())
+            )
         except (OSError, ValueError, TypeError, RuntimeError):
             continue
     options: list[TargetDirectoryOption] = []

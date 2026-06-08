@@ -39,7 +39,14 @@ def _token_value(payload: dict):
     ).strip()
     if env_token:
         return env_token
-    token = (payload.get("token") or "").strip()
+    # Defensive: a hand-edited payload could ship ``"token": null`` /
+    # ``"token": false`` / ``"token": 0`` and the ``.strip()`` below
+    # would raise ``AttributeError`` mid-flight. Coerce to "" so the
+    # fallback ("anonymous Hub access") kicks in instead.
+    raw_token = payload.get("token")
+    if not isinstance(raw_token, str):
+        return None
+    token = raw_token.strip()
     return token or None
 
 
@@ -192,11 +199,19 @@ def _normalize_path_list(value) -> list[Path]:
     Same rationale as ``_normalize_pattern_list``: a CLI/manual payload
     with ``"target_dirs": "/models"`` would otherwise iterate
     character-by-character and create junk single-letter directories.
+    Non-sequence shapes (dict, int, …) are loud failures here so the
+    subprocess exits cleanly instead of silently iterating dict keys
+    as paths.
     """
     if value is None:
         return []
     if isinstance(value, (str, Path)):
-        value = [value]
+        return [Path(value)] if str(value) else []
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(
+            f"target_dirs must be a list/tuple/str/Path; got "
+            f"{type(value).__name__}"
+        )
     return [Path(item) for item in value if isinstance(item, (str, Path)) and str(item)]
 
 
@@ -209,11 +224,18 @@ def _normalize_pattern_list(value) -> list[str]:
     (e.g. ``"include_patterns": "*.gguf"``). That string would silently
     iterate as characters and hand ``snapshot_download`` a nonsense filter.
     Wrap bare strings in a single-item list and drop non-string entries.
+    Non-sequence shapes (dict, int, …) are loud failures here so the
+    subprocess exits cleanly instead of silently iterating dict keys.
     """
     if value is None:
         return []
     if isinstance(value, str):
-        value = [value]
+        return [value] if value else []
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(
+            f"pattern list must be a list/tuple/str; got "
+            f"{type(value).__name__}"
+        )
     return [item for item in value if isinstance(item, str) and item]
 
 

@@ -161,10 +161,14 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     terminal_launcher.open_command_in_terminal("winget install --id Kitware.CMake -e")
 
     argv = popen.call_args.args[0]
-    assert argv[:8] == ["cmd", "/v:on", "/c", "start", "", "cmd", "/v:on", "/k"]
-    assert "winget install --id Kitware.CMake -e" in argv[8]
-    assert "Running command..." in argv[8]
-    assert "Command completed successfully." in argv[8]
+    # ``_cmd_keep_open`` dropped ``/v:on`` (delayed expansion would
+    # corrupt ``!`` literals in user paths) and now uses ``call echo
+    # %%ERRORLEVEL%%`` for the post-status block. Match the new shape
+    # and the new combined success/failure message.
+    assert argv[:6] == ["cmd", "/c", "start", "", "cmd", "/k"]
+    assert "winget install --id Kitware.CMake -e" in argv[6]
+    assert "Running command..." in argv[6]
+    assert "Command finished with exit code %ERRORLEVEL%." in argv[6]
 
 
 def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypatch):

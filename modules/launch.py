@@ -1284,9 +1284,18 @@ class LaunchManager:
                     messagebox.showwarning("Terminal Not Found", "Could not find a supported terminal emulator (gnome-terminal, konsole, xfce4-terminal, xterm, iterm).\nAttempting to launch directly.\n\nThe server output might appear in the GUI's console or launch in the background.")
 
                     try:
-                        # For direct launch with 'source' and other shell features, shell=True is needed.
-                        # Use the fully quoted command string.
-                        subprocess.Popen(full_script_content, shell=True)
+                        # ``full_script_content`` may contain ``source
+                        # .../bin/activate`` and other bash-only features
+                        # (``[[ … ]]``, ``$'…'``). The default ``shell=True``
+                        # invokes ``/bin/sh`` which on Debian/Ubuntu is
+                        # ``dash`` and rejects those. Pin to ``/bin/bash``
+                        # so the no-terminal fallback honours the same
+                        # contract as the terminal-emulator branches above.
+                        subprocess.Popen(
+                            full_script_content,
+                            shell=True,
+                            executable="/bin/bash",
+                        )
                         launched = True # Mark as launched even if it's a fallback method
 
                     except Exception as direct_launch_err:

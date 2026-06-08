@@ -650,6 +650,19 @@ class AboutTab:
         # the new queue drain from scheduling, leaving the version
         # label stuck on ``Checking...``.
         self._alive.set()
+        # If the previous mount left a pending ``after`` handle alive,
+        # cancel it BEFORE we drop the reference. A leftover timer would
+        # otherwise fire against the new mount's parent and either
+        # schedule against a destroyed widget or race the new
+        # ``_drain_version_queue`` loop. ``_parent`` from the prior mount
+        # is the widget the timer was registered against.
+        prev_after_id = self._version_after_id
+        prev_parent = getattr(self, "_parent", None)
+        if prev_after_id and prev_parent is not None:
+            try:
+                prev_parent.after_cancel(prev_after_id)
+            except Exception:
+                pass
         self._version_after_id = None
         self._version_check_pending = False
         # Bump the per-mount generation so any still-in-flight check

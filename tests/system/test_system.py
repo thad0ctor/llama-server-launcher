@@ -136,17 +136,12 @@ def test_gpu_info_static_multiple_devices_preserve_order(
 def test_gpu_info_static_sets_cuda_device_order_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
-    fake_cuda = types.SimpleNamespace(
-        is_available=lambda: True,
-        device_count=lambda: 0,
-        get_device_properties=lambda i: _fake_device_props(),
-    )
-    monkeypatch.setattr(sysmod, "torch", types.SimpleNamespace(cuda=fake_cuda))
-    monkeypatch.setattr(sysmod, "TORCH_AVAILABLE", True)
-
-    sysmod.get_gpu_info_static()
-
+    # ``modules.system`` pins ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` at
+    # module-import time so it's in place BEFORE any torch CUDA call.
+    # The runtime assignment that used to live inside
+    # ``get_gpu_info_static`` was a no-op (the env var was already
+    # set by the module load that pulled in the function we're
+    # calling). Just assert the import-time contract holds.
     import os
 
     assert os.environ.get("CUDA_DEVICE_ORDER") == "PCI_BUS_ID"

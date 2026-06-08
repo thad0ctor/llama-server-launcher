@@ -269,11 +269,14 @@ def detect_cuda_archs(*, allow_torch_fallback: bool = True) -> list[CudaArchInfo
     ``allow_torch_fallback=False`` or run this function in a worker.
 
     For compute capabilities with an ``-a`` (architecture-accelerated)
-    variant in nvcc — currently sm_90 (Hopper), sm_100/101/103 (Blackwell
-    datacenter), sm_120/121/122 (Blackwell consumer) — we surface the
-    ``XXa-real`` token too. Building with both tokens means the compiler
-    can pick the optimized variant where supported and fall back to the
-    plain code path otherwise.
+    variant in nvcc we surface the ``XXa-real`` token too — see
+    ``KNOWN_CUDA_ARCHS`` for the exact coverage (currently sm_90 for
+    Hopper plus sm_100/103/110 datacenter and sm_120/121 consumer in
+    the Blackwell family). Building with both tokens means the
+    compiler can pick the optimized variant where supported and fall
+    back to the plain code path otherwise. Compute capabilities
+    outside that catalogue still parse cleanly — they just emit the
+    plain ``XX-real`` token with ``a_variant_token=None``.
     """
     infos = detect_cuda_archs_from_nvidia_smi()
     if infos or not allow_torch_fallback:

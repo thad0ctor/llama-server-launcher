@@ -475,8 +475,10 @@ def get_gpu_info_static():
     except Exception as exc:
         return _unavailable_gpu_info(f"CUDA availability check failed: {exc}", "torch")
 
-    # Ensure consistent GPU ordering by PCIe bus ID (matches nvidia-smi and llama.cpp)
-    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    # ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` is already pinned at module import
+    # (see lines 24-25) BEFORE any torch CUDA call, so re-assigning it
+    # here after ``torch.cuda.is_available()`` is a no-op. Dropped to
+    # avoid implying a runtime guarantee that this point only had.
 
     try:
         device_count = torch_module.cuda.device_count()
