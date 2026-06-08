@@ -84,20 +84,36 @@ class TestSpecMasterToggle:
         assert "--spec-draft-model" not in cmd
 
     def test_spec_enabled_with_empty_spec_type_emits_nothing(self, manager, launcher_mock):
+        # Seed multiple persisted spec fields, not just n_max — the
+        # bug being pinned is "stale config emits flags even when
+        # spec_type is empty", so the test needs to cover the FULL
+        # spec/draft surface, not a single representative knob.
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("")
         launcher_mock.spec_draft_n_max.set("3")
+        launcher_mock.spec_draft_model.set("/tmp/draft.gguf")
+        launcher_mock.spec_draft_device.set("CUDA0")
         cmd = manager.build_cmd()
-        assert "--spec-type" not in cmd
-        assert "--spec-draft-n-max" not in cmd
+        leaked = [arg for arg in cmd if isinstance(arg, str)
+                  and (arg.startswith("--spec-") or arg.startswith("--draft-"))]
+        assert not leaked, (
+            f"spec_type='' must suppress every --spec-*/--draft-* flag; "
+            f"got leaked={leaked!r} cmd={cmd!r}"
+        )
 
     def test_spec_enabled_with_none_spec_type_emits_nothing(self, manager, launcher_mock):
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("none")
         launcher_mock.spec_draft_n_max.set("3")
+        launcher_mock.spec_draft_model.set("/tmp/draft.gguf")
+        launcher_mock.spec_draft_device.set("CUDA0")
         cmd = manager.build_cmd()
-        assert "--spec-type" not in cmd
-        assert "--spec-draft-n-max" not in cmd
+        leaked = [arg for arg in cmd if isinstance(arg, str)
+                  and (arg.startswith("--spec-") or arg.startswith("--draft-"))]
+        assert not leaked, (
+            f"spec_type='none' must suppress every --spec-*/--draft-* flag; "
+            f"got leaked={leaked!r} cmd={cmd!r}"
+        )
 
     def test_default_state_emits_no_spec_flags(self, manager, launcher_mock):
         """Zero-noise default: untouched fixture must not emit any spec or
@@ -2289,6 +2305,13 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         action, value = manager._resolve_cuda_visible_devices_action()
         assert action == "unset"
         assert value is None
+        # Manual mode also disables draft-device emission: a synthetic
+        # ``CUDA2`` would refer to a different physical card than the
+        # user picked. ``build_cmd`` must not surface ``-devd`` /
+        # ``--spec-draft-device`` arguments under those settings.
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" not in cmd
+        assert "-devd" not in cmd
 
     def test_empty_main_with_draft_does_not_create_filter(self, manager, union_launcher):
         """When the user has NOT selected any main GPUs (= 'use all detected
@@ -2467,6 +2490,10 @@ class TestMainDeviceEmittedOnDraftUnion:
         union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 3]
         cmd = manager.build_cmd()
         assert "--device" not in cmd
+        # Same rationale for the draft side: synthetic indices must
+        # not survive into ``--spec-draft-device`` / ``-devd``.
+        assert "--spec-draft-device" not in cmd
+        assert "-devd" not in cmd
 
     def test_no_device_when_empty_main_selection(self, manager, union_launcher):
         """Empty main selection means 'no filter' — union helper returns

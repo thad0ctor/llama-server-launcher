@@ -265,6 +265,12 @@ def _forbid_static_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_gpu_info_from_venv_empty_stdout_triggers_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fake venv below uses POSIX layout (``bin/python``). On
+    # Windows, ``get_gpu_info_from_venv`` would short-circuit at
+    # "Scripts/python.exe missing" and never exercise the empty-stdout
+    # branch this test is meant to pin. Pin the platform here so the
+    # test fails for the right reason on a Windows CI runner.
+    monkeypatch.setattr(sys, "platform", "linux")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "python").write_text("")
@@ -282,6 +288,7 @@ def test_gpu_info_from_venv_empty_stdout_triggers_fallback(tmp_path: Path, monke
 
 
 def test_gpu_info_from_venv_bad_json_triggers_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -298,6 +305,7 @@ def test_gpu_info_from_venv_bad_json_triggers_fallback(tmp_path: Path, monkeypat
 def test_gpu_info_from_venv_nonzero_return_code_triggers_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -312,6 +320,7 @@ def test_gpu_info_from_venv_nonzero_return_code_triggers_fallback(
 
 
 def test_gpu_info_from_venv_subprocess_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -328,6 +337,7 @@ def test_gpu_info_from_venv_subprocess_timeout(tmp_path: Path, monkeypatch: pyte
 
 
 def test_gpu_info_from_venv_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")

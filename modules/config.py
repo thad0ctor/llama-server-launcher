@@ -849,19 +849,42 @@ class ConfigManager:
             prior_configs = dict(self.launcher.saved_configs)
 
             imported_count = 0
-            for config_name, config_data in configs_to_import.items():
+            for raw_name, config_data in configs_to_import.items():
                 try:
+                    # Run imported names through the same sanitizer as
+                    # ``save_configuration``. Without this, a JSON file
+                    # with control chars / pipe / slash / NUL in a key
+                    # would land verbatim in ``saved_configs`` and on
+                    # disk, bypassing the per-save guard.
+                    config_name = self._sanitize_config_name(raw_name)
+                    if not config_name:
+                        print(
+                            f"WARNING: Skipping import of invalid config name "
+                            f"{raw_name!r}",
+                            file=sys.stderr,
+                        )
+                        continue
                     # Basic validation of config data
                     if not isinstance(config_data, dict):
                         print(f"WARNING: Skipping invalid config '{config_name}' - not a dictionary", file=sys.stderr)
                         continue
+                    # If sanitization collapsed two distinct raw keys
+                    # into one, or the sanitized name already exists,
+                    # disambiguate with a suffix rather than silently
+                    # overwriting.
+                    final_name = config_name
+                    if final_name in self.launcher.saved_configs and final_name != raw_name:
+                        suffix = 2
+                        while f"{config_name}_{suffix}" in self.launcher.saved_configs:
+                            suffix += 1
+                        final_name = f"{config_name}_{suffix}"
 
                     # Import the configuration
-                    self.launcher.saved_configs[config_name] = config_data
+                    self.launcher.saved_configs[final_name] = config_data
                     imported_count += 1
 
                 except Exception as e:
-                    print(f"WARNING: Failed to import config '{config_name}': {e}", file=sys.stderr)
+                    print(f"WARNING: Failed to import config '{raw_name}': {e}", file=sys.stderr)
 
             if imported_count > 0:
                 saved = self.launcher._save_configs()

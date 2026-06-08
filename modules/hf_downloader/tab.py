@@ -85,6 +85,13 @@ class HuggingFaceDownloaderTab:
         # ref and clearing the box mid-flight is a deliberate edit, not
         # something the listing handler should silently overwrite).
         self._last_requested_revision: str = ""
+        # Repo / revision that the LISTING currently in the file rows
+        # was actually loaded for. ``_on_download`` checks these so a
+        # user who pasted a new repo URL but didn't reload can't
+        # accidentally fetch from the wrong source (the file selection
+        # is meaningful only for the loaded repo).
+        self._loaded_repo_id: str = ""
+        self._loaded_revision: str = ""
         self._target_container = None
         self._files_listbox = None
         self._revision_combo = None
@@ -635,6 +642,11 @@ class HuggingFaceDownloaderTab:
         self._file_rows = []
         self._file_path_by_index = []
         self._refs = []
+        # Drop the loaded-listing identity too — until the new ``list``
+        # runner posts a ``listing`` event, ``_on_download`` must not
+        # treat the previous repo's identity as still active.
+        self._loaded_repo_id = ""
+        self._loaded_revision = ""
         if self._revision_combo is not None:
             self._revision_combo.config(values=())
         if self._files_listbox is not None:
@@ -715,9 +727,42 @@ class HuggingFaceDownloaderTab:
         except ValueError as exc:
             messagebox.showerror("Invalid repo", str(exc))
             return
+        # Refuse the download if the input has drifted since the file
+        # list was loaded. The selection in ``self._file_rows`` is only
+        # meaningful for the repo/revision that produced the listing;
+        # silently fetching against the changed input would download
+        # the wrong files (or fail with a confusing 404).
+        current_revision = self.revision_var.get().strip()
+        if self._loaded_repo_id and parsed.repo_id != self._loaded_repo_id:
+            messagebox.showerror(
+                "Repo changed since load",
+                f"The file list was loaded for {self._loaded_repo_id!r}, but "
+                f"the input now reads {parsed.repo_id!r}. Click 'Load repo' "
+                f"again to refresh the listing, or restore the original URL.",
+            )
+            return
+        if (
+            self._loaded_revision
+            and current_revision
+            and current_revision != self._loaded_revision
+        ):
+            messagebox.showerror(
+                "Revision changed since load",
+                f"The file list was loaded for revision {self._loaded_revision!r}, "
+                f"but the field now reads {current_revision!r}. Click 'Load repo' "
+                f"again so the file selection matches the revision you'll download.",
+            )
+            return
+        # Use the LOADED repo/revision (when present) — that's the
+        # exact identity the file selection is keyed against. Falling
+        # back to the current input only when no listing has been
+        # accepted yet preserves the historical behaviour for the
+        # "patterns-only, no listbox selection" flow.
+        effective_repo_id = self._loaded_repo_id or parsed.repo_id
+        effective_revision = self._loaded_revision or current_revision
         payload = {
-            "repo_id": parsed.repo_id,
-            "revision": self.revision_var.get().strip(),
+            "repo_id": effective_repo_id,
+            "revision": effective_revision,
             # Token NOT in payload — handed to the subprocess via env
             # (see ``_start_runner``) so it never lands on disk.
             "download_mode": self.download_mode_var.get(),
@@ -729,7 +774,7 @@ class HuggingFaceDownloaderTab:
             "max_workers": max_workers,
             "target_dirs": selected_targets,
         }
-        self.status_var.set(f"Downloading {parsed.repo_id}…")
+        self.status_var.set(f"Downloading {effective_repo_id}…")
         self._start_runner("download", payload)
 
     def _selected_file_paths(self) -> list[str]:
@@ -1005,6 +1050,18 @@ class HuggingFaceDownloaderTab:
                 self.revision_var.set(requested_revision)
             self._file_rows = list(files)
             self._file_path_by_index = [row.path for row in self._file_rows]
+            # Pin the repo / revision that produced THIS file list so
+            # ``_on_download`` can refuse to launch against a mismatched
+            # current input.
+            self._loaded_repo_id = str(event.get("repo_id", "") or "")
+            # Prefer the runner's resolved revision (the actual ref it
+            # listed against) over the user-submitted one; fall back to
+            # the request value, then to the current field.
+            self._loaded_revision = (
+                str(event.get("revision") or "").strip()
+                or requested_revision
+                or self.revision_var.get().strip()
+            )
             if self._files_listbox is not None:
                 self._files_listbox.delete(0, tk.END)
                 for row in self._file_rows:

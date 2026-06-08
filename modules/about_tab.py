@@ -665,6 +665,13 @@ class AboutTab:
                 pass
         self._version_after_id = None
         self._version_check_pending = False
+        # Reset the per-instance version-check state so a remount
+        # doesn't briefly render a stale "Current"/"Update Available"
+        # from the previous mount while the new background worker
+        # is still in flight. The display update below will fall
+        # through ``_update_version_display`` once widgets exist.
+        self.version_status = "Checking..."
+        self.remote_version = None
         # Bump the per-mount generation so any still-in-flight check
         # from a prior mount (background worker hasn't returned yet)
         # is rejected when its result tries to post into the queue.

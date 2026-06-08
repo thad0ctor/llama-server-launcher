@@ -103,7 +103,8 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
             f"source_dir {source_dir!r} is a file, not a directory; "
             f"refusing to operate."
         )
-    if not build.is_absolute():
+    build_was_relative = not build.is_absolute()
+    if build_was_relative:
         build = src / build
     # Same file-vs-directory guard for build_dir. Without this, a user
     # who typed a file path here would have ``rm -rf <build_dir>`` /
@@ -126,6 +127,24 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
             f"Refusing unsafe build dir {build_resolved!s} "
             f"(would target the source dir or an ancestor)."
         )
+
+    # If the user supplied a RELATIVE build_dir (so we anchored it
+    # under ``src``), make sure that after symlink-resolution it
+    # actually stays inside ``src``. A devious value like
+    # ``../../etc`` or a path component that's a symlink pointing
+    # outside the source tree would otherwise let ``rm -rf
+    # "$BUILD_DIR"`` reach unrelated directories. Absolute build_dirs
+    # are user-explicit and can legitimately live anywhere.
+    if build_was_relative:
+        try:
+            build_resolved.relative_to(src_resolved)
+        except ValueError as exc:
+            raise ValueError(
+                f"Refusing relative build_dir {build_dir!r}: it resolves "
+                f"to {build_resolved!s}, which is outside the source tree "
+                f"{src_resolved!s} (likely via a parent traversal or a "
+                f"symlinked path component)."
+            ) from exc
 
     return src_resolved, build_resolved
 

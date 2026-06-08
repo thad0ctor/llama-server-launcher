@@ -335,19 +335,26 @@ class BuildConfigStore:
         # the same mutated object — i.e. no rollback at all.
         return _clone_cfg(cfg) if cfg is not None else None
 
-    def save(self, cfg: BuildConfig) -> None:
+    def save(self, cfg: BuildConfig) -> bool:
+        """Persist ``cfg`` to disk. Returns True on a durable save,
+        False when the change was rolled back in memory only (load
+        refused, blank name, or write failure). Mirrors the
+        ``delete``/``rename`` contract — callers can now distinguish
+        "saved" from "reverted in memory only" rather than seeing
+        ``None`` for both.
+        """
         if not self._load():
             # If the on-disk file is unreadable, refuse to overwrite it with
             # an empty cache — that would silently destroy the user's
             # presets.
-            return
+            return False
         # Normalize + reject blank names so we don't create unusable entries
         # (e.g. {"": {...}} which would be invisible in the picker).
         cfg.name = (cfg.name or "").strip()
         if not cfg.name:
             print("WARN: refusing to save build config with empty name",
                   file=sys.stderr)
-            return
+            return False
         if not cfg.created_at:
             cfg.created_at = _utcnow_iso()
         if not cfg.last_used_at:
@@ -364,6 +371,8 @@ class BuildConfigStore:
                 self._cache[cfg.name] = prior_snapshot
             else:
                 self._cache.pop(cfg.name, None)
+            return False
+        return True
 
     def touch_last_used(self, name: str) -> None:
         if not self._load():

@@ -2372,7 +2372,19 @@ class BuildTab:
             extra_cmake_args=self.var_extra_args.get().strip(),
             ui_state=ui_state,
         )
-        self.store.save(cfg)
+        # ``store.save`` returns False when the on-disk write failed
+        # (e.g. read-only filesystem, ENOSPC) — the in-memory cache
+        # has already been rolled back at that point. Surfacing the
+        # failure here matches the ``delete``/``rename`` paths and
+        # prevents a "Saved config: X" message that lies on restart.
+        if not self.store.save(cfg):
+            self._append_console(
+                f"WARNING: failed to persist build config {name!r}; "
+                f"the change was reverted in memory.\n",
+                tag="error",
+            )
+            self._refresh_saved_configs_dropdown()
+            return
         self.var_config_name.set(name)
         self._refresh_saved_configs_dropdown()
         self._append_console(f"Saved config: {name}\n", tag="stage")
