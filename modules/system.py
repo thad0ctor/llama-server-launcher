@@ -731,6 +731,13 @@ def load_cached_gpu_info(config_dir, venv_path):
     devices = gpu_info.get("devices")
     if not isinstance(devices, list):
         return None
+    # Reject caches where ``device_count`` and ``len(devices)`` disagree.
+    # A truncated/edited cache where these don't match would resurrect
+    # phantom GPU slots in the UI (``device_count`` drives row count;
+    # ``devices`` is consulted per-row) instead of being ignored so a
+    # fresh detection runs.
+    if gpu_info.get("device_count") != len(devices):
+        return None
     # Downstream callers like ``format_gpu_mapping_table`` do ``dev.get(...)``
     # on each entry, so a hand-edited cache with ``devices=["oops"]`` would
     # crash startup despite passing the top-level shape checks above.

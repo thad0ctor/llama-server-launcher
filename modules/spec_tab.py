@@ -595,6 +595,18 @@ class SpecTab:
                 f"WARN: post-setup _refresh_spec_tab_state failed: {exc}",
                 file=sys.stderr,
             )
+        # Replay the draft GPU checkbox build. Any earlier GPU-detection
+        # refresh fired before this lazy tab was constructed and short-
+        # circuited on ``spec_draft_gpu_checkbox_frame`` being None; without
+        # this explicit replay the "Draft devices" section opens blank
+        # until some unrelated later refresh restores it.
+        try:
+            self._update_spec_draft_gpu_checkboxes()
+        except tk.TclError as exc:
+            print(
+                f"WARN: post-setup _update_spec_draft_gpu_checkboxes failed: {exc}",
+                file=sys.stderr,
+            )
 
     def _on_spec_draft_model_selected(self, event=None):
         """Listbox <<ListboxSelect>> handler for the draft GGUF picker.
