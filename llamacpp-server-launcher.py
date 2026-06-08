@@ -198,14 +198,30 @@ class LlamaCppLauncher:
 
     # --- New Imports ---
     # Define hardcoded templates, now primarily just the "default" option
+    # Fallback when ``config/chat_templates.json`` is missing.
+    #
+    # Values are **built-in template names** that both llama.cpp and ik_llama
+    # accept verbatim as ``--chat-template <name>``. Verified against
+    # ``llama.cpp/src/llama-chat.cpp::LLM_CHAT_TEMPLATES`` and
+    # ``ik_llama/src/llama.cpp::LLM_CHAT_TEMPLATES``.
+    #
+    # Previously this dict (and the shipped JSON) held Mustache-style
+    # template bodies with ``{{prompt}}`` / ``{{system_message}}``
+    # placeholders that don't exist in llama.cpp's Jinja2 context, so half
+    # the entries silently mapped to the wrong built-in via content
+    # detection (Mistral → llama2, Command R → falcon3, …) and the rest
+    # returned UNKNOWN and tripped a server error.
     _default_templates = {
-        "Let llama.cpp Decide (Use Model Default)": "", # Key for the explicit default option
-        # Add other core templates here if you want them available even without the JSON file
-        "Alpaca": "### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}",
-        "ChatML": "<|im_start|>system\\n{{system_message}}<|im_end|>\\n<|im_start|>user\\n{{prompt}}<|im_end|>\\n<|im_start|>assistant\\n",
-        "Llama 2 Chat": "  <<SYS>>\\n{{system_message}}\\n<</SYS>>\\n\\n{{prompt}} ",
-        "Vicuna": "A chat between a curious user and an AI assistant.\nThe assistant gives helpful, harmless, honest answers.\nUSER: {{prompt}}\nASSISTANT: ",
-        # Qwen3 templates are removed as requested
+        "Let llama.cpp Decide (Use Model Default)": "",  # explicit default option
+        "ChatML (chatml)": "chatml",
+        "Llama 2 (llama2)": "llama2",
+        "Llama 3 (llama3)": "llama3",
+        "Mistral v3 (mistral-v3)": "mistral-v3",
+        "Gemma (gemma)": "gemma",
+        "Phi-3 (phi3)": "phi3",
+        "Vicuna (vicuna)": "vicuna",
+        "DeepSeek 3 (deepseek3)": "deepseek3",
+        "Command R (command-r)": "command-r",
     }
 
     # ────────────────═════════════════════════════════════════════════
@@ -2087,21 +2103,47 @@ class LlamaCppLauncher:
         r += 1
 
 
-        # --- Effective Template Display --- (Logic remains the same, only the source changes)
-        ttk.Label(frame, text="Effective Template:").grid(column=0, row=r, sticky="w", padx=5, pady=3)
-        self.effective_template_display = ttk.Entry(frame, textvariable=self.current_template_display,
-                                                    state="readonly")
+        # --- Effective Template Display ---
+        # Multi-line so real Jinja2 templates aren't visually clipped to
+        # the first ~60 chars (a one-line Entry was previously used).
+        ttk.Label(frame, text="Effective Template:").grid(column=0, row=r, sticky="nw", padx=5, pady=3)
+        self.effective_template_display = scrolledtext.ScrolledText(
+            frame, wrap=tk.WORD, height=4, width=60, relief=tk.SUNKEN, bd=1,
+        )
         self.effective_template_display.grid(column=1, row=r, sticky="ew", padx=5, pady=3)
+        # Read-only via the disabled state; copy via the side button.
+        self.effective_template_display.configure(state="disabled")
         ttk.Button(frame, text="Copy", command=self._copy_template_display)\
-            .grid(column=2, row=r, sticky="w", padx=5, pady=3)
+            .grid(column=2, row=r, sticky="nw", padx=5, pady=3)
 
         r += 1
 
-        # Keep help labels, adjust wording if necessary
-        ttk.Label(frame, text="Enter a Go-template string. e.g., \"### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}\"", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
-        ttk.Label(frame, text="Use double backslashes (\\\\) for newline characters within the template string for Python literals. The server uses Go-template syntax.", font=("TkSmallCaptionFont"), foreground="orange")\
-             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
+        # Help text that switches based on --jinja state.
+        # llama.cpp's ``--chat-template`` accepts either:
+        #   • a built-in *name* from the LLM_CHAT_TEMPLATES table
+        #     (works in the legacy path; ``--jinja`` should be OFF), or
+        #   • a Jinja2 template source (rendered through Minja when
+        #     ``--jinja`` is ON).
+        # The previous help text claimed "Go-template syntax" which is
+        # wrong for both backends.
+        self.template_help_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self.template_help_var,
+            font=("TkSmallCaptionFont",), foreground="gray",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        ttk.Label(
+            frame,
+            text=(
+                "Tip: Custom mode + ``--jinja`` ON expects a real Jinja2 template "
+                "(receives ``messages``, ``add_generation_prompt``, ``bos_token``, "
+                "``eos_token`` — not ``{{prompt}}`` / ``{{system_message}}``)."
+            ),
+            font=("TkSmallCaptionFont",), foreground="gray", wraplength=720, justify="left",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        # Keep the help text in sync with the jinja toggle and the source radios.
+        self.jinja_enabled.trace_add("write", lambda *_a: self._update_template_help_text())
+        self.template_source.trace_add("write", lambda *_a: self._update_template_help_text())
+        self._update_template_help_text()
 
 
         # --- Reasoning / Thinking section ---
@@ -2159,17 +2201,36 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=5, pady=3)
         self.reasoning_budget_message_entry = ttk.Entry(frame, textvariable=self.reasoning_budget_message)
         self.reasoning_budget_message_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2); r += 1
+        ttk.Label(
+            frame,
+            text="Only injected when --reasoning-budget is a positive integer; "
+                 "irrelevant for -1 (unlimited) or 0 (immediate end).",
+            font=("TkSmallCaptionFont",), foreground="gray",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        # Keep enabled/disabled in sync with the budget value.
+        self.reasoning_budget.trace_add(
+            "write", lambda *_a: self._update_reasoning_budget_message_state()
+        )
+        self._update_reasoning_budget_message_state()
 
         # --chat-template-kwargs
         ttk.Label(frame, text="Chat Template KWargs (--chat-template-kwargs):")\
             .grid(column=0, row=r, sticky="w", padx=5, pady=3)
         self.chat_template_kwargs_entry = ttk.Entry(frame, textvariable=self.chat_template_kwargs)
         self.chat_template_kwargs_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2); r += 1
-        ttk.Label(frame, text="(advanced: JSON string)", font=("TkSmallCaptionFont"), foreground="gray")\
+        # Lint as JSON on focus-out so a typo'd value tints the entry red
+        # right away instead of failing at server startup with an opaque
+        # parser error.
+        self.chat_template_kwargs_entry.bind(
+            "<FocusOut>", lambda _e: self._validate_chat_template_kwargs()
+        )
+        ttk.Label(frame, text="(advanced: JSON object — e.g. {\"enable_thinking\":true})",
+                  font=("TkSmallCaptionFont",), foreground="gray")\
             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
         ttk.Label(frame,
-                  text="Use --reasoning on/off instead of --chat-template-kwargs '{\"preserve_thinking\":true}'",
-                  font=("TkSmallCaptionFont"), foreground="gray")\
+                  text="Prefer --reasoning on/off over --chat-template-kwargs "
+                       "'{\"enable_thinking\":true}'; the kwarg path is deprecated upstream.",
+                  font=("TkSmallCaptionFont",), foreground="gray")\
             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
 
 
@@ -2242,11 +2303,24 @@ class LlamaCppLauncher:
         elif source == "custom":
             effective_template = self.custom_template_string.get()
 
-        # Ensure the displayed entry is writable before setting, then set back to readonly
-        if hasattr(self, 'effective_template_display') and self.effective_template_display.winfo_exists():
-             self.effective_template_display.config(state=tk.NORMAL)
-             self.current_template_display.set(effective_template)
-             self.effective_template_display.config(state="readonly")
+        # Keep the underlying StringVar so save/load and the Copy button
+        # continue to work without changes.
+        self.current_template_display.set(effective_template)
+
+        # Rewrite the visible widget. Previously a one-line ttk.Entry —
+        # now a multi-line read-only ScrolledText so real Jinja2 templates
+        # render fully instead of being clipped to the leading ~60 chars.
+        widget = getattr(self, 'effective_template_display', None)
+        if widget is not None and widget.winfo_exists():
+            try:
+                widget.configure(state="normal")
+                widget.delete("1.0", tk.END)
+                if effective_template:
+                    widget.insert("1.0", effective_template)
+                widget.configure(state="disabled")
+            except tk.TclError:
+                # Widget torn down mid-update; safe to ignore.
+                pass
 
 
     def _on_custom_template_modified(self, event=None):
@@ -2308,6 +2382,153 @@ class LlamaCppLauncher:
                 messagebox.showerror("Copy Error", f"Failed to copy template to clipboard:\n{e}")
         else:
             messagebox.showinfo("Copy Info", "No template string to copy.")
+
+    def _update_template_help_text(self, *_args) -> None:
+        """Switch the chat-template help line based on jinja + source mode.
+
+        The rules are non-obvious and previously the static "Go-template
+        syntax" hint actively misled users:
+
+        * Predefined: a built-in template *name* like ``chatml`` is sent
+          verbatim. Works in the legacy code path; ``--jinja`` should
+          stay OFF (with ``--jinja`` ON, Minja parses the literal string
+          ``"chatml"`` as a Jinja2 template — broken).
+        * Custom + ``--jinja`` OFF: llama.cpp tries to match the body
+          against the built-in name table, then falls through to
+          content-pattern detection. Anything that doesn't match a
+          known marker returns ``UNKNOWN`` and the server errors out.
+        * Custom + ``--jinja`` ON: the body is parsed as a real Jinja2
+          template via Minja; it receives ``messages``,
+          ``add_generation_prompt``, ``bos_token``, ``eos_token``.
+        """
+        var = getattr(self, "template_help_var", None)
+        if var is None:
+            return
+        try:
+            source = self.template_source.get()
+        except Exception:
+            return
+        jinja_on = False
+        try:
+            jinja_on = bool(self.jinja_enabled.get())
+        except Exception:
+            pass
+        if source == "default":
+            msg = (
+                "llama.cpp decides — the template embedded in the GGUF metadata is used. "
+                "``--chat-template`` is not emitted."
+            )
+        elif source == "predefined":
+            if jinja_on:
+                msg = (
+                    "⚠ Predefined entries send a built-in template *name* (e.g. "
+                    "``chatml``). With ``--jinja`` ON, Minja tries to parse the "
+                    "name as Jinja2 source — turn ``--jinja`` OFF or switch to "
+                    "Custom mode and paste a real Jinja2 template."
+                )
+            else:
+                msg = (
+                    "Sends a built-in template name as ``--chat-template <name>``. "
+                    "Verified against llama.cpp + ik_llama; ``--jinja`` not required."
+                )
+        elif source == "custom":
+            if jinja_on:
+                msg = (
+                    "Custom Jinja2 template. Receives ``messages`` (list of "
+                    "{role, content}), ``add_generation_prompt`` (bool), "
+                    "``bos_token``, ``eos_token``. Validated by Minja at "
+                    "server startup."
+                )
+            else:
+                msg = (
+                    "Without ``--jinja``, the body is matched against the built-in "
+                    "name table, then against known content markers. Anything "
+                    "that doesn't match returns UNKNOWN and the server errors. "
+                    "Easiest: either type a built-in name (``chatml``, ``llama3``, "
+                    "…) or enable ``--jinja`` and paste a real Jinja2 template."
+                )
+        else:
+            msg = ""
+        var.set(msg)
+
+    def _validate_chat_template_kwargs(self) -> None:
+        """Lint ``--chat-template-kwargs`` as JSON on focus-out.
+
+        The server requires this flag to be valid JSON (it merges the
+        parsed object into the per-request template context). A typo
+        like ``{"a":}`` was previously only surfaced at server startup
+        as an opaque parse error; show it here while the user can still
+        fix it.
+        """
+        widget = getattr(self, "chat_template_kwargs_entry", None)
+        if widget is None:
+            return
+        raw = self.chat_template_kwargs.get().strip()
+        # Empty is fine — flag won't be emitted.
+        if not raw:
+            try:
+                widget.configure(foreground="")
+            except tk.TclError:
+                pass
+            return
+        try:
+            parsed = json.loads(raw)
+        except Exception as exc:
+            try:
+                widget.configure(foreground="#b00020")
+            except tk.TclError:
+                pass
+            print(
+                f"WARNING: --chat-template-kwargs value is not valid JSON: {exc}",
+                file=sys.stderr,
+            )
+            return
+        if not isinstance(parsed, dict):
+            try:
+                widget.configure(foreground="#b00020")
+            except tk.TclError:
+                pass
+            print(
+                "WARNING: --chat-template-kwargs must be a JSON object "
+                "(e.g. {\"enable_thinking\":true}); got "
+                f"{type(parsed).__name__}.",
+                file=sys.stderr,
+            )
+            return
+        try:
+            widget.configure(foreground="")
+        except tk.TclError:
+            pass
+
+    def _update_reasoning_budget_message_state(self, *_args) -> None:
+        """Disable ``--reasoning-budget-message`` when the budget is blank
+        or set to ``-1`` (unlimited) or ``0`` (immediate end).
+
+        Per ``llama.cpp/common/arg.cpp:3187-3192`` the message is *only*
+        emitted when the reasoning budget is exhausted — meaning a
+        positive integer budget. When ``--reasoning-budget`` is blank
+        (= flag not emitted), ``-1`` (unlimited; never exhausted) or
+        ``0`` (immediately ended; no time to inject the message), the
+        flag would have no effect. Greyed-out + cleared makes that
+        relationship obvious.
+        """
+        entry = getattr(self, "reasoning_budget_message_entry", None)
+        if entry is None:
+            return
+        try:
+            budget = self.reasoning_budget.get().strip()
+        except Exception:
+            budget = ""
+        try:
+            budget_int = int(budget) if budget else None
+        except ValueError:
+            budget_int = None
+        # Active state: budget is a positive integer.
+        active = budget_int is not None and budget_int >= 1
+        try:
+            entry.configure(state=("normal" if active else "disabled"))
+        except tk.TclError:
+            pass
 
 
     # ░░░░░ CONFIG TAB ░░░░░
