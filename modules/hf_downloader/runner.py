@@ -211,6 +211,17 @@ def run_download(payload: dict) -> int:
     revision = (payload.get("revision") or "").strip() or None
     token = _token_value(payload)
     allow_patterns = _combined_allow_patterns(payload)
+    # ``selected`` mode with no selected files AND no include_patterns used
+    # to silently turn into a full-repo download (allow_patterns=None lets
+    # snapshot_download fetch everything). Fail fast instead so a CLI/manual
+    # payload that forgot to populate ``selected_files`` can't accidentally
+    # pull dozens of GB.
+    if payload.get("download_mode", "selected") == "selected" and not allow_patterns:
+        raise ValueError(
+            "'selected' download mode requires at least one selected_file or "
+            "include_pattern; got an empty selection. To download the whole "
+            "repo set ``download_mode`` to ``all``."
+        )
     ignore_patterns = _normalize_pattern_list(payload.get("ignore_patterns")) or None
     target_dirs = _normalize_path_list(payload.get("target_dirs"))
     # Validate + clamp at the runner boundary. The UI clamps too, but this

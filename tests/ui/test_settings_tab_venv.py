@@ -47,9 +47,7 @@ def test_current_venv_info_blank_uses_repo_default(settings_tab):
 @posix_only
 def test_current_active_venv_path_blank_uses_default_only_when_real_venv(settings_tab, tmp_path):
     settings_tab.repo_dir = tmp_path
-    bindir = tmp_path / "venv" / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "python").write_text("", encoding="utf-8")
+    _make_fake_venv(tmp_path / "venv")
     settings_tab.venv_dir_var.set("")
 
     assert settings_tab._current_active_venv_path() == str((tmp_path / "venv").resolve())
@@ -58,9 +56,7 @@ def test_current_active_venv_path_blank_uses_default_only_when_real_venv(setting
 @posix_only
 def test_current_active_venv_path_relative_matches_launcher_resolution(settings_tab, tmp_path):
     settings_tab.repo_dir = tmp_path
-    bindir = tmp_path / "envs" / "custom" / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "python").write_text("", encoding="utf-8")
+    _make_fake_venv(tmp_path / "envs" / "custom")
     settings_tab.venv_dir_var.set("envs/custom")
 
     assert settings_tab._current_active_venv_path() == str((tmp_path / "envs" / "custom").resolve())
@@ -85,6 +81,23 @@ def test_create_venv_uses_default_repo_path_when_blank(settings_tab, monkeypatch
     assert str(expected) in launch_mock.call_args.args[0]
     assert info_mock.called
     error_mock.assert_not_called()
+
+
+def _make_fake_venv(root):
+    """Lay out a POSIX venv that ``looks_like_venv`` will accept.
+
+    ``looks_like_venv`` now requires three markers: ``bin/python`` (already
+    required), ``pyvenv.cfg``, and the platform activator. Tests that
+    previously only created ``bin/python`` need the other two too.
+    Returns the path to the python interpreter so callers can re-use it.
+    """
+    bindir = root / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    python = bindir / "python"
+    python.write_text("", encoding="utf-8")
+    (bindir / "activate").write_text("# mock\n", encoding="utf-8")
+    (root / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
+    return python
 
 
 def _managed_dep(key):
@@ -123,9 +136,7 @@ def test_remove_venv_opens_terminal_after_confirmation(settings_tab, monkeypatch
     # _on_remove_venv now requires the target to look like a venv (so it can't
     # rm -rf an arbitrary directory the user typed). Lay out a minimal POSIX
     # venv so the success path still runs.
-    bindir = venv_dir / "bin"
-    bindir.mkdir(parents=True)
-    (bindir / "python").write_text("", encoding="utf-8")
+    _make_fake_venv(venv_dir)
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
     monkeypatch.setattr("modules.settings_tab.messagebox.askyesno", lambda *a, **kw: True)
@@ -156,10 +167,7 @@ def test_install_dependency_requires_detected_venv(settings_tab, monkeypatch):
 
 @posix_only
 def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monkeypatch, tmp_path):
-    bindir = tmp_path / "bin"
-    bindir.mkdir(parents=True)
-    python = bindir / "python"
-    python.write_text("", encoding="utf-8")
+    _make_fake_venv(tmp_path)
     dep = _managed_dep("huggingface_hub")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
@@ -177,10 +185,7 @@ def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monke
 
 @posix_only
 def test_remove_dependency_opens_terminal_for_existing_venv(settings_tab, monkeypatch, tmp_path):
-    bindir = tmp_path / "bin"
-    bindir.mkdir(parents=True)
-    python = bindir / "python"
-    python.write_text("", encoding="utf-8")
+    _make_fake_venv(tmp_path)
     dep = _managed_dep("psutil")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)

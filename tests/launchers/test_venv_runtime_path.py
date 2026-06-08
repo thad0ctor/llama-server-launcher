@@ -22,18 +22,25 @@ ENTRY_PATH = REPO_ROOT / "llamacpp-server-launcher.py"
 def _make_platform_venv(base: Path) -> Path:
     """Create a venv-shaped directory under ``base`` for the current platform.
 
-    Windows expects ``Scripts/python.exe``; POSIX expects ``bin/python``.
-    Returns the venv directory path.
+    ``looks_like_venv`` now requires three markers (python, pyvenv.cfg,
+    activator) — laying out just ``bin/python`` no longer suffices.
+    Windows expects ``Scripts/python.exe`` + ``Scripts/activate.bat``;
+    POSIX expects ``bin/python`` + ``bin/activate``. Both also need
+    ``pyvenv.cfg``. Returns the venv directory path.
     """
     venv = base / "venv"
     if sys.platform.startswith("win"):
         bindir = venv / "Scripts"
         exe = bindir / "python.exe"
+        activator = bindir / "activate.bat"
     else:
         bindir = venv / "bin"
         exe = bindir / "python"
+        activator = bindir / "activate"
     bindir.mkdir(parents=True)
     exe.write_text("", encoding="utf-8")
+    activator.write_text("# mock\n", encoding="utf-8")
+    (venv / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
     return venv
 
 

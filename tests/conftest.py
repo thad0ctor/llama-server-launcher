@@ -192,8 +192,17 @@ def _silence_tk_messagebox(monkeypatch):
 
     ``askyesno`` / ``askokcancel`` default to ``True`` so that any test
     relying on the user confirming proceeds along the happy path.
+
+    On environments without Tk (some minimal CI images, sandboxes), the
+    ``import tkinter.messagebox`` line raises ``ImportError`` which used
+    to abort the entire test session because this fixture is autouse.
+    Guard the import so non-Tk tests can still run; Tk-dependent tests
+    will skip themselves later via the ``tk_root`` fixture.
     """
-    import tkinter.messagebox as mb
+    try:
+        import tkinter.messagebox as mb
+    except ImportError:
+        return
 
     monkeypatch.setattr(mb, "showinfo", MagicMock(), raising=False)
     monkeypatch.setattr(mb, "showwarning", MagicMock(), raising=False)

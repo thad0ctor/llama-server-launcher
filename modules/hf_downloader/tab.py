@@ -694,6 +694,12 @@ class HuggingFaceDownloaderTab:
         self._set_button_state(self._cancel_button, True)
         self._set_button_state(self._load_button, False)
         self._set_button_state(self._download_button, False)
+        # Disable Install/Update synchronously here too. The
+        # ``_refresh_runtime_state`` re-gate only fires after the worker
+        # publishes ``self._process``, leaving a window where the user
+        # could click Install during ``list``/``download`` and run
+        # ``pip install`` into the same venv mid-operation.
+        self._set_button_state(self._install_button, False)
         command = build_runner_command(python, action, payload_file)
         self._worker_thread = threading.Thread(
             target=self._run_process_worker,

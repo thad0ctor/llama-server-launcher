@@ -39,7 +39,38 @@ class VenvTargetInfo:
 
     @property
     def looks_like_venv(self) -> bool:
-        return self.python_path is not None
+        """True only when the target really looks like a venv.
+
+        Any plain file at ``bin/python`` / ``Scripts/python.exe`` used to
+        satisfy this check, which let a non-venv project directory be
+        auto-activated by ``resolve_active_venv_path()`` and even targeted
+        for recursive deletion by ``SettingsTab._on_remove_venv``. Now we
+        also require:
+
+          * ``pyvenv.cfg`` to exist (the file ``python -m venv`` writes
+            into every freshly created environment), and
+          * the platform-appropriate activator script
+            (``bin/activate`` on POSIX, ``Scripts/activate.bat`` /
+            ``Scripts/Activate.ps1`` on Windows) to exist.
+
+        Together these are reliable enough to gate the activate/delete
+        paths without misfiring on a folder that happens to contain a
+        ``python`` symlink.
+        """
+        if self.python_path is None:
+            return False
+        if not (self.effective_dir / "pyvenv.cfg").is_file():
+            return False
+        # Different layouts ship different activators (bash vs cmd vs PS,
+        # bin/ vs Scripts/). Accept any one of them so this works on
+        # POSIX, Windows, and the occasional Cygwin / MSYS layout.
+        activator_candidates = (
+            self.effective_dir / "bin" / "activate",
+            self.effective_dir / "Scripts" / "activate.bat",
+            self.effective_dir / "Scripts" / "Activate.ps1",
+            self.effective_dir / "Scripts" / "activate",
+        )
+        return any(p.is_file() for p in activator_candidates)
 
 
 @dataclass(frozen=True)
@@ -406,9 +437,13 @@ def build_remove_venv_command(
     target = str(resolved_target)
     plat = platform or sys.platform
     if plat.startswith("win"):
-        # Force-quote so a venv path containing cmd metacharacters can't
-        # break out of the rmdir invocation.
-        return " ".join(_win_cmd_quote(s) for s in ["rmdir", "/s", "/q", target])
+        # Route through ``_shell_join`` so the args get the same ``%``/``!``
+        # rejection every other Windows command builder gets. Without this
+        # a path that passed the safety-resolution above could still be
+        # rewritten by ``cmd.exe`` variable expansion before ``rmdir``
+        # executes — i.e. the deletion would target a different directory
+        # than the one we validated.
+        return _shell_join(["rmdir", "/s", "/q", target], platform=plat)
     return _shell_join(["rm", "-rf", target], platform=plat)
 
 

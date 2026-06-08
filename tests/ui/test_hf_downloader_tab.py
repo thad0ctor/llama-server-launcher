@@ -21,22 +21,30 @@ def hf_launcher_stub(launcher_stub, tmp_path):
 def active_venv(tmp_path):
     """Lay out a venv that ``looks_like_venv`` will accept on this platform.
 
-    Windows expects ``venv/Scripts/python.exe``; POSIX expects
-    ``venv/bin/python``. The earlier hard-coded POSIX layout caused
-    ``_current_active_venv_path()`` to return "" on Windows, which routed
-    tests into a blocking ``messagebox.showerror`` and wedged the runner.
+    ``looks_like_venv`` now requires the full set of markers a real venv
+    has: the python interpreter, the ``pyvenv.cfg`` config file, and the
+    platform-appropriate activator script. Earlier fixtures only created
+    ``bin/python`` (or ``Scripts/python.exe``), which let any plain
+    ``bin/python`` directory pose as a venv — fine for tests but a real
+    security/UX problem in the GUI (auto-activation, recursive deletion).
     """
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
+    venv_dir = repo_dir / "venv"
     if sys.platform.startswith("win"):
-        bindir = repo_dir / "venv" / "Scripts"
+        bindir = venv_dir / "Scripts"
         exe_name = "python.exe"
+        activator = bindir / "activate.bat"
     else:
-        bindir = repo_dir / "venv" / "bin"
+        bindir = venv_dir / "bin"
         exe_name = "python"
+        activator = bindir / "activate"
     bindir.mkdir(parents=True)
     python = bindir / exe_name
     python.write_text("", encoding="utf-8")
+    # Both markers ``looks_like_venv`` now requires.
+    (venv_dir / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
+    activator.write_text("# mock\n", encoding="utf-8")
     return repo_dir, python
 
 

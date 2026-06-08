@@ -5,6 +5,19 @@ from types import SimpleNamespace
 from modules import venv_manager
 
 
+def _dep(key: str):
+    """Find a ``ManagedDependency`` by its stable ``key`` field.
+
+    Indexing ``MANAGED_DEPENDENCIES`` by position (``[0]``, ``[3]``…) used
+    to break whenever the tuple was reordered — silently rewiring which
+    test exercised which package.
+    """
+    for dep in venv_manager.MANAGED_DEPENDENCIES:
+        if dep.key == key:
+            return dep
+    raise AssertionError(f"no managed dependency named {key!r}")
+
+
 def test_default_venv_dir_uses_repo_folder(tmp_path):
     assert venv_manager.default_venv_dir(repo_dir=tmp_path) == tmp_path / "venv"
 
@@ -32,13 +45,19 @@ def test_resolve_active_venv_path_blank_stays_empty_without_default_venv(tmp_pat
 
 
 def test_resolve_active_venv_path_blank_uses_default_when_venv_exists(tmp_path):
-    bindir = tmp_path / "venv" / "bin"
+    # ``looks_like_venv`` now requires the full marker set (pyvenv.cfg +
+    # activator + python). Lay them all out so the resolved-active-path
+    # heuristic still considers this a real venv.
+    venv_root = tmp_path / "venv"
+    bindir = venv_root / "bin"
     bindir.mkdir(parents=True)
     (bindir / "python").write_text("", encoding="utf-8")
+    (bindir / "activate").write_text("# mock\n", encoding="utf-8")
+    (venv_root / "pyvenv.cfg").write_text("home = /\n", encoding="utf-8")
 
     resolved = venv_manager.resolve_active_venv_path("", repo_dir=tmp_path, platform="linux")
 
-    assert resolved == str((tmp_path / "venv").resolve())
+    assert resolved == str(venv_root.resolve())
 
 
 def test_resolve_active_venv_path_relative_is_repo_relative(tmp_path):
@@ -115,7 +134,7 @@ def test_build_bootstrap_venv_command_installs_managed_packages(tmp_path):
 
 
 def test_probe_current_python_dependencies_reports_availability(monkeypatch):
-    dep = venv_manager.MANAGED_DEPENDENCIES[0]
+    dep = _dep("requests")
     monkeypatch.setattr(
         venv_manager.importlib.util,
         "find_spec",
@@ -142,7 +161,7 @@ def test_build_install_dependency_command_uses_venv_python(tmp_path):
 
     command = venv_manager.build_install_dependency_command(
         tmp_path,
-        venv_manager.MANAGED_DEPENDENCIES[0],
+        _dep("requests"),
         platform="linux",
     )
 
@@ -161,7 +180,7 @@ def test_build_install_dependency_command_quotes_windows_python(tmp_path):
 
     command = venv_manager.build_install_dependency_command(
         base,
-        venv_manager.MANAGED_DEPENDENCIES[3],
+        _dep("huggingface_hub"),
         platform="win32",
     )
 
@@ -202,7 +221,7 @@ def test_build_remove_venv_command_posix_uses_rm_rf(tmp_path):
 
 
 def test_probe_dependency_status_reports_missing_python(tmp_path):
-    dep = venv_manager.MANAGED_DEPENDENCIES[0]
+    dep = _dep("requests")
 
     status = venv_manager.probe_dependency_status(tmp_path, dep, platform="linux")
 
@@ -215,7 +234,7 @@ def test_probe_dependency_status_parses_success(monkeypatch, tmp_path):
     bindir.mkdir(parents=True)
     exe = bindir / "python"
     exe.write_text("", encoding="utf-8")
-    dep = venv_manager.MANAGED_DEPENDENCIES[1]
+    dep = _dep("torch")
 
     def fake_run(args, **kwargs):
         assert args[0] == str(exe)
@@ -239,7 +258,7 @@ def test_probe_dependency_status_nonzero_return_surfaces_error(monkeypatch, tmp_
     bindir.mkdir(parents=True)
     exe = bindir / "python"
     exe.write_text("", encoding="utf-8")
-    dep = venv_manager.MANAGED_DEPENDENCIES[0]
+    dep = _dep("requests")
 
     monkeypatch.setattr(
         venv_manager.subprocess,
