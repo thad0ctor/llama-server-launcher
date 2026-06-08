@@ -172,22 +172,33 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
         return ParsedRepoInput(repo_id=repo_id)
 
     if "://" not in text:
-        parts = [part for part in text.split("/") if part]
-        # Same dataset/space rejection the ``hf://`` and ``https://``
-        # branches do — otherwise bare ``datasets/<owner>/<repo>`` would
-        # silently truncate to the bogus model id ``datasets/<owner>``
-        # and fail much later in the runner.
-        if parts and parts[0] in {"datasets", "spaces"}:
-            kind = parts[0]
-            raise ValueError(
-                f"This is a HuggingFace {kind} URL; this tab only downloads "
-                "model repos."
-            )
-        if len(parts) < 2:
-            raise ValueError("Repo input must include both owner and repo name.")
-        repo_id = "/".join(parts[:2])
-        _validate_repo_id(repo_id)
-        return ParsedRepoInput(repo_id=repo_id)
+        # A schemeless ``huggingface.co/<owner>/<repo>`` / ``huggingface.co/tree/...``
+        # is conceptually a URL, not a bare repo id. Without this guard the
+        # leading ``huggingface.co`` is silently treated as ``<owner>``,
+        # producing the bogus repo id ``huggingface.co/<owner>``. Promote
+        # to the URL-handling branch so the same ``tree``/``blob``
+        # revision-hint extraction, dataset/space rejection, and netloc
+        # validation apply.
+        leading = text.split("/", 1)[0].lower()
+        if leading in {"huggingface.co", "www.huggingface.co"}:
+            text = "https://" + text
+        else:
+            parts = [part for part in text.split("/") if part]
+            # Same dataset/space rejection the ``hf://`` and ``https://``
+            # branches do — otherwise bare ``datasets/<owner>/<repo>`` would
+            # silently truncate to the bogus model id ``datasets/<owner>``
+            # and fail much later in the runner.
+            if parts and parts[0] in {"datasets", "spaces"}:
+                kind = parts[0]
+                raise ValueError(
+                    f"This is a HuggingFace {kind} URL; this tab only downloads "
+                    "model repos."
+                )
+            if len(parts) < 2:
+                raise ValueError("Repo input must include both owner and repo name.")
+            repo_id = "/".join(parts[:2])
+            _validate_repo_id(repo_id)
+            return ParsedRepoInput(repo_id=repo_id)
 
     parsed = urlparse(text)
     if parsed.netloc not in {"huggingface.co", "www.huggingface.co"}:

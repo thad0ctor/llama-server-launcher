@@ -195,8 +195,19 @@ def _normalize_pattern_list(value) -> list[str]:
     return [item for item in value if isinstance(item, str) and item]
 
 
+_ALLOWED_DOWNLOAD_MODES = frozenset({"selected", "snapshot"})
+
+
 def _combined_allow_patterns(payload: dict) -> list[str] | None:
     mode = payload.get("download_mode", "selected")
+    if mode not in _ALLOWED_DOWNLOAD_MODES:
+        # The old code treated any non-``"selected"`` value as snapshot,
+        # so a typo like ``"snapshop"`` silently widened scope to a full
+        # repo download. Reject the typo at the runner boundary instead.
+        raise ValueError(
+            f"Unknown download_mode {mode!r}; expected one of "
+            f"{sorted(_ALLOWED_DOWNLOAD_MODES)}."
+        )
     patterns: list[str] = []
     if mode == "selected":
         patterns.extend(_normalize_pattern_list(payload.get("selected_files")))

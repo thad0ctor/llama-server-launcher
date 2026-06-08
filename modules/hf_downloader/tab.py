@@ -570,7 +570,12 @@ class HuggingFaceDownloaderTab:
         if self._files_listbox is not None:
             self._files_listbox.delete(0, tk.END)
         self._set_button_state(self._download_button, False)
-        if parsed.revision_hint and not self.revision_var.get().strip():
+        # Apply URL-derived revision hints UNCONDITIONALLY. The old guard
+        # only set the hint when revision_var was blank/whitespace, so a
+        # stale persisted or manually-typed revision could shadow a
+        # ``tree/<branch>`` hint pulled from the freshly pasted URL — the
+        # user's most recent intent must win.
+        if parsed.revision_hint:
             self.revision_var.set(parsed.revision_hint)
         payload = {
             "repo_id": parsed.repo_id,
@@ -592,8 +597,22 @@ class HuggingFaceDownloaderTab:
             messagebox.showerror("No target directory", "Select at least one model directory target.")
             return
         selected_files = self._selected_file_paths()
-        if self.download_mode_var.get() == "selected" and not selected_files:
-            messagebox.showerror("No files selected", "Select at least one file or switch to repo snapshot mode.")
+        # Compute include_patterns early so the "selected" mode guard can
+        # consider EITHER source: include_patterns alone (a power-user
+        # ``*.gguf`` filter on a tree-only listing) used to be rejected
+        # for having no listbox selection, which forced the user to either
+        # tick rows that don't exist or switch to snapshot mode.
+        include_patterns = list(parse_pattern_lines(self.include_patterns_var.get()))
+        if (
+            self.download_mode_var.get() == "selected"
+            and not selected_files
+            and not include_patterns
+        ):
+            messagebox.showerror(
+                "No files selected",
+                "Select at least one file, enter an include pattern, or "
+                "switch to repo snapshot mode.",
+            )
             return
         try:
             # Clamp to BOTH ends of the configured range. The keystroke
@@ -621,7 +640,7 @@ class HuggingFaceDownloaderTab:
             "token": self.token_var.get().strip(),
             "download_mode": self.download_mode_var.get(),
             "selected_files": selected_files,
-            "include_patterns": list(parse_pattern_lines(self.include_patterns_var.get())),
+            "include_patterns": include_patterns,
             "ignore_patterns": list(parse_pattern_lines(self.ignore_patterns_var.get())),
             "force_download": bool(self.force_download_var.get()),
             "local_files_only": bool(self.local_files_only_var.get()),
@@ -875,7 +894,12 @@ class HuggingFaceDownloaderTab:
                     self._files_listbox.insert(tk.END, row.display_name)
                 self._select_default_files()
             self.status_var.set(f"Loaded {len(files)} files from {event.get('repo_id', '')}.")
-            self._set_button_state(self._download_button, bool(files))
+            # Don't enable Download here — the list runner subprocess is
+            # still alive. Re-enabling now would let the user click
+            # Download against an in-flight worker; ``_start_runner``
+            # would then race with the still-cleaning-up list process.
+            # The button comes back on via ``_refresh_runtime_state`` once
+            # ``process-exit`` fires (which clears ``self._process``).
             return
         if kind == "target-start":
             self.status_var.set(event.get("message", "Downloading…"))

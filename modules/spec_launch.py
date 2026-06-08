@@ -167,11 +167,23 @@ def get_effective_visible_gpu_indices(launcher):
     if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return main_ordered
     try:
-        draft_indices = list(
+        draft_indices_raw = list(
             launcher.app_settings.get("spec_draft_selected_gpus", []) or []
         )
     except Exception:
-        draft_indices = []
+        draft_indices_raw = []
+    # Coerce persisted entries to int up front. A JSON-edited config can
+    # leave string entries like ``"2"`` in the list; the old code passed
+    # them straight into ``sorted({...})`` / set comparison, which would
+    # either raise on heterogeneous int+str sorts or silently fail to
+    # match a main-set membership check. Mirrors the same sanitization
+    # in ``_resolve_draft_device_value``.
+    draft_indices: list[int] = []
+    for raw_idx in draft_indices_raw:
+        try:
+            draft_indices.append(int(raw_idx))
+        except (TypeError, ValueError):
+            continue
     if not draft_indices:
         return main_ordered
     # Don't auto-create a CUDA_VISIBLE_DEVICES filter when the user hasn't

@@ -103,36 +103,71 @@ class BuildConfig:
 
     @classmethod
     def from_json(cls, name: str, data: dict[str, Any]) -> BuildConfig:
+        def _as_str(value: Any, default: str = "") -> str:
+            """Coerce a persisted value to ``str``.
+
+            JSON-edited configs can leave bare ints / null where strings are
+            expected (e.g. ``"source_dir": 1``); passing those straight into
+            ``Path(...)`` or ``subprocess.Popen`` later would raise at use
+            time. Coerce here so the runner sees consistent string-ish
+            fields. ``None`` collapses to the default rather than the
+            string ``"None"``.
+            """
+            if value is None:
+                return default
+            try:
+                return str(value)
+            except Exception:
+                return default
+
+        def _coerce_env(raw: Any) -> dict[str, str]:
+            """Coerce both keys and values of the env mapping to str."""
+            if not isinstance(raw, Mapping):
+                return {}
+            out: dict[str, str] = {}
+            for k, v in raw.items():
+                try:
+                    key = str(k)
+                except Exception:
+                    continue
+                if v is None:
+                    continue
+                try:
+                    out[key] = str(v)
+                except Exception:
+                    continue
+            return out
+
         return cls(
             name=name,
-            backend=data.get("backend", "llama.cpp"),
-            source_dir=data.get("source_dir", ""),
-            build_dir=data.get("build_dir", "build"),
-            git_ref=data.get("git_ref", ""),
+            backend=_as_str(data.get("backend"), "llama.cpp"),
+            source_dir=_as_str(data.get("source_dir"), ""),
+            build_dir=_as_str(data.get("build_dir"), "build"),
+            git_ref=_as_str(data.get("git_ref"), ""),
             git_pull_before_build=_safe_bool(
                 data.get("git_pull_before_build", False), default=False
             ),
             clean_build=_safe_bool(data.get("clean_build", True), default=True),
             jobs=_safe_int(data.get("jobs", 0)),
-            cuda_archs=data.get("cuda_archs", ""),
+            cuda_archs=_as_str(data.get("cuda_archs"), ""),
             # Defensive: a malformed persisted value ("env": "") would raise
             # in dict(...) and _load() would then drop the entire preset.
             # Default non-mapping values to {} so one bad field doesn't make
             # the whole config disappear from the UI.
-            env=dict(data["env"]) if isinstance(data.get("env"), Mapping) else {},
+            env=_coerce_env(data.get("env")),
             flag_values=(
                 dict(data["flag_values"])
                 if isinstance(data.get("flag_values"), Mapping)
                 else {}
             ),
-            extra_cmake_args=data.get("extra_cmake_args", ""),
+            extra_cmake_args=_as_str(data.get("extra_cmake_args"), ""),
             ui_state=(
                 dict(data["ui_state"])
                 if isinstance(data.get("ui_state"), Mapping)
                 else {}
             ),
-            created_at=data.get("created_at", ""),
-            last_used_at=data.get("last_used_at", ""),
+            created_at=_as_str(data.get("created_at"), ""),
+            last_used_at=_as_str(data.get("last_used_at"), ""),
         )
 
 

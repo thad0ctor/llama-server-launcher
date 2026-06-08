@@ -775,7 +775,11 @@ class LaunchManager:
 
         parts = []
         exe_posix = str(Path(cmd_list[0]).resolve().as_posix())
-        parts.append(f'& "{self._ps_escape_double_quoted(exe_posix)}"')
+        # Single-quoted PS literal so a user-controlled install path
+        # containing ``$env:TEMP`` or ``$(...)`` can't be interpreted as
+        # a PowerShell expression. Same rationale as the
+        # ``_ps_escape_single_quoted`` calls in the venv-activate dot-source.
+        parts.append(f"& '{self._ps_escape_single_quoted(exe_posix)}'")
 
         i = 1
         while i < len(cmd_list):

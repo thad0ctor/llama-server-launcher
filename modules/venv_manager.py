@@ -389,6 +389,36 @@ def build_remove_dependency_command(
     return _shell_join(args, platform=platform)
 
 
+def _path_looks_like_venv(path: Path) -> bool:
+    """Standalone version of ``VenvTargetInfo.looks_like_venv``.
+
+    The dataclass property needs a constructed ``VenvTargetInfo`` (with
+    a python_path that's already been located); this helper checks an
+    arbitrary Path directly for the same three markers (python + pyvenv.cfg
+    + activator) so command builders that only have a resolved path can
+    apply the same gate.
+    """
+    if not path.is_dir():
+        return False
+    if not (path / "pyvenv.cfg").is_file():
+        return False
+    python_candidates = (
+        path / "bin" / "python",
+        path / "bin" / "python3",
+        path / "Scripts" / "python.exe",
+        path / "Scripts" / "python3.exe",
+    )
+    if not any(p.exists() for p in python_candidates):
+        return False
+    activator_candidates = (
+        path / "bin" / "activate",
+        path / "Scripts" / "activate.bat",
+        path / "Scripts" / "Activate.ps1",
+        path / "Scripts" / "activate",
+    )
+    return any(p.is_file() for p in activator_candidates)
+
+
 def build_remove_venv_command(
     venv_dir: str | Path,
     *,
@@ -434,6 +464,19 @@ def build_remove_venv_command(
     if resolved_target == Path(resolved_target.anchor):
         # Anchor is the filesystem root (``/`` on POSIX, ``C:\`` on Windows).
         raise ValueError(f"Refusing to remove filesystem root: {raw!r}")
+    # If the path EXISTS, additionally require it to look like a real venv
+    # (pyvenv.cfg + a python interpreter + an activator) before emitting a
+    # recursive delete. Without this guard, a user pointing ``venv_dir``
+    # at an arbitrary directory the launcher previously auto-detected
+    # could have that directory recursively removed. ``resolved_target``
+    # not existing is fine — ``rm -rf`` on a missing path is a no-op and
+    # the GUI already rejects that case earlier.
+    if resolved_target.exists() and not _path_looks_like_venv(resolved_target):
+        raise ValueError(
+            f"Refusing to remove {raw!r}: target exists but does not look "
+            "like a venv (missing pyvenv.cfg, activator, or python "
+            "interpreter)."
+        )
     target = str(resolved_target)
     plat = platform or sys.platform
     if plat.startswith("win"):
@@ -455,7 +498,10 @@ def probe_dependency_status(
     timeout: float = 2.5,
 ) -> DependencyStatus:
     """Inspect one dependency inside a venv without importing it into the GUI."""
-    python = locate_venv_python(venv_dir, platform=platform)
+    # Normalize the venv path the same way the command builders do, so a
+    # blank/relative UI value isn't probed against the launcher's cwd.
+    target = resolve_venv_dir(str(venv_dir), repo_dir=launcher_repo_dir())
+    python = locate_venv_python(target, platform=platform)
     if python is None:
         return DependencyStatus(
             dependency=dependency,

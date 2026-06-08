@@ -586,6 +586,16 @@ class AboutTab:
     
     def setup_about_tab(self, parent):
         """Set up the About tab UI."""
+        # Re-arm teardown state in case this AboutTab is being remounted.
+        # ``_on_parent_destroy`` permanently clears ``_alive`` and may
+        # have left ``_version_after_id`` non-None — without re-arming
+        # here ``_check_version_online`` would short-circuit at
+        # ``_widget_alive()`` and a stale after id would also prevent
+        # the new queue drain from scheduling, leaving the version
+        # label stuck on ``Checking...``.
+        self._alive.set()
+        self._version_after_id = None
+        self._version_check_pending = False
         self._parent = parent
         # Bind the parent's <Destroy> so background workers know to stop
         # touching widgets before Tcl tears them down. Without this, the

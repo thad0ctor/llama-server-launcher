@@ -795,11 +795,30 @@ def validate_values(
         if flag.key in seen:
             continue
         seen.add(flag.key)
-        if flag.validate is None or flag.key not in values:
+        if flag.key not in values:
             continue
         if flag.visible_when and not flag.visible_when(values):
             continue
         if not _cuda_version_satisfies(flag.cuda_version_min, cuda_version):
+            continue
+        if flag.type == ENUM:
+            # Validate persisted enum values against the declared choices —
+            # this used to be skipped entirely when ``flag.validate is None``
+            # (which it is for most enums), so a hand-edited preset with
+            # ``"GGML_CUDA_COMPRESSION_MODE": "garbage"`` would slip through
+            # and only blow up at cmake-configure time.
+            raw_value = values[flag.key]
+            sv = "" if raw_value is None else str(raw_value).strip()
+            if sv and flag.choices and sv not in flag.choices:
+                errors.append(
+                    (
+                        flag.label,
+                        f"value {sv!r} is not one of the allowed choices "
+                        f"({', '.join(flag.choices)}).",
+                    )
+                )
+            continue
+        if flag.validate is None:
             continue
         msg = validate_flag_value(flag, values[flag.key])
         if msg:

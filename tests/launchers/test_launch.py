@@ -1379,9 +1379,13 @@ class TestSavePs1Script:
     ):
         out = tmp_path / "launch.ps1"
         text = self._write_and_read(manager, launcher_mock, out)
-        # PowerShell block uses forward slashes (from Path.as_posix()).
+        # PowerShell block uses forward slashes (from Path.as_posix()) and
+        # wraps the path in a SINGLE-quoted PS literal so a path containing
+        # ``$env:TEMP`` / ``$(...)`` can't be expression-expanded by
+        # PowerShell. Single quotes inside the path itself are doubled
+        # (``'`` → ``''``) per ``_ps_escape_single_quoted``.
         exe_posix = built_tree["exe"].resolve().as_posix()
-        assert f'& "{exe_posix}"' in text
+        assert f"& '{exe_posix}'" in text
 
     def test_ps1_user_cancel_returns_early(self, manager, launcher_mock, tmp_path):
         with patch("modules.launch.filedialog") as fd, patch(
