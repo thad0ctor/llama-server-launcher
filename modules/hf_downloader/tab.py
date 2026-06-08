@@ -98,6 +98,16 @@ class HuggingFaceDownloaderTab:
         # text the user may have edited mid-flight.
         self._loaded_repo_id: str = ""
         self._loaded_revision: str | None = None
+        # ``_loaded_revision`` holds the human-facing ref the user
+        # asked for (``"main"`` / ``"v1.0"`` / ``""``) and is what
+        # the mismatch-detection in ``_on_download`` compares against.
+        # ``_pinned_revision_sha`` holds the runner's
+        # ``resolved_revision`` (a commit SHA) so the download payload
+        # binds to the EXACT commit the listing was generated against
+        # — branches and tags move, but a SHA doesn't. Empty string =
+        # listing didn't report a SHA (older runner, or repo without
+        # one); fall back to the ref name in that case.
+        self._pinned_revision_sha: str = ""
         self._target_container = None
         self._files_listbox = None
         self._revision_combo = None
@@ -654,6 +664,7 @@ class HuggingFaceDownloaderTab:
         # ``None`` sentinel so the "never loaded" branches fire.
         self._loaded_repo_id = ""
         self._loaded_revision = None
+        self._pinned_revision_sha = ""
         if self._revision_combo is not None:
             self._revision_combo.config(values=())
         if self._files_listbox is not None:
@@ -770,11 +781,18 @@ class HuggingFaceDownloaderTab:
         # accepted yet preserves the historical behaviour for the
         # "patterns-only, no listbox selection" flow.
         effective_repo_id = self._loaded_repo_id or parsed.repo_id
-        effective_revision = (
-            self._loaded_revision
-            if self._loaded_revision is not None
-            else current_revision
-        )
+        # Prefer the pinned SHA so the download binds to the EXACT
+        # commit that produced the file list. ``_loaded_revision``
+        # (the ref name) is the user-facing fallback for older
+        # listing payloads that didn't include a SHA. The
+        # current-input fallback only fires when no listing has been
+        # accepted yet (patterns-only flow).
+        if self._pinned_revision_sha:
+            effective_revision = self._pinned_revision_sha
+        elif self._loaded_revision is not None:
+            effective_revision = self._loaded_revision
+        else:
+            effective_revision = current_revision
         payload = {
             "repo_id": effective_repo_id,
             "revision": effective_revision,
@@ -1069,18 +1087,28 @@ class HuggingFaceDownloaderTab:
             # ``_on_download`` can refuse to launch against a mismatched
             # current input.
             self._loaded_repo_id = str(event.get("repo_id", "") or "")
-            # Prefer the runner's resolved revision (the actual ref it
-            # listed against). If the runner didn't echo one, fall back
-            # to what the user asked for. Critically: DO NOT read the
-            # live ``revision_var`` here — the user can edit that field
-            # mid-flight and we'd silently bind the file selection to
-            # their unrelated new typing. An explicit ``""`` is the
-            # correct value when the request itself was blank (the
-            # runner resolved against the default branch); the
-            # ``None``-vs-``""`` distinction at the read sites then
-            # tells "never loaded" apart from "loaded with blank".
+            # ``event.get("revision")`` is the runner's echo of the
+            # requested ref (a moving branch/tag name). Use it for the
+            # mismatch-detection in ``_on_download`` — that's what the
+            # user typed and what they expect to see. Critically: DO
+            # NOT read the live ``revision_var`` here — the user can
+            # edit it mid-flight and we'd silently bind to their
+            # unrelated new typing. An explicit ``""`` is the correct
+            # value when the request itself was blank; the
+            # ``None``-vs-``""`` distinction at the read sites tells
+            # "never loaded" apart from "loaded with blank".
             runner_resolved = str(event.get("revision") or "").strip()
             self._loaded_revision = runner_resolved or requested_revision
+            # ``event.get("resolved_revision")`` is the runner's
+            # ACTUAL commit SHA. Pinning the download against the SHA
+            # rather than the ref name means a force-push or new
+            # commit to the branch between the listing and the
+            # download fetches the same bytes the user saw in the
+            # file list. Empty string = older runner / repo without
+            # SHA; the download falls back to the ref name.
+            self._pinned_revision_sha = str(
+                event.get("resolved_revision") or ""
+            ).strip()
             if self._files_listbox is not None:
                 self._files_listbox.delete(0, tk.END)
                 for row in self._file_rows:

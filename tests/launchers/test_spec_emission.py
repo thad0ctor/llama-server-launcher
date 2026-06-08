@@ -100,6 +100,11 @@ class TestSpecMasterToggle:
             and (
                 arg.startswith("--spec-")
                 or arg.startswith("--draft-")
+                # ``--suffix-*`` flags (e.g. ``--suffix-pattern-len``,
+                # ``--suffix-max-depth``) are part of the speculative
+                # decoding tree-suffix path; an empty/none ``spec_type``
+                # must suppress them too.
+                or arg.startswith("--suffix-")
                 or arg in cls._SPEC_LEAK_FLAGS
             )
         ]
@@ -2542,14 +2547,25 @@ class TestMainDeviceEmittedOnDraftUnion:
         assert "--device" not in cmd
         assert "-devd" not in cmd
 
-    def test_ik_llama_mtp_separate_draft_emits_device_and_devd(self, manager, union_launcher):
+    def test_ik_llama_mtp_separate_draft_emits_device_and_devd(self, manager, union_launcher, tmp_path):
         """ik_llama + mtp with the separate --model-draft opt-in uses the
         same post-CUDA_VISIBLE_DEVICES assignment as llama.cpp separate-draft
         modes. The emitted -devd value must be local to the filtered device
-        list, matching ik_llama's fixed -dev/-devd subset semantics."""
+        list, matching ik_llama's fixed -dev/-devd subset semantics.
+
+        Also asserts ``--model-draft`` is emitted with the draft file path
+        — without this, the test would have passed against a regression
+        that flipped ``spec_use_draft_model=True`` but failed to actually
+        plumb the draft path through to ``build_cmd``.
+        """
         union_launcher.backend_selection.set("ik_llama")
         union_launcher.spec_type.set("mtp")
         union_launcher.spec_use_draft_model.set(True)
+        # Materialize a real-looking draft GGUF on disk so the path
+        # validation inside ``build_cmd`` doesn't drop the flag.
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF" + b"\x00" * 64)
+        union_launcher.spec_draft_model.set(str(draft))
         union_launcher.app_settings["selected_gpus"] = [1, 7]
         union_launcher.app_settings["gpu_order"] = [1, 7]
         union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
@@ -2562,6 +2578,11 @@ class TestMainDeviceEmittedOnDraftUnion:
         assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
         assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
         assert "--spec-draft-device" not in cmd
+        # Separate-draft contract: the model path the user opted into
+        # has to land in the command line, otherwise the rest of the
+        # spec/draft surface is meaningless.
+        assert "--model-draft" in cmd
+        assert cmd[cmd.index("--model-draft") + 1] == str(draft)
 
     def test_device_value_preserves_main_order(self, manager, union_launcher):
         """Main order [7, 1] (user dragged 7 first) with draft [2] → union

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from tkinter import messagebox, filedialog
 from datetime import datetime
+from typing import Any
 
 from modules.spec_persistence import (
     collect_spec_into_cfg,
@@ -809,18 +810,66 @@ class ConfigManager:
                                    "Expected format: JSON file with configuration objects.")
                 return
 
-            # Check for conflicts and get user preferences
-            conflicts = []
-            new_configs = []
+            # Compute the sanitized, disambiguated final name for every
+            # importable entry up-front so the preview dialog shows what
+            # the user will ACTUALLY get on disk — not the raw JSON
+            # keys that the previous implementation displayed and then
+            # silently rewrote during the write loop.
+            #
+            # Each item is ``(raw_name, final_name, config_data)``;
+            # ``final_name is None`` means the entry will be skipped
+            # (invalid name or invalid payload shape).
+            import_plan: list[tuple[str, str | None, Any]] = []
+            planned_names: set[str] = set()
+            for raw_name, config_data in configs_to_import.items():
+                sanitized = self._sanitize_config_name(raw_name)
+                if not sanitized:
+                    import_plan.append((raw_name, None, config_data))
+                    continue
+                if not isinstance(config_data, dict):
+                    import_plan.append((raw_name, None, config_data))
+                    continue
+                # Disambiguate against both existing saved configs AND
+                # names already chosen earlier in this batch.
+                final_name = sanitized
+                if (
+                    final_name in self.launcher.saved_configs
+                    or final_name in planned_names
+                ):
+                    suffix = 2
+                    while (
+                        f"{sanitized}_{suffix}" in self.launcher.saved_configs
+                        or f"{sanitized}_{suffix}" in planned_names
+                    ):
+                        suffix += 1
+                    final_name = f"{sanitized}_{suffix}"
+                planned_names.add(final_name)
+                import_plan.append((raw_name, final_name, config_data))
 
-            for config_name in configs_to_import.keys():
-                if config_name in self.launcher.saved_configs:
-                    conflicts.append(config_name)
+            # Bucket finals for the preview. ``"renamed"`` covers
+            # entries whose sanitized form differs from the raw key.
+            # ``"skipped"`` is for entries we'll drop entirely (invalid).
+            new_configs: list[str] = []
+            conflicts: list[str] = []
+            renamed: list[tuple[str, str]] = []
+            skipped: list[str] = []
+            for raw_name, final_name, _data in import_plan:
+                if final_name is None:
+                    skipped.append(raw_name)
+                    continue
+                if final_name != raw_name:
+                    renamed.append((raw_name, final_name))
+                if final_name in self.launcher.saved_configs:
+                    conflicts.append(final_name)
                 else:
-                    new_configs.append(config_name)
+                    new_configs.append(final_name)
 
             # Show preview dialog
-            import_summary = f"Found {len(configs_to_import)} configuration(s) to import:\n\n"
+            importable_count = sum(1 for _, fn, _ in import_plan if fn is not None)
+            import_summary = (
+                f"Found {len(configs_to_import)} configuration(s) to import "
+                f"({importable_count} after sanitization):\n\n"
+            )
 
             if new_configs:
                 import_summary += f"New configurations ({len(new_configs)}):\n"
@@ -838,6 +887,26 @@ class ConfigManager:
                     import_summary += f"  ... and {len(conflicts) - 5} more\n"
                 import_summary += "\n"
 
+            if renamed:
+                import_summary += (
+                    f"Renamed during sanitization ({len(renamed)}):\n"
+                )
+                for raw_name, final_name in renamed[:5]:
+                    import_summary += f"  • {raw_name!r} → {final_name!r}\n"
+                if len(renamed) > 5:
+                    import_summary += f"  ... and {len(renamed) - 5} more\n"
+                import_summary += "\n"
+
+            if skipped:
+                import_summary += (
+                    f"Skipped (invalid name or payload, {len(skipped)}):\n"
+                )
+                for raw_name in skipped[:5]:
+                    import_summary += f"  • {raw_name!r}\n"
+                if len(skipped) > 5:
+                    import_summary += f"  ... and {len(skipped) - 5} more\n"
+                import_summary += "\n"
+
             import_summary += "Do you want to proceed with the import?"
 
             if not messagebox.askyesno("Confirm Import", import_summary):
@@ -849,56 +918,30 @@ class ConfigManager:
             prior_configs = dict(self.launcher.saved_configs)
 
             imported_count = 0
-            # Track names already assigned during THIS import batch so
-            # two distinct raw keys that collapse to the same sanitized
-            # name (``"./foo"`` and ``"foo"``) don't overwrite each
-            # other silently — the second one disambiguates with a
-            # suffix instead.
-            imported_this_batch: set[str] = set()
-            for raw_name, config_data in configs_to_import.items():
-                try:
-                    # Run imported names through the same sanitizer as
-                    # ``save_configuration``. Without this, a JSON file
-                    # with control chars / pipe / slash / NUL in a key
-                    # would land verbatim in ``saved_configs`` and on
-                    # disk, bypassing the per-save guard.
-                    config_name = self._sanitize_config_name(raw_name)
-                    if not config_name:
+            for raw_name, final_name, config_data in import_plan:
+                if final_name is None:
+                    if isinstance(config_data, dict):
                         print(
                             f"WARNING: Skipping import of invalid config name "
                             f"{raw_name!r}",
                             file=sys.stderr,
                         )
-                        continue
-                    # Basic validation of config data
-                    if not isinstance(config_data, dict):
-                        print(f"WARNING: Skipping invalid config '{config_name}' - not a dictionary", file=sys.stderr)
-                        continue
-                    # Disambiguate against both existing saved configs
-                    # AND names already chosen in this batch. The
-                    # previous ``final_name != raw_name`` guard let
-                    # ``"foo"`` followed by ``"./foo"`` both land on
-                    # the same slot.
-                    final_name = config_name
-                    if (
-                        final_name in self.launcher.saved_configs
-                        or final_name in imported_this_batch
-                    ):
-                        suffix = 2
-                        while (
-                            f"{config_name}_{suffix}" in self.launcher.saved_configs
-                            or f"{config_name}_{suffix}" in imported_this_batch
-                        ):
-                            suffix += 1
-                        final_name = f"{config_name}_{suffix}"
-
-                    # Import the configuration
+                    else:
+                        print(
+                            f"WARNING: Skipping invalid config '{raw_name}' - "
+                            f"not a dictionary",
+                            file=sys.stderr,
+                        )
+                    continue
+                try:
                     self.launcher.saved_configs[final_name] = config_data
-                    imported_this_batch.add(final_name)
                     imported_count += 1
-
                 except Exception as e:
-                    print(f"WARNING: Failed to import config '{raw_name}': {e}", file=sys.stderr)
+                    print(
+                        f"WARNING: Failed to import config '{raw_name}' "
+                        f"as '{final_name}': {e}",
+                        file=sys.stderr,
+                    )
 
             if imported_count > 0:
                 saved = self.launcher._save_configs()

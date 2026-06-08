@@ -18,7 +18,7 @@ launch.py emission block.
 import sys
 import queue
 import tkinter as tk
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from tkinter import ttk
 
 from modules.system import parse_gguf_header_simple
@@ -134,6 +134,17 @@ class SpecTab:
         self._spec_draft_analysis_lock = Lock()
         self._spec_draft_analysis_after_id = None
         self._spec_draft_analysis_thread = None
+        # Coalescing slots: ``_spec_draft_latest_path`` holds the most
+        # recent ``_start_spec_draft_gguf_analysis`` request; the
+        # single long-lived worker always re-reads this between
+        # parses so rapid listbox navigation collapses to one parse
+        # (the latest). ``_spec_draft_request_event`` wakes the
+        # idle-blocked worker; ``_spec_draft_worker_active`` is the
+        # atomic "do we already have a worker running?" flag, set /
+        # cleared only under ``_spec_draft_analysis_lock``.
+        self._spec_draft_latest_path: str | None = None
+        self._spec_draft_request_event = Event()
+        self._spec_draft_worker_active = False
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
         self.spec_ngram_simple_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
         self.spec_ngram_simple_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
@@ -963,17 +974,30 @@ class SpecTab:
     # -- Draft GGUF analysis (mirrors _on_model_selected/_run_gguf_analysis) --
 
     def _start_spec_draft_gguf_analysis(self, draft_path_str):
-        """Start draft GGUF parsing and poll results from the Tk thread."""
+        """Submit ``draft_path_str`` to the single background analyser.
+
+        Coalescing: each call overwrites the "latest pending path" slot
+        and bumps the generation counter. A SINGLE long-lived worker
+        thread processes only the latest pending path between parses,
+        so rapid listbox navigation no longer fans out concurrent
+        ``parse_gguf_header_simple`` invocations on superseded paths.
+        Stale-result-after-parse guard is preserved via the generation
+        check in ``_drain_spec_draft_gguf_analysis``.
+        """
         with self._get_spec_draft_analysis_lock():
             self._spec_draft_analysis_generation += 1
-            analysis_id = self._spec_draft_analysis_generation
-        t = Thread(
-            target=self._run_spec_draft_gguf_analysis,
-            args=(draft_path_str, analysis_id),
-            daemon=True,
-        )
-        self._spec_draft_analysis_thread = t
-        t.start()
+            self._spec_draft_latest_path = draft_path_str
+            self._spec_draft_request_event.set()
+            need_spawn = not self._spec_draft_worker_active
+            if need_spawn:
+                self._spec_draft_worker_active = True
+                t = Thread(
+                    target=self._run_spec_draft_gguf_analysis_loop,
+                    daemon=True,
+                )
+                self._spec_draft_analysis_thread = t
+        if need_spawn:
+            t.start()
         if self._spec_draft_analysis_after_id is None:
             try:
                 self._spec_draft_analysis_after_id = self.launcher.root.after(
@@ -993,8 +1017,72 @@ class SpecTab:
             self._spec_draft_analysis_lock = lock
         return lock
 
+    def _run_spec_draft_gguf_analysis_loop(self):
+        """Single long-lived worker that processes only the LATEST
+        requested draft path. Exits when no request is pending after
+        a brief idle window so the next selection re-spawns cheaply.
+
+        Never calls Tk APIs directly — results are queued for the
+        main thread's ``_drain_spec_draft_gguf_analysis`` poll.
+        """
+        # Idle timeout: after this many seconds without a new request,
+        # the worker exits. A small value keeps the thread cheap when
+        # the spec tab is dormant; the next selection re-spawns under
+        # the lock atomically.
+        IDLE_TIMEOUT_S = 2.0
+        try:
+            while True:
+                signalled = self._spec_draft_request_event.wait(
+                    timeout=IDLE_TIMEOUT_S
+                )
+                with self._get_spec_draft_analysis_lock():
+                    pending = self._spec_draft_latest_path
+                    analysis_id = self._spec_draft_analysis_generation
+                    self._spec_draft_latest_path = None
+                    self._spec_draft_request_event.clear()
+                    if pending is None:
+                        if not signalled:
+                            # Idle timeout AND no request pending →
+                            # exit. Selection-side ``need_spawn`` check
+                            # under the same lock guarantees the next
+                            # selection re-spawns.
+                            self._spec_draft_worker_active = False
+                            return
+                        # Race: event fired but the producer reset the
+                        # slot before we read it. Loop back and wait again.
+                        continue
+                # Parse the latest pending path. May take a while; we
+                # release the lock so additional selections can keep
+                # updating the slot during this parse — they just won't
+                # spawn a second worker.
+                try:
+                    analysis_result = parse_gguf_header_simple(pending)
+                except Exception as exc:
+                    analysis_result = {"path": pending, "error": str(exc)}
+                with self._get_spec_draft_analysis_lock():
+                    # Stale guard: a newer selection bumped the
+                    # generation while we were parsing → drop our
+                    # result. The next loop iteration handles the new
+                    # latest path.
+                    if analysis_id != self._spec_draft_analysis_generation:
+                        continue
+                    self._spec_draft_analysis_queue.put(
+                        (analysis_id, analysis_result)
+                    )
+        except Exception:
+            # Worker exception is fatal for this worker; let the next
+            # selection re-spawn a fresh one rather than masquerade as
+            # alive.
+            with self._get_spec_draft_analysis_lock():
+                self._spec_draft_worker_active = False
+            raise
+
     def _run_spec_draft_gguf_analysis(self, draft_path_str, analysis_id=None):
-        """Background worker that parses the draft GGUF. No Tk calls here."""
+        """Compatibility shim for tests that call the worker entry-point
+        directly with an analysis_id (mocked path scenarios). The
+        production code path now uses ``_run_spec_draft_gguf_analysis_loop``;
+        this single-shot wrapper preserves the pre-coalescing test API
+        without leaving an old per-thread design in production."""
         try:
             if analysis_id is None:
                 with self._get_spec_draft_analysis_lock():

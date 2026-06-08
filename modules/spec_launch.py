@@ -521,7 +521,25 @@ def _resolve_draft_device_value(launcher):
         # silently targets a different physical GPU than the user
         # typed. Manual mode keeps the override as a power-user
         # affordance (no filtering happens). Otherwise drop it.
+        #
+        # CRITICAL: only suppress when the override contains CUDA
+        # tokens. CUDA_VISIBLE_DEVICES is a CUDA-only env var — a
+        # Vulkan / Metal / SYCL override (``Vulkan0``, ``Metal0``,
+        # ``SYCL1``) is unaffected by it and must pass through
+        # unchanged regardless of the visible-GPU reorder. The regex
+        # ``_re_csv_cuda`` accepts ``[A-Za-z]+\d+`` for free-text
+        # entries, so a non-CUDA backend can match.
         if manual_mode or no_filter:
+            return override
+        is_cuda_override = bool(
+            re.fullmatch(
+                r"CUDA\d+(?:,CUDA\d+)*", override, flags=re.IGNORECASE
+            )
+        )
+        if not is_cuda_override:
+            # Non-CUDA backend tokens (Vulkan0, Metal0, SYCL1, …) —
+            # ``CUDA_VISIBLE_DEVICES`` doesn't touch them, so the
+            # filtering rationale doesn't apply.
             return override
         print(
             f"WARNING: spec_draft_device override {override!r} ignored because "

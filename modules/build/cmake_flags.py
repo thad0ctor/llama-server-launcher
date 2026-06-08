@@ -584,28 +584,41 @@ def _parse_dotted_version(v: str | None) -> tuple[int, ...] | None:
     return tuple(parts) if parts else None
 
 
-def _cuda_version_satisfies(min_required: str | None, detected: str | None) -> bool:
+def _cuda_version_satisfies(
+    min_required: str | None,
+    detected: str | None,
+    *,
+    assume_compatible_if_unknown: bool = False,
+) -> bool:
     """Return True iff a flag declaring ``cuda_version_min=min_required`` is
     permitted for ``detected``.
 
-    Permissive: an unknown ``detected`` is treated as compatible. The
-    callers that want strict semantics (auto-ENABLING a version-fenced
-    flag on detection alone) must add an explicit
-    ``cuda_version is not None`` guard at the call site.
+    Defaults to **fail-closed** semantics: an unknown ``detected`` is
+    treated as INCOMPATIBLE when ``min_required`` is set. The emit /
+    validate paths (``values_to_cmake_args``, ``validate_values``) use
+    this default so a failed CUDA-toolkit probe doesn't silently inject
+    a version-fenced flag like ``GGML_CUDA_COMPRESSION_MODE`` and break
+    configure on older toolkits.
+
+    Call sites that genuinely need permissive behaviour (e.g. preserving
+    a user's manual toggle when detection failed) pass
+    ``assume_compatible_if_unknown=True`` explicitly.
 
     - If the flag has no ``cuda_version_min`` set, always True.
-    - If the detected CUDA version is unknown (None), be permissive (True)
-      so callers without detection don't lose flags the user manually
-      enabled. The Build tab passes a detected version when it has one.
+    - If the detected CUDA version is unknown (None), return
+      ``assume_compatible_if_unknown`` (False by default).
     - Otherwise compare numerically: detected >= min_required.
     """
     if not min_required:
         return True
     detected_t = _parse_dotted_version(detected)
     if detected_t is None:
-        return True
+        return assume_compatible_if_unknown
     min_t = _parse_dotted_version(min_required)
     if min_t is None:
+        # Unparseable ``min_required`` — schema-level bug, not a runtime
+        # toolkit issue. Stay permissive so a flag with a malformed
+        # ``cuda_version_min`` isn't silently dropped for everyone.
         return True
     return detected_t >= min_t
 
@@ -642,11 +655,14 @@ def build_autodetect_values(
         if backend == BACKEND_LLAMA:
             values["GGML_CUDA_FA"] = True
             values["GGML_CUDA_GRAPHS"] = True
-            # NCCL only makes sense with >=2 CUDA devices and requires
-            # libnccl-dev to be installed. Default off on single-GPU
-            # systems so the build doesn't fail looking for the lib.
-            if cuda_device_count >= 2:
-                values["GGML_CUDA_NCCL"] = True
+            # NCCL is intentionally NOT auto-enabled. Multi-GPU alone
+            # doesn't guarantee ``libnccl-dev`` is installed, and
+            # turning the flag on without the lib turns "optimized
+            # preset" into a confusing configure failure. Users with
+            # multi-GPU + NCCL installed toggle ``GGML_CUDA_NCCL`` on
+            # manually from the Build tab. (The autodetect path used
+            # to set this on ``cuda_device_count >= 2`` alone, which
+            # tripped up everyone without libnccl-dev.)
             compression_flag = _FLAG_BY_KEY.get("GGML_CUDA_COMPRESSION_MODE")
             # Strict gate: only AUTO-enable a version-fenced flag when we
             # actually know the toolkit version. The shared
