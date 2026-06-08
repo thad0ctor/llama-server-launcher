@@ -337,15 +337,31 @@ def build_remove_venv_command(
     if not raw.strip():
         raise ValueError("Refusing to remove an empty venv path.")
     target_path = Path(raw).expanduser()
-    # Compare the literal ``.``/``..`` (and any whitespace variant) against
-    # the current-dir sentinel without resolving — ``Path(".").resolve()``
-    # would just return the cwd and silently allow it.
-    if target_path == Path(".") or target_path == Path(".."):
+    # Resolve the target before comparing — the literal-only check used to
+    # let dangerous aliases through:
+    #   - ``"."`` and ``".."`` against a non-resolved ``Path(".")`` only
+    #     matched the exact literal, missing ``"./"``, ``"foo/.."``, etc.
+    #   - ``~`` would expand to a real path that bypassed the literal
+    #     guard but the resolved path equals ``Path.home()`` — exactly the
+    #     thing we want to refuse.
+    try:
+        resolved_target = target_path.resolve(strict=False)
+    except OSError:
+        resolved_target = target_path
+    try:
+        cwd_resolved = Path.cwd().resolve(strict=False)
+    except OSError:
+        cwd_resolved = Path.cwd()
+    try:
+        home_resolved = Path.home().resolve(strict=False)
+    except (OSError, RuntimeError):
+        home_resolved = Path.home()
+    if resolved_target in {cwd_resolved, home_resolved}:
         raise ValueError(f"Refusing to remove unsafe venv path: {raw!r}")
-    if target_path.is_absolute() and target_path == Path(target_path.anchor):
+    if resolved_target == Path(resolved_target.anchor):
         # Anchor is the filesystem root (``/`` on POSIX, ``C:\`` on Windows).
         raise ValueError(f"Refusing to remove filesystem root: {raw!r}")
-    target = str(target_path)
+    target = str(resolved_target)
     plat = platform or sys.platform
     if plat.startswith("win"):
         # Force-quote so a venv path containing cmd metacharacters can't

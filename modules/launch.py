@@ -135,11 +135,12 @@ class LaunchManager:
                 file=sys.stderr,
             )
             return None
-        # An empty payload combined with a non-zero exit means the binary
-        # didn't respond meaningfully — don't memoize. Memoizing here used
-        # to wedge the session into "no flags supported" if the FIRST
-        # probe caught a transient failure.
-        if result.returncode != 0 and not help_text.strip():
+        # Empty payload → don't memoize, regardless of return code. A
+        # well-behaved binary always prints SOMETHING on ``--help``; a
+        # wrapper script that returns 0 with no output is just a
+        # different shape of transient failure. Caching ``""`` here would
+        # silently strip every reasoning flag for the rest of the session.
+        if not help_text.strip():
             print(
                 f"DEBUG: Feature probe returned empty output (rc={result.returncode}) "
                 f"for {exe_path}; not caching so the next call can retry",
