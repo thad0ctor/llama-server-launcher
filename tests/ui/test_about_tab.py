@@ -17,7 +17,19 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
+
+# Don't import ``requests`` at module scope: ``modules.about_tab`` runs fine
+# without it (``REQUESTS_AVAILABLE = False``), and the regression coverage
+# for that missing-dependency path needs pytest to be able to *collect* this
+# module even when ``requests`` is not installed. Tests that genuinely need
+# ``requests.ConnectionError`` / ``requests.Timeout`` import it locally
+# (and are skipped if it's unavailable) via the ``requests_module`` fixture.
+try:
+    import requests as _requests  # noqa: F401 — probed at import time
+
+    _HAS_REQUESTS = True
+except ImportError:  # pragma: no cover - exercised in stripped-down envs
+    _HAS_REQUESTS = False
 
 from modules.about_tab import (
     VERSION_CHECK_POLL_MS,
@@ -25,6 +37,16 @@ from modules.about_tab import (
     _VERSION_CHECK_COMPLETE,
     build_update_script,
 )
+
+
+@pytest.fixture
+def requests_module():
+    """Yield the ``requests`` module or skip when unavailable."""
+    if not _HAS_REQUESTS:
+        pytest.skip("requests is not installed in this environment")
+    import requests as _r
+
+    return _r
 
 
 # ---------------------------------------------------------------------------
@@ -320,13 +342,13 @@ class TestCheckVersionOnline:
         assert about.version_status == "requests not installed"
         about._update_version_display.assert_called_once()
 
-    def test_network_failure_sets_check_failed(self, about):
+    def test_network_failure_sets_check_failed(self, about, requests_module):
         """``RequestException`` should flip status to ``Check Failed`` and
         call ``_update_version_display`` so the user knows it didn't work."""
         about._update_version_display = MagicMock()
 
         with patch("modules.about_tab.requests.get",
-                   side_effect=requests.ConnectionError("unreachable")):
+                   side_effect=requests_module.ConnectionError("unreachable")):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
@@ -377,12 +399,12 @@ class TestCheckVersionOnline:
         assert about.remote_version == "2024-02-01-1"
         about._show_update_button.assert_called_once()
 
-    def test_timeout_treated_as_check_failed(self, about):
+    def test_timeout_treated_as_check_failed(self, about, requests_module):
         """Timeouts are a subclass of RequestException — same graceful path."""
         about._update_version_display = MagicMock()
 
         with patch("modules.about_tab.requests.get",
-                   side_effect=requests.Timeout("slow")):
+                   side_effect=requests_module.Timeout("slow")):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"

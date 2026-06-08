@@ -82,8 +82,7 @@ def _make_real_launcher(entry_module, config_path, monkeypatch):
     overrides scoped to the test via ``monkeypatch``."""
     import modules.config as cfg_mod
 
-    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path",
-                        lambda self: config_path)
+    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path", lambda self: config_path)
     _silence_messagebox(monkeypatch)
     root = tk.Tk()
     root.withdraw()
@@ -146,9 +145,7 @@ class TestSameObjectReferenceContract:
             "max_spec_draft_gpu_layers",
             "spec_draft_layers_status_var",
         ):
-            assert getattr(launcher, name) is getattr(launcher.spec_tab, name), (
-                f"Tk var {name!r} mismatch"
-            )
+            assert getattr(launcher, name) is getattr(launcher.spec_tab, name), f"Tk var {name!r} mismatch"
         # Dict / list state delegated via __getattr__ — must always reflect
         # the live SpecTab attribute, even after SpecTab rebinds it.
         for name in (
@@ -213,9 +210,9 @@ class TestSameObjectReferenceContract:
         ):
             launcher_attr = getattr(launcher, name)
             spec_tab_attr = getattr(launcher.spec_tab, name)
-            assert launcher_attr is spec_tab_attr, (
-                f"Lazy attr {name!r} mismatch: ids {id(launcher_attr)} vs {id(spec_tab_attr)}"
-            )
+            assert (
+                launcher_attr is spec_tab_attr
+            ), f"Lazy attr {name!r} mismatch: ids {id(launcher_attr)} vs {id(spec_tab_attr)}"
 
     def test_writes_through_launcher_visible_on_spec_tab(self, real_launcher):
         """``launcher.spec_enabled.set(True)`` must propagate so
@@ -309,13 +306,12 @@ class TestNoLatentReassignmentBugs:
                 if pattern in raw and not raw.lstrip().startswith("#"):
                     # Disallow assignment, but allow `==` comparison and `.set()`.
                     idx = raw.find(pattern)
-                    after = raw[idx + len(pattern):].lstrip()
+                    after = raw[idx + len(pattern) :].lstrip()
                     # If the next non-space char is `=`, it's `==` (allowed).
                     if not after.startswith("="):
                         offenses.append(f"Line {i}: {raw.rstrip()}")
-        assert not offenses, (
-            "Found reassignments of statically-reexported attrs outside __init__:\n"
-            + "\n".join(offenses)
+        assert not offenses, "Found reassignments of statically-reexported attrs outside __init__:\n" + "\n".join(
+            offenses
         )
 
     def test_post_setup_object_ids_match_construction(self, real_launcher):
@@ -332,9 +328,7 @@ class TestNoLatentReassignmentBugs:
             try:
                 launcher_attr = launcher.__dict__[name]  # bypass __getattr__
             except KeyError:
-                pytest.fail(
-                    f"Statically-reexported attr {name!r} not in launcher.__dict__"
-                )
+                pytest.fail(f"Statically-reexported attr {name!r} not in launcher.__dict__")
             spec_tab_attr = getattr(launcher.spec_tab, name)
             assert launcher_attr is spec_tab_attr, (
                 f"Post-setup divergence for {name!r}: "
@@ -420,8 +414,10 @@ class TestEmissionParity:
                     "spec_ngram_mod_n_match": "2",
                 },
                 [
-                    "--spec-type", "ngram-mod",
-                    "--spec-ngram-mod-n-min", "--spec-ngram-mod-n-max",
+                    "--spec-type",
+                    "ngram-mod",
+                    "--spec-ngram-mod-n-min",
+                    "--spec-ngram-mod-n-max",
                     "--spec-ngram-mod-n-match",
                 ],
             ),
@@ -434,8 +430,10 @@ class TestEmissionParity:
                     "spec_suffix_max_depth": "3",
                 },
                 [
-                    "--spec-type", "suffix",
-                    "--suffix-pattern-len", "--suffix-max-depth",
+                    "--spec-type",
+                    "suffix",
+                    "--suffix-pattern-len",
+                    "--suffix-max-depth",
                 ],
             ),
             # ik_llama mtp draft-capable case.
@@ -447,9 +445,7 @@ class TestEmissionParity:
             ),
         ],
     )
-    def test_spec_args_emitted_per_combination(
-        self, real_launcher, backend, spec_type, extras, expected_flags
-    ):
+    def test_spec_args_emitted_per_combination(self, real_launcher, backend, spec_type, extras, expected_flags):
         launcher, _ = real_launcher
         launcher.backend_selection.set(backend)
         # spec_enabled must be True for any --spec-* emission. For the
@@ -467,14 +463,12 @@ class TestEmissionParity:
         emit_spec_args(launcher, backend, partial)
         for flag in expected_flags:
             assert flag in partial, (
-                f"backend={backend} spec_type={spec_type}: "
-                f"expected {flag!r} in emitted args; got {partial!r}"
+                f"backend={backend} spec_type={spec_type}: " f"expected {flag!r} in emitted args; got {partial!r}"
             )
         # When type=none, no --spec-* / --draft-* flags should be in argv.
         if spec_type == "none":
             assert not any(
-                arg.startswith("--spec-") or arg.startswith("--draft-")
-                for arg in partial
+                arg.startswith("--spec-") or arg.startswith("--draft-") for arg in partial
             ), f"type=none must emit no spec/draft flags; got {partial!r}"
 
     def test_mtp_overrides_parallel_8_at_launch(self, real_launcher):
@@ -488,10 +482,9 @@ class TestEmissionParity:
         launcher.spec_type.set("draft-mtp")
         launcher.parallel.set("8")
         from modules.spec_launch import resolve_effective_parallel
+
         effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
-        assert effective == "1", (
-            f"MTP must force --parallel 1; got {effective!r}"
-        )
+        assert effective == "1", f"MTP must force --parallel 1; got {effective!r}"
 
     def test_default_no_spec_no_emissions(self, real_launcher):
         """Spec disabled → emission block must emit nothing."""
@@ -499,6 +492,7 @@ class TestEmissionParity:
         launcher.spec_enabled.set(False)
         launcher.spec_type.set("none")
         from modules.spec_launch import emit_spec_args
+
         partial = []
         emit_spec_args(launcher, "llama.cpp", partial)
         assert partial == [], f"disabled spec must emit nothing; got {partial!r}"
@@ -530,17 +524,13 @@ class TestPersistenceParity:
             return "on"
         return f"v_{name[-12:]}"
 
-    def test_every_spec_key_persists_through_named_config(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_every_spec_key_persists_through_named_config(self, entry_module, tmp_path, monkeypatch):
         """Set distinctive non-default values, save as named config,
         boot fresh launcher, load the named config back. Assert every
         key matches what we set.
         """
         cfg_path = tmp_path / "configs.json"
-        targets = {
-            n: self._distinctive_value(n, c) for n, c, _d in ALL_NEW_LAUNCHER_TK_VARS
-        }
+        targets = {n: self._distinctive_value(n, c) for n, c, _d in ALL_NEW_LAUNCHER_TK_VARS}
 
         try:
             launcher1, root1 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
@@ -558,8 +548,7 @@ class TestPersistenceParity:
             for name, _vc, _d in ALL_NEW_LAUNCHER_TK_VARS:
                 assert name in stored, f"key {name!r} missing from named config"
                 assert stored[name] == targets[name], (
-                    f"named-config {name!r}: expected {targets[name]!r}, "
-                    f"got {stored[name]!r}"
+                    f"named-config {name!r}: expected {targets[name]!r}, " f"got {stored[name]!r}"
                 )
         finally:
             root1.destroy()
@@ -580,6 +569,7 @@ class TestLoadOrderResync:
         """Patch the resync helper to record invocations and confirm
         it's invoked exactly once during __init__."""
         import modules.spec_persistence as sp
+
         cfg_path = tmp_path / "configs.json"
 
         calls = []
@@ -597,19 +587,16 @@ class TestLoadOrderResync:
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
-            assert len(calls) >= 1, (
-                "resync_spec_tk_vars_from_app_settings was NOT called during __init__"
-            )
+            assert len(calls) >= 1, "resync_spec_tk_vars_from_app_settings was NOT called during __init__"
         finally:
             root.destroy()
 
-    def test_resync_runs_before_env_vars_load_from_config(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_resync_runs_before_env_vars_load_from_config(self, entry_module, tmp_path, monkeypatch):
         """Order-of-init bug regression test: resync must precede
         env_vars_manager.load_from_config (which can fire traces that
         write back into app_settings)."""
         import modules.spec_persistence as sp
+
         cfg_path = tmp_path / "configs.json"
 
         order = []
@@ -623,15 +610,14 @@ class TestLoadOrderResync:
 
         # Patch env_vars_manager.load_from_config on the class.
         from modules.env_vars_module import EnvironmentalVariablesManager
+
         real_evm_load = EnvironmentalVariablesManager.load_from_config
 
         def evm_load_spy(self, app_settings):
             order.append("env_vars_load_from_config")
             return real_evm_load(self, app_settings)
 
-        monkeypatch.setattr(
-            EnvironmentalVariablesManager, "load_from_config", evm_load_spy
-        )
+        monkeypatch.setattr(EnvironmentalVariablesManager, "load_from_config", evm_load_spy)
 
         try:
             launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
@@ -639,9 +625,7 @@ class TestLoadOrderResync:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
             assert "resync" in order, "resync helper was never called"
-            assert "env_vars_load_from_config" in order, (
-                "env_vars_manager.load_from_config was never called"
-            )
+            assert "env_vars_load_from_config" in order, "env_vars_manager.load_from_config was never called"
             resync_idx = order.index("resync")
             evm_idx = order.index("env_vars_load_from_config")
             assert resync_idx < evm_idx, (
@@ -691,15 +675,11 @@ class TestExtraAdversarialConfigs:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
             # Loader didn't crash. spec_draft_hf should NOT be on the launcher.
-            assert not hasattr(launcher, "spec_draft_hf"), (
-                "legacy spec_draft_hf key resurrected an attribute"
-            )
+            assert not hasattr(launcher, "spec_draft_hf"), "legacy spec_draft_hf key resurrected an attribute"
         finally:
             root.destroy()
 
-    def test_wrong_backend_spec_type_preserved_and_inactive(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_wrong_backend_spec_type_preserved_and_inactive(self, entry_module, tmp_path, monkeypatch):
         """``spec_type=draft-mtp`` (llama.cpp-only) + ``backend=ik_llama``:
         the loader must preserve the stored value; emission must reject
         it on the active backend."""
@@ -727,11 +707,10 @@ class TestExtraAdversarialConfigs:
             assert launcher.spec_type.get() == "draft-mtp"  # preserved!
             # Emission should reject and skip with WARNING printed.
             from modules.spec_launch import emit_spec_args
+
             partial = []
             emit_spec_args(launcher, "ik_llama", partial)
-            assert "--spec-type" not in partial, (
-                f"emission must reject wrong-backend spec_type; got {partial!r}"
-            )
+            assert "--spec-type" not in partial, f"emission must reject wrong-backend spec_type; got {partial!r}"
         finally:
             root.destroy()
 
@@ -764,16 +743,13 @@ class TestExtraAdversarialConfigs:
             # last-line-of-defense override).
             launcher.parallel.set("8")
             from modules.spec_launch import resolve_effective_parallel
+
             effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
-            assert effective == "1", (
-                f"MTP + parallel=8 must override to 1; got {effective!r}"
-            )
+            assert effective == "1", f"MTP + parallel=8 must override to 1; got {effective!r}"
         finally:
             root.destroy()
 
-    def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(self, entry_module, tmp_path, monkeypatch):
         """``spec_draft_selected_gpus=[999, "abc", True]`` -> only valid
         ints survive. (True is a bool subclass and must NOT pass through
         since it's not a meaningful GPU index.)"""
@@ -798,9 +774,9 @@ class TestExtraAdversarialConfigs:
             cleaned = launcher.app_settings.get("spec_draft_selected_gpus")
             assert isinstance(cleaned, list)
             for entry in cleaned:
-                assert isinstance(entry, int) and not isinstance(entry, bool), (
-                    f"non-int / bool survived filter: {cleaned!r}"
-                )
+                assert isinstance(entry, int) and not isinstance(
+                    entry, bool
+                ), f"non-int / bool survived filter: {cleaned!r}"
             assert "abc" not in cleaned and True not in cleaned
         finally:
             root.destroy()
@@ -839,26 +815,16 @@ class TestRedirectIntegrity:
 
     def test_all_redirected_methods_exist_on_spec_tab(self, entry_module):
         for name in self._REDIRECTED_METHODS:
-            assert hasattr(entry_module.SpecTab, name), (
-                f"SpecTab.{name} missing — tests would silently no-op"
-            )
-            assert callable(getattr(entry_module.SpecTab, name)), (
-                f"SpecTab.{name} not callable"
-            )
+            assert hasattr(entry_module.SpecTab, name), f"SpecTab.{name} missing — tests would silently no-op"
+            assert callable(getattr(entry_module.SpecTab, name)), f"SpecTab.{name} not callable"
 
     def test_class_constants_re_exported_from_launcher(self, entry_module):
         """Legacy tests reference ``LlamaCppLauncher._SPEC_TYPES_*``;
         the launcher exposes them as class-level aliases of SpecTab's
         canonical definitions.
         """
-        assert (
-            entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP
-            is entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
-        )
-        assert (
-            entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA
-            is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
-        )
+        assert entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP is entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
+        assert entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
 
     def test_stale_draft_analysis_is_dropped_at_enqueue(self, entry_module, monkeypatch):
         import modules.spec_tab as spec_mod
@@ -874,8 +840,6 @@ class TestRedirectIntegrity:
 
         monkeypatch.setattr(spec_mod, "parse_gguf_header_simple", parse_and_supersede)
 
-        entry_module.SpecTab._run_spec_draft_gguf_analysis(
-            tab, "/models/draft.gguf", analysis_id=1
-        )
+        entry_module.SpecTab._run_spec_draft_gguf_analysis(tab, "/models/draft.gguf", analysis_id=1)
 
         assert tab._spec_draft_analysis_queue.empty()

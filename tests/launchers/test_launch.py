@@ -491,15 +491,25 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is True
         assert call_count["n"] == 2, "second call should actually re-probe"
 
-    def test_result_is_cached_per_exe_and_flag(self, manager, monkeypatch):
+    def test_result_is_cached_per_exe(self, manager, monkeypatch):
+        """Subprocess cost is amortized across all flag probes on the same exe.
+
+        The old implementation spawned one ``<exe> --help`` subprocess per
+        (exe, flag) probe — so a launch checking five reasoning flags paid
+        five subprocess startups in series. The current implementation
+        caches the raw ``--help`` text per exe and runs the per-flag regex
+        against that cached snapshot, so all flag probes for one exe share
+        a single subprocess. The (exe, flag) memoization is still in place
+        so the regex itself only runs once per pair, and ANSWERS per flag
+        remain independent (a build that lists ``--fit`` but not
+        ``--fit-margin`` reports True/False respectively).
+        """
         calls = {"n": 0}
 
         def _counting_run(*a, **kw):
             calls["n"] += 1
             from unittest.mock import MagicMock as _MM
             r = _MM()
-            # Echo a help line that contains every flag the test asks about,
-            # so each (exe, flag) probe resolves to True.
             r.stdout = "  --fit on|off\n  --other-flag X\n"
             r.stderr = ""
             return r
@@ -510,21 +520,23 @@ class TestBackendSupportsFlag:
         manager._backend_supports_flag("/fake/exe", "--fit")
         manager._backend_supports_flag("/fake/exe", "--fit")
         manager._backend_supports_flag("/fake/exe", "--fit")
-        assert calls["n"] == 1, "subprocess.run should only be invoked once per (exe, flag)"
+        assert calls["n"] == 1, "subprocess.run should only be invoked once per exe"
 
-        # Different flag on the same exe must re-probe — the cache key is
-        # (exe, flag), not exe alone. Without this, a build that supports
-        # --fit but not --fit-margin would be miscached as supporting both.
-        manager._backend_supports_flag("/fake/exe", "--other-flag")
-        assert calls["n"] == 2, (
-            "different flag on same exe must re-probe (cache key is per-flag)"
+        # Different flag on the same exe DOES NOT re-spawn the subprocess —
+        # it consults the cached help text and runs a per-flag regex.
+        # Answers stay correct per flag (the cache is text, not boolean).
+        assert manager._backend_supports_flag("/fake/exe", "--other-flag") is True
+        assert calls["n"] == 1, (
+            "different flag on the same exe must reuse the cached --help text"
         )
-        manager._backend_supports_flag("/fake/exe", "--other-flag")
-        assert calls["n"] == 2, "second call for same (exe, flag) should hit cache"
+        # A flag the help text doesn't advertise reports False, proving the
+        # per-flag answer is still independent.
+        assert manager._backend_supports_flag("/fake/exe", "--never-mentioned") is False
+        assert calls["n"] == 1
 
         # Different exe path → re-probes.
         manager._backend_supports_flag("/other/exe", "--fit")
-        assert calls["n"] == 3
+        assert calls["n"] == 2
 
 
 # ============================================================================

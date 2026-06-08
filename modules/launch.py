@@ -46,20 +46,56 @@ class LaunchManager:
         # Used to gracefully skip flags older builds don't recognize, e.g.
         # --fit on ik_llama builds that predate fit support.
         self._feature_probe_cache: dict[tuple[str, str], bool] = {}
+        # Caches the raw ``<exe> --help`` text by exe so multiple flag
+        # checks on the same exe pay one subprocess + N regex matches
+        # instead of N subprocesses. ``None`` means "we tried and the
+        # probe failed" — distinct from "we never tried" (missing key).
+        self._help_text_cache: dict[str, str | None] = {}
 
     def _backend_supports_flag(self, exe_path, flag):
         """Return True if `exe_path --help` advertises `flag`.
 
-        Caches per (exe, flag) so repeated build_cmd() calls don't re-spawn
-        the help process. On any probe failure (timeout, non-zero exit,
-        OSError), assumes the flag is unsupported — safer than emitting an
-        unknown argument that would crash the server at startup.
+        Caches per (exe, flag) AND caches the raw ``--help`` output per exe
+        so a launch that needs to check N flags spawns at most one
+        subprocess instead of N. On any probe failure (timeout, non-zero
+        exit, OSError), assumes the flag is unsupported — safer than
+        emitting an unknown argument that would crash the server at
+        startup.
         """
-        cache_key = (str(exe_path), flag)
+        exe_key = str(exe_path)
+        cache_key = (exe_key, flag)
         if cache_key in self._feature_probe_cache:
             return self._feature_probe_cache[cache_key]
 
-        supported = False
+        help_text = self._get_help_text(exe_path)
+        if help_text is None:
+            # ``_get_help_text`` already logged; treat as unsupported for
+            # this call only and don't memoize (so a later call can retry
+            # if the issue was transient).
+            return False
+
+        # Match the flag as a token: preceded by start-of-line/whitespace,
+        # followed by whitespace, comma, end-of-line, or '='.
+        pattern = rf"(?:^|\s){re.escape(flag)}(?:[\s,=]|$)"
+        supported = bool(re.search(pattern, help_text, re.MULTILINE))
+        print(
+            f"DEBUG: Feature probe — {Path(exe_path).name} {flag}: "
+            f"{'supported' if supported else 'not advertised'}",
+            file=sys.stderr,
+        )
+        self._feature_probe_cache[cache_key] = supported
+        return supported
+
+    def _get_help_text(self, exe_path) -> str | None:
+        """Return cached ``<exe> --help`` output (one subprocess per exe).
+
+        Returns ``None`` on probe failure (timeout, OSError, non-zero exit
+        with no output). Failures are *not* memoized — a later flag check
+        on the same exe will retry.
+        """
+        exe_key = str(exe_path)
+        if exe_key in self._help_text_cache:
+            return self._help_text_cache[exe_key]
         try:
             result = subprocess.run(
                 [str(exe_path), "--help"],
@@ -69,30 +105,16 @@ class LaunchManager:
                 check=False,
             )
             help_text = (result.stdout or "") + (result.stderr or "")
-            # Match the flag as a token: preceded by start-of-line/whitespace,
-            # followed by whitespace, comma, end-of-line, or '='.
-            pattern = rf"(?:^|\s){re.escape(flag)}(?:[\s,=]|$)"
-            supported = bool(re.search(pattern, help_text, re.MULTILINE))
-            print(
-                f"DEBUG: Feature probe — {Path(exe_path).name} {flag}: "
-                f"{'supported' if supported else 'not advertised'}",
-                file=sys.stderr,
-            )
         except Exception as e:
-            # Don't memoize transient failures. A timeout or OSError on one
-            # probe could be a one-off (load spike, momentarily-busy disk),
-            # and there's no invalidation path on this cache — caching False
-            # here would silently disable the flag for the rest of the
-            # session even if a later probe would succeed.
             print(
-                f"DEBUG: Feature probe failed for {exe_path} {flag}: {e!r}; "
-                f"assuming unsupported for this call only (not cached)",
+                f"DEBUG: Feature probe failed for {exe_path}: {e!r}; "
+                f"assuming all flags unsupported for this call only "
+                f"(not cached)",
                 file=sys.stderr,
             )
-            return False
-
-        self._feature_probe_cache[cache_key] = supported
-        return supported
+            return None
+        self._help_text_cache[exe_key] = help_text
+        return help_text
 
     def _effective_venv_path(self) -> str:
         """Return the normalized venv path used for launch and saved scripts."""
@@ -360,6 +382,12 @@ class LaunchManager:
         # than the one available locally).
         reasoning_supports = None
         if probe_backend:
+            # Lazy probe: ``emit_reasoning_args`` decides which flags it
+            # actually needs based on the launcher's reasoning UI state.
+            # ``_backend_supports_flag`` now shares one cached ``--help``
+            # text per exe (``_get_help_text``), so even when the user has
+            # configured every reasoning flag we still spawn at most one
+            # subprocess per launch — not one per flag.
             def _probe(flag, _exe=exe_path):
                 return self._backend_supports_flag(_exe, flag)
             reasoning_supports = _probe

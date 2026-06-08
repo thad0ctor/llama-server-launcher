@@ -150,21 +150,24 @@ class BuildConfigStore:
         self._loaded = False
 
     # ---------------------------------------------------------------- io
-    def _load(self) -> None:
+    def _load(self) -> bool:
         # Don't mark loaded until we've actually succeeded — otherwise a
         # transient unreadable file (mid-edit, permissions glitch) latches us
         # into an empty cache for the rest of the session.
+        # Returns True on success so mutators can refuse to write a fresh
+        # state that would clobber an unreadable on-disk file with an empty
+        # in-memory cache.
         if self._loaded:
-            return
+            return True
         self._cache = {}
         if not self.path.is_file():
             self._loaded = True
-            return
+            return True
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except Exception as exc:
             print(f"WARN: build_configs.json unreadable: {exc}", file=sys.stderr)
-            return  # leave _loaded=False so we retry next time
+            return False  # leave _loaded=False so we retry next time
         if isinstance(raw, dict):
             version = raw.get("schema_version")
             if version is not None and version != SCHEMA_VERSION:
@@ -185,13 +188,14 @@ class BuildConfigStore:
                 except Exception as exc:
                     print(f"WARN: skipping build config {name!r}: {exc}", file=sys.stderr)
         self._loaded = True
+        return True
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             print(f"ERROR: cannot create {self.config_dir}: {exc}", file=sys.stderr)
-            return
+            return False
         payload = {
             "schema_version": SCHEMA_VERSION,
             "configs": {name: cfg.to_json() for name, cfg in self._cache.items()},
@@ -202,6 +206,8 @@ class BuildConfigStore:
             os.replace(tmp, self.path)
         except Exception as exc:
             print(f"ERROR: failed to write {self.path}: {exc}", file=sys.stderr)
+            return False
+        return True
 
     # ---------------------------------------------------------------- crud
     def list_names(self) -> list[str]:
@@ -213,7 +219,11 @@ class BuildConfigStore:
         return self._cache.get(name)
 
     def save(self, cfg: BuildConfig) -> None:
-        self._load()
+        if not self._load():
+            # If the on-disk file is unreadable, refuse to overwrite it with
+            # an empty cache — that would silently destroy the user's
+            # presets.
+            return
         # Normalize + reject blank names so we don't create unusable entries
         # (e.g. {"": {...}} which would be invisible in the picker).
         cfg.name = (cfg.name or "").strip()
@@ -229,7 +239,8 @@ class BuildConfigStore:
         self._save()
 
     def touch_last_used(self, name: str) -> None:
-        self._load()
+        if not self._load():
+            return
         cfg = self._cache.get(name)
         if cfg is None:
             return
@@ -237,15 +248,22 @@ class BuildConfigStore:
         self._save()
 
     def delete(self, name: str) -> bool:
-        self._load()
+        if not self._load():
+            return False
         if name not in self._cache:
             return False
-        del self._cache[name]
-        self._save()
+        cfg = self._cache.pop(name)
+        # Restore the cache entry and report failure if the disk write
+        # didn't actually complete — otherwise callers see ``True`` but the
+        # entry comes back on the next session.
+        if not self._save():
+            self._cache[name] = cfg
+            return False
         return True
 
     def rename(self, old: str, new: str) -> bool:
-        self._load()
+        if not self._load():
+            return False
         # Mirror the empty-name guard from save(): strip + reject blanks so
         # whitespace-only names can't sneak in through rename().
         new = (new or "").strip()
@@ -254,5 +272,11 @@ class BuildConfigStore:
         cfg = self._cache.pop(old)
         cfg.name = new
         self._cache[new] = cfg
-        self._save()
+        if not self._save():
+            # Roll back so an unreported write failure doesn't leave the
+            # in-memory state divergent from disk.
+            self._cache.pop(new, None)
+            cfg.name = old
+            self._cache[old] = cfg
+            return False
         return True

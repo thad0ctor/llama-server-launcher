@@ -681,9 +681,15 @@ class HuggingFaceDownloaderTab:
             return
         # Publish the handle under the lock so _cancel_operation, which
         # reads it on the Tk thread, can never observe a torn state.
+        # Cancellation that beat the ``self._process = proc`` assignment must
+        # NOT leave a stale handle pinned: ``_finalize_process`` only fires on
+        # events that ``_poll_queue`` accepts, and cancelled-op events are
+        # dropped — so without this guard ``_poll_queue`` would keep
+        # rescheduling forever against a process the user already cancelled.
         with self._process_lock:
-            self._process = proc
             cancelled_at_start = op_id in self._cancelled_ops
+            if not cancelled_at_start:
+                self._process = proc
         # If Cancel was clicked while Popen was still launching, the main
         # thread had no handle to terminate. Detect that here and terminate
         # before draining the pipes.

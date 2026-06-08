@@ -320,6 +320,17 @@ def _resolve_draft_device_value(launcher):
     free-text ``spec_draft_device`` value if ``spec_draft_selected_gpus``
     is empty (allowing power users to type a raw override).
     """
+    # In manual GPU mode the user has explicitly opted out of detected-GPU
+    # logic, so the saved draft-GPU selection (which is a SpecTab convenience
+    # for non-manual mode) must not bleed into the launch command. The
+    # selection IS preserved in app_settings so toggling manual mode off
+    # restores the prior checkbox state — only the launch-side emission is
+    # gated. (Mirrors the same gate in ``_resolve_main_device_value``.)
+    try:
+        if getattr(launcher, "gpu_info", {}).get("manual_mode", False):
+            return ""
+    except Exception:
+        return ""
     # MTP variants (draft-mtp on llama.cpp, mtp on ik_llama) normally DON'T
     # use a separate draft model — the MTP head is embedded in the main
     # GGUF and rides along with the main GPU distribution. So any stored

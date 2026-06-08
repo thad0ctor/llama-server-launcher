@@ -728,7 +728,13 @@ def load_cached_gpu_info(config_dir, venv_path):
         return None
     if not isinstance(gpu_info.get("device_count"), int):
         return None
-    if not isinstance(gpu_info.get("devices"), list):
+    devices = gpu_info.get("devices")
+    if not isinstance(devices, list):
+        return None
+    # Downstream callers like ``format_gpu_mapping_table`` do ``dev.get(...)``
+    # on each entry, so a hand-edited cache with ``devices=["oops"]`` would
+    # crash startup despite passing the top-level shape checks above.
+    if any(not isinstance(device, dict) for device in devices):
         return None
     return gpu_info
 

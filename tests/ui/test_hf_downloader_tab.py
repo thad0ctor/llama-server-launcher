@@ -290,3 +290,72 @@ def test_run_process_worker_reports_start_failure(hf_launcher_stub, active_venv,
     assert event["event"] == "process-exit"
     assert event["returncode"] == 1
     assert event["stderr"]
+
+
+def test_cancel_before_worker_publishes_process_does_not_pin_handle(
+    hf_launcher_stub, active_venv, monkeypatch
+):
+    """Cancel that wins the race against ``self._process = proc`` must not
+    leave a stale handle pinned on the tab.
+
+    Earlier behavior: the worker assigned ``self._process = proc`` and only
+    then checked ``op_id in self._cancelled_ops``. Stale events for a
+    cancelled op are dropped by ``_poll_queue``, so ``_finalize_process``
+    never ran and ``self._process`` stayed non-``None`` — ``_poll_queue``
+    would keep rescheduling forever against a process the user already
+    cancelled. The fix checks cancellation before publishing, and skips the
+    assignment in the cancelled case.
+    """
+    repo_dir, _python = active_venv
+    hf_launcher_stub.repo_dir = repo_dir
+    hf_launcher_stub.venv_dir.set("")
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=True,
+            version="1.0.0",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    parent = tk.Frame(hf_launcher_stub.root)
+    tab.setup_tab(parent)
+
+    # Pre-cancel the next op id so the in-worker check sees it as cancelled
+    # before the assignment.
+    tab._cancelled_ops.add(tab._op_id)
+
+    # Build a fake Popen-like object: ``terminate`` and ``wait`` must be
+    # callable; ``stdout``/``stderr`` iterate to nothing so the worker
+    # finishes without consuming streams.
+    class _FakeProc:
+        def __init__(self):
+            self.terminate_calls = 0
+            self.stdout = iter(())
+            self.stderr = iter(())
+            self.returncode = 1
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    fake_proc = _FakeProc()
+
+    import subprocess as _subprocess
+
+    monkeypatch.setattr(_subprocess, "Popen", lambda *_a, **_k: fake_proc)
+
+    tab._run_process_worker(
+        ["/will-not-actually-run", "-m", "modules.hf_downloader.runner"],
+        op_id=tab._op_id,
+    )
+
+    # The cancellation-aware publish must skip assigning ``self._process``,
+    # so the polling loop has nothing stale to chase.
+    assert tab._process is None
+    # And the worker still terminated the process it briefly held a
+    # reference to, so we don't leak a runaway subprocess.
+    assert fake_proc.terminate_calls >= 1

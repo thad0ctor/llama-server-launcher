@@ -221,7 +221,9 @@ def test_dependency_buttons_follow_installed_state(settings_tab):
         for grandchild in child.winfo_children()
         if isinstance(grandchild, ttk.Button)
     ]
-    button_state_by_text = {(button.cget("text"), index): str(button.cget("state")) for index, button in enumerate(buttons)}
+    button_state_by_text = {
+        (button.cget("text"), index): str(button.cget("state")) for index, button in enumerate(buttons)
+    }
 
     # requests is required → Remove must be disabled even when installed.
     # torch is optional and not installed → Install is normal, Remove disabled.

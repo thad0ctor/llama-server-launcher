@@ -74,6 +74,11 @@ class SettingsTab:
         # queue after the tab is torn down used to call
         # ``_rebuild_dependency_rows`` against destroyed widgets.
         self._venv_probe_drain_after_id = None
+        # Tracks the ``root.after`` id for the 2 s deferred probe scheduled
+        # after the user clicks Remove venv. Without this, a tab torn down
+        # in that 2 s window could still get its dependency table rebuilt
+        # against destroyed widgets.
+        self._venv_remove_refresh_after_id = None
         self._venv_probe_results = queue.Queue()
         self._venv_probe_generation = 0
         self._venv_trace_token = self.venv_dir_var.trace_add(
@@ -99,7 +104,11 @@ class SettingsTab:
             self._venv_trace_token = None
         # Cancel any in-flight ``after()`` callbacks so they don't fire
         # against destroyed widgets after teardown.
-        for attr in ("_venv_probe_after_id", "_venv_probe_drain_after_id"):
+        for attr in (
+            "_venv_probe_after_id",
+            "_venv_probe_drain_after_id",
+            "_venv_remove_refresh_after_id",
+        ):
             after_id = getattr(self, attr, None)
             if after_id is not None:
                 try:
@@ -569,9 +578,18 @@ class SettingsTab:
         # click Refresh deps manually.
         self._rebuild_dependency_rows([])
         try:
-            self.root.after(2000, self._schedule_venv_dependency_probe)
+            self._venv_remove_refresh_after_id = self.root.after(
+                2000, self._run_remove_venv_refresh
+            )
         except tk.TclError:
-            pass
+            self._venv_remove_refresh_after_id = None
+
+    def _run_remove_venv_refresh(self):
+        # Clear the tracked id at top so a manual cancel during this callback
+        # window doesn't try to ``after_cancel`` a callback that's already
+        # firing.
+        self._venv_remove_refresh_after_id = None
+        self._schedule_venv_dependency_probe()
 
     def _on_install_dependency(self, dependency):
         info = self._current_venv_info()

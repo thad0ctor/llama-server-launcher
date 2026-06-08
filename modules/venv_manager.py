@@ -278,11 +278,18 @@ def build_bootstrap_venv_command(
         [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
         platform=platform,
     )
-    install_cmd = _shell_join(
-        [str(python_path), "-m", "pip", "install", *packages],
-        platform=platform,
-    )
-    return " && ".join((create_cmd, upgrade_pip_cmd, install_cmd))
+    # Skip the trailing ``pip install`` step when there are no packages to
+    # install — otherwise we emit a bare ``pip install`` that exits non-zero
+    # and breaks the chained shell pipeline.
+    commands = [create_cmd, upgrade_pip_cmd]
+    if packages:
+        commands.append(
+            _shell_join(
+                [str(python_path), "-m", "pip", "install", *packages],
+                platform=platform,
+            )
+        )
+    return " && ".join(commands)
 
 
 def build_install_dependency_command(
@@ -447,7 +454,11 @@ def probe_current_python_dependencies(
 ) -> tuple[DependencyStatus, ...]:
     """Inspect launcher-managed dependencies in the current Python process."""
     rows: list[DependencyStatus] = []
-    for dependency in dependencies or MANAGED_DEPENDENCIES:
+    # Same convention as ``build_bootstrap_venv_command``: an explicit
+    # empty tuple/list is a legitimate "probe nothing" no-op; only ``None``
+    # falls back to the managed default set.
+    selected = MANAGED_DEPENDENCIES if dependencies is None else dependencies
+    for dependency in selected:
         try:
             available = importlib.util.find_spec(dependency.import_name) is not None
         except Exception as exc:
