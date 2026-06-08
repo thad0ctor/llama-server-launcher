@@ -9,7 +9,7 @@ from modules.build.build_tab import DEFAULT_GENERATOR_LABEL
 
 # Shared helpers live in ``tests/build/conftest.py`` so this file and
 # ``test_build_tab_sync.py`` can't drift independently.
-from tests.build.conftest import make_build_tab as _make_build_tab  # noqa: F401
+from tests.build.conftest import make_build_tab
 
 
 def test_linux_install_plan_uses_apt_for_missing_ninja(monkeypatch):
@@ -143,7 +143,7 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
 
 
 def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypatch):
-    _launcher, tab = _make_build_tab(tk_root, tmp_path, monkeypatch)
+    _launcher, tab = make_build_tab(tk_root, tmp_path, monkeypatch)
 
     plan = tab._build_plan()
 
@@ -153,7 +153,7 @@ def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypa
 
 
 def test_loading_config_without_generator_resets_ui_to_cmake(tk_root, tmp_path, monkeypatch):
-    _launcher, tab = _make_build_tab(tk_root, tmp_path, monkeypatch)
+    _launcher, tab = make_build_tab(tk_root, tmp_path, monkeypatch)
     tab.var_generator.set("Ninja")
 
     tab._apply_loaded_config(
@@ -170,7 +170,7 @@ def test_loading_config_without_generator_resets_ui_to_cmake(tk_root, tmp_path, 
 
 
 def test_install_missing_tool_opens_terminal_from_build_tab(tk_root, tmp_path, monkeypatch):
-    _launcher, tab = _make_build_tab(tk_root, tmp_path, monkeypatch)
+    _launcher, tab = make_build_tab(tk_root, tmp_path, monkeypatch)
     install_plan = detection.ToolInstallPlan(
         tool_key="cmake",
         tool_label="CMake",

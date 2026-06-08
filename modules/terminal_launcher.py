@@ -143,7 +143,15 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
 
         bash_payload = _bash_hold_open(command)
         if cwd_text:
-            bash_payload = f"cd {shlex.quote(cwd_text)} && {bash_payload}"
+            # ``_bash_hold_open`` returns a ``;``-separated chain.
+            # Without the brace group, ``cd /foo && cmd1 ; cmd2 ;
+            # ...`` only gates ``cmd1`` on the cd — the ``;``-chained
+            # follow-ups run from whatever the previous cwd was even
+            # if cd failed. Wrap in ``{ ...; }`` so the cd guards the
+            # WHOLE payload.
+            bash_payload = (
+                f"cd {shlex.quote(cwd_text)} && {{ {bash_payload}; }}"
+            )
         fd, script_path = tempfile.mkstemp(suffix=".command", prefix="llama-launcher-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:

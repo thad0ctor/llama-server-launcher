@@ -83,6 +83,27 @@ class TestSpecMasterToggle:
         assert "--spec-draft-n-max" not in cmd
         assert "--spec-draft-model" not in cmd
 
+    # Backend-specific short flags used by ik_llama's draft path
+    # (``-devd``, ``-ngld``, ``-ctkd``, ``-ctvd``) and the
+    # ``--model-draft`` alias aren't caught by a ``--spec-*`` /
+    # ``--draft-*`` prefix sweep. Test the full set so a regression
+    # that leaks any of them on an empty/none spec_type fails loudly.
+    _SPEC_LEAK_FLAGS = frozenset({
+        "-devd", "-ngld", "-ctkd", "-ctvd", "-draft", "--model-draft",
+    })
+
+    @classmethod
+    def _leaked_spec_args(cls, cmd):
+        return [
+            arg for arg in cmd
+            if isinstance(arg, str)
+            and (
+                arg.startswith("--spec-")
+                or arg.startswith("--draft-")
+                or arg in cls._SPEC_LEAK_FLAGS
+            )
+        ]
+
     def test_spec_enabled_with_empty_spec_type_emits_nothing(self, manager, launcher_mock):
         # Seed multiple persisted spec fields, not just n_max — the
         # bug being pinned is "stale config emits flags even when
@@ -94,10 +115,9 @@ class TestSpecMasterToggle:
         launcher_mock.spec_draft_model.set("/tmp/draft.gguf")
         launcher_mock.spec_draft_device.set("CUDA0")
         cmd = manager.build_cmd()
-        leaked = [arg for arg in cmd if isinstance(arg, str)
-                  and (arg.startswith("--spec-") or arg.startswith("--draft-"))]
+        leaked = self._leaked_spec_args(cmd)
         assert not leaked, (
-            f"spec_type='' must suppress every --spec-*/--draft-* flag; "
+            f"spec_type='' must suppress every spec/draft flag (long + short); "
             f"got leaked={leaked!r} cmd={cmd!r}"
         )
 
@@ -108,10 +128,9 @@ class TestSpecMasterToggle:
         launcher_mock.spec_draft_model.set("/tmp/draft.gguf")
         launcher_mock.spec_draft_device.set("CUDA0")
         cmd = manager.build_cmd()
-        leaked = [arg for arg in cmd if isinstance(arg, str)
-                  and (arg.startswith("--spec-") or arg.startswith("--draft-"))]
+        leaked = self._leaked_spec_args(cmd)
         assert not leaked, (
-            f"spec_type='none' must suppress every --spec-*/--draft-* flag; "
+            f"spec_type='none' must suppress every spec/draft flag (long + short); "
             f"got leaked={leaked!r} cmd={cmd!r}"
         )
 

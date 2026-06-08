@@ -89,9 +89,15 @@ class HuggingFaceDownloaderTab:
         # was actually loaded for. ``_on_download`` checks these so a
         # user who pasted a new repo URL but didn't reload can't
         # accidentally fetch from the wrong source (the file selection
-        # is meaningful only for the loaded repo).
+        # is meaningful only for the loaded repo). ``_loaded_revision``
+        # uses ``None`` as the "never loaded" sentinel; an explicit
+        # ``""`` means "the listing was loaded with a BLANK revision"
+        # (i.e. the runner resolved against the default branch) — that
+        # must be distinguishable from "user hasn't loaded yet" so
+        # ``_on_download`` doesn't fall back to the live revision_var
+        # text the user may have edited mid-flight.
         self._loaded_repo_id: str = ""
-        self._loaded_revision: str = ""
+        self._loaded_revision: str | None = None
         self._target_container = None
         self._files_listbox = None
         self._revision_combo = None
@@ -644,9 +650,10 @@ class HuggingFaceDownloaderTab:
         self._refs = []
         # Drop the loaded-listing identity too — until the new ``list``
         # runner posts a ``listing`` event, ``_on_download`` must not
-        # treat the previous repo's identity as still active.
+        # treat the previous repo's identity as still active. Reset to
+        # ``None`` sentinel so the "never loaded" branches fire.
         self._loaded_repo_id = ""
-        self._loaded_revision = ""
+        self._loaded_revision = None
         if self._revision_combo is not None:
             self._revision_combo.config(values=())
         if self._files_listbox is not None:
@@ -741,9 +748,13 @@ class HuggingFaceDownloaderTab:
                 f"again to refresh the listing, or restore the original URL.",
             )
             return
+        # ``is not None`` (not truthy): an explicit empty
+        # ``_loaded_revision`` means "listing came back for the repo's
+        # default branch" and the user later typing a specific ref
+        # must trigger the mismatch dialog. The previous truthy check
+        # let the new text silently win.
         if (
-            self._loaded_revision
-            and current_revision
+            self._loaded_revision is not None
             and current_revision != self._loaded_revision
         ):
             messagebox.showerror(
@@ -759,7 +770,11 @@ class HuggingFaceDownloaderTab:
         # accepted yet preserves the historical behaviour for the
         # "patterns-only, no listbox selection" flow.
         effective_repo_id = self._loaded_repo_id or parsed.repo_id
-        effective_revision = self._loaded_revision or current_revision
+        effective_revision = (
+            self._loaded_revision
+            if self._loaded_revision is not None
+            else current_revision
+        )
         payload = {
             "repo_id": effective_repo_id,
             "revision": effective_revision,
@@ -1055,13 +1070,17 @@ class HuggingFaceDownloaderTab:
             # current input.
             self._loaded_repo_id = str(event.get("repo_id", "") or "")
             # Prefer the runner's resolved revision (the actual ref it
-            # listed against) over the user-submitted one; fall back to
-            # the request value, then to the current field.
-            self._loaded_revision = (
-                str(event.get("revision") or "").strip()
-                or requested_revision
-                or self.revision_var.get().strip()
-            )
+            # listed against). If the runner didn't echo one, fall back
+            # to what the user asked for. Critically: DO NOT read the
+            # live ``revision_var`` here — the user can edit that field
+            # mid-flight and we'd silently bind the file selection to
+            # their unrelated new typing. An explicit ``""`` is the
+            # correct value when the request itself was blank (the
+            # runner resolved against the default branch); the
+            # ``None``-vs-``""`` distinction at the read sites then
+            # tells "never loaded" apart from "loaded with blank".
+            runner_resolved = str(event.get("revision") or "").strip()
+            self._loaded_revision = runner_resolved or requested_revision
             if self._files_listbox is not None:
                 self._files_listbox.delete(0, tk.END)
                 for row in self._file_rows:

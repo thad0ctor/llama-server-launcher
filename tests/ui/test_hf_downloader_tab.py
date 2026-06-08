@@ -202,10 +202,14 @@ def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stu
     tab.include_patterns_var.set("README*")
     tab.ignore_patterns_var.set("*.tmp")
     tab.max_workers_var.set("6")
+    # The real runner emits ``revision`` in its listing payload — the
+    # tab now pins ``_loaded_revision`` from that so a mid-flight edit
+    # to ``revision_var`` doesn't silently retarget the download.
     tab._handle_event(
         {
             "event": "listing",
             "repo_id": "TheBloke/Test",
+            "revision": "main",
             "refs": [{"name": "main", "kind": "branch"}],
             "files": [{"path": "model.gguf", "size_bytes": 120, "kind": "gguf"}],
         }

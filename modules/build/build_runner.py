@@ -471,6 +471,16 @@ class BuildRunner:
             # ``probe_upstream`` fetch.
             git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
+            # Helper: bail out at a stage boundary when the user has
+            # cancelled. Without these checks, a cancel pressed BETWEEN
+            # ``_stream`` calls would still let the next subprocess spin
+            # up and only react when the current ``_stream`` returns.
+            def _bail_if_cancelled() -> bool:
+                if self._cancel.is_set():
+                    self._emit_event(EVENT_CANCELLED, None)
+                    return True
+                return False
+
             # Stage: clone if needed
             if not src.exists():
                 if not plan.git_clone_if_missing:
@@ -478,6 +488,8 @@ class BuildRunner:
                     return
                 if not plan.upstream_url:
                     self._emit_event(EVENT_ERROR, f"No upstream URL known for backend {plan.backend!r}")
+                    return
+                if _bail_if_cancelled():
                     return
                 src.parent.mkdir(parents=True, exist_ok=True)
                 self._emit_stage(f"git clone {plan.upstream_url} → {src}")
@@ -493,6 +505,8 @@ class BuildRunner:
                     self._emit_event(EVENT_DONE, rc)
                     return
             elif plan.git_pull_before_build:
+                if _bail_if_cancelled():
+                    return
                 self._emit_stage("git pull --ff-only")
                 rc = self._stream(
                     ["git", "pull", "--ff-only"],
@@ -507,6 +521,8 @@ class BuildRunner:
 
             # Stage: optional checkout
             if plan.git_ref:
+                if _bail_if_cancelled():
+                    return
                 self._emit_stage(f"git checkout {plan.git_ref}")
                 rc = self._stream(
                     ["git", "checkout", plan.git_ref],
@@ -518,6 +534,8 @@ class BuildRunner:
                     return
                 if rc != 0:
                     self._emit_event(EVENT_DONE, rc)
+                    return
+                if _bail_if_cancelled():
                     return
                 rc = self._stream(
                     ["git", "submodule", "update", "--init", "--recursive"],
@@ -535,6 +553,8 @@ class BuildRunner:
 
             # Stage: clean
             if plan.clean_build and build.exists():
+                if _bail_if_cancelled():
+                    return
                 self._emit_stage(f"rm -rf {build}")
                 try:
                     shutil.rmtree(build)
@@ -542,9 +562,13 @@ class BuildRunner:
                     self._emit_event(EVENT_ERROR, f"Failed to clean build dir: {exc}")
                     return
 
+            if _bail_if_cancelled():
+                return
             build.mkdir(parents=True, exist_ok=True)
 
             # Stage: configure
+            if _bail_if_cancelled():
+                return
             self._emit_stage("cmake configure")
             cfg_cmd = ["cmake", "-S", str(src), "-B", str(build)]
             if plan.generator:
@@ -562,6 +586,8 @@ class BuildRunner:
                 return
 
             # Stage: build
+            if _bail_if_cancelled():
+                return
             jobs = plan.jobs if plan.jobs and plan.jobs > 0 else None
             build_cmd = ["cmake", "--build", str(build), "--config", "Release"]
             if jobs:

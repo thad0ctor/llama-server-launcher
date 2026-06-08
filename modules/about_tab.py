@@ -209,6 +209,14 @@ elif [ -f {q_backup_path}/llama_cpp_launcher_configs.json ]; then
     USER_CONFIG_SRC={q_backup_path}/llama_cpp_launcher_configs.json
 fi
 
+# build_configs.json is also user-owned persisted state (saved Build
+# tab presets). gpu_detection_cache.json is host-specific and stays
+# excluded — the next launch re-detects.
+BUILD_CONFIG_SRC=""
+if [ -f {q_backup_path}/config/build_configs.json ]; then
+    BUILD_CONFIG_SRC={q_backup_path}/config/build_configs.json
+fi
+
 if [ -n "$USER_CONFIG_SRC" ]; then
     if [ -d {q_current_dir}/config ] && [ -d {q_current_dir}/modules ]; then
         cp "$USER_CONFIG_SRC" {q_current_dir}/config/llama_cpp_launcher_configs.json
@@ -219,6 +227,11 @@ if [ -n "$USER_CONFIG_SRC" ]; then
     fi
 else
     echo "  No user configuration found in backup - clean install, nothing to restore."
+fi
+
+if [ -n "$BUILD_CONFIG_SRC" ] && [ -d {q_current_dir}/config ]; then
+    cp "$BUILD_CONFIG_SRC" {q_current_dir}/config/build_configs.json
+    echo "  Restored: config/build_configs.json"
 fi
 
 echo ""

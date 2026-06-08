@@ -135,8 +135,16 @@ def parse_bool(value) -> bool:
     """
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)):
-        return bool(value)
+    if isinstance(value, int):
+        # Accept ONLY the canonical 0/1 ints. Treating ``42`` as
+        # ``True`` (via ``bool(value)``) would silently enable a
+        # destructive flag like ``force_download`` if a hand-edited
+        # settings file shipped an accidental count.
+        return value == 1
+    if isinstance(value, float):
+        # ``1.0`` only — same rationale. NaN / inf / 0.5 / 42.0 are
+        # "not actually a boolean", so reject.
+        return value == 1.0
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes", "y", "on"}
     return False

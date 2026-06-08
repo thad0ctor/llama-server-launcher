@@ -849,6 +849,12 @@ class ConfigManager:
             prior_configs = dict(self.launcher.saved_configs)
 
             imported_count = 0
+            # Track names already assigned during THIS import batch so
+            # two distinct raw keys that collapse to the same sanitized
+            # name (``"./foo"`` and ``"foo"``) don't overwrite each
+            # other silently — the second one disambiguates with a
+            # suffix instead.
+            imported_this_batch: set[str] = set()
             for raw_name, config_data in configs_to_import.items():
                 try:
                     # Run imported names through the same sanitizer as
@@ -868,19 +874,27 @@ class ConfigManager:
                     if not isinstance(config_data, dict):
                         print(f"WARNING: Skipping invalid config '{config_name}' - not a dictionary", file=sys.stderr)
                         continue
-                    # If sanitization collapsed two distinct raw keys
-                    # into one, or the sanitized name already exists,
-                    # disambiguate with a suffix rather than silently
-                    # overwriting.
+                    # Disambiguate against both existing saved configs
+                    # AND names already chosen in this batch. The
+                    # previous ``final_name != raw_name`` guard let
+                    # ``"foo"`` followed by ``"./foo"`` both land on
+                    # the same slot.
                     final_name = config_name
-                    if final_name in self.launcher.saved_configs and final_name != raw_name:
+                    if (
+                        final_name in self.launcher.saved_configs
+                        or final_name in imported_this_batch
+                    ):
                         suffix = 2
-                        while f"{config_name}_{suffix}" in self.launcher.saved_configs:
+                        while (
+                            f"{config_name}_{suffix}" in self.launcher.saved_configs
+                            or f"{config_name}_{suffix}" in imported_this_batch
+                        ):
                             suffix += 1
                         final_name = f"{config_name}_{suffix}"
 
                     # Import the configuration
                     self.launcher.saved_configs[final_name] = config_data
+                    imported_this_batch.add(final_name)
                     imported_count += 1
 
                 except Exception as e:
