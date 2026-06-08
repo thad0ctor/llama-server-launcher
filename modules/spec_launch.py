@@ -321,16 +321,15 @@ def _resolve_draft_device_value(launcher):
     is empty (allowing power users to type a raw override).
     """
     # In manual GPU mode the user has explicitly opted out of detected-GPU
-    # logic, so the saved draft-GPU selection (which is a SpecTab convenience
-    # for non-manual mode) must not bleed into the launch command. The
-    # selection IS preserved in app_settings so toggling manual mode off
-    # restores the prior checkbox state — only the launch-side emission is
-    # gated. (Mirrors the same gate in ``_resolve_main_device_value``.)
+    # logic. The saved ``spec_draft_selected_gpus`` (a SpecTab convenience
+    # populated from detected GPUs) must NOT bleed into the launch command,
+    # but the free-text ``spec_draft_device`` override IS a power-user
+    # affordance that should still flow through — manual mode is exactly
+    # the case where users hand-write that override.
     try:
-        if getattr(launcher, "gpu_info", {}).get("manual_mode", False):
-            return ""
+        manual_mode = bool(getattr(launcher, "gpu_info", {}).get("manual_mode", False))
     except Exception:
-        return ""
+        manual_mode = False
     # MTP variants (draft-mtp on llama.cpp, mtp on ik_llama) normally DON'T
     # use a separate draft model — the MTP head is embedded in the main
     # GGUF and rides along with the main GPU distribution. So any stored
@@ -348,6 +347,10 @@ def _resolve_draft_device_value(launcher):
         return ""
 
     draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
+    if manual_mode:
+        # Ignore the detected-GPU checkbox state but keep the raw override
+        # path below alive.
+        draft_indices = []
     if not draft_indices:
         # No checkbox selection → fall back to the free-text override.
         try:

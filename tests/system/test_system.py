@@ -366,15 +366,30 @@ def test_gpu_info_from_venv_permission_error(
     assert info["available"] is False
 
 
-def test_gpu_info_from_venv_missing_python_exe_falls_back(
+def test_gpu_info_from_venv_missing_python_exe_returns_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # tmp_path exists but has no bin/python or python at top-level.
-    sentinel = {"available": False, "device_count": 0, "devices": [], "message": "s"}
-    monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
+    """When the venv has no python executable, ``get_gpu_info_from_venv``
+    returns an ``_unavailable_gpu_info`` marker (``source=torch-venv``).
+    Previously it called ``get_gpu_info_static`` directly, which the
+    orchestrator (``get_gpu_info_with_venv``) ALSO calls — so the same
+    slow CUDA init ran twice on every probe failure. The single in-process
+    fallback now lives only in the orchestrator.
+    """
+    # If anything still calls get_gpu_info_static here, fail the test
+    # immediately rather than silently re-running CUDA init.
+    monkeypatch.setattr(
+        sysmod,
+        "get_gpu_info_static",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("get_gpu_info_static must NOT be invoked from get_gpu_info_from_venv")
+        ),
+    )
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
-    assert info is sentinel
+    assert info["available"] is False
+    assert info["detection_source"] == "torch-venv"
+    assert "Python executable not found" in info["message"]
 
 
 # ---------------------------------------------------------------------------

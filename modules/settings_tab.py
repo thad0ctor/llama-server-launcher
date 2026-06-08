@@ -379,6 +379,17 @@ class SettingsTab:
         generation = self._venv_probe_generation + 1
         self._venv_probe_generation = generation
         if not info.looks_like_venv or not active_path:
+            # Cancel any drain scheduled by a prior generation. Otherwise
+            # ``_drain_venv_dependency_probe`` keeps rescheduling every
+            # 75 ms forever because the now-current generation will never
+            # produce a result.
+            drain_id = self._venv_probe_drain_after_id
+            if drain_id is not None:
+                try:
+                    self.root.after_cancel(drain_id)
+                except Exception:
+                    pass
+                self._venv_probe_drain_after_id = None
             self._rebuild_dependency_rows([])
             self._venv_action_status_var.set(
                 "Create a venv or point this field at an existing one to manage packages."

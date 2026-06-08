@@ -635,10 +635,27 @@ class HuggingFaceDownloaderTab:
         # generation for *this* new run.
         self._cancel_operation(clean_only=True)
         op_id = self._op_id
-        fd, payload_path = tempfile.mkstemp(prefix="hf-downloader-", suffix=".json")
-        os.close(fd)
-        payload_file = Path(payload_path)
-        payload_file.write_bytes(payload_bytes(payload))
+        # Tempdir-out-of-space, EACCES on /tmp, or any other OS-level
+        # failure used to bubble straight through the Tk callback, which
+        # left the tab disabled (Cancel + Load + Download all flipped off
+        # below) with no recovery. Catch + surface a recoverable error.
+        payload_file: Path | None = None
+        try:
+            fd, payload_path = tempfile.mkstemp(prefix="hf-downloader-", suffix=".json")
+            os.close(fd)
+            payload_file = Path(payload_path)
+            payload_file.write_bytes(payload_bytes(payload))
+        except OSError as exc:
+            if payload_file is not None:
+                try:
+                    payload_file.unlink()
+                except OSError:
+                    pass
+            messagebox.showerror(
+                "Hugging Face operation",
+                f"Failed to prepare runner payload file:\n{exc}",
+            )
+            return
         self._payload_path = payload_file
         self._operation_name = action
         self._progress_stop()

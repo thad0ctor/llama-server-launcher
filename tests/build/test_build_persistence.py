@@ -141,8 +141,8 @@ def test_build_config_round_trip_through_disk_preserves_every_field(tmp_path):
             f"field {field.name!r} did not round-trip: "
             f"in={getattr(cfg_in, field.name)!r} out={getattr(cfg_out, field.name)!r}"
         )
-    assert isinstance(cfg_out.created_at, str)
-    assert isinstance(cfg_out.last_used_at, str)
+    assert isinstance(cfg_out.created_at, str) and cfg_out.created_at
+    assert isinstance(cfg_out.last_used_at, str) and cfg_out.last_used_at
 
 
 def test_build_config_round_trip_two_configs_in_same_file(tmp_path):

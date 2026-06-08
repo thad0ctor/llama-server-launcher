@@ -183,7 +183,16 @@ def run_download(payload: dict) -> int:
     allow_patterns = _combined_allow_patterns(payload)
     ignore_patterns = [item for item in payload.get("ignore_patterns") or [] if item] or None
     target_dirs = [Path(path) for path in payload.get("target_dirs") or []]
-    max_workers = int(payload.get("max_workers") or 4)
+    # Validate + clamp at the runner boundary. The UI clamps too, but this
+    # module is also reachable via ``python -m modules.hf_downloader.runner
+    # download <payload.json>`` from the CLI, where a hand-written payload
+    # could carry a non-int, negative, or wildly-large value straight to
+    # ``snapshot_download``'s threadpool.
+    try:
+        parsed_workers = int(payload.get("max_workers") or 4)
+    except (TypeError, ValueError):
+        parsed_workers = 4
+    max_workers = max(1, min(32, parsed_workers))
     try:
         tqdm_class = _build_progress_tqdm_class()
     except ImportError:

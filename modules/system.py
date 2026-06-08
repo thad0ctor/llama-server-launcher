@@ -317,8 +317,14 @@ def get_gpu_info_from_venv(venv_path):
     
     if not python_exe.exists():
         print(f"DEBUG: Python executable not found in venv: {venv_path}", file=sys.stderr)
-        # Fall back to current process detection
-        return get_gpu_info_static()
+        # Return an "unavailable" marker — ``get_gpu_info_with_venv`` is
+        # the single owner of the in-process torch fallback. Returning a
+        # second ``get_gpu_info_static()`` here would re-run the same slow
+        # CUDA init the orchestrator is about to run anyway.
+        return _unavailable_gpu_info(
+            f"Python executable not found in venv: {venv_path}",
+            "torch-venv",
+        )
     
     # Create a small Python script to check for PyTorch/CUDA in the venv
     detection_script = '''
@@ -374,45 +380,59 @@ except Exception as e:
             timeout=30
         )
         
+        # Every error path here returns an ``_unavailable_gpu_info`` marker
+        # for ``source="torch-venv"`` so the orchestrator
+        # (``get_gpu_info_with_venv``) owns the single in-process torch
+        # fallback. Calling ``get_gpu_info_static`` (via
+        # ``_create_fallback_gpu_info``) here would cause the same slow
+        # CUDA init to run twice on every venv-detection failure.
         if result.returncode == 0:
             try:
                 output = result.stdout.strip()
                 if not output:
                     print("DEBUG: Venv GPU detection returned empty output", file=sys.stderr)
-                    return _create_fallback_gpu_info("Empty output from venv detection")
-                
+                    return _unavailable_gpu_info(
+                        "Empty output from venv detection", "torch-venv"
+                    )
+
                 gpu_info = json.loads(output)
                 print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
                 return gpu_info
             except json.JSONDecodeError as e:
                 print(f"DEBUG: Failed to parse venv GPU detection output: {e}", file=sys.stderr)
                 print(f"DEBUG: Raw output: '{result.stdout}'", file=sys.stderr)
-                return _create_fallback_gpu_info(f"JSON parse error: {e}")
+                return _unavailable_gpu_info(f"JSON parse error: {e}", "torch-venv")
         else:
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
             print(f"DEBUG: Venv GPU detection failed with return code {result.returncode}", file=sys.stderr)
             print(f"DEBUG: Error output: {error_msg}", file=sys.stderr)
-            
+
             # Check for specific error types
             if "ModuleNotFoundError" in error_msg or "ImportError" in error_msg:
-                return _create_fallback_gpu_info("Required modules not found in venv")
+                return _unavailable_gpu_info(
+                    "Required modules not found in venv", "torch-venv"
+                )
             elif "CUDA" in error_msg:
-                return _create_fallback_gpu_info("CUDA error in venv")
+                return _unavailable_gpu_info("CUDA error in venv", "torch-venv")
             else:
-                return _create_fallback_gpu_info(f"Venv detection failed: {error_msg}")
-            
+                return _unavailable_gpu_info(
+                    f"Venv detection failed: {error_msg}", "torch-venv"
+                )
+
     except subprocess.TimeoutExpired:
         print("DEBUG: Venv GPU detection timed out after 30 seconds", file=sys.stderr)
-        return _create_fallback_gpu_info("Detection timeout")
+        return _unavailable_gpu_info("Detection timeout", "torch-venv")
     except FileNotFoundError:
         print(f"DEBUG: Python executable not found: {python_exe}", file=sys.stderr)
-        return _create_fallback_gpu_info("Python executable not found")
+        return _unavailable_gpu_info("Python executable not found", "torch-venv")
     except PermissionError:
         print(f"DEBUG: Permission denied accessing venv: {venv_path}", file=sys.stderr)
-        return _create_fallback_gpu_info("Permission denied")
+        return _unavailable_gpu_info("Permission denied", "torch-venv")
     except Exception as e:
         print(f"DEBUG: Unexpected exception during venv GPU detection: {type(e).__name__}: {e}", file=sys.stderr)
-        return _create_fallback_gpu_info(f"Unexpected error: {type(e).__name__}")
+        return _unavailable_gpu_info(
+            f"Unexpected error: {type(e).__name__}", "torch-venv"
+        )
 
 def _create_fallback_gpu_info(reason):
     """Create fallback GPU info with specific reason, then try current process detection."""

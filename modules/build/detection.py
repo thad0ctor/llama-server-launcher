@@ -558,8 +558,16 @@ def _nvcc_in_root(root: str) -> str | None:
 
 def _root_from_nvcc(nvcc_path: str) -> str:
     """Given .../<root>/bin/nvcc, return <root>. Falls back to the nvcc
-    file's parent if the bin/ layout isn't present (rare)."""
-    parent = os.path.dirname(nvcc_path)
+    file's parent if the bin/ layout isn't present (rare).
+
+    ``nvcc`` is commonly a symlink (``/usr/bin/nvcc`` →
+    ``/usr/lib/cuda-X.Y/bin/nvcc`` on Debian-family distros), so deriving
+    the root from the literal path would return ``/usr`` and confuse the
+    toolkit-selection / dedupe logic. Resolve the symlink first to get the
+    real toolkit root.
+    """
+    resolved = os.path.realpath(nvcc_path)
+    parent = os.path.dirname(resolved)
     grand = os.path.dirname(parent)
     if os.path.basename(parent).lower() == "bin" and grand:
         return grand
