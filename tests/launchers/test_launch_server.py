@@ -306,7 +306,9 @@ class TestLaunchServerLinuxFallback:
         self, manager, launcher_mock
     ):
         """No supported terminal emulator is found; the code must
-        messagebox.warn, then fall back to Popen(script, shell=True)."""
+        messagebox.warn, then fall back to ``Popen([bash, '-lc', script])``
+        (``shell=False``, direct exec — no SAST-flagged shell layer).
+        """
         with patch.object(sys, "platform", "linux"), patch(
             "modules.launch.shutil.which", return_value=None
         ), patch("modules.launch.subprocess.Popen") as popen, patch(
@@ -316,10 +318,17 @@ class TestLaunchServerLinuxFallback:
             manager.launch_server()
 
         assert popen.called
-        # Popen(script_str, shell=True)
         args, kwargs = popen.call_args
-        assert isinstance(args[0], str), "Fallback must pass a single shell string"
-        assert kwargs.get("shell") is True
+        argv = args[0]
+        assert isinstance(argv, list), (
+            "Fallback must pass argv list [bash, '-lc', script], not a shell string"
+        )
+        assert len(argv) == 3
+        assert argv[0].endswith("bash") or argv[0].endswith("bash.exe")
+        assert argv[1] == "-lc"
+        assert isinstance(argv[2], str)
+        # ``shell=False`` (or omitted, which defaults to False).
+        assert not kwargs.get("shell", False)
         # User was warned.
         assert mb.showwarning.called
 

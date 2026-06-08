@@ -132,19 +132,32 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     terminal_launcher.open_command_in_terminal("winget install --id Kitware.CMake -e")
 
     argv = popen.call_args.args[0]
-    # ``_cmd_keep_open`` dropped ``/v:on`` (delayed expansion would
-    # corrupt ``!`` literals in user paths) and now uses ``call echo
-    # %%ERRORLEVEL%%`` for the post-status block. Match the new shape
-    # and the new combined success/failure message.
+    # ``_cmd_keep_open`` now writes the user command to a temp .cmd
+    # script and points ``cmd /k`` at the file (rather than passing
+    # the wrapped command inline). This sidesteps both ``!literal!``
+    # delayed-expansion AND ``%VAR%`` outer-parser expansion, so a
+    # path with ``%PATH%`` in it survives intact.
     assert argv[:6] == ["cmd", "/c", "start", "", "cmd", "/k"]
-    assert "winget install --id Kitware.CMake -e" in argv[6]
-    assert "Running command..." in argv[6]
-    # ``argv[6]`` is the LITERAL string passed to subprocess; cmd's
-    # second parse turns ``%%`` into ``%`` at runtime. Match the raw
-    # double-percent form so this assertion can't accidentally
-    # tolerate a single-``%`` regression that would emit
-    # ``%ERRORLEVEL%`` literally instead of the runtime value.
-    assert "Command finished with exit code %%ERRORLEVEL%%." in argv[6]
+    script_path = argv[6]
+    assert script_path.endswith(".cmd"), f"expected .cmd path, got {script_path!r}"
+    # Inspect the generated batch file to verify the wrapper contract
+    # (header, user command, exit-code echo, self-delete).
+    import os as _os
+    try:
+        with open(script_path, encoding="utf-8") as fh:
+            body = fh.read()
+    finally:
+        try:
+            _os.unlink(script_path)
+        except OSError:
+            pass
+    assert "winget install --id Kitware.CMake -e" in body
+    assert "Running command..." in body
+    # ``%ERRORLEVEL%`` (single ``%``) is the runtime value inside a
+    # batch file — the previous ``%%`` form was needed only because
+    # the string went through ``cmd /c``'s parser first.
+    assert "Command finished with exit code %ERRORLEVEL%." in body
+    assert 'del "%~f0"' in body
 
 
 def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypatch):

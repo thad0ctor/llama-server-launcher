@@ -32,22 +32,44 @@ def _bash_hold_open(command: str) -> str:
 def _cmd_keep_open(command: str) -> list[str]:
     """Return a Windows ``cmd`` invocation that reports success/failure.
 
-    Both shells run with delayed expansion OFF (cmd's default). The
-    previous ``/v:on`` form would silently strip ``!`` literals inside
-    the user's command — an exclamation mark in a directory name, a
-    quoted string with a history-style ``!`` — because delayed
-    expansion would try to resolve them as variables. We capture
-    ``ERRORLEVEL`` via ``call echo … %%ERRORLEVEL%%`` (double-percent
-    forces a second expansion pass at execution time, no delayed
-    expansion required).
+    Writes the user command to a temporary ``.cmd`` batch file and
+    executes that. The previous inline form ``cmd /c start "" cmd /k
+    "<wrapped>"`` had two layered cmd parsers eating tokens from the
+    user's command before it ran:
+
+    * ``!literal!`` was expanded as a delayed-expansion variable
+      (``/v:on``). Dropping ``/v:on`` solved that.
+    * ``%PATH%`` / ``%VAR%`` was expanded by the OUTER ``cmd`` at
+      parse time regardless of delayed expansion. The batch-file
+      approach side-steps it because the user's line lives inside a
+      .cmd file that the inner ``cmd /k`` reads directly — no outer
+      parser involved.
+
+    The script self-deletes via ``del "%~f0"`` after running so the
+    temp file doesn't accumulate.
     """
-    wrapped = (
-        'echo Running command... & '
-        f'{command} & '
-        'echo. & '
-        'call echo Command finished with exit code %%ERRORLEVEL%%.'
+    import tempfile
+    fd, script_path = tempfile.mkstemp(
+        suffix=".cmd", prefix="llama-launcher-", text=False
     )
-    return ["cmd", "/c", "start", "", "cmd", "/k", wrapped]
+    # cmd.exe requires CRLF line endings in .cmd files for reliable
+    # parsing; ``newline=""`` + explicit ``\r\n`` ensures that even
+    # on POSIX hosts running cross-platform tooling.
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write("@echo off\r\n")
+        fh.write("echo Running command...\r\n")
+        fh.write(f"{command}\r\n")
+        fh.write("echo.\r\n")
+        fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
+        # Self-delete after the user dismisses the keep-open shell.
+        # ``%~f0`` is the full path of the running .cmd. The user can
+        # type ``exit`` or close the window to trigger ``cmd /k``'s
+        # final return; once it returns, the next prompt would still
+        # be alive, so we ``del`` BEFORE ``exit`` from the script's
+        # last line (the user's ``cmd /k`` shell stays open for them
+        # to inspect output, but the script file itself is gone).
+        fh.write('del "%~f0"\r\n')
+    return ["cmd", "/c", "start", "", "cmd", "/k", script_path]
 
 
 def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> None:

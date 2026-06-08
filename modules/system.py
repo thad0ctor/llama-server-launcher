@@ -766,6 +766,15 @@ def load_cached_gpu_info(config_dir, venv_path):
     devices = gpu_info.get("devices")
     if not isinstance(devices, list):
         return None
+    # Reject contradictory cached payloads where ``available`` is False
+    # but ``device_count`` / ``devices`` say otherwise. Without this,
+    # ``fetch_system_info`` would happily copy the (non-empty) devices
+    # list into ``detected_gpu_devices`` and resurrect phantom GPU rows
+    # even though the cache itself reports the system as unavailable.
+    if gpu_info.get("available") is False and (
+        gpu_info.get("device_count", 0) != 0 or len(devices) != 0
+    ):
+        return None
     # Reject caches where ``device_count`` and ``len(devices)`` disagree.
     # A truncated/edited cache where these don't match would resurrect
     # phantom GPU slots in the UI (``device_count`` drives row count;

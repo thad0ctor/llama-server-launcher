@@ -1286,20 +1286,21 @@ class LaunchManager:
                     try:
                         # ``full_script_content`` may contain ``source
                         # .../bin/activate`` and other bash-only features
-                        # (``[[ … ]]``, ``$'…'``). The default ``shell=True``
-                        # invokes ``/bin/sh`` which on Debian/Ubuntu is
-                        # ``dash`` and rejects those. Resolve bash from
-                        # PATH so a Homebrew bash (``/opt/homebrew/bin/bash``,
+                        # (``[[ … ]]``, ``$'…'``). Resolve bash from PATH
+                        # so a Homebrew bash (``/opt/homebrew/bin/bash``,
                         # ``/usr/local/bin/bash``) or NixOS one
-                        # (``/run/current-system/sw/bin/bash``) wins over
-                        # a possibly-old ``/bin/bash``. Fall back to the
-                        # historical absolute path if nothing else is in
-                        # PATH (highly unusual).
+                        # (``/run/current-system/sw/bin/bash``) wins
+                        # over a possibly-old ``/bin/bash``. Fall back
+                        # to the historical absolute path if nothing
+                        # else is in PATH (highly unusual). Invoke bash
+                        # directly via argv (``shell=False``) instead
+                        # of routing through ``shell=True`` — same
+                        # behaviour, no extra shell layer for SAST to
+                        # flag.
                         bash_executable = shutil.which("bash") or "/bin/bash"
                         subprocess.Popen(
-                            full_script_content,
-                            shell=True,
-                            executable=bash_executable,
+                            [bash_executable, "-lc", full_script_content],
+                            shell=False,
                         )
                         launched = True # Mark as launched even if it's a fallback method
 

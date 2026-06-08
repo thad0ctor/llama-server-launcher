@@ -1296,8 +1296,19 @@ class ConfigManager:
                 and not self.launcher.saved_configs
                 and self.launcher.config_path.exists()):
             try:
-                existing_data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
-                if existing_data.get("configs"):
+                existing_data = json.loads(
+                    self.launcher.config_path.read_text(encoding="utf-8")
+                )
+                # A non-dict top-level (``[...]``, ``"broken"``, etc) is
+                # ALSO a "don't overwrite" signal — we don't know what
+                # the user has, but it isn't an empty dict and the
+                # in-memory state is empty, so blowing it away with our
+                # empty ``configs`` would lose data. Block the
+                # overwrite the same way as the populated-dict branch
+                # below. Without ``isinstance`` we'd hit
+                # ``AttributeError`` on ``.get`` and the whole save
+                # path would crash rather than just refusing.
+                if not isinstance(existing_data, dict) or existing_data.get("configs"):
                     print(
                         f"WARNING: Refusing to overwrite populated config at "
                         f"{self.launcher.config_path} with an empty configs dict "

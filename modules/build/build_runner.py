@@ -844,9 +844,24 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
 
     env_prefix = ""
     if plan.cmake_env:
+        # Defense in depth: ``BuildConfig.from_json`` already filters
+        # ``cmake_env`` keys through ``_ENV_NAME_RE`` at load time, but
+        # a ``BuildPlan`` can also be constructed programmatically (the
+        # tests do this) or via a future loader that skips the
+        # persistence layer. Re-validate here so the exported script
+        # never emits a shell-unsafe ``CC FLAGS="x"`` /
+        # ``CC;echo pwned="x"`` line.
+        import re as _re
+        _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        safe_env_items = [
+            (k, v) for k, v in plan.cmake_env.items()
+            if isinstance(k, str) and _env_name_re.fullmatch(k)
+        ]
         env_prefix = " ".join(
-            f"{k}={shlex.quote(v)}" for k, v in plan.cmake_env.items()
-        ) + " "
+            f"{k}={shlex.quote(v)}" for k, v in safe_env_items
+        )
+        if env_prefix:
+            env_prefix += " "
 
     cfg_head = f'{env_prefix}cmake -S "$SRC_DIR" -B "$BUILD_DIR"'
     if plan.generator:

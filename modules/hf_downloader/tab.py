@@ -154,8 +154,17 @@ class HuggingFaceDownloaderTab:
         self._trace_tokens = [
             self.repo_input_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.revision_var.trace_add("write", lambda *_a: self._persist_settings()),
-            self.download_mode_var.trace_add("write", lambda *_a: self._persist_settings()),
-            self.include_patterns_var.trace_add("write", lambda *_a: self._persist_settings()),
+            # ``download_mode_var`` and ``include_patterns_var`` also
+            # gate the Download button: snapshot mode and any non-empty
+            # include pattern allow downloading without a loaded
+            # listing. Refresh runtime state so the button enables
+            # immediately when the user switches mode / types a pattern.
+            self.download_mode_var.trace_add("write", lambda *_a: (
+                self._persist_settings(), self._refresh_runtime_state()
+            )),
+            self.include_patterns_var.trace_add("write", lambda *_a: (
+                self._persist_settings(), self._refresh_runtime_state()
+            )),
             self.ignore_patterns_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.force_download_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.local_files_only_var.trace_add("write", lambda *_a: self._persist_settings()),
@@ -376,7 +385,23 @@ class HuggingFaceDownloaderTab:
             version = f" (v{status.version})" if status.version else ""
             self.venv_status_var.set(f"{active}{version}")
             self._set_button_state(self._load_button, idle)
-            self._set_button_state(self._download_button, idle and bool(self._file_rows))
+            # Download is reachable WITHOUT a loaded file listing under
+            # two flows ``_on_download`` now accepts:
+            #   * snapshot mode (download everything in the repo);
+            #   * pattern-only ``selected`` mode (download whatever
+            #     matches ``include_patterns_var`` without picking
+            #     individual files).
+            # Listbox-selection mode still requires a loaded listing
+            # so the user has something to pick from.
+            mode = self.download_mode_var.get()
+            include_patterns_raw = self.include_patterns_var.get().strip()
+            download_ok_without_listing = (
+                mode == "snapshot" or bool(include_patterns_raw)
+            )
+            self._set_button_state(
+                self._download_button,
+                idle and (bool(self._file_rows) or download_ok_without_listing),
+            )
         else:
             detail = status.error or "not installed"
             self.venv_status_var.set(f"{active} [huggingface_hub missing: {detail}]")
@@ -756,49 +781,66 @@ class HuggingFaceDownloaderTab:
         except ValueError as exc:
             messagebox.showerror("Invalid repo", str(exc))
             return
-        # Refuse the download if the input has drifted since the file
-        # list was loaded. The selection in ``self._file_rows`` is only
-        # meaningful for the repo/revision that produced the listing;
-        # silently fetching against the changed input would download
-        # the wrong files (or fail with a confusing 404).
         current_revision = self.revision_var.get().strip()
-        if self._loaded_repo_id and parsed.repo_id != self._loaded_repo_id:
-            messagebox.showerror(
-                "Repo changed since load",
-                f"The file list was loaded for {self._loaded_repo_id!r}, but "
-                f"the input now reads {parsed.repo_id!r}. Click 'Load repo' "
-                f"again to refresh the listing, or restore the original URL.",
-            )
-            return
-        # ``is not None`` (not truthy): an explicit empty
-        # ``_loaded_revision`` means "listing came back for the repo's
-        # default branch" and the user later typing a specific ref
-        # must trigger the mismatch dialog. The previous truthy check
-        # let the new text silently win.
-        if (
-            self._loaded_revision is not None
-            and current_revision != self._loaded_revision
-        ):
-            messagebox.showerror(
-                "Revision changed since load",
-                f"The file list was loaded for revision {self._loaded_revision!r}, "
-                f"but the field now reads {current_revision!r}. Click 'Load repo' "
-                f"again so the file selection matches the revision you'll download.",
-            )
-            return
-        # Use the LOADED repo/revision (when present) — that's the
-        # exact identity the file selection is keyed against. Falling
-        # back to the current input only when no listing has been
-        # accepted yet preserves the historical behaviour for the
-        # "patterns-only, no listbox selection" flow.
-        effective_repo_id = self._loaded_repo_id or parsed.repo_id
+        # Drift checks ONLY apply when the user is relying on the
+        # loaded file listing — i.e. they ticked specific files in the
+        # listbox. Snapshot mode and pattern-only ``selected`` mode
+        # don't depend on the loaded file rows, so a different
+        # repo/revision in the input box doesn't make the download
+        # "wrong" — it just means the user wants to fetch from a
+        # different source than the one they last browsed. Skip the
+        # mismatch dialogs and the loaded-identity binding in those
+        # flows; fall back to the current input.
+        using_loaded_listing = bool(selected_files) and bool(self._file_rows)
+        if using_loaded_listing:
+            # Refuse the download if the input has drifted since the
+            # file list was loaded. The selection in
+            # ``self._file_rows`` is only meaningful for the
+            # repo/revision that produced the listing; silently
+            # fetching against the changed input would download the
+            # wrong files (or fail with a confusing 404).
+            if self._loaded_repo_id and parsed.repo_id != self._loaded_repo_id:
+                messagebox.showerror(
+                    "Repo changed since load",
+                    f"The file list was loaded for {self._loaded_repo_id!r}, but "
+                    f"the input now reads {parsed.repo_id!r}. Click 'Load repo' "
+                    f"again to refresh the listing, or restore the original URL.",
+                )
+                return
+            # ``is not None`` (not truthy): an explicit empty
+            # ``_loaded_revision`` means "listing came back for the repo's
+            # default branch" and the user later typing a specific ref
+            # must trigger the mismatch dialog. The previous truthy
+            # check let the new text silently win.
+            if (
+                self._loaded_revision is not None
+                and current_revision != self._loaded_revision
+            ):
+                messagebox.showerror(
+                    "Revision changed since load",
+                    f"The file list was loaded for revision {self._loaded_revision!r}, "
+                    f"but the field now reads {current_revision!r}. Click 'Load repo' "
+                    f"again so the file selection matches the revision you'll download.",
+                )
+                return
+        # Use the LOADED repo/revision only when the user is actually
+        # relying on the listing's file selection. Snapshot and
+        # pattern-only flows use the current input directly.
+        if not using_loaded_listing:
+            effective_repo_id = parsed.repo_id
+        else:
+            effective_repo_id = self._loaded_repo_id or parsed.repo_id
         # Prefer the pinned SHA so the download binds to the EXACT
         # commit that produced the file list. ``_loaded_revision``
         # (the ref name) is the user-facing fallback for older
         # listing payloads that didn't include a SHA. The
-        # current-input fallback only fires when no listing has been
-        # accepted yet (patterns-only flow).
-        if self._pinned_revision_sha:
+        # current-input fallback fires when:
+        # * no listing has been accepted yet (patterns-only flow), OR
+        # * the download isn't using the loaded listing (snapshot /
+        #   pattern-only) — see ``using_loaded_listing`` above.
+        if not using_loaded_listing:
+            effective_revision = current_revision
+        elif self._pinned_revision_sha:
             effective_revision = self._pinned_revision_sha
         elif self._loaded_revision is not None:
             effective_revision = self._loaded_revision

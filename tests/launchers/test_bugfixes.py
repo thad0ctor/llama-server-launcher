@@ -224,10 +224,17 @@ class TestEnvInjectionMarkerCollision:
         ), patch("modules.launch.messagebox"):
             manager.launch_server()
 
-        # Fallback direct-launch path calls Popen with shell=True and a
-        # string; capture it.
+        # Fallback direct-launch path now calls Popen with
+        # ``[bash_executable, "-lc", content]`` (shell=False, direct
+        # exec — no extra ``/bin/sh`` layer that SAST flags). The
+        # script content lives at index 2.
         assert "cmd" in captured
-        script = captured["cmd"]
+        argv = captured["cmd"]
+        assert isinstance(argv, list)
+        assert len(argv) == 3
+        assert argv[0].endswith("bash") or argv[0].endswith("bash.exe")
+        assert argv[1] == "-lc"
+        script = argv[2]
         assert isinstance(script, str)
 
         # venv activation appears exactly once.
