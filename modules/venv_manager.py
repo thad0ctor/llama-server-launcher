@@ -326,8 +326,26 @@ def build_remove_venv_command(
     *,
     platform: str | None = None,
 ) -> str:
-    """Return a shell command that removes ``venv_dir``."""
-    target = str(Path(venv_dir))
+    """Return a shell command that removes ``venv_dir``.
+
+    Rejects unsafe targets up front: blank/``"."``/filesystem-root paths
+    would otherwise compose into ``rm -rf .`` (current dir) or ``rm -rf /``
+    (whole disk), which is catastrophic on POSIX and arbitrary-folder
+    deletion on Windows (``rmdir /s /q .``).
+    """
+    raw = str(venv_dir or "")
+    if not raw.strip():
+        raise ValueError("Refusing to remove an empty venv path.")
+    target_path = Path(raw).expanduser()
+    # Compare the literal ``.``/``..`` (and any whitespace variant) against
+    # the current-dir sentinel without resolving — ``Path(".").resolve()``
+    # would just return the cwd and silently allow it.
+    if target_path == Path(".") or target_path == Path(".."):
+        raise ValueError(f"Refusing to remove unsafe venv path: {raw!r}")
+    if target_path.is_absolute() and target_path == Path(target_path.anchor):
+        # Anchor is the filesystem root (``/`` on POSIX, ``C:\`` on Windows).
+        raise ValueError(f"Refusing to remove filesystem root: {raw!r}")
+    target = str(target_path)
     plat = platform or sys.platform
     if plat.startswith("win"):
         # Force-quote so a venv path containing cmd metacharacters can't

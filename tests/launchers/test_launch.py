@@ -401,6 +401,25 @@ class TestLaunchersDir:
 
 
 class TestBackendSupportsFlag:
+    """``_backend_supports_flag`` resolves an exe's signature via
+    ``_exe_signature`` (path, mtime_ns, size). The tests use synthetic
+    ``/fake/exe`` paths that can't be stat'd, so each test monkey-patches
+    the signature method to return a stable fake. The signature MUST
+    change between distinct exe paths so the per-exe cache invariant
+    holds — ``_fake_sig`` derives a per-path stable signature.
+    """
+
+    def _fake_sig(self, exe_path):  # noqa: D401 — helper, not a fixture
+        # Stable but path-distinct: hash the path string so different
+        # ``exe_path`` arguments get distinct keys.
+        return (str(exe_path), hash(str(exe_path)) & 0xFFFFFFFF, 0)
+
+    def _patch_sig(self, manager, monkeypatch):
+        """Patch ``manager._exe_signature`` so synthetic paths pass."""
+        monkeypatch.setattr(
+            manager, "_exe_signature", self._fake_sig
+        )
+
     def _fake_run(self, stdout="", stderr="", raise_exc=None):
         from unittest.mock import MagicMock as _MM
         if raise_exc is not None:
@@ -410,9 +429,12 @@ class TestBackendSupportsFlag:
         result = _MM()
         result.stdout = stdout
         result.stderr = stderr
+        # Subprocess result needs a returncode for the empty-payload check.
+        result.returncode = 0
         return lambda *a, **kw: result
 
     def test_returns_true_when_flag_in_stdout(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stdout="usage: server [opts]\n  --fit on|off  fit memory\n"),
@@ -421,6 +443,7 @@ class TestBackendSupportsFlag:
 
     def test_returns_true_when_flag_in_stderr(self, manager, monkeypatch):
         # Some servers print --help to stderr.
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stderr="  --fit on|off\n"),
@@ -428,6 +451,7 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is True
 
     def test_returns_false_when_flag_absent(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stdout="usage: server [opts]\n  --threads N\n"),
@@ -435,6 +459,7 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
 
     def test_returns_false_on_subprocess_failure(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         import subprocess as _sp
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
@@ -443,6 +468,7 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
 
     def test_returns_false_on_oserror(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(raise_exc=OSError("exec format error")),
@@ -451,6 +477,7 @@ class TestBackendSupportsFlag:
 
     def test_does_not_match_substring_of_other_flag(self, manager, monkeypatch):
         # "--fitness" should not satisfy a probe for "--fit".
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stdout="  --fitness foo\n"),
@@ -468,6 +495,7 @@ class TestBackendSupportsFlag:
         from unittest.mock import MagicMock as _MM
         import subprocess as _sp
 
+        self._patch_sig(manager, monkeypatch)
         call_count = {"n": 0}
 
         def _flaky_run(*a, **kw):
@@ -477,13 +505,17 @@ class TestBackendSupportsFlag:
             r = _MM()
             r.stdout = "  --fit on|off\n"
             r.stderr = ""
+            r.returncode = 0
             return r
 
         monkeypatch.setattr("modules.launch.subprocess.run", _flaky_run)
 
         # First call hits the timeout — returns False, must NOT cache.
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
-        assert ("/fake/exe", "--fit") not in manager._feature_probe_cache, (
+        # The cache key is now (path, mtime_ns, size, flag) — check that no
+        # entry for this exe/flag exists rather than the old 2-tuple shape.
+        sig = self._fake_sig("/fake/exe")
+        assert (*sig, "--fit") not in manager._feature_probe_cache, (
             "transient probe failures must not be memoized"
         )
 
@@ -504,6 +536,7 @@ class TestBackendSupportsFlag:
         remain independent (a build that lists ``--fit`` but not
         ``--fit-margin`` reports True/False respectively).
         """
+        self._patch_sig(manager, monkeypatch)
         calls = {"n": 0}
 
         def _counting_run(*a, **kw):
@@ -512,6 +545,7 @@ class TestBackendSupportsFlag:
             r = _MM()
             r.stdout = "  --fit on|off\n  --other-flag X\n"
             r.stderr = ""
+            r.returncode = 0
             return r
 
         monkeypatch.setattr("modules.launch.subprocess.run", _counting_run)

@@ -432,7 +432,19 @@ class HuggingFaceDownloaderTab:
             self._huggingface_dependency(),
             platform=sys.platform,
         )
-        terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        except Exception as exc:
+            # Failing to spawn the terminal (no supported emulator,
+            # permission denied, etc.) used to bubble up and leave the tab
+            # in a broken state. Surface a recoverable error and bail
+            # without arming the dependency watch loop.
+            messagebox.showerror(
+                "Install / update huggingface_hub",
+                f"Failed to open terminal:\n{exc}",
+            )
+            self.status_var.set("Failed to open terminal for huggingface_hub install.")
+            return
         self.status_var.set(
             "Opened terminal to install or update huggingface_hub. Waiting for it to appear in the venv…"
         )

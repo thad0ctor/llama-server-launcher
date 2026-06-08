@@ -588,10 +588,15 @@ def _cuda_version_satisfies(min_required: str | None, detected: str | None) -> b
     """Return True iff a flag declaring ``cuda_version_min=min_required`` is
     permitted for ``detected``.
 
+    Permissive: an unknown ``detected`` is treated as compatible. The
+    callers that want strict semantics (auto-ENABLING a version-fenced
+    flag on detection alone) must add an explicit
+    ``cuda_version is not None`` guard at the call site.
+
     - If the flag has no ``cuda_version_min`` set, always True.
-    - If the detected CUDA version is unknown (None), be permissive (True) so
-      callers without detection don't lose flags. The Build tab passes a
-      detected version when it has one.
+    - If the detected CUDA version is unknown (None), be permissive (True)
+      so callers without detection don't lose flags the user manually
+      enabled. The Build tab passes a detected version when it has one.
     - Otherwise compare numerically: detected >= min_required.
     """
     if not min_required:
@@ -643,8 +648,18 @@ def build_autodetect_values(
             if cuda_device_count >= 2:
                 values["GGML_CUDA_NCCL"] = True
             compression_flag = _FLAG_BY_KEY.get("GGML_CUDA_COMPRESSION_MODE")
-            if compression_flag is not None and _cuda_version_satisfies(
-                compression_flag.cuda_version_min, cuda_version
+            # Strict gate: only AUTO-enable a version-fenced flag when we
+            # actually know the toolkit version. The shared
+            # ``_cuda_version_satisfies`` helper is permissive on missing
+            # detection (so manual toggles aren't dropped); here we add an
+            # explicit ``is not None`` check so an undetected CUDA install
+            # doesn't get this flag silently injected.
+            if (
+                compression_flag is not None
+                and cuda_version is not None
+                and _cuda_version_satisfies(
+                    compression_flag.cuda_version_min, cuda_version
+                )
             ):
                 values["GGML_CUDA_COMPRESSION_MODE"] = "speed"
         else:

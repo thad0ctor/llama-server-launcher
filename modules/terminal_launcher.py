@@ -66,7 +66,14 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
             "x-terminal-emulator": ["-e", "bash", "-lc", term_command],
             "xterm": ["-hold", "-e", "bash", "-lc", term_command],
         }
-        env_terminal = os.environ.get("TERMINAL", "").strip()
+        env_terminal_raw = os.environ.get("TERMINAL", "").strip()
+        # ``$TERMINAL`` is conventionally a name (``gnome-terminal``), but
+        # users sometimes set it to an absolute path
+        # (``/usr/local/bin/gnome-terminal``). Look up our argument template
+        # by the basename so a path-form $TERMINAL still gets the right
+        # ``-- bash -lc`` / ``--hold -e ...`` form instead of falling
+        # through to the safe-default ``-e`` invocation.
+        env_terminal = Path(env_terminal_raw).name if env_terminal_raw else ""
         ordered_names: list[str] = []
         if env_terminal:
             ordered_names.append(env_terminal)

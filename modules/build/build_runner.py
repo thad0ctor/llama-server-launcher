@@ -680,6 +680,11 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
     # default parallelism. The runner has identical semantics.
     jobs = plan.jobs if plan.jobs and plan.jobs > 0 else None
     jobs_arg = f" -j {jobs}" if jobs else ""
-    lines.append(f'cmake --build "$BUILD_DIR" --config Release{jobs_arg}')
+    # Apply ``env_prefix`` to ``cmake --build`` too — ``BuildRunner._run``
+    # passes ``plan.cmake_env`` to BOTH the configure and build stages, so
+    # the exported shell script must do the same or an in-app build that
+    # depends on e.g. ``CUDACXX=/path/to/nvcc`` for the build step will
+    # silently fail when run from the exported script.
+    lines.append(f'{env_prefix}cmake --build "$BUILD_DIR" --config Release{jobs_arg}')
     lines.append("")
     return "\n".join(lines)

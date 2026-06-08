@@ -42,32 +42,48 @@ class LaunchManager:
     def __init__(self, launcher_instance):
         """Initialize with a reference to the main launcher instance."""
         self.launcher = launcher_instance
-        # Caches results of `<exe> --help` probes keyed by (exe_path, flag).
-        # Used to gracefully skip flags older builds don't recognize, e.g.
-        # --fit on ik_llama builds that predate fit support.
-        self._feature_probe_cache: dict[tuple[str, str], bool] = {}
-        # Caches the raw ``<exe> --help`` text by exe so multiple flag
-        # checks on the same exe pay one subprocess + N regex matches
-        # instead of N subprocesses. ``None`` means "we tried and the
-        # probe failed" — distinct from "we never tried" (missing key).
-        self._help_text_cache: dict[str, str | None] = {}
+        # Caches results of `<exe> --help` probes keyed by
+        # (exe_path, mtime_ns, size, flag). Including mtime+size invalidates
+        # the cache when a user rebuilds the server binary in the same app
+        # session — without it, the rebuilt binary would silently report
+        # its old (smaller) capability set.
+        self._feature_probe_cache: dict[tuple[str, int, int, str], bool] = {}
+        # Caches the raw ``<exe> --help`` text keyed by
+        # (exe_path, mtime_ns, size). Only successful probes with non-empty
+        # output are cached — a transient failure (timeout, briefly empty
+        # output) is not memoized, so the next probe gets a fresh shot.
+        self._help_text_cache: dict[tuple[str, int, int], str] = {}
+
+    def _exe_signature(self, exe_path) -> tuple[str, int, int] | None:
+        """Return ``(path, mtime_ns, size)`` for the cache key, or ``None``
+        if the file can't be stat'd (treat as not-cacheable). Path is
+        stringified verbatim so reordering callers don't have to."""
+        try:
+            stat_result = Path(exe_path).stat()
+        except OSError:
+            return None
+        return (str(exe_path), stat_result.st_mtime_ns, stat_result.st_size)
 
     def _backend_supports_flag(self, exe_path, flag):
         """Return True if `exe_path --help` advertises `flag`.
 
-        Caches per (exe, flag) AND caches the raw ``--help`` output per exe
-        so a launch that needs to check N flags spawns at most one
-        subprocess instead of N. On any probe failure (timeout, non-zero
-        exit, OSError), assumes the flag is unsupported — safer than
-        emitting an unknown argument that would crash the server at
-        startup.
+        Caches per (exe-signature, flag) AND caches the raw ``--help``
+        output per exe-signature so a launch that needs to check N flags
+        spawns at most one subprocess instead of N. On any probe failure
+        (timeout, non-zero exit, OSError), assumes the flag is unsupported
+        — safer than emitting an unknown argument that would crash the
+        server at startup.
         """
-        exe_key = str(exe_path)
-        cache_key = (exe_key, flag)
+        sig = self._exe_signature(exe_path)
+        if sig is None:
+            # Can't stat the file (deleted between detection and launch,
+            # path-not-a-file, …). Don't cache; report unsupported.
+            return False
+        cache_key = (*sig, flag)
         if cache_key in self._feature_probe_cache:
             return self._feature_probe_cache[cache_key]
 
-        help_text = self._get_help_text(exe_path)
+        help_text = self._get_help_text(exe_path, sig=sig)
         if help_text is None:
             # ``_get_help_text`` already logged; treat as unsupported for
             # this call only and don't memoize (so a later call can retry
@@ -86,16 +102,22 @@ class LaunchManager:
         self._feature_probe_cache[cache_key] = supported
         return supported
 
-    def _get_help_text(self, exe_path) -> str | None:
-        """Return cached ``<exe> --help`` output (one subprocess per exe).
+    def _get_help_text(self, exe_path, *, sig: tuple[str, int, int] | None = None) -> str | None:
+        """Return cached ``<exe> --help`` output (one subprocess per exe
+        signature).
 
         Returns ``None`` on probe failure (timeout, OSError, non-zero exit
-        with no output). Failures are *not* memoized — a later flag check
-        on the same exe will retry.
+        with empty output, exe vanished). Failures are NOT memoized — a
+        later flag check on the same exe will retry. Empty help payloads
+        are also rejected so a momentarily-broken binary doesn't poison
+        every subsequent probe on the same path in this session.
         """
-        exe_key = str(exe_path)
-        if exe_key in self._help_text_cache:
-            return self._help_text_cache[exe_key]
+        if sig is None:
+            sig = self._exe_signature(exe_path)
+            if sig is None:
+                return None
+        if sig in self._help_text_cache:
+            return self._help_text_cache[sig]
         try:
             result = subprocess.run(
                 [str(exe_path), "--help"],
@@ -113,7 +135,18 @@ class LaunchManager:
                 file=sys.stderr,
             )
             return None
-        self._help_text_cache[exe_key] = help_text
+        # An empty payload combined with a non-zero exit means the binary
+        # didn't respond meaningfully — don't memoize. Memoizing here used
+        # to wedge the session into "no flags supported" if the FIRST
+        # probe caught a transient failure.
+        if result.returncode != 0 and not help_text.strip():
+            print(
+                f"DEBUG: Feature probe returned empty output (rc={result.returncode}) "
+                f"for {exe_path}; not caching so the next call can retry",
+                file=sys.stderr,
+            )
+            return None
+        self._help_text_cache[sig] = help_text
         return help_text
 
     def _effective_venv_path(self) -> str:

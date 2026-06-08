@@ -354,7 +354,7 @@ class TestCheckVersionOnline:
         assert about.version_status == "Check Failed"
         about._update_version_display.assert_called_once()
 
-    def test_http_non_200_sets_check_failed(self, about):
+    def test_http_non_200_sets_check_failed(self, about, requests_module):
         """A 404 or 500 also surfaces as ``Check Failed`` — not silent success."""
         about._update_version_display = MagicMock()
         fake_resp = MagicMock()
@@ -366,7 +366,7 @@ class TestCheckVersionOnline:
 
         assert about.version_status == "Check Failed"
 
-    def test_up_to_date_sets_current(self, about):
+    def test_up_to_date_sets_current(self, about, requests_module):
         """Remote matches local → status ``Current`` and no update button."""
         about._update_version_display = MagicMock()
         about._show_update_button = MagicMock()
@@ -383,7 +383,7 @@ class TestCheckVersionOnline:
         assert about.remote_version == "2024-01-01-1"
         about._show_update_button.assert_not_called()
 
-    def test_newer_remote_sets_update_available(self, about):
+    def test_newer_remote_sets_update_available(self, about, requests_module):
         about._update_version_display = MagicMock()
         about._show_update_button = MagicMock()
         about.version = "2024-01-01-1"
