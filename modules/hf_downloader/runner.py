@@ -164,14 +164,30 @@ def _build_progress_tqdm_class():  # pragma: no cover - exercised indirectly
     return _ProgressTqdm
 
 
+def _normalize_pattern_list(value) -> list[str]:
+    """Coerce a payload field to ``list[str]`` at the runner boundary.
+
+    The UI always sends list/tuple values, but this module is also reachable
+    via ``python -m modules.hf_downloader.runner ... <payload.json>`` from
+    the CLI, where a hand-written payload can easily carry a bare string
+    (e.g. ``"include_patterns": "*.gguf"``). That string would silently
+    iterate as characters and hand ``snapshot_download`` a nonsense filter.
+    Wrap bare strings in a single-item list and drop non-string entries.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    return [item for item in value if isinstance(item, str) and item]
+
+
 def _combined_allow_patterns(payload: dict) -> list[str] | None:
     mode = payload.get("download_mode", "selected")
     patterns: list[str] = []
     if mode == "selected":
-        patterns.extend(payload.get("selected_files") or [])
-    patterns.extend(payload.get("include_patterns") or [])
-    cleaned = [item for item in patterns if item]
-    return cleaned or None
+        patterns.extend(_normalize_pattern_list(payload.get("selected_files")))
+    patterns.extend(_normalize_pattern_list(payload.get("include_patterns")))
+    return patterns or None
 
 
 def run_download(payload: dict) -> int:
@@ -181,7 +197,7 @@ def run_download(payload: dict) -> int:
     revision = (payload.get("revision") or "").strip() or None
     token = _token_value(payload)
     allow_patterns = _combined_allow_patterns(payload)
-    ignore_patterns = [item for item in payload.get("ignore_patterns") or [] if item] or None
+    ignore_patterns = _normalize_pattern_list(payload.get("ignore_patterns")) or None
     target_dirs = [Path(path) for path in payload.get("target_dirs") or []]
     # Validate + clamp at the runner boundary. The UI clamps too, but this
     # module is also reachable via ``python -m modules.hf_downloader.runner

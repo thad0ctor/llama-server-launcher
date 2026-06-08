@@ -157,6 +157,7 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
         return status
     status.is_git_repo = True
 
+    fetched = False
     if do_fetch:
         # 20s caps how long the UI's upstream-check banner is stale on a
         # slow / unreachable origin. The fetch runs on a background thread,
@@ -165,6 +166,8 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
         if rc != 0:
             status.error = (err or "git fetch failed").strip()
             # Don't bail — we can still report local-only state.
+        else:
+            fetched = True
 
     rc, out, _ = _run_capture(
         ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
@@ -199,7 +202,13 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
             except ValueError:
                 pass
 
-    status.last_fetch_at = time.time()
+    # Only stamp ``last_fetch_at`` when ``git fetch`` actually succeeded.
+    # Callers use this to distinguish "remote state was refreshed" from
+    # "this was a local-only / stale probe"; updating it on every probe
+    # made the UI's "last refreshed N seconds ago" indicator lie when
+    # fetch was skipped (do_fetch=False) or failed.
+    if fetched:
+        status.last_fetch_at = time.time()
     return status
 
 
@@ -573,6 +582,8 @@ class BuildRunner:
                 buf.extend(chunk)
                 # Split on \n; also break on \r so carriage-return progress
                 # bars (compiler/linker) don't pile up into one giant line.
+                # CRLF (Windows builds) is consumed as a single break to
+                # avoid spamming the console with empty lines.
                 while True:
                     nl = -1
                     for i, b in enumerate(buf):
@@ -585,9 +596,14 @@ class BuildRunner:
                             self._emit_line(buf.decode("utf-8", errors="replace"))
                             buf.clear()
                         break
+                    sep = buf[nl]
                     line = bytes(buf[:nl]).decode("utf-8", errors="replace")
                     self._emit_line(line)
                     del buf[: nl + 1]
+                    # If the break was CR and the next byte is LF, consume
+                    # the LF too so CRLF doesn't emit a phantom empty line.
+                    if sep == 13 and buf[:1] == b"\n":
+                        del buf[:1]
             if buf:
                 self._emit_line(buf.decode("utf-8", errors="replace"))
         except Exception as exc:

@@ -140,7 +140,20 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
             "    activate\n"
             "end tell\n"
         )
-        subprocess.Popen(["osascript", "-e", applescript], cwd=cwd_text)
+        # The script self-deletes once Terminal.app runs it, but if
+        # ``osascript`` itself fails to spawn (PATH issue, sandbox denial,
+        # OS resource limit) that self-delete never runs and the temp
+        # launcher file leaks. Every retry would then leave another stub
+        # behind. Clean up explicitly on failure before bubbling the
+        # exception to the caller.
+        try:
+            subprocess.Popen(["osascript", "-e", applescript], cwd=cwd_text)
+        except Exception:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+            raise
         return
 
     if sys.platform.startswith("win"):

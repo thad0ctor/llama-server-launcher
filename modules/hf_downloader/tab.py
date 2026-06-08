@@ -509,11 +509,26 @@ class HuggingFaceDownloaderTab:
             self._dep_watch_venv = None
             return
         if available:
+            # Close out the install-watch with a visible status. Otherwise
+            # the status panel stays stuck on the earlier "Waiting for it
+            # to appear in the venv…" message even though buttons have
+            # already re-enabled — confusing.
+            self.status_var.set(
+                "huggingface_hub is now available in the active venv."
+            )
             self._dep_watch_venv = None
             self._refresh_runtime_state()
             return
         if time.monotonic() > self._dep_watch_deadline:
+            # Same visibility issue on the timeout branch — the watch
+            # used to exit silently, leaving the user with no signal that
+            # the install never completed.
+            self.status_var.set(
+                "Timed out waiting for huggingface_hub to appear. "
+                "Refresh deps to probe again."
+            )
             self._dep_watch_venv = None
+            self._refresh_runtime_state()
             return
         try:
             self._dep_watch_after_id = self.root.after(
