@@ -465,15 +465,34 @@ class TestEmissionParity:
 
         partial = []
         emit_spec_args(launcher, backend, partial)
-        for flag in expected_flags:
-            assert flag in partial, (
-                f"backend={backend} spec_type={spec_type}: " f"expected {flag!r} in emitted args; got {partial!r}"
-            )
-        # When type=none, no --spec-* / --draft-* flags should be in argv.
+        # Set-equality on option tokens only (``--spec-*`` /
+        # ``--draft-*``). The test's ``expected_flags`` data also
+        # carries value tokens for some rows (e.g. ``"draft-mtp"``
+        # as the value of ``--spec-type``); strip both sides to the
+        # option-prefix set so a regression that leaks an extra
+        # ``--spec-draft-…`` flag on a subset spec_type fails
+        # loudly, but the value tokens stay free to vary.
+        def _option_tokens(args):
+            return {
+                arg for arg in args
+                if isinstance(arg, str)
+                and (arg.startswith("--spec-") or arg.startswith("--draft-"))
+            }
+        emitted_option_flags = _option_tokens(partial)
+        expected_option_flags = _option_tokens(expected_flags)
         if spec_type == "none":
-            assert not any(
-                arg.startswith("--spec-") or arg.startswith("--draft-") for arg in partial
-            ), f"type=none must emit no spec/draft flags; got {partial!r}"
+            # type=none → no --spec-* / --draft-* flags AT ALL.
+            assert emitted_option_flags == set(), (
+                f"backend={backend} spec_type=none must emit no spec/draft "
+                f"flags; got leaked={emitted_option_flags!r} partial={partial!r}"
+            )
+        else:
+            assert emitted_option_flags == expected_option_flags, (
+                f"backend={backend} spec_type={spec_type}: emitted spec/draft "
+                f"option flags must equal expected set. "
+                f"expected={expected_option_flags!r} "
+                f"emitted={emitted_option_flags!r} partial={partial!r}"
+            )
 
     def test_mtp_overrides_parallel_8_at_launch(self, real_launcher):
         """MTP requires --parallel 1. If the user has parallel=8 in config

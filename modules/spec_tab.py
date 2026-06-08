@@ -937,12 +937,21 @@ class SpecTab:
             # selection — that's the leftover-from-prior-non-manual
             # case the original clear was meant to handle.
             #
-            # ``loaded_selected`` is the persisted-selection set built
-            # at the top of this method; ``sorted`` ensures we
-            # reconstruct the same comma order the non-manual branch
-            # above uses when it stamps the field.
+            # ``loaded_selected`` includes EVERY persisted index,
+            # even out-of-range ones (``CUDA99`` from a stale config)
+            # that the non-manual branch above filters out via
+            # ``valid_selected``. To detect the leftover-from-prior-
+            # non-manual case correctly, reconstruct the same
+            # filtered/valid list — otherwise a "stale config" with
+            # ``CUDA99`` baked into ``spec_draft_device`` would never
+            # match the recomputed string and we'd treat it as a
+            # manual override, which it isn't.
+            sanitized_for_compare = [
+                i for i in sorted(loaded_selected)
+                if count == 0 or 0 <= i < count
+            ]
             checkbox_derived = ",".join(
-                f"CUDA{i}" for i in sorted(loaded_selected)
+                f"CUDA{i}" for i in sanitized_for_compare
             )
             try:
                 if self.spec_draft_device.get() == checkbox_derived:

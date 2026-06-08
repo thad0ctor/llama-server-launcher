@@ -288,7 +288,10 @@ class TestEnvInjectionMarkerCollision:
         # The substring "llama-server" should appear in the command (plus
         # in the boilerplate echo). We just verify the script is executable
         # and well-formed.
-        assert text.startswith("#!/bin/bash")
+        # Env-based shebang resolves bash via PATH so the saved
+        # script works on hosts where bash isn't at /bin (NixOS,
+        # macOS Homebrew before a /bin symlink, busybox containers).
+        assert text.startswith("#!/usr/bin/env bash")
         # No truncation of the model arg has happened: the marker itself,
         # including ``Virtual environment activated."``, still appears.
         # (Single-quoted by shlex, so embedded double-quotes are preserved.)

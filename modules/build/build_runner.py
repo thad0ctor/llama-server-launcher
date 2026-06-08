@@ -404,6 +404,11 @@ class BuildRunner:
                 self.events.get_nowait()
         except queue.Empty:
             pass
+        # Same reasoning for the dropped-line counter — without this
+        # reset, a status line like ``[3 lines dropped]`` from the
+        # previous build would leak into the start of the next one.
+        with self._lock:
+            self._dropped_output_lines = 0
         self._cancel.clear()
         self._thread = threading.Thread(
             target=self._run, args=(plan,), name="BuildRunner", daemon=True,

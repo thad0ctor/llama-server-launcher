@@ -535,6 +535,13 @@ class ConfigManager:
         # silently emit an empty ``--chat-template`` and ``current_cfg``
         # round-trips a valid name back to disk.
         saved_predefined = cfg.get("predefined_template_name", default_predefined_key)
+        # Coerce non-string values (a JSON-edited ``null``,
+        # ``false``, or a number) to the default. The downstream
+        # ``predefined_template_name.set`` is a ``tk.StringVar.set``
+        # which would either AttributeError or stringify the value
+        # into a name that doesn't match any template key.
+        if not isinstance(saved_predefined, str):
+            saved_predefined = default_predefined_key
         if (
             saved_predefined
             and saved_predefined not in self.launcher._all_templates

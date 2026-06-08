@@ -370,8 +370,17 @@ def default_selected_repo_paths(paths: list[str]) -> tuple[str, ...]:
         return tuple(dict.fromkeys([*primary_with_shards, *mmproj]))
     weights = [path for path in paths if classify_repo_file(path) == "weights"]
     if weights:
+        # Rank weight candidates the same way GGUFs are ranked so the
+        # default picks a meaningful primary (preferred-token match
+        # first, then alphabetical / shortest path) instead of
+        # whatever happened to land at ``weights[0]`` after the
+        # listing sort. The same ``_gguf_sort_key`` works fine for
+        # safetensors / ``*.bin`` filenames — token rank still falls
+        # through to the alphabetical tiebreak for non-quant
+        # filenames, which is what we want.
+        primary_weight = min(weights, key=_gguf_sort_key)
         # Same shard-set expansion for safetensors / *.bin.
-        primary_weight_shards = _shard_siblings(weights[0], weights)
+        primary_weight_shards = _shard_siblings(primary_weight, weights)
         return tuple(dict.fromkeys(primary_weight_shards))
     return tuple(paths[:1])
 

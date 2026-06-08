@@ -370,15 +370,21 @@ def build_bootstrap_venv_command(
         else dependencies
     )
     packages = [dep.install_name or dep.package_name for dep in install_list]
-    upgrade_pip_cmd = _shell_join(
-        [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
-        platform=platform,
-    )
-    # Skip the trailing ``pip install`` step when there are no packages to
-    # install — otherwise we emit a bare ``pip install`` that exits non-zero
-    # and breaks the chained shell pipeline.
-    commands = [create_cmd, upgrade_pip_cmd]
+    # ``commands`` starts as just the venv create. The pip upgrade
+    # and the install line only get appended when there are packages
+    # to install. Without this gate, a caller passing
+    # ``dependencies=()`` (genuinely "create venv only, no managed
+    # installs") would still emit ``python -m pip install --upgrade
+    # pip`` and require network access — exactly the offline /
+    # "create only" flow that empty-deps was meant to support.
+    commands = [create_cmd]
     if packages:
+        commands.append(
+            _shell_join(
+                [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
+                platform=platform,
+            )
+        )
         commands.append(
             _shell_join(
                 [str(python_path), "-m", "pip", "install", *packages],

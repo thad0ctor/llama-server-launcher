@@ -1215,6 +1215,15 @@ class HuggingFaceDownloaderTab:
         if kind == "error":
             self.status_var.set(event.get("message", "Operation failed."))
             return
+        if kind == "warn":
+            # Non-fatal runner-side warnings (probe-cleanup failures,
+            # leaked temp files, etc). Surface to the status bar so
+            # log scrapers / users notice without aborting the
+            # operation. The runner keeps going.
+            self.status_var.set(
+                event.get("message", "Warning from runner.")
+            )
+            return
         if kind == "process-exit":
             self._finalize_process(event)
 

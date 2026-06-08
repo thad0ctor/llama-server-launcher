@@ -1125,7 +1125,9 @@ class TestSaveShScript:
     def test_script_has_shebang_and_set_e(self, manager, launcher_mock, tmp_path):
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert text.startswith("#!/bin/bash")
+        # Env-based shebang for portability (NixOS / Homebrew / hosts
+        # without ``/bin/bash``).
+        assert text.startswith("#!/usr/bin/env bash")
         assert "set -e" in text
 
     @pytest.mark.skipif(

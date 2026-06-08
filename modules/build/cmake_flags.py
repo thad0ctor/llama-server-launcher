@@ -642,8 +642,13 @@ def build_autodetect_values(
     schema default so the resulting preset doesn't silently inject a flag
     the user's toolkit can't accept.
 
-    ``cuda_device_count`` gates multi-GPU-only flags like ``GGML_CUDA_NCCL``
-    (which pulls in libnccl-dev and has no value on a single-GPU machine).
+    ``cuda_device_count`` is currently UNUSED. ``GGML_CUDA_NCCL`` used to
+    auto-enable on ``>= 2`` devices, but multi-GPU alone doesn't prove
+    ``libnccl-dev`` is installed — toggling the flag on without the
+    library turned the autodetect path's "optimized" preset into a
+    confusing configure failure for users without it. NCCL is now
+    a manual opt-in from the Build tab. The parameter stays on the
+    signature for back-compat with existing callers.
     """
     values = default_values_for_backend(backend)
 

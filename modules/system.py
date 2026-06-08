@@ -761,7 +761,13 @@ def load_cached_gpu_info(config_dir, venv_path):
     # ``device_count`` is int + ``devices`` is a list.
     if not isinstance(gpu_info.get("available"), bool):
         return None
-    if not isinstance(gpu_info.get("device_count"), int):
+    # ``bool`` is an ``int`` subclass in Python, so
+    # ``isinstance(True, int)`` is True and a hand-edited
+    # ``{"device_count": true}`` would otherwise count as a 1-GPU
+    # cache hit. Exclude booleans the same way the per-device ``id``
+    # check below does.
+    device_count_value = gpu_info.get("device_count")
+    if not isinstance(device_count_value, int) or isinstance(device_count_value, bool):
         return None
     devices = gpu_info.get("devices")
     if not isinstance(devices, list):
