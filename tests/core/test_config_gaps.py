@@ -197,7 +197,11 @@ class TestLoadConfiguration:
         assert launcher.fit_enabled.get() is True
         assert launcher.fit_target.get() == "1024"
         assert launcher.template_source.get() == "default"
-        assert launcher.predefined_template_name.get() == "ChatML"  # first key
+        # Don't hard-code "ChatML" — derive from the launcher's loaded
+        # template catalogue so reorders / renames in
+        # ``config/chat_templates.json`` don't break this test.
+        expected_first_template = next(iter(launcher._all_templates.keys()))
+        assert launcher.predefined_template_name.get() == expected_first_template
         assert launcher.custom_template_string.get() == ""
         assert launcher.jinja_enabled.get() is False
         assert launcher.custom_parameters_list == []

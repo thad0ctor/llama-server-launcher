@@ -322,11 +322,30 @@ class BuildConfigStore:
 
     # ---------------------------------------------------------------- crud
     def list_names(self) -> list[str]:
-        self._load()
+        # If ``_load`` failed (unreadable / malformed file), log the
+        # condition so the UI's "no saved configs" view is recognisable
+        # as a load failure rather than a genuinely empty store. We
+        # deliberately don't raise — the build_tab's dropdown can
+        # tolerate an empty list, and a transient permission issue
+        # shouldn't crash the UI.
+        if not self._load():
+            print(
+                "WARN: list_names() returning empty list because "
+                "build_configs.json could not be loaded; see earlier "
+                "WARN lines for the underlying cause.",
+                file=sys.stderr,
+            )
         return sorted(self._cache.keys(), key=str.lower)
 
     def get(self, name: str) -> BuildConfig | None:
-        self._load()
+        if not self._load():
+            print(
+                f"WARN: get({name!r}) returning None because "
+                f"build_configs.json could not be loaded; see earlier "
+                f"WARN lines for the underlying cause.",
+                file=sys.stderr,
+            )
+            return None
         cfg = self._cache.get(name)
         # Return an independent copy so callers can't reach back into the
         # cache and mutate the stored BuildConfig in place. Without this,

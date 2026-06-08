@@ -139,7 +139,12 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     assert argv[:6] == ["cmd", "/c", "start", "", "cmd", "/k"]
     assert "winget install --id Kitware.CMake -e" in argv[6]
     assert "Running command..." in argv[6]
-    assert "Command finished with exit code %ERRORLEVEL%." in argv[6]
+    # ``argv[6]`` is the LITERAL string passed to subprocess; cmd's
+    # second parse turns ``%%`` into ``%`` at runtime. Match the raw
+    # double-percent form so this assertion can't accidentally
+    # tolerate a single-``%`` regression that would emit
+    # ``%ERRORLEVEL%`` literally instead of the runtime value.
+    assert "Command finished with exit code %%ERRORLEVEL%%." in argv[6]
 
 
 def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypatch):

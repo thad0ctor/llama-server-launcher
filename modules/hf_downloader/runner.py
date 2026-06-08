@@ -338,10 +338,21 @@ def run_download(payload: dict) -> int:
             if probe_path:
                 try:
                     os.unlink(probe_path)
-                except OSError:
-                    # Probe file leaked — surface as a writability failure
-                    # rather than silently leaving the stub.
-                    pass
+                except OSError as exc:
+                    # The comment above said "surface as a writability
+                    # failure" but the bare ``pass`` did the opposite —
+                    # the probe leak silently went un-reported. Emit
+                    # the failure so log scrapers can flag the
+                    # accumulating stubs (NTFS quota, permission churn,
+                    # etc) instead of having to manually diff
+                    # ``ls -la`` between runs.
+                    _emit(
+                        "warn",
+                        message=(
+                            f"Failed to remove writability probe at "
+                            f"{probe_path}: {exc!r}"
+                        ),
+                    )
 
     for index, target_dir in enumerate(target_dirs, start=1):
         _emit(

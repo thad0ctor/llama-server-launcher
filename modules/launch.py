@@ -1288,13 +1288,18 @@ class LaunchManager:
                         # .../bin/activate`` and other bash-only features
                         # (``[[ … ]]``, ``$'…'``). The default ``shell=True``
                         # invokes ``/bin/sh`` which on Debian/Ubuntu is
-                        # ``dash`` and rejects those. Pin to ``/bin/bash``
-                        # so the no-terminal fallback honours the same
-                        # contract as the terminal-emulator branches above.
+                        # ``dash`` and rejects those. Resolve bash from
+                        # PATH so a Homebrew bash (``/opt/homebrew/bin/bash``,
+                        # ``/usr/local/bin/bash``) or NixOS one
+                        # (``/run/current-system/sw/bin/bash``) wins over
+                        # a possibly-old ``/bin/bash``. Fall back to the
+                        # historical absolute path if nothing else is in
+                        # PATH (highly unusual).
+                        bash_executable = shutil.which("bash") or "/bin/bash"
                         subprocess.Popen(
                             full_script_content,
                             shell=True,
-                            executable="/bin/bash",
+                            executable=bash_executable,
                         )
                         launched = True # Mark as launched even if it's a fallback method
 
