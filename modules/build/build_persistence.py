@@ -358,11 +358,13 @@ class BuildConfigStore:
         if name not in self._cache:
             return False
         cfg = self._cache.pop(name)
-        # Restore the cache entry and report failure if the disk write
-        # didn't actually complete — otherwise callers see ``True`` but the
-        # entry comes back on the next session.
+        # Snapshot pre-pop so the rollback restores a CLONE (matches the
+        # invariant ``save()`` already maintains). A caller holding a
+        # reference to the popped object and mutating it would otherwise
+        # see the mutated instance restored, defeating the rollback.
+        prior_snapshot = _clone_cfg(cfg)
         if not self._save():
-            self._cache[name] = cfg
+            self._cache[name] = prior_snapshot
             return False
         return True
 
@@ -375,13 +377,16 @@ class BuildConfigStore:
         if old not in self._cache or not new or new in self._cache:
             return False
         cfg = self._cache.pop(old)
+        # Snapshot the original-key form so rollback restores an
+        # independent clone with the original name.
+        prior_snapshot = _clone_cfg(cfg)
+        prior_snapshot.name = old
         cfg.name = new
         self._cache[new] = cfg
         if not self._save():
             # Roll back so an unreported write failure doesn't leave the
             # in-memory state divergent from disk.
             self._cache.pop(new, None)
-            cfg.name = old
-            self._cache[old] = cfg
+            self._cache[old] = prior_snapshot
             return False
         return True

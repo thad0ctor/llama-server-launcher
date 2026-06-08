@@ -137,11 +137,20 @@ class UpstreamStatus:
     error: str = ""
 
 
-def _run_capture(cmd: list[str], cwd: str | None = None, timeout: float = 30.0) -> tuple[int, str, str]:
+def _run_capture(
+    cmd: list[str],
+    cwd: str | None = None,
+    timeout: float = 30.0,
+    *,
+    env: dict | None = None,
+    stdin=None,
+) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True,
             timeout=timeout, check=False,
+            env=env if env is not None else None,
+            stdin=stdin if stdin is not None else subprocess.DEVNULL,
         )
         return proc.returncode, proc.stdout or "", proc.stderr or ""
     except subprocess.TimeoutExpired:
@@ -182,7 +191,17 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
         # 20s caps how long the UI's upstream-check banner is stale on a
         # slow / unreachable origin. The fetch runs on a background thread,
         # so this only blocks that worker, not the Tk mainloop.
-        rc, _, err = _run_capture(["git", "fetch", "--quiet"], cwd=str(src), timeout=20.0)
+        # Non-interactive ``git fetch``. Without ``GIT_TERMINAL_PROMPT=0``
+        # and ``stdin=DEVNULL``, an HTTPS remote requiring auth (private
+        # repo, expired credential helper) would block the worker thread
+        # forever waiting on a credential prompt nobody can answer.
+        fetch_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        rc, _, err = _run_capture(
+            ["git", "fetch", "--quiet"],
+            cwd=str(src),
+            timeout=20.0,
+            env=fetch_env,
+        )
         if rc != 0:
             status.error = (err or "git fetch failed").strip()
             # Don't bail — we can still report local-only state.

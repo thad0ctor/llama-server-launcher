@@ -18,8 +18,17 @@ The per-backend whitelists below are the single source of truth for valid
 in ``modules.spec_tab.SpecTab``.
 """
 
+import re
 import sys
 from pathlib import Path
+
+# Comma-separated list of ``<Backend><Int>`` device tokens (e.g.
+# ``CUDA0``, ``Vulkan1``, ``SYCL0``, ``Metal0``). Used to validate the
+# free-text ``spec_draft_device`` override before passing it to the
+# launcher command line — accepts every backend name llama.cpp recognizes
+# while rejecting shell metacharacters / whitespace / path separators
+# that have no legitimate place in a device token.
+_re_csv_cuda = re.compile(r"[A-Za-z]+\d+(?:,[A-Za-z]+\d+)*")
 
 
 # Per-backend allowed values for `--spec-type`. Used to validate spec_type
@@ -75,13 +84,17 @@ def _coerce_strict_gpu_index(raw):
     if isinstance(raw, bool):
         return None
     if isinstance(raw, int):
-        return raw
+        # Reject negatives. CUDA device indices are always non-negative;
+        # a negative value here would emit ``CUDA-1`` and fail at runtime
+        # (or silently pass through a config-corruption sentinel).
+        return raw if raw >= 0 else None
     if isinstance(raw, str):
         if _re.fullmatch(r"[+-]?\d+", raw):
             try:
-                return int(raw)
+                value = int(raw)
             except ValueError:
                 return None
+            return value if value >= 0 else None
     return None
 
 
@@ -453,9 +466,23 @@ def _resolve_draft_device_value(launcher):
         # No usable checkbox selection → fall back to the free-text
         # override, same as if the persisted list was empty to begin with.
         try:
-            return launcher.spec_draft_device.get().strip()
+            override = launcher.spec_draft_device.get().strip()
         except Exception:
             return ""
+        # Validate the raw override against the comma-separated
+        # ``CUDA<int>`` token form. A JSON-edited config could otherwise
+        # ship ``spec_draft_device = "CUDA0;malicious"`` and have it
+        # passed verbatim into the command line. Empty → empty (no flag).
+        if not override:
+            return ""
+        if _re_csv_cuda.fullmatch(override):
+            return override
+        print(
+            f"WARNING: spec_draft_device override {override!r} doesn't match "
+            f"``CUDA<int>[,CUDA<int>…]`` form; dropping.",
+            file=sys.stderr,
+        )
+        return ""
     # If no filter is in effect (no selection at all, or the user selected
     # every detected GPU), launcher indices pass through unchanged.
     no_filter = (not effective_ordered) or (

@@ -823,4 +823,17 @@ def validate_values(
         msg = validate_flag_value(flag, values[flag.key])
         if msg:
             errors.append((flag.label, msg))
+    # Cross-flag dependency: ``GGML_BACKEND_DL=ON`` requires
+    # ``BUILD_SHARED_LIBS=ON`` (documented in BUILD_SHARED_LIBS's help
+    # text — building static libs makes the dynamic-backend loader
+    # nonsensical). Surface this at start-build validation rather than
+    # letting cmake fail with a less obvious linker error.
+    if _truthy(values, "GGML_BACKEND_DL") and not _truthy(values, "BUILD_SHARED_LIBS"):
+        errors.append(
+            (
+                "Dynamic backend loading",
+                "GGML_BACKEND_DL requires BUILD_SHARED_LIBS=ON; either enable "
+                "shared-libs or disable dynamic-backend loading.",
+            )
+        )
     return errors

@@ -1145,7 +1145,9 @@ class TestSaveShScript:
         launcher_mock.gpu_info = {"device_count": 2}
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert 'export CUDA_VISIBLE_DEVICES="1,0"' in text
+        # ``shlex.quote("1,0")`` is identity (no shell metachars); the
+        # saved script emits the bare numeric form now.
+        assert "export CUDA_VISIBLE_DEVICES=1,0" in text
 
     def test_cuda_visible_devices_cleared_when_gpus_exist_none_selected(
         self, manager, launcher_mock, tmp_path
@@ -1345,7 +1347,9 @@ class TestSavePs1Script:
         launcher_mock.gpu_info = {"device_count": 3}
         out = tmp_path / "launch.ps1"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert '$env:CUDA_VISIBLE_DEVICES="0,2"' in text
+        # PS single-quoted literal is the safe form — see
+        # ``CUDA_VISIBLE_DEVICES`` hardening in modules/launch.py.
+        assert "$env:CUDA_VISIBLE_DEVICES='0,2'" in text
 
     def test_ps1_cuda_cleared_when_gpus_detected_none_selected(
         self, manager, launcher_mock, tmp_path

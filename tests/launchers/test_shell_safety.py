@@ -491,7 +491,10 @@ class TestGpuIndexEdgeCases:
         out = tmp_path / "g.sh"
         text = _save_sh_and_read(manager, launcher_mock, out)
         joined = ",".join(map(str, indices))
-        assert f'export CUDA_VISIBLE_DEVICES="{joined}"' in text
+        # ``shlex.quote`` of a bare numeric/comma string round-trips
+        # unchanged, so the saved script emits the value without
+        # surrounding quotes now.
+        assert f"export CUDA_VISIBLE_DEVICES={joined}" in text
 
     def test_negative_index_emitted_verbatim_not_stripped(
         self, manager, launcher_mock, tmp_path
@@ -515,7 +518,10 @@ class TestGpuIndexEdgeCases:
         out = tmp_path / "g.ps1"
         text = _save_ps1_and_read(manager, launcher_mock, out)
         joined = ",".join(map(str, indices))
-        assert f'$env:CUDA_VISIBLE_DEVICES="{joined}"' in text
+        # ``_ps_escape_single_quoted("0,1,...")`` round-trips unchanged
+        # (no embedded single quotes), so the saved script now emits the
+        # value as a PS single-quoted literal.
+        assert f"$env:CUDA_VISIBLE_DEVICES='{joined}'" in text
 
 
 # ---------------------------------------------------------------------------

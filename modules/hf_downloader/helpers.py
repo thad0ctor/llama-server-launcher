@@ -132,15 +132,35 @@ def parse_pattern_lines(raw: str) -> tuple[str, ...]:
 
 
 def _validate_repo_id(repo_id: str) -> None:
-    """Reject repo ids with characters that would break the
-    ``target_dir / repo_id`` materialization downstream on Windows. Called
-    from every ``normalize_repo_input`` branch so all input shapes
+    """Reject repo ids that would either break the ``target_dir / repo_id``
+    materialization on Windows or escape the target directory via path
+    traversal.
+
+    Called from every ``normalize_repo_input`` branch so all input shapes
     (``hf://``, bare, ``https://``) reject the same set consistently.
     """
     if any(ch in repo_id for ch in '<>:"|?*'):
         raise ValueError(
             f"Repo ID {repo_id!r} contains characters that are not legal on "
             "Windows filesystems; check the URL for stray text."
+        )
+    # ``snapshot_download`` materializes the repo under
+    # ``<target_dir>/<repo_id>``. A repo id containing ``..`` segments,
+    # backslashes (Windows path separator), or URL-encoded escapes
+    # could redirect the materialization outside ``target_dir`` —
+    # forensic example: ``owner/../../../etc/passwd/repo``.
+    parts = repo_id.split("/")
+    if any(seg in {"", ".", ".."} for seg in parts):
+        raise ValueError(
+            f"Repo ID {repo_id!r} contains a path-traversal segment "
+            f"(``.``/``..``/empty); refusing."
+        )
+    if "\\" in repo_id or "\x00" in repo_id or "%" in repo_id:
+        # Backslash is the Windows separator; NUL terminates C strings;
+        # ``%`` could be the leading byte of a URL-encoded ``..``.
+        raise ValueError(
+            f"Repo ID {repo_id!r} contains backslash, NUL, or ``%`` — "
+            f"refusing as a potential path-traversal vector."
         )
 
 

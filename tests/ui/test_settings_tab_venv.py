@@ -157,13 +157,16 @@ def test_remove_venv_opens_terminal_after_confirmation(settings_tab, monkeypatch
     assert "rm -rf" in launch_mock.call_args.args[0]
 
 
-def test_install_dependency_requires_detected_venv(settings_tab, monkeypatch):
+def test_install_dependency_requires_detected_venv(settings_tab, monkeypatch, tmp_path):
     dep = _managed_dep("requests")
     error_mock = MagicMock()
     launch_mock = MagicMock()
     monkeypatch.setattr("modules.settings_tab.messagebox.showerror", error_mock)
     monkeypatch.setattr(terminal_launcher, "open_command_in_terminal", launch_mock)
-    settings_tab.venv_dir_var.set("/tmp/missing-venv")
+    # Use the test's per-invocation tmp_path instead of a hard-coded
+    # ``/tmp/missing-venv`` so a leftover dir from a prior run can't
+    # accidentally make this test fail.
+    settings_tab.venv_dir_var.set(str(tmp_path / "missing-venv"))
 
     settings_tab._on_install_dependency(dep)
 

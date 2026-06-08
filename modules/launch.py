@@ -984,8 +984,16 @@ class LaunchManager:
 
                     # --- Add CUDA_VISIBLE_DEVICES action ---
                     if cuda_action == "export":
-                        f.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
-                        f.write(f'$env:CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
+                        # Single-quoted PS literal so the GPU index string
+                        # can't be interpreted as a PowerShell expression
+                        # (current resolvers produce numeric-only output,
+                        # but routing this through the same hardening as
+                        # every other env-var emission means a future
+                        # resolver bug or hand-edited config can't surprise
+                        # us into emitting a ``$()``-evaluating string).
+                        quoted_cuda = self._ps_escape_single_quoted(str(cuda_devices_value))
+                        f.write(f"Write-Host 'Setting CUDA_VISIBLE_DEVICES={quoted_cuda}' -ForegroundColor DarkCyan\n")
+                        f.write(f"$env:CUDA_VISIBLE_DEVICES='{quoted_cuda}'\n\n")
                     elif cuda_action == "unset":
                          # GPUs detected but none selected, or manual GPU mode —
                          # either way, clear CUDA_VISIBLE_DEVICES so an inherited
@@ -1113,7 +1121,14 @@ class LaunchManager:
                 commands.append('export CUDA_DEVICE_ORDER=PCI_BUS_ID')
 
                 if cuda_action == "export":
-                    commands.append(f'export CUDA_VISIBLE_DEVICES={cuda_devices_value}')
+                    # ``shlex.quote`` the GPU-index string for the same
+                    # reason every other ``export VAR=`` line in the
+                    # bash branch does — defense in depth against a
+                    # future resolver bug emitting a non-numeric token
+                    # that would otherwise be interpreted by bash.
+                    commands.append(
+                        f"export CUDA_VISIBLE_DEVICES={shlex.quote(str(cuda_devices_value))}"
+                    )
                     commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
                 elif cuda_action == "unset":
                     # GPUs detected but none selected, or manual GPU mode —
@@ -1322,8 +1337,11 @@ class LaunchManager:
                 # --- Add CUDA_VISIBLE_DEVICES action ---
                 cuda_action, cuda_devices_value = self._resolve_cuda_visible_devices_action()
                 if cuda_action == "export":
-                    fh.write(f'Write-Host "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}" -ForegroundColor DarkCyan\n')
-                    fh.write(f'$env:CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
+                    # Single-quoted PS literal — same hardening as the
+                    # live-launch path above.
+                    quoted_cuda = self._ps_escape_single_quoted(str(cuda_devices_value))
+                    fh.write(f"Write-Host 'Setting CUDA_VISIBLE_DEVICES={quoted_cuda}' -ForegroundColor DarkCyan\n")
+                    fh.write(f"$env:CUDA_VISIBLE_DEVICES='{quoted_cuda}'\n\n")
                 elif cuda_action == "unset":
                      # GPUs detected but none selected, or manual GPU mode —
                      # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
@@ -1490,8 +1508,15 @@ class LaunchManager:
                 # --- Add CUDA_VISIBLE_DEVICES action ---
                 cuda_action, cuda_devices_value = self._resolve_cuda_visible_devices_action()
                 if cuda_action == "export":
-                    fh.write(f'echo "Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}"\n')
-                    fh.write(f'export CUDA_VISIBLE_DEVICES="{cuda_devices_value}"\n\n')
+                    # ``shlex.quote`` the value so bash variable expansion
+                    # / command substitution can't reinterpret it; the
+                    # echo line uses ``printf`` form to stay consistent
+                    # with the other shell-quoted messages in this block.
+                    quoted_cuda = shlex.quote(str(cuda_devices_value))
+                    fh.write(
+                        f"printf '%s\\n' {shlex.quote(f'Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}')}\n"
+                    )
+                    fh.write(f"export CUDA_VISIBLE_DEVICES={quoted_cuda}\n\n")
                 elif cuda_action == "unset":
                      # GPUs detected but none selected, or manual GPU mode —
                      # either way, clear CUDA_VISIBLE_DEVICES to avoid silently

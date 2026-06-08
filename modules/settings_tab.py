@@ -4,6 +4,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox, font as tkfont
 
 from modules import terminal_launcher
@@ -36,7 +37,15 @@ class SettingsTab:
     def __init__(self, launcher):
         self.launcher = launcher
         self.root = launcher.root
-        self.repo_dir = venv_manager.launcher_repo_dir()
+        # Mirror ``LaunchManager._effective_venv_path`` resolution so
+        # SettingsTab's venv probes/create/remove and the launch path
+        # see the SAME repo root on a non-default checkout. Without
+        # this, Settings could create one venv while launch reads
+        # another. Type-guard against MagicMock auto-vivification.
+        repo_dir = getattr(launcher, "repo_dir", None)
+        if not isinstance(repo_dir, (str, Path)):
+            repo_dir = venv_manager.launcher_repo_dir()
+        self.repo_dir = repo_dir
 
         s = launcher.app_settings
         self.theme_mode_var = tk.StringVar(value=s.get("ui_theme_mode", "auto"))

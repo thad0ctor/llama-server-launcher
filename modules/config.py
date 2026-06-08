@@ -1173,8 +1173,26 @@ class ConfigManager:
                         f"File preserved at:\n{self.launcher.config_path}"
                     )
                     return False
-            except (OSError, json.JSONDecodeError):
-                pass  # If we can't read/parse the existing file, let the save proceed.
+            except (OSError, json.JSONDecodeError) as exc:
+                # The existing file is unreadable or malformed AND in-memory
+                # state is empty after a failed load. Letting the save
+                # proceed would overwrite a possibly-recoverable file with
+                # an empty configs dict — exactly the data-loss path the
+                # outer guard is designed to prevent. Refuse instead.
+                print(
+                    f"WARNING: Refusing to overwrite unreadable config at "
+                    f"{self.launcher.config_path} after a failed load: {exc}",
+                    file=sys.stderr,
+                )
+                messagebox.showwarning(
+                    "Config Save Blocked",
+                    f"Refused to overwrite your saved configurations.\n\n"
+                    f"The existing config file could not be read after the "
+                    f"startup load failed, so this save was blocked to "
+                    f"avoid destroying a recoverable file.\n\n"
+                    f"File preserved at:\n{self.launcher.config_path}"
+                )
+                return False
 
         try:
             self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
