@@ -394,6 +394,16 @@ class BuildRunner:
         the terminal ``done`` / ``cancelled`` / ``error`` event."""
         if self.is_running:
             return False
+        # Drain any leftover events from the previous run before the new
+        # one starts emitting. Without this, the UI consumer can poll
+        # ``self.events`` between ``start()`` and the first new event
+        # and see the old build's final ``done`` / ``cancelled`` event
+        # again — racing the UI back into its "build finished" state.
+        try:
+            while True:
+                self.events.get_nowait()
+        except queue.Empty:
+            pass
         self._cancel.clear()
         self._thread = threading.Thread(
             target=self._run, args=(plan,), name="BuildRunner", daemon=True,

@@ -397,6 +397,20 @@ class ConfigManager:
              messagebox.showerror("Error", f"Configuration '{name}' data not found.")
              return
 
+        # Snapshot the predefined-template name BEFORE
+        # ``_apply_loaded_configuration`` runs — that method may remap
+        # a stale value (legacy template removed from
+        # chat_templates.json) and write the corrected one back into
+        # ``cfg`` so the next save persists it. If the save below
+        # fails, we want the in-memory ``saved_configs`` to roll back
+        # rather than be left in an inconsistent state where the
+        # disk version still holds the OLD template name but memory
+        # holds the NEW one.
+        original_predefined = (
+            cfg.get("predefined_template_name")
+            if isinstance(cfg, dict)
+            else None
+        )
         # Silence per-var save traces for the duration of the ~50 .set()
         # calls below. Without this, each .set() that hits a traced var
         # (port, host, ik_llama_*, env vars, spec) fires _save_configs +
@@ -415,6 +429,19 @@ class ConfigManager:
         saved = self.launcher._save_configs()
         if saved:
             messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
+        else:
+            # Restore the original predefined_template_name in the
+            # in-memory config so memory matches what's still on disk.
+            # Without this, the next time the user opens the dialog the
+            # listbox could show a remapped name that the on-disk file
+            # doesn't actually have, leading to confusing "Config Save
+            # Error" loops on subsequent edits.
+            if (
+                isinstance(cfg, dict)
+                and original_predefined is not None
+                and cfg.get("predefined_template_name") != original_predefined
+            ):
+                cfg["predefined_template_name"] = original_predefined
 
     def _apply_loaded_configuration(self, name, cfg):
         """Mutates launcher state from a named-config dict.

@@ -697,9 +697,6 @@ class HuggingFaceDownloaderTab:
         self._start_runner("list", payload)
 
     def _on_download(self):
-        if not self._file_rows:
-            messagebox.showinfo("No repo loaded", "Load a repo before downloading.")
-            return
         selected_targets = [
             path for path, var in self._selected_target_vars.items()
             if bool(var.get())
@@ -714,11 +711,25 @@ class HuggingFaceDownloaderTab:
         # for having no listbox selection, which forced the user to either
         # tick rows that don't exist or switch to snapshot mode.
         include_patterns = list(parse_pattern_lines(self.include_patterns_var.get()))
+        download_mode = self.download_mode_var.get()
+        # Snapshot mode AND pattern-only "selected" mode can both
+        # legitimately start without a loaded listing — the runner
+        # downloads ``allow_patterns``/everything directly against the
+        # current repo input. Only require a loaded listing when the
+        # user picked specific files from the listbox (``selected``
+        # mode + no include patterns).
         if (
-            self.download_mode_var.get() == "selected"
+            download_mode == "selected"
             and not selected_files
             and not include_patterns
         ):
+            if not self._file_rows:
+                messagebox.showinfo(
+                    "No repo loaded",
+                    "Load a repo first, or switch to snapshot mode / enter "
+                    "an include pattern to download without a listing.",
+                )
+                return
             messagebox.showerror(
                 "No files selected",
                 "Select at least one file, enter an include pattern, or "

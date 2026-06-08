@@ -2582,7 +2582,13 @@ class TestMainDeviceEmittedOnDraftUnion:
         # has to land in the command line, otherwise the rest of the
         # spec/draft surface is meaningless.
         assert "--model-draft" in cmd
-        assert cmd[cmd.index("--model-draft") + 1] == str(draft)
+        # Compare resolved paths so a tmp root that's a symlink (macOS
+        # /tmp → /private/tmp) or a Windows short-name path doesn't
+        # break the equality.
+        import os as _os
+        assert _os.path.realpath(
+            cmd[cmd.index("--model-draft") + 1]
+        ) == _os.path.realpath(str(draft))
 
     def test_device_value_preserves_main_order(self, manager, union_launcher):
         """Main order [7, 1] (user dragged 7 first) with draft [2] → union

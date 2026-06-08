@@ -86,7 +86,14 @@ def run_list(payload: dict) -> int:
 
     api = HfApi()
     repo_id = payload["repo_id"]
-    revision = (payload.get("revision") or "").strip() or None
+    # Mirror ``_token_value``'s defensive coercion. A hand-edited
+    # payload could ship ``"revision": false`` / ``null`` / ``0`` and
+    # the ``.strip()`` would AttributeError on a non-string. Coerce to
+    # the empty branch (= "use default branch") for any non-string.
+    _revision_raw = payload.get("revision")
+    revision = (
+        _revision_raw.strip() if isinstance(_revision_raw, str) else ""
+    ) or None
     token = _token_value(payload)
 
     _emit("status", message=f"Loading {repo_id}…")
@@ -263,7 +270,14 @@ def run_download(payload: dict) -> int:
     from huggingface_hub import snapshot_download
 
     repo_id = payload["repo_id"]
-    revision = (payload.get("revision") or "").strip() or None
+    # Mirror ``_token_value``'s defensive coercion. A hand-edited
+    # payload could ship ``"revision": false`` / ``null`` / ``0`` and
+    # the ``.strip()`` would AttributeError on a non-string. Coerce to
+    # the empty branch (= "use default branch") for any non-string.
+    _revision_raw = payload.get("revision")
+    revision = (
+        _revision_raw.strip() if isinstance(_revision_raw, str) else ""
+    ) or None
     token = _token_value(payload)
     allow_patterns = _combined_allow_patterns(payload)
     # ``selected`` mode with no selected files AND no include_patterns used

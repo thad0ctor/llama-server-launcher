@@ -928,13 +928,25 @@ class SpecTab:
             except Exception:
                 pass
         elif manual_mode:
-            # Manual GPU mode disables CUDA<i> draft device emission.
-            # Any leftover value (e.g. "CUDA0,CUDA1" from a previous
-            # non-manual session) would otherwise survive in
-            # ``spec_draft_device`` and trick ``_resolve_draft_device_value``
-            # into treating it as a deliberate override.
+            # Manual GPU mode disables CUDA<i> draft device emission
+            # for the checkbox-derived value, but must NOT wipe out a
+            # user / imported override like ``Vulkan0`` /
+            # ``CUDA2,SYCL1``. Only clear when the current
+            # ``spec_draft_device`` value exactly matches the string
+            # the checkbox UI would have produced from the persisted
+            # selection — that's the leftover-from-prior-non-manual
+            # case the original clear was meant to handle.
+            #
+            # ``loaded_selected`` is the persisted-selection set built
+            # at the top of this method; ``sorted`` ensures we
+            # reconstruct the same comma order the non-manual branch
+            # above uses when it stamps the field.
+            checkbox_derived = ",".join(
+                f"CUDA{i}" for i in sorted(loaded_selected)
+            )
             try:
-                self.spec_draft_device.set("")
+                if self.spec_draft_device.get() == checkbox_derived:
+                    self.spec_draft_device.set("")
             except Exception:
                 pass
 
