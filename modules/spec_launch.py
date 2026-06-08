@@ -691,23 +691,47 @@ def emit_spec_args(launcher, backend, cmd):
         print(f"WARNING: speculative-decoding block raised: {exc}", file=sys.stderr)
 
 
-def emit_reasoning_args(launcher, cmd):
+def emit_reasoning_args(launcher, cmd, supports_flag=None):
     """Append ``--reasoning`` / ``--reasoning-*`` / ``--chat-template-kwargs``
     flags to ``cmd``.
 
     Independent of spec_enabled — emit unconditionally based on per-var
-    values. All five flags are accepted by mainline llama.cpp and ik_llama.
+    values. All five flags are present in current llama.cpp
+    (verified at ``common/arg.cpp:3142-3192,3009-3020``) and current
+    ik_llama (verified at ``common/common.cpp:2489-2575``), but they
+    were added throughout 2025 and an older fork of either may lack
+    one or more. Pass ``supports_flag`` (a callable ``flag -> bool``;
+    typically a closure around ``LaunchManager._backend_supports_flag``
+    for the resolved server exe) to gate each flag against the target
+    binary's ``--help`` output. When ``supports_flag is None`` (e.g.
+    the save-script flow, where we don't want to spawn the server),
+    every flag is emitted unconditionally.
     """
+    def _ok(flag):
+        if supports_flag is None:
+            return True
+        try:
+            ok = bool(supports_flag(flag))
+        except Exception:
+            return True  # probe failure -> emit; the server will surface a real error
+        if not ok:
+            print(
+                f"WARNING: target server binary does not advertise {flag!r}; "
+                f"skipping. Update the binary or clear the field to suppress.",
+                file=sys.stderr,
+            )
+        return ok
+
     try:
         rm_var = getattr(launcher, "reasoning_mode", None)
         if rm_var is not None:
             rm = rm_var.get().strip()
-            if rm and rm in ("on", "off", "auto"):
+            if rm and rm in ("on", "off", "auto") and _ok("--reasoning"):
                 cmd.extend(["--reasoning", rm])
         rf_var = getattr(launcher, "reasoning_format", None)
         if rf_var is not None:
             rf = rf_var.get().strip()
-            if rf:
+            if rf and _ok("--reasoning-format"):
                 cmd.extend(["--reasoning-format", rf])
         rb_var = getattr(launcher, "reasoning_budget", None)
         if rb_var is not None:
@@ -718,18 +742,19 @@ def emit_reasoning_args(launcher, cmd):
                 # bad input; this catches anything that slipped through.
                 try:
                     int(rb)
-                    cmd.extend(["--reasoning-budget", rb])
+                    if _ok("--reasoning-budget"):
+                        cmd.extend(["--reasoning-budget", rb])
                 except ValueError:
                     print(f"WARNING: --reasoning-budget value {rb!r} is not an integer; skipping.", file=sys.stderr)
         rbm_var = getattr(launcher, "reasoning_budget_message", None)
         if rbm_var is not None:
             rbm = rbm_var.get().strip()
-            if rbm:
+            if rbm and _ok("--reasoning-budget-message"):
                 cmd.extend(["--reasoning-budget-message", rbm])
         ctk_var = getattr(launcher, "chat_template_kwargs", None)
         if ctk_var is not None:
             ctk = ctk_var.get().strip()
-            if ctk:
+            if ctk and _ok("--chat-template-kwargs"):
                 cmd.extend(["--chat-template-kwargs", ctk])
     except Exception as exc:
         print(f"WARNING: reasoning/chat-template emission raised: {exc}", file=sys.stderr)

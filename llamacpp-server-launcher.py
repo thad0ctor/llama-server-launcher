@@ -2080,6 +2080,22 @@ class LlamaCppLauncher:
 
         r += 1 # Next row
 
+        # Status line surfaced when a saved ``predefined_template_name``
+        # no longer exists in ``_all_templates`` (e.g. the user removed a
+        # sidecar template or upgraded across the Mustache→names rename).
+        # Previously this case silently emitted no ``--chat-template`` and
+        # fell back to the model default, leaving the user wondering why
+        # their selection had no effect.
+        self.predefined_template_status_var = tk.StringVar(value="")
+        ttk.Label(
+            frame,
+            textvariable=self.predefined_template_status_var,
+            font=("TkSmallCaptionFont",),
+            foreground="#b00020",
+            wraplength=720,
+            justify="left",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+
 
         # --- Custom Template Entry ---
         # This is now only active when "Use Custom Template" is selected via radio button
@@ -2294,12 +2310,45 @@ class LlamaCppLauncher:
         source = self.template_source.get()
         effective_template = "" # Default to empty
 
+        # Clear any prior stale-predefined warning by default; the
+        # predefined branch below sets it again only if needed.
+        status_var = getattr(self, "predefined_template_status_var", None)
+        if status_var is not None:
+            try:
+                status_var.set("")
+            except tk.TclError:
+                pass
+
         if source == "default":
             effective_template = "" # Explicitly empty when llama.cpp decides
         elif source == "predefined":
             selected_name = self.predefined_template_name.get()
-            # Get template string from the combined dictionary
-            effective_template = self._all_templates.get(selected_name, "") # Default to empty if key not found
+            # Detect a dangling saved selection: the launcher kept the
+            # config's ``predefined_template_name`` even when the templates
+            # dict no longer carries that label (e.g. a sidecar JSON was
+            # removed, or this is an upgrade across the old Mustache →
+            # built-in-name rename). Without this warning the user would
+            # see an empty effective template and the server would
+            # silently fall back to the model default.
+            if selected_name and selected_name not in self._all_templates:
+                if status_var is not None:
+                    try:
+                        status_var.set(
+                            f"⚠ Saved predefined template {selected_name!r} is not "
+                            f"available in the current list. ``--chat-template`` will "
+                            f"not be emitted and the server will use the model's "
+                            f"default template. Pick a different entry above to clear."
+                        )
+                    except tk.TclError:
+                        pass
+                print(
+                    f"WARNING: predefined chat template {selected_name!r} not found "
+                    f"in _all_templates; --chat-template will not be emitted.",
+                    file=sys.stderr,
+                )
+                effective_template = ""
+            else:
+                effective_template = self._all_templates.get(selected_name, "")
         elif source == "custom":
             effective_template = self.custom_template_string.get()
 

@@ -353,7 +353,17 @@ class LaunchManager:
         # (precedence) and in manual GPU mode. See spec_launch.py for the
         # full rationale.
         emit_main_device_arg(self.launcher, backend, cmd)
-        emit_reasoning_args(self.launcher, cmd)
+        # Probe the resolved server exe for the reasoning/chat-template
+        # flags only when we'll actually run it. The save-script flow
+        # passes ``probe_backend=False`` and we keep the legacy unconditional
+        # emission there (the script may target a different host/binary
+        # than the one available locally).
+        reasoning_supports = None
+        if probe_backend:
+            def _probe(flag, _exe=exe_path):
+                return self._backend_supports_flag(_exe, flag)
+            reasoning_supports = _probe
+        emit_reasoning_args(self.launcher, cmd, supports_flag=reasoning_supports)
         emit_kv_unify_args(self.launcher, backend, cmd)
         emit_no_mmproj_arg(self.launcher, backend, cmd)
 
