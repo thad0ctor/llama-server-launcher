@@ -140,6 +140,16 @@ def _utcnow_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _clone_cfg(cfg: BuildConfig) -> BuildConfig:
+    """Round-trip a BuildConfig through its JSON form to make an independent
+    copy. ``to_json`` already takes care of which fields are persistable, so
+    the resulting object has no shared mutable state with the input — safe to
+    hand to callers (so they can't mutate the cache) and to stash as a
+    rollback snapshot (so save-failure restoration doesn't restore an alias
+    to the same mutated object)."""
+    return BuildConfig.from_json(cfg.name, cfg.to_json())
+
+
 class BuildConfigStore:
     """File-backed CRUD for named build configs."""
 
@@ -216,7 +226,13 @@ class BuildConfigStore:
 
     def get(self, name: str) -> BuildConfig | None:
         self._load()
-        return self._cache.get(name)
+        cfg = self._cache.get(name)
+        # Return an independent copy so callers can't reach back into the
+        # cache and mutate the stored BuildConfig in place. Without this,
+        # a caller that edits the returned config before handing it to
+        # ``save()`` would observe a rollback that restored a reference to
+        # the same mutated object — i.e. no rollback at all.
+        return _clone_cfg(cfg) if cfg is not None else None
 
     def save(self, cfg: BuildConfig) -> None:
         if not self._load():
@@ -235,15 +251,16 @@ class BuildConfigStore:
             cfg.created_at = _utcnow_iso()
         if not cfg.last_used_at:
             cfg.last_used_at = cfg.created_at
-        # Capture prior state so a failed ``_save`` can roll back the
-        # in-memory mutation. Without this, an UPDATE that fails to reach
-        # disk would still appear to have taken effect in-session and then
-        # silently revert on restart.
+        # Snapshot prior state AND store an independent copy so a failed
+        # ``_save`` can roll back to the original. Aliasing would defeat
+        # the rollback if the caller continued to mutate ``cfg`` after we
+        # returned.
         prior = self._cache.get(cfg.name)
-        self._cache[cfg.name] = cfg
+        prior_snapshot = _clone_cfg(prior) if prior is not None else None
+        self._cache[cfg.name] = _clone_cfg(cfg)
         if not self._save():
-            if prior is not None:
-                self._cache[cfg.name] = prior
+            if prior_snapshot is not None:
+                self._cache[cfg.name] = prior_snapshot
             else:
                 self._cache.pop(cfg.name, None)
 

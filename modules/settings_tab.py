@@ -588,6 +588,17 @@ class SettingsTab:
         # the table catches up once the rm completes; the user can also
         # click Refresh deps manually.
         self._rebuild_dependency_rows([])
+        # If the user clicks Remove venv multiple times inside the 2 s
+        # window, the prior ``after()`` id would be lost and the orphan
+        # callback could re-enter ``_schedule_venv_dependency_probe``
+        # against destroyed widgets after teardown.
+        prior_refresh_id = self._venv_remove_refresh_after_id
+        if prior_refresh_id is not None:
+            try:
+                self.root.after_cancel(prior_refresh_id)
+            except Exception:
+                pass
+            self._venv_remove_refresh_after_id = None
         try:
             self._venv_remove_refresh_after_id = self.root.after(
                 2000, self._run_remove_venv_refresh

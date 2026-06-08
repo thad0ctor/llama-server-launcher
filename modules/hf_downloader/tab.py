@@ -720,11 +720,27 @@ class HuggingFaceDownloaderTab:
             if not cancelled_at_start:
                 self._process = proc
         # If Cancel was clicked while Popen was still launching, the main
-        # thread had no handle to terminate. Detect that here and terminate
-        # before draining the pipes.
+        # thread had no handle to terminate. Detect that here and run the
+        # same terminate → wait → kill escalation as ``_cancel_operation``;
+        # a single ``terminate()`` would leave the subprocess alive if it
+        # ignores SIGTERM, and ``_poll_queue`` would then reschedule
+        # forever because ``_worker_thread.is_alive()`` never flips false.
         if cancelled_at_start:
             try:
                 proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
             except Exception:
                 pass
 

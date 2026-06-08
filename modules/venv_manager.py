@@ -239,14 +239,22 @@ def build_create_venv_command(
     base_python: str | tuple[str, ...] | list[str] | None = None,
     platform: str | None = None,
 ) -> str:
-    """Return a shell command that creates ``venv_dir``."""
+    """Return a shell command that creates ``venv_dir``.
+
+    Normalizes ``venv_dir`` through :func:`resolve_venv_dir` so this helper
+    honors the module's documented "blank means ``<repo>/venv``" and
+    "relative means repo-relative" contract instead of building shell
+    commands against the literal UI value (which would silently target the
+    current working directory for ``""`` and ``"."``).
+    """
+    target = resolve_venv_dir(str(venv_dir), repo_dir=launcher_repo_dir())
     if base_python is None:
         python_args = list(default_venv_base_python_args(platform=platform))
     elif isinstance(base_python, (tuple, list)):
         python_args = list(base_python)
     else:
         python_args = [base_python]
-    args = [*python_args, "-m", "venv", str(Path(venv_dir))]
+    args = [*python_args, "-m", "venv", str(target)]
     return _shell_join(args, platform=platform)
 
 
@@ -258,7 +266,7 @@ def build_bootstrap_venv_command(
     platform: str | None = None,
 ) -> str:
     """Return a shell command that creates a venv and installs managed packages."""
-    target = Path(venv_dir)
+    target = resolve_venv_dir(str(venv_dir), repo_dir=launcher_repo_dir())
     create_cmd = build_create_venv_command(
         target,
         base_python=base_python,
@@ -356,7 +364,15 @@ def build_remove_venv_command(
         home_resolved = Path.home().resolve(strict=False)
     except (OSError, RuntimeError):
         home_resolved = Path.home()
-    if resolved_target in {cwd_resolved, home_resolved}:
+    try:
+        repo_resolved = launcher_repo_dir().resolve(strict=False)
+    except OSError:
+        repo_resolved = launcher_repo_dir()
+    # Reject the repo root too: ``resolve_venv_dir("")`` and
+    # ``resolve_venv_dir(".")`` both normalize to the repo root, so without
+    # this guard a Remove venv triggered before the user picked a venv path
+    # would emit ``rm -rf <repo>`` / ``rmdir /s /q <repo>``.
+    if resolved_target in {cwd_resolved, home_resolved, repo_resolved}:
         raise ValueError(f"Refusing to remove unsafe venv path: {raw!r}")
     if resolved_target == Path(resolved_target.anchor):
         # Anchor is the filesystem root (``/`` on POSIX, ``C:\`` on Windows).

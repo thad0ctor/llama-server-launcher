@@ -262,8 +262,13 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: python -m modules.hf_downloader.runner <list|download> <payload.json>", file=sys.stderr)
         return 2
     action, payload_path = args
-    payload = _load_payload(payload_path)
+    # Pull payload parsing INSIDE the error envelope. Otherwise a
+    # ``FileNotFoundError`` (payload path missing) or ``JSONDecodeError``
+    # (corrupt payload) would skip the structured ``error`` event the UI
+    # relies on and leave the caller with only raw stderr + exit code 1
+    # to interpret.
     try:
+        payload = _load_payload(payload_path)
         if action == "list":
             return run_list(payload)
         return run_download(payload)
