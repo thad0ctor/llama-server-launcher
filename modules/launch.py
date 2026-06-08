@@ -156,9 +156,22 @@ class LaunchManager:
             raw_path = self.launcher.venv_dir.get()
         except Exception:
             raw_path = ""
+        # Honor a launcher-supplied ``repo_dir`` if set (HuggingFaceDownloaderTab
+        # already does this for its own resolution). Falling back to the
+        # launcher-checkout root keeps the historical behavior for tests
+        # and direct callers that don't set ``launcher.repo_dir``.
+        # Restrict the type to str/Path explicitly — ``MagicMock`` auto-
+        # vivifies attribute access and ``MagicMock`` instances pass
+        # ``isinstance(..., os.PathLike)`` because Mock auto-implements
+        # ``__fspath__``. The test ``launcher_mock`` fixture doesn't set
+        # ``repo_dir``, so without this narrow check the launch path
+        # would silently use the Mock as a Path and produce nonsense.
+        repo_dir = getattr(self.launcher, "repo_dir", None)
+        if not isinstance(repo_dir, (str, Path)):
+            repo_dir = venv_manager.launcher_repo_dir()
         return venv_manager.resolve_active_venv_path(
             raw_path,
-            repo_dir=venv_manager.launcher_repo_dir(),
+            repo_dir=repo_dir,
         )
 
     def _build_llama_cpp_fit_args(self, cmd):

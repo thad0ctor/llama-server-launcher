@@ -623,9 +623,14 @@ class ConfigManager:
                     deleted_count += 1
 
             if deleted_count > 0:
-                self.launcher._save_configs()
+                # Only confirm the delete to the user when the disk write
+                # actually succeeded. ``save_configs`` shows its own
+                # error dialog on failure; we just shouldn't ALSO
+                # optimistically show "Deleted" on top of it.
+                saved = self.launcher._save_configs()
                 self.launcher._update_config_listbox()
-                messagebox.showinfo("Deleted", result_msg)
+                if saved:
+                    messagebox.showinfo("Deleted", result_msg)
             else:
                 messagebox.showerror("Error", "No configurations were found to delete.")
 
@@ -823,13 +828,18 @@ class ConfigManager:
                     print(f"WARNING: Failed to import config '{config_name}': {e}", file=sys.stderr)
 
             if imported_count > 0:
-                # Save the updated configurations
-                self.launcher._save_configs()
+                # Only confirm "imported" when the save actually reached
+                # disk — otherwise the imports are in-memory only and
+                # will vanish on restart, which is worse than no import.
+                saved = self.launcher._save_configs()
                 # Update the listbox
                 self.update_config_listbox()
 
-                messagebox.showinfo("Import Successful",
-                                  f"Successfully imported {imported_count} configuration(s).")
+                if saved:
+                    messagebox.showinfo(
+                        "Import Successful",
+                        f"Successfully imported {imported_count} configuration(s).",
+                    )
             else:
                 messagebox.showerror("Import Error", "No configurations were successfully imported.")
 
@@ -1260,6 +1270,10 @@ class ConfigManager:
 
         current_cfg = self.current_cfg()
         self.launcher.saved_configs[name] = current_cfg
-        self.save_configs()
+        # Gate the "Saved" toast on the disk write actually succeeding —
+        # ``save_configs`` shows its own error dialog on failure and
+        # we don't want to stack a misleading success message on top.
+        saved = self.save_configs()
         self.update_config_listbox()
-        messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")
+        if saved:
+            messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")

@@ -935,8 +935,14 @@ def default_source_dir(backend: str, existing_dir: str) -> str:
     path of the launcher home so 'Clone' creates the repo somewhere sane.
     """
     existing_dir = (existing_dir or "").strip()
-    if existing_dir and os.path.isdir(existing_dir):
-        return existing_dir
+    if existing_dir:
+        # Expand ``~`` for the filesystem check, but return the ORIGINAL
+        # user input so callers that store ``~/repos/foo`` in config get
+        # their form back verbatim (avoids hard-coding the launcher's
+        # home into a persisted preference).
+        expanded = os.path.expanduser(existing_dir)
+        if os.path.isdir(expanded):
+            return existing_dir
     home = str(Path.home())
     folder = "ik_llama.cpp" if backend == "ik_llama" else "llama.cpp"
     return str(Path(home) / "Documents" / "GitHub" / folder)

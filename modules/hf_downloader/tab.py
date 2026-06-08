@@ -277,7 +277,13 @@ class HuggingFaceDownloaderTab:
     def _refresh_runtime_state(self):
         active = self._current_active_venv_path()
         if self._dep_watch_venv and self._dep_watch_venv != active:
+            # The active venv switched out from under an in-flight
+            # install-watch (user changed Venv dir in Settings). Cancel
+            # the watch AND clear the "Waiting for it to appear in the
+            # venv…" status string — otherwise the panel stays stuck on
+            # a message about the previous environment.
             self._cancel_dependency_watch()
+            self.status_var.set("")
         if not active:
             self.venv_status_var.set("No active venv. Create one in Settings first.")
             self._set_button_state(self._install_button, False)

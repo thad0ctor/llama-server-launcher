@@ -235,17 +235,35 @@ class BuildConfigStore:
         except Exception as exc:
             print(f"WARN: build_configs.json unreadable: {exc}", file=sys.stderr)
             return False  # leave _loaded=False so we retry next time
-        if isinstance(raw, dict):
-            version = raw.get("schema_version")
-            if version is not None and version != SCHEMA_VERSION:
-                print(
-                    f"WARN: build_configs.json schema_version={version} "
-                    f"(expected {SCHEMA_VERSION}); loading best-effort.",
-                    file=sys.stderr,
-                )
-            configs = raw.get("configs")
-        else:
-            configs = None
+        if not isinstance(raw, dict):
+            # Top-level shape mismatch — the file is something like a JSON
+            # list or scalar. Treat the same way as ``read_text`` failure
+            # so ``save()`` won't later overwrite the file with the
+            # in-memory empty cache and destroy whatever legitimate
+            # content was there.
+            print(
+                f"WARN: build_configs.json top-level is not a JSON object "
+                f"(got {type(raw).__name__}); refusing to load.",
+                file=sys.stderr,
+            )
+            return False
+        version = raw.get("schema_version")
+        if version is not None and version != SCHEMA_VERSION:
+            print(
+                f"WARN: build_configs.json schema_version={version} "
+                f"(expected {SCHEMA_VERSION}); loading best-effort.",
+                file=sys.stderr,
+            )
+        configs = raw.get("configs")
+        if configs is not None and not isinstance(configs, dict):
+            # ``"configs": [...]`` or any other non-mapping shape.
+            # Refuse rather than silently discarding everything.
+            print(
+                f"WARN: build_configs.json ``configs`` field is not a JSON "
+                f"object (got {type(configs).__name__}); refusing to load.",
+                file=sys.stderr,
+            )
+            return False
         if isinstance(configs, dict):
             for name, data in configs.items():
                 if not isinstance(name, str) or not isinstance(data, dict):

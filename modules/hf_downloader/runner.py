@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -164,6 +165,25 @@ def _build_progress_tqdm_class():  # pragma: no cover - exercised indirectly
     return _ProgressTqdm
 
 
+def _parse_bool(value) -> bool:
+    """Coerce a payload value to a strict bool.
+
+    ``bool("false")`` and ``bool("0")`` are both ``True`` in Python because
+    they're non-empty strings, so a CLI-edited payload with
+    ``"force_download": "false"`` used to silently enable force-download.
+    This helper accepts the strings the average human would write
+    (``"true"``/``"1"``/``"yes"``/``"on"`` etc.) and treats anything else
+    as ``False``.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    return bool(value)
+
+
 def _normalize_path_list(value) -> list[Path]:
     """Coerce a payload field to ``list[Path]`` at the runner boundary.
 
@@ -261,19 +281,43 @@ def run_download(payload: dict) -> int:
     # directories under each target and then fail with a confusing HF
     # error; verifying write access here keeps the failure local and
     # actionable, and avoids leaving stub directories behind.
+    import tempfile
+
     for target_dir in target_dirs:
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise OSError(f"Cannot create target directory {target_dir}: {exc}") from exc
-        probe = target_dir / ".hf-download-write-test"
+        # Use a uniquely-named temp file inside ``target_dir`` rather than
+        # a fixed sentinel like ``.hf-download-write-test``. The fixed
+        # name could (a) collide with a legitimate user file at that
+        # path and clobber it on success or unlink it on failure, and
+        # (b) race with a parallel HF runner against the same dir.
+        # ``mkstemp`` guarantees an exclusive new inode.
+        probe_fd = None
+        probe_path = None
         try:
-            probe.write_bytes(b"")
-            probe.unlink()
+            probe_fd, probe_path = tempfile.mkstemp(
+                prefix=".hf-write-probe-",
+                dir=str(target_dir),
+            )
         except OSError as exc:
             raise OSError(
                 f"Target directory {target_dir} is not writable: {exc}"
             ) from exc
+        finally:
+            if probe_fd is not None:
+                try:
+                    os.close(probe_fd)
+                except OSError:
+                    pass
+            if probe_path:
+                try:
+                    os.unlink(probe_path)
+                except OSError:
+                    # Probe file leaked — surface as a writability failure
+                    # rather than silently leaving the stub.
+                    pass
 
     for index, target_dir in enumerate(target_dirs, start=1):
         _emit(
@@ -290,8 +334,8 @@ def run_download(payload: dict) -> int:
             "local_dir": target_dir,
             "allow_patterns": allow_patterns,
             "ignore_patterns": ignore_patterns,
-            "force_download": bool(payload.get("force_download")),
-            "local_files_only": bool(payload.get("local_files_only")),
+            "force_download": _parse_bool(payload.get("force_download")),
+            "local_files_only": _parse_bool(payload.get("local_files_only")),
             "token": token,
             "max_workers": max_workers,
         }

@@ -94,6 +94,15 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
 
     src = Path(source_dir).expanduser()
     build = Path(build_dir).expanduser()
+    # A user-supplied ``source_dir`` pointing at an existing FILE (not a
+    # directory) would cause every downstream operation — ``git fetch``,
+    # ``cmake -S``, etc. — to fail with a confusing tool-specific error
+    # message. Catch it here with a clear cause.
+    if src.exists() and src.is_file():
+        raise ValueError(
+            f"source_dir {source_dir!r} is a file, not a directory; "
+            f"refusing to operate."
+        )
     if not build.is_absolute():
         build = src / build
 

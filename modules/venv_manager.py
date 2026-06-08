@@ -189,9 +189,25 @@ def venv_python_candidates(
 def locate_venv_python(
     venv_dir: str | Path, *, platform: str | None = None
 ) -> Path | None:
-    """Return the first existing Python interpreter inside ``venv_dir``."""
+    """Return the first existing Python interpreter inside ``venv_dir``.
+
+    Mirrors the stricter check used by ``VenvTargetInfo.looks_like_venv``
+    and ``_path_looks_like_venv``: a non-executable file at ``bin/python``
+    used to be returned as the interpreter, and downstream callers
+    (``build_install_dependency_command``, ``build_remove_dependency_command``,
+    ``probe_dependency_status``) would then run subprocess against a
+    file that isn't actually executable and fail with a confusing
+    ``PermissionError``. Require an executable interpreter on POSIX;
+    on Windows the ``.exe`` extension is the executable marker.
+    """
     for candidate in venv_python_candidates(venv_dir, platform=platform):
-        if candidate.is_file():
+        if not candidate.is_file():
+            continue
+        # ``.exe`` is the Windows executable marker; ``os.access(X_OK)``
+        # is unreliable there. Everywhere else require the bit.
+        if candidate.name.lower().endswith(".exe"):
+            return candidate
+        if os.access(str(candidate), os.X_OK):
             return candidate
     return None
 

@@ -93,10 +93,17 @@ def test_locate_venv_python_prefers_windows_scripts_path(tmp_path):
 
 
 def test_locate_venv_python_prefers_posix_bin_path(tmp_path):
+    import os as _os
+    import sys as _sys
+
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
     exe = bindir / "python"
     exe.write_text("", encoding="utf-8")
+    # ``locate_venv_python`` now requires the interpreter to be executable
+    # on POSIX (matches the stricter ``_path_looks_like_venv`` check).
+    if not _sys.platform.startswith("win"):
+        _os.chmod(exe, 0o755)
 
     found = venv_manager.locate_venv_python(tmp_path, platform="linux")
 
@@ -241,10 +248,15 @@ def test_probe_dependency_status_reports_missing_python(tmp_path):
 
 
 def test_probe_dependency_status_parses_success(monkeypatch, tmp_path):
+    import os as _os
+    import sys as _sys
+
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
     exe = bindir / "python"
     exe.write_text("", encoding="utf-8")
+    if not _sys.platform.startswith("win"):
+        _os.chmod(exe, 0o755)
     dep = _dep("torch")
 
     def fake_run(args, **kwargs):
@@ -265,10 +277,15 @@ def test_probe_dependency_status_parses_success(monkeypatch, tmp_path):
 
 
 def test_probe_dependency_status_nonzero_return_surfaces_error(monkeypatch, tmp_path):
+    import os as _os
+    import sys as _sys
+
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
     exe = bindir / "python"
     exe.write_text("", encoding="utf-8")
+    if not _sys.platform.startswith("win"):
+        _os.chmod(exe, 0o755)
     dep = _dep("requests")
 
     monkeypatch.setattr(

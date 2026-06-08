@@ -232,7 +232,11 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
     repo_id = "/".join(parts[:2])
     _validate_repo_id(repo_id)
     revision_hint = ""
-    if len(parts) >= 4 and parts[2] in {"tree", "blob"}:
+    # ``resolve`` is the third valid URL form Hugging Face uses for
+    # revision-scoped file/tree URLs (``/owner/repo/resolve/<branch>/path``),
+    # alongside ``tree`` (branch browser) and ``blob`` (file view). Without
+    # it, a ``…/resolve/dev/…`` URL would silently drop the revision hint.
+    if len(parts) >= 4 and parts[2] in {"tree", "blob", "resolve"}:
         remainder = parts[3:]
         if remainder:
             if remainder[0] == "refs" and len(remainder) >= 3:
@@ -337,6 +341,19 @@ def collect_target_directory_options(
                 exists=exists,
                 selected=is_selected,
             )
+        )
+    # If a persisted selection was supplied but didn't match any current
+    # model_dirs (user removed the directory from Settings, or moved
+    # disks), fall back to checking the first option so the download UI
+    # always has a destination. Without this the Download button would
+    # be blocked with "no target dirs selected" until the user clicked.
+    if normalized_selected and options and not any(o.selected for o in options):
+        head = options[0]
+        options[0] = TargetDirectoryOption(
+            path=head.path,
+            free_bytes=head.free_bytes,
+            exists=head.exists,
+            selected=True,
         )
     selected_paths_tuple = tuple(str(option.path) for option in options if option.selected)
     return DownloadTargetsState(options=tuple(options), selected_paths=selected_paths_tuple)

@@ -739,7 +739,10 @@ def load_cached_gpu_info(config_dir, venv_path):
     if not isinstance(data, dict):
         return None
     cached_venv = data.get("venv_path") or "__none__"
-    expected_venv = (venv_path or "").strip() or "__none__"
+    # ``venv_path`` callers occasionally pass a ``Path`` (callers that
+    # forwarded the resolved active venv directly). ``Path.strip()`` does
+    # not exist, so coerce first.
+    expected_venv = (str(venv_path) if venv_path is not None else "").strip() or "__none__"
     if cached_venv != expected_venv:
         return None
     gpu_info = data.get("gpu_info")
@@ -779,7 +782,9 @@ def save_cached_gpu_info(config_dir, venv_path, gpu_info):
     if cache_path is None:
         return
     payload = {
-        "venv_path": (venv_path or "").strip() or "__none__",
+        # Mirror the normalization in ``load_cached_gpu_info``: coerce
+        # to str so a ``Path`` caller doesn't trip ``str.strip``.
+        "venv_path": (str(venv_path) if venv_path is not None else "").strip() or "__none__",
         "gpu_info": gpu_info,
     }
     try:
