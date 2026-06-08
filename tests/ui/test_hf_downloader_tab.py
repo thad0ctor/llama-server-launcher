@@ -167,7 +167,14 @@ def test_listing_event_populates_files_and_selects_defaults(hf_launcher_stub, ac
 
     assert tab._files_listbox.size() == 3
     assert tab._selected_file_paths() == ["model.gguf", "mmproj-f16.gguf"]
-    assert tab.revision_var.get() == "main"
+    # The listing event arrived without ``_on_load_repo`` ever running,
+    # so ``_last_requested_revision`` is "" — the listing handler must
+    # preserve the blank revision rather than silently filling it with
+    # ``_refs[0]`` (which might be a different branch than the default
+    # the runner actually listed against). The combobox values list
+    # still gets populated for the dropdown UI.
+    assert tab.revision_var.get() == ""
+    assert tab._refs == ["main"]
 
 
 def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stub, active_venv, monkeypatch):

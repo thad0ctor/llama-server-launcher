@@ -121,6 +121,26 @@ def format_bytes(size_bytes: int | None) -> str:
     return f"{size_bytes} B"
 
 
+def parse_bool(value) -> bool:
+    """Coerce an arbitrary persisted value to a strict ``bool``.
+
+    ``bool("false")`` and ``bool("0")`` are both ``True`` in Python because
+    they're non-empty strings, so a JSON-edited settings file with
+    ``"hf_force_download": "false"`` would silently flip the flag on.
+    This helper accepts the strings a human would write (``"true"``,
+    ``"1"``, ``"yes"``, ``"on"`` …) and treats anything else as ``False``.
+    Shared with ``hf_downloader.runner`` so the UI checkbox seeding and
+    the subprocess parsing agree on what a stored value means.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    return False
+
+
 def parse_pattern_lines(raw: str) -> tuple[str, ...]:
     """Parse newline/comma-separated Hub patterns."""
     rows: list[str] = []

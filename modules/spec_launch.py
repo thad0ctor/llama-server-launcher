@@ -428,7 +428,17 @@ def _resolve_draft_device_value(launcher):
     if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return ""
 
-    raw_draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
+    # Mirror the list/tuple gate from ``get_effective_visible_gpu_indices``:
+    # ``list("0,1")`` would split character-by-character into
+    # ``["0", ",", "1"]``, fail ``_coerce_strict_gpu_index`` on every entry,
+    # and ``emit_spec_args`` would skip the speculative-decoding block
+    # entirely. A bare scalar would raise here. Discard non-sequence
+    # persisted values up front.
+    raw_value = launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+    if isinstance(raw_value, (list, tuple)):
+        raw_draft_indices = list(raw_value)
+    else:
+        raw_draft_indices = []
     if manual_mode:
         # Ignore the detected-GPU checkbox state but keep the raw override
         # path below alive.

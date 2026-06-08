@@ -33,6 +33,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import queue
+import re
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -300,16 +301,18 @@ class TestNoLatentReassignmentBugs:
                 in_init = False
             if in_init:
                 continue
+            if raw.lstrip().startswith("#"):
+                continue
             for name in self._STATIC_REEXPORT:
-                pattern = f"self.{name} ="
-                # Exclude .set() and == comparisons; match assignment only.
-                if pattern in raw and not raw.lstrip().startswith("#"):
-                    # Disallow assignment, but allow `==` comparison and `.set()`.
-                    idx = raw.find(pattern)
-                    after = raw[idx + len(pattern) :].lstrip()
-                    # If the next non-space char is `=`, it's `==` (allowed).
-                    if not after.startswith("="):
-                        offenses.append(f"Line {i}: {raw.rstrip()}")
+                # ``self.<name>\s*=(?!=)`` so we match BOTH ``self.x = y``
+                # AND the no-space ``self.x=y`` form (the old substring
+                # match ``"self.{name} ="`` silently missed the latter and
+                # let a real reassignment slip through the audit).
+                # ``(?!=)`` excludes ``==`` comparisons and ``.set(...)``
+                # is excluded because it never matches an ``=`` token at
+                # this position.
+                if re.search(rf"\bself\.{re.escape(name)}\s*=(?!=)", raw):
+                    offenses.append(f"Line {i}: {raw.rstrip()}")
         assert not offenses, "Found reassignments of statically-reexported attrs outside __init__:\n" + "\n".join(
             offenses
         )

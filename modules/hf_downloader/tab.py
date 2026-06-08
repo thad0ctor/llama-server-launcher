@@ -20,6 +20,7 @@ from modules.hf_downloader.helpers import (
     build_runner_command,
     collect_target_directory_options,
     normalize_repo_input,
+    parse_bool,
     parse_pattern_lines,
     payload_bytes,
     summarize_repo_listing,
@@ -43,8 +44,13 @@ class HuggingFaceDownloaderTab:
         self.download_mode_var = tk.StringVar(value=settings.get("hf_download_mode", "selected"))
         self.include_patterns_var = tk.StringVar(value=settings.get("hf_include_patterns", ""))
         self.ignore_patterns_var = tk.StringVar(value=settings.get("hf_ignore_patterns", ""))
-        self.force_download_var = tk.BooleanVar(value=bool(settings.get("hf_force_download", False)))
-        self.local_files_only_var = tk.BooleanVar(value=bool(settings.get("hf_local_files_only", False)))
+        # ``bool("false")`` and ``bool("0")`` are both True in Python; a
+        # JSON-edited settings file with ``"hf_force_download": "false"``
+        # would silently re-enable destructive behaviour. ``parse_bool``
+        # mirrors the runner-side coercion, so a UI-rehydration and a
+        # subprocess parse agree on what a stored string means.
+        self.force_download_var = tk.BooleanVar(value=parse_bool(settings.get("hf_force_download", False)))
+        self.local_files_only_var = tk.BooleanVar(value=parse_bool(settings.get("hf_local_files_only", False)))
         self.max_workers_var = tk.StringVar(value=str(settings.get("hf_max_workers", 4)))
         # Re-entry guard so the validating trace below doesn't recurse when
         # it normalizes its own value.
@@ -967,14 +973,16 @@ class HuggingFaceDownloaderTab:
             self._refs = [ref.name for ref in refs]
             if self._revision_combo is not None:
                 self._revision_combo.config(values=self._refs)
-            # Only auto-populate when the user submitted with a blank
-            # revision AND has not typed something into the field since.
-            # If they submitted "main" then cleared the box mid-flight, we
-            # respect the blank — silently filling it with ``_refs[0]``
-            # would be a confusing override.
+            # Auto-populate ONLY when the user submitted with a non-empty
+            # revision and then cleared the box mid-flight. If they
+            # submitted blank, the runner resolved the listing against the
+            # repo's *default* branch — but ``_refs[0]`` is just the first
+            # alphabetically-sorted ref, which might be a different branch
+            # entirely. Overwriting a blank ``revision_var`` here would
+            # silently retarget the next download at the wrong ref.
             if (
                 not self.revision_var.get().strip()
-                and not getattr(self, "_last_requested_revision", "").strip()
+                and getattr(self, "_last_requested_revision", "").strip()
                 and self._refs
             ):
                 self.revision_var.set(self._refs[0])

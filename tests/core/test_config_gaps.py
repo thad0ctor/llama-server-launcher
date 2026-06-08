@@ -299,6 +299,12 @@ class TestLoadConfiguration:
     ):
         cfg = _full_cfg(predefined_template_name="unknown")
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
+        # Derive the expected fallback from ``launcher._all_templates``
+        # so the test doesn't go stale the next time the first entry in
+        # ``chat_templates.json`` is renamed/reordered. The behaviour
+        # under audit is "remap to whatever the first available template
+        # is" — not the literal name "ChatML".
+        expected_fallback = next(iter(launcher._all_templates.keys()))
         # Saved name no longer exists in chat_templates.json (legacy
         # alias was cleaned up). _apply_loaded_configuration must
         # remap to the first available key so .set() doesn't leave
@@ -307,7 +313,7 @@ class TestLoadConfiguration:
         # invalid name back to disk).
         with patch("modules.config.messagebox"):
             cm.load_configuration()
-        assert launcher.predefined_template_name.get() == "ChatML"
+        assert launcher.predefined_template_name.get() == expected_fallback
 
         # And when the saved name is missing entirely, the first key wins.
         cfg2 = _full_cfg()
@@ -317,7 +323,7 @@ class TestLoadConfiguration:
         launcher.saved_configs["demo"] = cfg2
         with patch("modules.config.messagebox"):
             cm.load_configuration()
-        assert launcher.predefined_template_name.get() == "ChatML"
+        assert launcher.predefined_template_name.get() == expected_fallback
 
     def test_env_vars_and_ik_llama_delegates_called(
         self, rich_launcher_factory, tmp_path

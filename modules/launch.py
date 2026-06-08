@@ -1179,8 +1179,16 @@ class LaunchManager:
                         # see a literal two-character ``\n`` in their env var.
                         # See tests/launchers/test_shell_safety.py
                         # ``TestEnvVarExportEscaping`` for the regression.
+                        # ``get_enabled_env_vars()`` can yield non-string
+                        # values (a numeric ``"42"`` saved as an int, or a
+                        # bool). Stringify first so the chained ``.replace``
+                        # calls don't raise AttributeError and abort the
+                        # entire Linux/macOS launch. Mirrors the PowerShell
+                        # path which already calls ``str(...)`` before
+                        # escaping.
+                        text_value = str(var_value)
                         escaped_value = (
-                            var_value.replace('\\', '\\\\')
+                            text_value.replace('\\', '\\\\')
                                      .replace('"', '\\"')
                                      .replace('$', '\\$')
                                      .replace('`', '\\`')
@@ -1557,9 +1565,12 @@ class LaunchManager:
                         # ``$``, and backtick. Newlines deliberately pass
                         # through — see the matching block in launch_server()
                         # and tests/launchers/test_shell_safety.py
-                        # ``TestEnvVarExportEscaping``.
+                        # ``TestEnvVarExportEscaping``. Stringify first
+                        # so a numeric/bool env value doesn't AttributeError
+                        # the .sh writer — matches launch_server().
+                        text_value = str(var_value)
                         escaped_value = (
-                            var_value.replace('\\', '\\\\')
+                            text_value.replace('\\', '\\\\')
                                      .replace('"', '\\"')
                                      .replace('$', '\\$')
                                      .replace('`', '\\`')
