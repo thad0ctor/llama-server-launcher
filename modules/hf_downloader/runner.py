@@ -8,6 +8,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from modules.hf_downloader.helpers import parse_bool as _parse_bool
+
 
 def _emit(event: str, **payload) -> None:
     print(json.dumps({"event": event, **payload}), flush=True)
@@ -182,30 +184,6 @@ def _build_progress_tqdm_class():  # pragma: no cover - exercised indirectly
             )
 
     return _ProgressTqdm
-
-
-def _parse_bool(value) -> bool:
-    """Coerce a payload value to a strict bool.
-
-    ``bool("false")`` and ``bool("0")`` are both ``True`` in Python because
-    they're non-empty strings, so a CLI-edited payload with
-    ``"force_download": "false"`` used to silently enable force-download.
-    This helper accepts the strings the average human would write
-    (``"true"``/``"1"``/``"yes"``/``"on"`` etc.) and treats anything else
-    as ``False``.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
-    # Unknown payload types (list/dict/object) → False. The previous
-    # ``bool(value)`` fallback flipped a non-empty list/dict to True,
-    # which would silently enable a destructive flag like
-    # ``force_download`` if a hand-edited JSON payload shipped an
-    # accidentally-list-valued entry.
-    return False
 
 
 def _normalize_path_list(value) -> list[Path]:

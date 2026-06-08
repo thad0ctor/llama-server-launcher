@@ -373,8 +373,16 @@ def collect_target_directory_options(
         except (OSError, ValueError, TypeError, RuntimeError):
             continue
     options: list[TargetDirectoryOption] = []
-    for index, raw_path in enumerate(model_dirs):
-        path = Path(raw_path).expanduser().resolve()
+    rendered_index = 0
+    for raw_path in model_dirs:
+        # Same protection as ``normalized_selected``: a malformed entry
+        # in ``launcher.model_dirs`` (NUL byte, bad surrogate, etc) used
+        # to abort the entire Download tab build. Skip it and keep
+        # going so the other model dirs still render.
+        try:
+            path = Path(raw_path).expanduser().resolve()
+        except (OSError, ValueError, TypeError, RuntimeError):
+            continue
         exists = path.exists() and path.is_dir()
         free_bytes: int | None = None
         try:
@@ -385,7 +393,7 @@ def collect_target_directory_options(
         if normalized_selected:
             is_selected = str(path) in normalized_selected
         else:
-            is_selected = index == 0
+            is_selected = rendered_index == 0
         options.append(
             TargetDirectoryOption(
                 path=path,
@@ -394,6 +402,7 @@ def collect_target_directory_options(
                 selected=is_selected,
             )
         )
+        rendered_index += 1
     # If a persisted selection was supplied but didn't match any current
     # model_dirs (user removed the directory from Settings, or moved
     # disks), fall back to checking the first option so the download UI

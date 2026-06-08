@@ -53,6 +53,13 @@ class LaunchManager:
         # output are cached — a transient failure (timeout, briefly empty
         # output) is not memoized, so the next probe gets a fresh shot.
         self._help_text_cache: dict[tuple[str, int, int], str] = {}
+        # Per-build memoization for ``--help`` failures. A broken binary
+        # used to cost ``N * timeout`` per build_cmd() call because every
+        # supports_flag(...) check re-probed the exe. Tracked here, reset
+        # at the start of each ``build_cmd`` / ``launch_server``, so a
+        # FUTURE launch can re-probe (e.g. user fixed the binary) but a
+        # single build/launch only probes each exe once even on failure.
+        self._help_text_failed_this_build: set[tuple[str, int, int]] = set()
 
     def _exe_signature(self, exe_path) -> tuple[str, int, int] | None:
         """Return ``(path, mtime_ns, size)`` for the cache key, or ``None``
@@ -107,10 +114,12 @@ class LaunchManager:
         signature).
 
         Returns ``None`` on probe failure (timeout, OSError, non-zero exit
-        with empty output, exe vanished). Failures are NOT memoized — a
-        later flag check on the same exe will retry. Empty help payloads
-        are also rejected so a momentarily-broken binary doesn't poison
-        every subsequent probe on the same path in this session.
+        with empty output, exe vanished). Failures are memoized **for the
+        current build/launch only** — a later launch on the same
+        ``LaunchManager`` instance can re-probe (e.g. after the user
+        rebuilt the binary), but within one ``build_cmd``/``launch_server``
+        call the exe is probed at most once even on failure. Empty help
+        payloads are also rejected the same way.
         """
         if sig is None:
             sig = self._exe_signature(exe_path)
@@ -118,6 +127,8 @@ class LaunchManager:
                 return None
         if sig in self._help_text_cache:
             return self._help_text_cache[sig]
+        if sig in self._help_text_failed_this_build:
+            return None
         try:
             result = subprocess.run(
                 [str(exe_path), "--help"],
@@ -130,36 +141,41 @@ class LaunchManager:
         except Exception as e:
             print(
                 f"DEBUG: Feature probe failed for {exe_path}: {e!r}; "
-                f"assuming all flags unsupported for this call only "
-                f"(not cached)",
+                f"assuming all flags unsupported for the rest of this "
+                f"build (a later launch can re-probe)",
                 file=sys.stderr,
             )
+            self._help_text_failed_this_build.add(sig)
             return None
-        # Empty payload → don't memoize, regardless of return code. A
-        # well-behaved binary always prints SOMETHING on ``--help``; a
-        # wrapper script that returns 0 with no output is just a
-        # different shape of transient failure. Caching ``""`` here would
-        # silently strip every reasoning flag for the rest of the session.
+        # Empty payload → don't memoize as success, but DO memoize as a
+        # failure for the rest of this build so we don't re-probe every
+        # ``supports_flag`` call. A well-behaved binary always prints
+        # SOMETHING on ``--help``; a wrapper script that returns 0 with
+        # no output is just a different shape of transient failure.
         if not help_text.strip():
             print(
                 f"DEBUG: Feature probe returned empty output (rc={result.returncode}) "
-                f"for {exe_path}; not caching so the next call can retry",
+                f"for {exe_path}; treating as failure for this build "
+                f"(re-probed on next launch)",
                 file=sys.stderr,
             )
+            self._help_text_failed_this_build.add(sig)
             return None
         # Non-zero exit AND non-empty output is usually a usage error
         # spat to stderr (``error: unknown argument: --help``, etc.) —
-        # memoizing that blob would let ``_backend_supports_flag`` decide
-        # flag support by pattern-matching the error message. Skip the
-        # cache; let the next probe retry with a freshly-built binary
-        # or recovered environment.
+        # memoizing that blob in ``_help_text_cache`` would let
+        # ``_backend_supports_flag`` decide flag support by pattern-
+        # matching the error message. Treat it as a failure: don't cache
+        # the bad text, do mark this build as failed so subsequent
+        # ``supports_flag`` calls skip re-probing.
         if result.returncode != 0:
             print(
                 f"DEBUG: Feature probe rc={result.returncode} for {exe_path}; "
-                f"output looks like an error message — not caching so a later "
-                f"call can retry against a fixed binary",
+                f"output looks like an error message — treating as "
+                f"failure for this build (re-probed on next launch)",
                 file=sys.stderr,
             )
+            self._help_text_failed_this_build.add(sig)
             return None
         self._help_text_cache[sig] = help_text
         return help_text
@@ -276,6 +292,11 @@ class LaunchManager:
         in; save-script flows leave it off so writing a script never
         executes the binary or hangs the UI on a probe timeout.
         """
+        # New build → reset the per-build failure memo so a later launch
+        # against a fixed binary can re-probe. Successes stay in
+        # ``_help_text_cache`` (keyed by mtime+size, auto-invalidated by
+        # a rebuild).
+        self._help_text_failed_this_build.clear()
         # Get the backend selection and use appropriate directory
         backend = self.launcher.backend_selection.get()
 

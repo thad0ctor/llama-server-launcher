@@ -30,19 +30,24 @@ def _bash_hold_open(command: str) -> str:
 
 
 def _cmd_keep_open(command: str) -> list[str]:
-    """Return a Windows ``cmd`` invocation that reports success/failure."""
+    """Return a Windows ``cmd`` invocation that reports success/failure.
+
+    Both shells run with delayed expansion OFF (cmd's default). The
+    previous ``/v:on`` form would silently strip ``!`` literals inside
+    the user's command — an exclamation mark in a directory name, a
+    quoted string with a history-style ``!`` — because delayed
+    expansion would try to resolve them as variables. We capture
+    ``ERRORLEVEL`` via ``call echo … %%ERRORLEVEL%%`` (double-percent
+    forces a second expansion pass at execution time, no delayed
+    expansion required).
+    """
     wrapped = (
         'echo Running command... & '
         f'{command} & '
-        'set "launcher_status=!errorlevel!" & '
         'echo. & '
-        'if not "!launcher_status!"=="0" ('
-        'echo Command failed with exit code !launcher_status!.'
-        ') else ('
-        'echo Command completed successfully.'
-        ')'
+        'call echo Command finished with exit code %%ERRORLEVEL%%.'
     )
-    return ["cmd", "/v:on", "/c", "start", "", "cmd", "/v:on", "/k", wrapped]
+    return ["cmd", "/c", "start", "", "cmd", "/k", wrapped]
 
 
 def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> None:

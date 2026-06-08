@@ -487,11 +487,13 @@ class TestBackendSupportsFlag:
     def test_failure_is_not_cached_so_later_probe_can_succeed(
         self, manager, monkeypatch
     ):
-        """A transient timeout/OSError must not poison the cache. If the
-        first probe fails (load spike, momentarily-busy disk) but a later
-        probe would succeed, the second call must actually re-run subprocess
-        and return True. Caching False on transient failures would silently
-        disable the flag for the rest of the session."""
+        """A transient timeout/OSError must not poison the cache PERMANENTLY.
+        Failures are now memoized for the rest of the current build/launch
+        (so a launch with five reasoning fields doesn't pay ``N * timeout``
+        on a broken exe), but the next build/launch clears that memo and
+        re-probes — which matters when the user has rebuilt the binary
+        between attempts.
+        """
         from unittest.mock import MagicMock as _MM
         import subprocess as _sp
 
@@ -510,18 +512,21 @@ class TestBackendSupportsFlag:
 
         monkeypatch.setattr("modules.launch.subprocess.run", _flaky_run)
 
-        # First call hits the timeout — returns False, must NOT cache.
+        # First call hits the timeout — returns False. The per-flag cache
+        # remains untouched (``_help_text_failed_this_build`` is what gates
+        # re-probing inside the build); a NEW build/launch can re-probe.
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
-        # The cache key is now (path, mtime_ns, size, flag) — check that no
-        # entry for this exe/flag exists rather than the old 2-tuple shape.
         sig = self._fake_sig("/fake/exe")
         assert (*sig, "--fit") not in manager._feature_probe_cache, (
-            "transient probe failures must not be memoized"
+            "transient probe failures must not be memoized as a per-flag result"
         )
 
-        # Second call re-runs subprocess and finds the flag.
+        # Simulate the start of a new build/launch — ``build_cmd``/
+        # ``launch_server`` clear the per-build failure memo. The second
+        # call now actually re-runs subprocess and finds the flag.
+        manager._help_text_failed_this_build.clear()
         assert manager._backend_supports_flag("/fake/exe", "--fit") is True
-        assert call_count["n"] == 2, "second call should actually re-probe"
+        assert call_count["n"] == 2, "second build should actually re-probe"
 
     def test_result_is_cached_per_exe(self, manager, monkeypatch):
         """Subprocess cost is amortized across all flag probes on the same exe.

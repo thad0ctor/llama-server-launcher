@@ -654,9 +654,14 @@ jobs:
           mkdir -p "$STAGE"
           cp -r modules config launchers images Readme.md requirements.txt \
                 llamacpp-server-launcher.py "$STAGE/"
-          # Strip caches and user-local state from the bundle
+          # Strip caches and user-local state from the bundle.
+          # build_configs.json and gpu_detection_cache.json hold
+          # machine-local paths (toolchain dirs, venv paths) and
+          # detected GPU info — never ship those to other users.
           find "$STAGE" -type d -name '__pycache__' -exec rm -rf {} +
           rm -f "$STAGE/config/llama_cpp_launcher_configs.json"
+          rm -f "$STAGE/config/build_configs.json"
+          rm -f "$STAGE/config/gpu_detection_cache.json"
           (cd dist && zip -r "llama-server-launcher-${{ steps.version.outputs.version }}.zip" \
                      "llama-server-launcher-${{ steps.version.outputs.version }}")
 

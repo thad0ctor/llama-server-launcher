@@ -777,15 +777,21 @@ def load_cached_gpu_info(config_dir, venv_path):
     if any(not isinstance(device, dict) for device in devices):
         return None
     # Downstream code keys off ``gpu["id"]`` (launch.py, spec_launch.py,
-    # gpu mapping UI) and assumes it's a real launcher index. A
-    # hand-edited cache with ``{"name": "A100"}`` (no id) or
-    # ``{"id": "0"}`` (string id) would either KeyError or compare
-    # against ints incorrectly. ``bool`` is intentionally excluded — a
-    # bool slipping through as an "id" would point at GPU 0/1 by
-    # accident.
-    for device in devices:
+    # gpu mapping UI) and assumes it's a real launcher index AND that
+    # the index matches the device's position in the list. A
+    # hand-edited cache with ``[{"id": 0}, {"id": 7}]`` would otherwise
+    # load fine but silently drift the mapping (UI row 1 = launcher
+    # GPU 7, etc). Reject anything that isn't the canonical 0..N-1
+    # sequence so the next detection pass rebuilds it. ``bool`` is
+    # intentionally excluded — ``True`` would otherwise pass as
+    # ``id == 1``.
+    for expected_id, device in enumerate(devices):
         device_id = device.get("id")
-        if not isinstance(device_id, int) or isinstance(device_id, bool):
+        if (
+            not isinstance(device_id, int)
+            or isinstance(device_id, bool)
+            or device_id != expected_id
+        ):
             return None
     return gpu_info
 

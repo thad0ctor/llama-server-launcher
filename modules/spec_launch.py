@@ -433,8 +433,14 @@ def _resolve_draft_device_value(launcher):
     # ``["0", ",", "1"]``, fail ``_coerce_strict_gpu_index`` on every entry,
     # and ``emit_spec_args`` would skip the speculative-decoding block
     # entirely. A bare scalar would raise here. Discard non-sequence
-    # persisted values up front.
-    raw_value = launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+    # persisted values up front. ``app_settings`` may be missing entirely
+    # on a stripped/mocked launcher; fall back to ``[]`` rather than
+    # ``AttributeError``-ing out of the spec-args emit path.
+    app_settings = getattr(launcher, "app_settings", None)
+    if hasattr(app_settings, "get"):
+        raw_value = app_settings.get("spec_draft_selected_gpus", []) or []
+    else:
+        raw_value = []
     if isinstance(raw_value, (list, tuple)):
         raw_draft_indices = list(raw_value)
     else:
