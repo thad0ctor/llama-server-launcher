@@ -1303,6 +1303,18 @@ class SpecTab:
         production code path now uses ``_run_spec_draft_gguf_analysis_loop``;
         this single-shot wrapper preserves the pre-coalescing test API
         without leaving an old per-thread design in production."""
+        # Defensive init: ``_get_spec_draft_analysis_lock`` already
+        # lazily creates its lock if ``__init__`` hasn't run (test
+        # subclasses / stubs that bypass ``__init__``). Mirror that
+        # pattern for ``_spec_draft_analysis_generation`` and
+        # ``_spec_draft_analysis_queue`` so this shim doesn't
+        # AttributeError on those callers — the production
+        # ``_run_spec_draft_gguf_analysis_loop`` doesn't need this
+        # because ``__init__`` always runs before it spawns a worker.
+        if not hasattr(self, "_spec_draft_analysis_generation"):
+            self._spec_draft_analysis_generation = 0
+        if not hasattr(self, "_spec_draft_analysis_queue"):
+            self._spec_draft_analysis_queue = queue.Queue()
         try:
             if analysis_id is None:
                 with self._get_spec_draft_analysis_lock():

@@ -122,8 +122,18 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
     # payload (so control returns here even if the payload is a
     # batch chain or invokes another .cmd without ``call``), then
     # echoes the exit code and self-deletes.
-    wrapper_fd, wrapper_path = tempfile.mkstemp(suffix=".cmd", prefix="llama-launcher-", text=False)
+    # ``tempfile.mkstemp`` is wrapped in the SAME try as the body
+    # write below so a failure to create the wrapper file (disk
+    # quota, EMFILE, AppLocker) still cleans up ``payload_path``.
+    # The earlier shape created ``wrapper_path`` OUTSIDE the try
+    # — a ``mkstemp`` exception would have leaked the payload
+    # behind in ``%TEMP%`` because neither the inner try nor the
+    # outer caller knew to unlink it. ``wrapper_path`` is also
+    # set to ``None`` ahead of time so the cleanup loop can
+    # safely skip it when ``mkstemp`` itself raised.
+    wrapper_path = None
     try:
+        wrapper_fd, wrapper_path = tempfile.mkstemp(suffix=".cmd", prefix="llama-launcher-", text=False)
         with os.fdopen(wrapper_fd, "w", encoding="utf-8-sig", newline="") as fh:
             fh.write("@echo off\r\n")
             fh.write("echo Running command...\r\n")
@@ -144,6 +154,8 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
             fh.write('del "%~f0"\r\n')
     except Exception:
         for path in (payload_path, wrapper_path):
+            if path is None:
+                continue
             try:
                 os.unlink(path)
             except OSError:

@@ -505,16 +505,23 @@ class TestEmissionParity:
             }
         )
 
+        # Use ``Counter`` (not ``set``) so duplicate emissions fail
+        # the test. A regression that emitted ``--spec-type`` twice
+        # (e.g. once from the spec block and once from a stale
+        # ``--draft-*`` fallback path) would tie-pass the set
+        # comparison; the Counter equality catches that.
+        from collections import Counter
+
         def _long_option_tokens(args):
-            return {
+            return Counter(
                 arg
                 for arg in args
                 if isinstance(arg, str)
                 and (arg.startswith("--spec-") or arg.startswith("--draft-") or arg.startswith("--suffix-"))
-            }
+            )
 
         def _short_option_tokens(args):
-            return {arg for arg in args if isinstance(arg, str) and arg in _SHORT_SPEC_TOKENS}
+            return Counter(arg for arg in args if isinstance(arg, str) and arg in _SHORT_SPEC_TOKENS)
 
         emitted_long = _long_option_tokens(partial)
         emitted_short = _short_option_tokens(partial)
@@ -522,15 +529,15 @@ class TestEmissionParity:
         expected_short = _short_option_tokens(expected_flags)
         if spec_type == "none":
             # type=none → no spec/draft option tokens AT ALL. The
-            # option-set equality below catches every ``--spec-*`` /
-            # ``--draft-*`` / ``--suffix-*`` / short-form flag, but a
-            # regression that emitted a BARE value token (e.g. a
+            # option-Counter equality below catches every ``--spec-*``
+            # / ``--draft-*`` / ``--suffix-*`` / short-form flag, but
+            # a regression that emitted a BARE value token (e.g. a
             # stray ``"draft-mtp"`` argv element with no preceding
             # ``--spec-type``) wouldn't be caught by the option-only
             # filter. Assert ``partial == []`` so the no-emission
             # contract covers any token shape, not just options.
             assert partial == [], f"backend={backend} spec_type=none must emit nothing; " f"got partial={partial!r}"
-            assert emitted_long == set() and emitted_short == set(), (
+            assert not emitted_long and not emitted_short, (
                 f"backend={backend} spec_type=none must emit no spec/draft/suffix "
                 f"flags; got long={emitted_long!r} short={emitted_short!r} "
                 f"partial={partial!r}"
@@ -538,13 +545,13 @@ class TestEmissionParity:
         else:
             assert emitted_long == expected_long, (
                 f"backend={backend} spec_type={spec_type}: emitted long-form "
-                f"spec/draft/suffix flags must equal expected set. "
+                f"spec/draft/suffix flag counts must equal expected. "
                 f"expected={expected_long!r} emitted={emitted_long!r} "
                 f"partial={partial!r}"
             )
             assert emitted_short == expected_short, (
                 f"backend={backend} spec_type={spec_type}: emitted short-form "
-                f"spec/draft flags must equal expected set. "
+                f"spec/draft flag counts must equal expected. "
                 f"expected={expected_short!r} emitted={emitted_short!r} "
                 f"partial={partial!r}"
             )
@@ -573,7 +580,9 @@ class TestEmissionParity:
             # ``--spec-draft-n-max 3`` with ``--spec-draft-n-max 0``
             # (e.g. pairs n-max with the n-min value) would slip
             # past the set-membership check above but trips here.
-            option_tokens = expected_long | expected_short
+            # Build the set of option tokens (just keys — multiplicity
+            # is already validated by the Counter equality above).
+            option_tokens = set(expected_long) | set(expected_short)
             for i, flag in enumerate(expected_flags):
                 if not isinstance(flag, str) or flag not in option_tokens:
                     continue
@@ -893,6 +902,14 @@ class TestExtraAdversarialConfigs:
                 "-draft",
                 "--model-draft",
             }
+            # The wrong-backend code path is meant to be a
+            # complete no-op. Filtering to known spec/draft/suffix
+            # tokens (``leaked`` below) catches the canonical
+            # regression, but a regression that emitted a bare
+            # value token (e.g. a stray ``"draft-mtp"`` argv
+            # element) would slip through that filter. Assert
+            # ``partial == []`` so ANY emission fails the test.
+            assert partial == [], f"emission must be entirely silent on wrong " f"backend; got partial={partial!r}"
             leaked = [
                 arg
                 for arg in partial

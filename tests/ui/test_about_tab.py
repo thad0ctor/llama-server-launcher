@@ -280,10 +280,12 @@ class TestBuildUpdateScriptBasic:
         # And the literal Python-None repr must NOT have leaked
         # through — a regression that does ``f"...{remote_version}"``
         # without coercing ``None`` first would have rendered as
-        # ``"None"`` in the generated bash. Both ``'None'`` and
-        # ``"None"`` would be a leak; reject both.
-        assert "'None'" not in s
-        assert '"None"' not in s
+        # ``"None"`` in the generated bash. Catch ``'None'`` /
+        # ``"None"`` AND a bare ``None`` token (the latter wasn't
+        # checked before — a regression that emitted unquoted
+        # ``None`` would have slipped past the two-quoted-form
+        # assertions).
+        assert "None" not in s
 
 
 class TestBuildUpdateScriptInjectionResistance:
