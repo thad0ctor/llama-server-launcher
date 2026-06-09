@@ -465,33 +465,58 @@ class TestEmissionParity:
 
         partial = []
         emit_spec_args(launcher, backend, partial)
-        # Set-equality on option tokens only (``--spec-*`` /
-        # ``--draft-*``). The test's ``expected_flags`` data also
-        # carries value tokens for some rows (e.g. ``"draft-mtp"``
-        # as the value of ``--spec-type``); strip both sides to the
-        # option-prefix set so a regression that leaks an extra
-        # ``--spec-draft-…`` flag on a subset spec_type fails
-        # loudly, but the value tokens stay free to vary.
-        def _option_tokens(args):
+        # Two-pass parity check:
+        # 1. Set-equality on long-form option tokens (``--spec-*`` /
+        #    ``--draft-*`` / ``--suffix-*``). A regression that
+        #    leaks an extra ``--spec-draft-…`` or ``--suffix-…``
+        #    flag on a subset spec_type fails loudly here.
+        # 2. Set-equality on the ik_llama short-form flags
+        #    (``-devd`` / ``-ngld`` / ``-ctkd`` / ``-ctvd`` /
+        #    ``-draft`` / ``--model-draft``). These don't share a
+        #    prefix and used to slip past the prefix-only check.
+        # Value tokens (e.g. ``"draft-mtp"`` as the value of
+        # ``--spec-type``) stay free to vary in both passes.
+        _SHORT_SPEC_TOKENS = frozenset({
+            "-devd", "-ngld", "-ctkd", "-ctvd", "-draft", "--model-draft",
+        })
+        def _long_option_tokens(args):
             return {
                 arg for arg in args
                 if isinstance(arg, str)
-                and (arg.startswith("--spec-") or arg.startswith("--draft-"))
+                and (
+                    arg.startswith("--spec-")
+                    or arg.startswith("--draft-")
+                    or arg.startswith("--suffix-")
+                )
             }
-        emitted_option_flags = _option_tokens(partial)
-        expected_option_flags = _option_tokens(expected_flags)
+        def _short_option_tokens(args):
+            return {
+                arg for arg in args
+                if isinstance(arg, str) and arg in _SHORT_SPEC_TOKENS
+            }
+        emitted_long = _long_option_tokens(partial)
+        emitted_short = _short_option_tokens(partial)
+        expected_long = _long_option_tokens(expected_flags)
+        expected_short = _short_option_tokens(expected_flags)
         if spec_type == "none":
-            # type=none → no --spec-* / --draft-* flags AT ALL.
-            assert emitted_option_flags == set(), (
-                f"backend={backend} spec_type=none must emit no spec/draft "
-                f"flags; got leaked={emitted_option_flags!r} partial={partial!r}"
+            # type=none → no spec/draft option tokens AT ALL.
+            assert emitted_long == set() and emitted_short == set(), (
+                f"backend={backend} spec_type=none must emit no spec/draft/suffix "
+                f"flags; got long={emitted_long!r} short={emitted_short!r} "
+                f"partial={partial!r}"
             )
         else:
-            assert emitted_option_flags == expected_option_flags, (
-                f"backend={backend} spec_type={spec_type}: emitted spec/draft "
-                f"option flags must equal expected set. "
-                f"expected={expected_option_flags!r} "
-                f"emitted={emitted_option_flags!r} partial={partial!r}"
+            assert emitted_long == expected_long, (
+                f"backend={backend} spec_type={spec_type}: emitted long-form "
+                f"spec/draft/suffix flags must equal expected set. "
+                f"expected={expected_long!r} emitted={emitted_long!r} "
+                f"partial={partial!r}"
+            )
+            assert emitted_short == expected_short, (
+                f"backend={backend} spec_type={spec_type}: emitted short-form "
+                f"spec/draft flags must equal expected set. "
+                f"expected={expected_short!r} emitted={emitted_short!r} "
+                f"partial={partial!r}"
             )
 
     def test_mtp_overrides_parallel_8_at_launch(self, real_launcher):

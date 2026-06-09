@@ -270,7 +270,21 @@ def _win_cmd_quote(arg: str) -> str:
 _WIN_CMD_EXPANSION_CHARS = ("%", "!")
 
 
-def _shell_join(args: list[str], *, platform: str | None = None) -> str:
+def _shell_join(
+    args: list[str],
+    *,
+    platform: str | None = None,
+    quote_cmd_word: bool = True,
+) -> str:
+    """Compose a shell command string from an argv list with the right
+    quoting rules for the target platform.
+
+    ``quote_cmd_word=False`` leaves the FIRST argument unquoted so
+    cmd.exe builtins like ``rmdir`` / ``del`` are still recognised as
+    builtins (a quoted ``"rmdir"`` makes cmd look for an executable
+    file with that name first). The ``%`` / ``!`` rejection and the
+    quoting rules for the remaining arguments are unchanged.
+    """
     plat = platform or sys.platform
     if plat.startswith("win"):
         # cmd.exe expands ``%VAR%`` inside double-quoted strings and ``!VAR!``
@@ -292,9 +306,15 @@ def _shell_join(args: list[str], *, platform: str | None = None) -> str:
                 )
         # Always double-quote each arg so embedded cmd metacharacters
         # (& | ^ < > and friends) can't break out of the intended
-        # command. See _win_cmd_quote for the rationale.
-        return " ".join(_win_cmd_quote(arg) for arg in args)
-    return " ".join(shlex.quote(arg) for arg in args)
+        # command. See _win_cmd_quote for the rationale. The optional
+        # ``quote_cmd_word=False`` leaves the first arg (the command
+        # name) unquoted for cmd.exe builtin compatibility.
+        if quote_cmd_word or not args:
+            return " ".join(_win_cmd_quote(arg) for arg in args)
+        return " ".join([args[0], *(_win_cmd_quote(a) for a in args[1:])])
+    if quote_cmd_word or not args:
+        return " ".join(shlex.quote(arg) for arg in args)
+    return " ".join([args[0], *(shlex.quote(a) for a in args[1:])])
 
 
 def default_venv_base_python_args(
@@ -522,8 +542,14 @@ def build_remove_venv_command(
         # a path that passed the safety-resolution above could still be
         # rewritten by ``cmd.exe`` variable expansion before ``rmdir``
         # executes — i.e. the deletion would target a different directory
-        # than the one we validated.
-        return _shell_join(["rmdir", "/s", "/q", target], platform=plat)
+        # than the one we validated. ``quote_cmd_word=False`` keeps
+        # ``rmdir`` unquoted so cmd.exe resolves it as a builtin
+        # (a quoted ``"rmdir"`` makes cmd search for a binary first).
+        return _shell_join(
+            ["rmdir", "/s", "/q", target],
+            platform=plat,
+            quote_cmd_word=False,
+        )
     return _shell_join(["rm", "-rf", target], platform=plat)
 
 

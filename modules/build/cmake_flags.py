@@ -697,10 +697,17 @@ def build_autodetect_values(
     values["GGML_LLAMAFILE"] = True
 
     if avx512_supported:
+        # Only auto-enable the umbrella ``GGML_AVX512`` flag. The
+        # sub-features (``_VBMI`` / ``_VNNI`` / ``_BF16``) are gated
+        # on dedicated CPU capability bits that
+        # ``avx512_supported`` (a single AVX-512 baseline probe)
+        # doesn't measure — turning them on without those bits
+        # produces "illegal instruction" at runtime on CPUs that
+        # advertise AVX-512 but lack the specific extensions
+        # (Skylake-X, Cannon Lake, etc.). The user can still flip
+        # them on manually from the Build tab if their CPU
+        # actually supports them.
         values["GGML_AVX512"] = True
-        values["GGML_AVX512_VBMI"] = True
-        values["GGML_AVX512_VNNI"] = True
-        values["GGML_AVX512_BF16"] = True
 
     # Don't hard-code -march=native here: it's a GCC/Clang-only flag and
     # breaks CMake configure on MSVC / clang-cl out of the box. ``GGML_NATIVE``

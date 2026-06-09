@@ -430,7 +430,24 @@ class HuggingFaceDownloaderTab:
             except Exception:
                 pass
         self._selected_target_trace_tokens = []
-        selected_paths = tuple(self.launcher.app_settings.get("hf_target_dirs", []))
+        # Defensive normalization: a JSON-edited ``hf_target_dirs``
+        # could ship a bare string (``"/models"`` instead of
+        # ``["/models"]``) or a scalar (``null`` / a bool / a number).
+        # ``tuple(...)`` on a string would iterate character-by-character
+        # and ``collect_target_directory_options`` would then try to
+        # ``Path("/")`` / ``Path("m")`` etc. Wrap strings as a
+        # single-item list, accept list/tuple as-is, and discard
+        # anything else.
+        raw_target_dirs = self.launcher.app_settings.get("hf_target_dirs", [])
+        if isinstance(raw_target_dirs, str):
+            normalized_targets = [raw_target_dirs] if raw_target_dirs else []
+        elif isinstance(raw_target_dirs, (list, tuple)):
+            normalized_targets = [
+                p for p in raw_target_dirs if isinstance(p, str) and p
+            ]
+        else:
+            normalized_targets = []
+        selected_paths = tuple(normalized_targets)
         state = collect_target_directory_options(
             list(getattr(self.launcher, "model_dirs", [])),
             selected_paths=selected_paths,

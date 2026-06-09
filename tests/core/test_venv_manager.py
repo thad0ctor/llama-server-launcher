@@ -212,9 +212,13 @@ def test_build_install_dependency_command_quotes_windows_python(tmp_path):
 def test_build_remove_venv_command_windows_uses_rmdir(tmp_path):
     command = venv_manager.build_remove_venv_command(tmp_path / "my env", platform="win32")
 
-    # Every cmd arg is quoted to neutralize metacharacters in path strings;
-    # see _win_cmd_quote in modules/venv_manager.py.
-    assert command.startswith('"rmdir" "/s" "/q" ')
+    # ``rmdir`` is a cmd.exe builtin; quoting the command word makes
+    # cmd look for an executable file with that name first. We leave
+    # the first arg unquoted (``quote_cmd_word=False`` in
+    # ``_shell_join``) and quote every subsequent argument to
+    # neutralize metacharacters in path strings; see ``_win_cmd_quote``
+    # in modules/venv_manager.py.
+    assert command.startswith('rmdir "/s" "/q" ')
     assert f'"{tmp_path / "my env"}"' in command
 
 

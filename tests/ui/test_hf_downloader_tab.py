@@ -251,7 +251,16 @@ def test_process_exit_failure_updates_status(hf_launcher_stub, active_venv, monk
 
     tab._handle_event({"event": "process-exit", "returncode": 1, "stderr": "boom"})
 
-    assert "failed" in tab.status_var.get()
+    status = tab.status_var.get()
+    assert "failed" in status
+    # The subprocess stderr must be surfaced to the user — a
+    # regression that drops it (so only the generic "failed" message
+    # shows) would have slipped through the previous membership-only
+    # assertion. Include the actual stderr token so users see what
+    # actually broke without having to dig through subprocess logs.
+    assert "boom" in status, (
+        f"failure status must include subprocess stderr; got {status!r}"
+    )
 
 
 def test_cancel_operation_restores_button_state(hf_launcher_stub, active_venv, monkeypatch):
