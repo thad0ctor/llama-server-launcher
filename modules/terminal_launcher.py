@@ -63,7 +63,17 @@ def _cmd_keep_open(command: str) -> tuple[list[str], str]:
     with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as fh:
         fh.write("@echo off\r\n")
         fh.write("echo Running command...\r\n")
-        fh.write(f"{command}\r\n")
+        # Wrap the user command in ``cmd /d /c`` so control always
+        # returns to THIS .cmd. Without the nested cmd, a user
+        # command that invokes another ``.bat`` / ``.cmd`` without
+        # the ``call`` prefix would transfer control to that
+        # script and our exit-code echo + ``del "%~f0"`` would
+        # never run (cmd's batch-chain semantics — see
+        # https://ss64.com/nt/call.html). ``/d`` skips AutoRun
+        # registry hooks so we don't accidentally trigger user
+        # environment scripts between the wrapper and the actual
+        # command.
+        fh.write(f"cmd /d /c {command}\r\n")
         fh.write("echo.\r\n")
         fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
         # Self-delete after the user dismisses the keep-open shell.

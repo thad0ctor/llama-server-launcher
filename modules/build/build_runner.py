@@ -590,7 +590,22 @@ class BuildRunner:
                 cfg_cmd += ["-G", plan.generator]
             cfg_cmd += list(plan.cmake_args)
             env = os.environ.copy()
-            env.update(plan.cmake_env or {})
+            # Same env-name validation the exported script does (see
+            # ``_ENV_NAME_RE`` in build_persistence.py). A programmatic
+            # ``BuildPlan`` could ship a key like ``"CC FLAGS"`` /
+            # ``"CC;echo pwned"`` that ``subprocess.Popen`` would
+            # reject with a confusing ``ValueError`` mid-run instead
+            # of being caught up front.
+            import re as _re
+            _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+            for k, v in (plan.cmake_env or {}).items():
+                if isinstance(k, str) and _env_name_re.fullmatch(k):
+                    env[k] = v
+                else:
+                    self._emit_line(
+                        f"WARNING: dropping invalid cmake_env entry "
+                        f"{k!r} (must match {_env_name_re.pattern!r})"
+                    )
             self._emit_line("$ " + " ".join(shlex.quote(x) for x in cfg_cmd))
             rc = self._stream(cfg_cmd, cwd=str(src), env=env)
             if self._cancel.is_set():

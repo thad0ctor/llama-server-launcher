@@ -406,20 +406,17 @@ class ConfigManager:
         # rather than be left in an inconsistent state where the
         # disk version still holds the OLD template name but memory
         # holds the NEW one.
-        # Capture BOTH whether the key was present AND its original
-        # value. ``cfg.get(...)`` collapses "missing" and "None" into
-        # the same sentinel; we need to distinguish them so the
-        # rollback below can restore the EXACT pre-apply shape
-        # (including removing a key that
-        # ``_apply_loaded_configuration`` may have INSERTED via the
-        # legacy-alias remap).
-        had_original_predefined = (
-            isinstance(cfg, dict) and "predefined_template_name" in cfg
-        )
-        original_predefined = (
-            cfg.get("predefined_template_name")
-            if had_original_predefined
-            else None
+        # Deep-copy the WHOLE pre-apply cfg dict so a failed save
+        # below can restore everything ``_apply_loaded_configuration``
+        # may have mutated — not just ``predefined_template_name``.
+        # The apply path also normalizes ``backend_selection``
+        # (``"ik_llama.cpp"`` → ``"ik_llama"``), and future
+        # legacy-name remaps in this method should automatically
+        # benefit from the rollback without each having to remember
+        # to update this snapshot.
+        from copy import deepcopy as _deepcopy
+        prior_cfg_snapshot = (
+            _deepcopy(cfg) if isinstance(cfg, dict) else None
         )
         # Silence per-var save traces for the duration of the ~50 .set()
         # calls below. Without this, each .set() that hits a traced var
@@ -440,22 +437,18 @@ class ConfigManager:
         if saved:
             messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
         else:
-            # Restore the original predefined_template_name in the
-            # in-memory config so memory matches what's still on disk.
-            # Two cases:
-            # * The key WAS originally present: write the original
-            #   value back (covers the legacy-alias remap case where
-            #   the value changed mid-flight).
-            # * The key was NOT originally present: pop the key the
-            #   apply path may have inserted. ``original_predefined``
-            #   is ``None`` in this case, so a ``cfg["…"] = None``
-            #   write would actually be wrong — we'd be persisting a
-            #   key that wasn't there before.
-            if isinstance(cfg, dict):
-                if had_original_predefined:
-                    cfg["predefined_template_name"] = original_predefined
-                else:
-                    cfg.pop("predefined_template_name", None)
+            # Wholesale restore of the in-memory cfg so memory
+            # matches what's still on disk. Covers
+            # ``predefined_template_name`` (legacy alias remap),
+            # ``backend_selection`` (``"ik_llama.cpp"`` rename), and
+            # any future load-time normalization the
+            # ``_apply_loaded_configuration`` path adds. ``cfg.clear()``
+            # + ``update`` keeps the same dict identity so the
+            # ``saved_configs`` mapping still points at the right
+            # object.
+            if isinstance(cfg, dict) and prior_cfg_snapshot is not None:
+                cfg.clear()
+                cfg.update(prior_cfg_snapshot)
 
     def _apply_loaded_configuration(self, name, cfg):
         """Mutates launcher state from a named-config dict.

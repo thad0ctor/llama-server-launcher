@@ -780,7 +780,14 @@ def _linux_install_plan(tool_key: str, label: str) -> ToolInstallPlan | None:
         "apt-get": lambda pkg: f"sudo apt-get update && sudo apt-get install -y {pkg}",
         "dnf": lambda pkg: f"sudo dnf install -y {pkg}",
         "yum": lambda pkg: f"sudo yum install -y {pkg}",
-        "pacman": lambda pkg: f"sudo pacman -Sy --needed {pkg}",
+        # ``pacman -Sy`` (without ``u``) causes "partial upgrade"
+        # state on Arch — installing a fresh package against a stale
+        # database is officially unsupported and can break the
+        # system. ``-Syu`` does the full sync + upgrade in one shot,
+        # matching every Arch wiki recommendation. ``--needed``
+        # keeps the install idempotent on packages already at the
+        # target version.
+        "pacman": lambda pkg: f"sudo pacman -Syu --needed --noconfirm {pkg}",
         "zypper": lambda pkg: f"sudo zypper install -y {pkg}",
         "apk": lambda pkg: f"sudo apk add {pkg}",
         "brew": lambda pkg: f"brew install {pkg}",

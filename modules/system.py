@@ -423,13 +423,22 @@ except Exception as e:
                 print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
                 return gpu_info
             except json.JSONDecodeError as e:
-                print(f"DEBUG: Failed to parse venv GPU detection output: {e}", file=sys.stderr)
-                print(f"DEBUG: Raw output: '{result.stdout}'", file=sys.stderr)
-                return _unavailable_gpu_info(f"JSON parse error: {e}", "torch-venv")
+                # Raw subprocess stdout / exception text gated behind
+                # the debug env so it doesn't leak into the
+                # tab status bar via ``attempts``. UI ``message`` is
+                # generic.
+                if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+                    print(f"DEBUG: Failed to parse venv GPU detection output: {e}", file=sys.stderr)
+                    print(f"DEBUG: Raw output: '{result.stdout}'", file=sys.stderr)
+                return _unavailable_gpu_info(
+                    "Failed to parse GPU detection output from virtual environment.",
+                    "torch-venv",
+                )
         else:
             error_msg = result.stderr.strip() if result.stderr else "Unknown error"
-            print(f"DEBUG: Venv GPU detection failed with return code {result.returncode}", file=sys.stderr)
-            print(f"DEBUG: Error output: {error_msg}", file=sys.stderr)
+            if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+                print(f"DEBUG: Venv GPU detection failed with return code {result.returncode}", file=sys.stderr)
+                print(f"DEBUG: Error output: {error_msg}", file=sys.stderr)
 
             # Check for specific error types
             if "ModuleNotFoundError" in error_msg or "ImportError" in error_msg:
@@ -439,18 +448,27 @@ except Exception as e:
             elif "CUDA" in error_msg:
                 return _unavailable_gpu_info("CUDA error in venv", "torch-venv")
             else:
+                # UI message no longer contains raw subprocess
+                # stderr — full text stays in the DEBUG print
+                # above (gated by ``LLAMA_LAUNCHER_DEBUG_ENV``).
                 return _unavailable_gpu_info(
-                    f"Venv detection failed: {error_msg}", "torch-venv"
+                    "GPU detection failed in configured virtual environment.",
+                    "torch-venv",
                 )
 
     except subprocess.TimeoutExpired:
-        print("DEBUG: Venv GPU detection timed out after 30 seconds", file=sys.stderr)
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print("DEBUG: Venv GPU detection timed out after 30 seconds", file=sys.stderr)
         return _unavailable_gpu_info("Detection timeout", "torch-venv")
     except FileNotFoundError:
-        print(f"DEBUG: Python executable not found: {python_exe}", file=sys.stderr)
+        # Full python_exe path stays in DEBUG-only output (gated).
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print(f"DEBUG: Python executable not found: {python_exe}", file=sys.stderr)
         return _unavailable_gpu_info("Python executable not found", "torch-venv")
     except PermissionError:
-        print(f"DEBUG: Permission denied accessing venv: {venv_path}", file=sys.stderr)
+        # Full venv_path stays in DEBUG-only output (gated).
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print(f"DEBUG: Permission denied accessing venv: {venv_path}", file=sys.stderr)
         return _unavailable_gpu_info("Permission denied", "torch-venv")
     except Exception as e:
         print(f"DEBUG: Unexpected exception during venv GPU detection: {type(e).__name__}: {e}", file=sys.stderr)
