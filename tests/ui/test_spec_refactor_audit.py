@@ -71,9 +71,7 @@ def _silence_messagebox(monkeypatch):
 
 @pytest.fixture(scope="module")
 def entry_module():
-    spec = importlib.util.spec_from_file_location(
-        "entry_module_refactor_audit", ENTRY_PATH
-    )
+    spec = importlib.util.spec_from_file_location("entry_module_refactor_audit", ENTRY_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules["entry_module_refactor_audit"] = module
     spec.loader.exec_module(module)
@@ -85,9 +83,7 @@ def _make_real_launcher(entry_module, config_path, monkeypatch):
     overrides scoped to the test via ``monkeypatch``."""
     import modules.config as cfg_mod
 
-    monkeypatch.setattr(
-        cfg_mod.ConfigManager, "get_config_path", lambda self: config_path
-    )
+    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path", lambda self: config_path)
     _silence_messagebox(monkeypatch)
     root = tk.Tk()
     root.withdraw()
@@ -102,9 +98,7 @@ def _make_real_launcher(entry_module, config_path, monkeypatch):
 @pytest.fixture
 def real_launcher(entry_module, tmp_path, monkeypatch):
     try:
-        launcher, root = _make_real_launcher(
-            entry_module, tmp_path / "configs.json", monkeypatch
-        )
+        launcher, root = _make_real_launcher(entry_module, tmp_path / "configs.json", monkeypatch)
     except tk.TclError as exc:
         pytest.skip(f"Tk root unavailable: {exc}")
     yield launcher, tmp_path
@@ -152,9 +146,7 @@ class TestSameObjectReferenceContract:
             "max_spec_draft_gpu_layers",
             "spec_draft_layers_status_var",
         ):
-            assert getattr(launcher, name) is getattr(
-                launcher.spec_tab, name
-            ), f"Tk var {name!r} mismatch"
+            assert getattr(launcher, name) is getattr(launcher.spec_tab, name), f"Tk var {name!r} mismatch"
         # Dict / list state delegated via __getattr__ — must always reflect
         # the live SpecTab attribute, even after SpecTab rebinds it.
         for name in (
@@ -305,11 +297,7 @@ class TestNoLatentReassignmentBugs:
                 in_init = True
                 init_indent = len(raw) - len(stripped)
                 continue
-            if (
-                in_init
-                and stripped.startswith("def ")
-                and (len(raw) - len(stripped)) <= init_indent
-            ):
+            if in_init and stripped.startswith("def ") and (len(raw) - len(stripped)) <= init_indent:
                 in_init = False
             if in_init:
                 continue
@@ -325,9 +313,8 @@ class TestNoLatentReassignmentBugs:
                 # this position.
                 if re.search(rf"\bself\.{re.escape(name)}\s*=(?!=)", raw):
                     offenses.append(f"Line {i}: {raw.rstrip()}")
-        assert not offenses, (
-            "Found reassignments of statically-reexported attrs outside __init__:\n"
-            + "\n".join(offenses)
+        assert not offenses, "Found reassignments of statically-reexported attrs outside __init__:\n" + "\n".join(
+            offenses
         )
 
     def test_post_setup_object_ids_match_construction(self, real_launcher):
@@ -344,9 +331,7 @@ class TestNoLatentReassignmentBugs:
             try:
                 launcher_attr = launcher.__dict__[name]  # bypass __getattr__
             except KeyError:
-                pytest.fail(
-                    f"Statically-reexported attr {name!r} not in launcher.__dict__"
-                )
+                pytest.fail(f"Statically-reexported attr {name!r} not in launcher.__dict__")
             spec_tab_attr = getattr(launcher.spec_tab, name)
             assert launcher_attr is spec_tab_attr, (
                 f"Post-setup divergence for {name!r}: "
@@ -468,9 +453,7 @@ class TestEmissionParity:
             ),
         ],
     )
-    def test_spec_args_emitted_per_combination(
-        self, real_launcher, backend, spec_type, extras, expected_flags
-    ):
+    def test_spec_args_emitted_per_combination(self, real_launcher, backend, spec_type, extras, expected_flags):
         launcher, _ = real_launcher
         launcher.backend_selection.set(backend)
         # spec_enabled stays True even for the "none" baseline so the
@@ -514,19 +497,11 @@ class TestEmissionParity:
                 arg
                 for arg in args
                 if isinstance(arg, str)
-                and (
-                    arg.startswith("--spec-")
-                    or arg.startswith("--draft-")
-                    or arg.startswith("--suffix-")
-                )
+                and (arg.startswith("--spec-") or arg.startswith("--draft-") or arg.startswith("--suffix-"))
             }
 
         def _short_option_tokens(args):
-            return {
-                arg
-                for arg in args
-                if isinstance(arg, str) and arg in _SHORT_SPEC_TOKENS
-            }
+            return {arg for arg in args if isinstance(arg, str) and arg in _SHORT_SPEC_TOKENS}
 
         emitted_long = _long_option_tokens(partial)
         emitted_short = _short_option_tokens(partial)
@@ -581,9 +556,7 @@ class TestEmissionParity:
         launcher.parallel.set("8")
         from modules.spec_launch import resolve_effective_parallel
 
-        effective = resolve_effective_parallel(
-            launcher, launcher.backend_selection.get()
-        )
+        effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
         assert effective == "1", f"MTP must force --parallel 1; got {effective!r}"
 
     def test_default_no_spec_no_emissions(self, real_launcher):
@@ -624,17 +597,13 @@ class TestPersistenceParity:
             return "on"
         return f"v_{name[-12:]}"
 
-    def test_every_spec_key_persists_through_named_config(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_every_spec_key_persists_through_named_config(self, entry_module, tmp_path, monkeypatch):
         """Set distinctive non-default values, save as named config,
         boot fresh launcher, load the named config back. Assert every
         key matches what we set.
         """
         cfg_path = tmp_path / "configs.json"
-        targets = {
-            n: self._distinctive_value(n, c) for n, c, _d in ALL_NEW_LAUNCHER_TK_VARS
-        }
+        targets = {n: self._distinctive_value(n, c) for n, c, _d in ALL_NEW_LAUNCHER_TK_VARS}
 
         try:
             launcher1, root1 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
@@ -652,8 +621,7 @@ class TestPersistenceParity:
             for name, _vc, _d in ALL_NEW_LAUNCHER_TK_VARS:
                 assert name in stored, f"key {name!r} missing from named config"
                 assert stored[name] == targets[name], (
-                    f"named-config {name!r}: expected {targets[name]!r}, "
-                    f"got {stored[name]!r}"
+                    f"named-config {name!r}: expected {targets[name]!r}, " f"got {stored[name]!r}"
                 )
         finally:
             root1.destroy()
@@ -694,15 +662,11 @@ class TestLoadOrderResync:
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
-            assert (
-                len(calls) >= 1
-            ), "resync_spec_tk_vars_from_app_settings was NOT called during __init__"
+            assert len(calls) >= 1, "resync_spec_tk_vars_from_app_settings was NOT called during __init__"
         finally:
             root.destroy()
 
-    def test_resync_runs_before_env_vars_load_from_config(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_resync_runs_before_env_vars_load_from_config(self, entry_module, tmp_path, monkeypatch):
         """Order-of-init bug regression test: resync must precede
         env_vars_manager.load_from_config (which can fire traces that
         write back into app_settings)."""
@@ -717,9 +681,7 @@ class TestLoadOrderResync:
             order.append("resync")
             return real_resync(launcher)
 
-        monkeypatch.setattr(
-            entry_module, "resync_spec_tk_vars_from_app_settings", resync_spy
-        )
+        monkeypatch.setattr(entry_module, "resync_spec_tk_vars_from_app_settings", resync_spy)
 
         # Patch env_vars_manager.load_from_config on the class.
         from modules.env_vars_module import EnvironmentalVariablesManager
@@ -730,9 +692,7 @@ class TestLoadOrderResync:
             order.append("env_vars_load_from_config")
             return real_evm_load(self, app_settings)
 
-        monkeypatch.setattr(
-            EnvironmentalVariablesManager, "load_from_config", evm_load_spy
-        )
+        monkeypatch.setattr(EnvironmentalVariablesManager, "load_from_config", evm_load_spy)
 
         try:
             launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
@@ -740,9 +700,7 @@ class TestLoadOrderResync:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
             assert "resync" in order, "resync helper was never called"
-            assert (
-                "env_vars_load_from_config" in order
-            ), "env_vars_manager.load_from_config was never called"
+            assert "env_vars_load_from_config" in order, "env_vars_manager.load_from_config was never called"
             resync_idx = order.index("resync")
             evm_idx = order.index("env_vars_load_from_config")
             assert resync_idx < evm_idx, (
@@ -770,9 +728,7 @@ class TestExtraAdversarialConfigs:
         }
         cfg_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def test_legacy_spec_draft_hf_silently_ignored(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_legacy_spec_draft_hf_silently_ignored(self, entry_module, tmp_path, monkeypatch):
         """The legacy ``spec_draft_hf`` key (removed in this branch) must
         be silently ignored without crashing the loader."""
         cfg_path = tmp_path / "configs.json"
@@ -794,15 +750,11 @@ class TestExtraAdversarialConfigs:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
             # Loader didn't crash. spec_draft_hf should NOT be on the launcher.
-            assert not hasattr(
-                launcher, "spec_draft_hf"
-            ), "legacy spec_draft_hf key resurrected an attribute"
+            assert not hasattr(launcher, "spec_draft_hf"), "legacy spec_draft_hf key resurrected an attribute"
         finally:
             root.destroy()
 
-    def test_wrong_backend_spec_type_preserved_and_inactive(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_wrong_backend_spec_type_preserved_and_inactive(self, entry_module, tmp_path, monkeypatch):
         """``spec_type=draft-mtp`` (llama.cpp-only) + ``backend=ik_llama``:
         the loader must preserve the stored value; emission must reject
         it on the active backend."""
@@ -834,26 +786,40 @@ class TestExtraAdversarialConfigs:
             partial = []
             emit_spec_args(launcher, "ik_llama", partial)
             # Tightened from a ``--spec-type`` membership check: every
-            # ``--spec-*`` and ``--draft-*`` flag must be suppressed, not
-            # just the type token. A regression that leaks
-            # ``--spec-temp`` or ``--draft-model`` would otherwise slip
-            # past the previous narrow check.
+            # spec/draft option token must be suppressed, not just the
+            # type token. ALSO includes the ``--suffix-*`` family
+            # (suffix-decoding flags) and the ik_llama short-form
+            # tokens (``-devd`` / ``-ngld`` / ``-ctkd`` / ``-ctvd`` /
+            # ``-draft`` / ``--model-draft``) — a regression that
+            # leaked any of those on the wrong backend used to slip
+            # past the prefix-only check.
+            _short_spec_tokens = {
+                "-devd",
+                "-ngld",
+                "-ctkd",
+                "-ctvd",
+                "-draft",
+                "--model-draft",
+            }
             leaked = [
                 arg
                 for arg in partial
                 if isinstance(arg, str)
-                and (arg.startswith("--spec-") or arg.startswith("--draft-"))
+                and (
+                    arg.startswith("--spec-")
+                    or arg.startswith("--draft-")
+                    or arg.startswith("--suffix-")
+                    or arg in _short_spec_tokens
+                )
             ]
             assert not leaked, (
-                f"emission must reject EVERY spec/draft flag on wrong "
+                f"emission must reject EVERY spec/draft/suffix flag on wrong "
                 f"backend; got leaked={leaked!r} partial={partial!r}"
             )
         finally:
             root.destroy()
 
-    def test_mtp_with_parallel_8_overrides_at_launch(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_mtp_with_parallel_8_overrides_at_launch(self, entry_module, tmp_path, monkeypatch):
         """parallel=8 + spec_enabled+spec_type=draft-mtp must force
         --parallel 1 at launch via resolve_effective_parallel.
         """
@@ -883,18 +849,12 @@ class TestExtraAdversarialConfigs:
             launcher.parallel.set("8")
             from modules.spec_launch import resolve_effective_parallel
 
-            effective = resolve_effective_parallel(
-                launcher, launcher.backend_selection.get()
-            )
-            assert (
-                effective == "1"
-            ), f"MTP + parallel=8 must override to 1; got {effective!r}"
+            effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
+            assert effective == "1", f"MTP + parallel=8 must override to 1; got {effective!r}"
         finally:
             root.destroy()
 
-    def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(self, entry_module, tmp_path, monkeypatch):
         """``spec_draft_selected_gpus=[999, "abc", True]`` -> only valid
         ints survive. (True is a bool subclass and must NOT pass through
         since it's not a meaningful GPU index.)
@@ -970,30 +930,18 @@ class TestRedirectIntegrity:
 
     def test_all_redirected_methods_exist_on_spec_tab(self, entry_module):
         for name in self._REDIRECTED_METHODS:
-            assert hasattr(
-                entry_module.SpecTab, name
-            ), f"SpecTab.{name} missing — tests would silently no-op"
-            assert callable(
-                getattr(entry_module.SpecTab, name)
-            ), f"SpecTab.{name} not callable"
+            assert hasattr(entry_module.SpecTab, name), f"SpecTab.{name} missing — tests would silently no-op"
+            assert callable(getattr(entry_module.SpecTab, name)), f"SpecTab.{name} not callable"
 
     def test_class_constants_re_exported_from_launcher(self, entry_module):
         """Legacy tests reference ``LlamaCppLauncher._SPEC_TYPES_*``;
         the launcher exposes them as class-level aliases of SpecTab's
         canonical definitions.
         """
-        assert (
-            entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP
-            is entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
-        )
-        assert (
-            entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA
-            is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
-        )
+        assert entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP is entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
+        assert entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
 
-    def test_stale_draft_analysis_is_dropped_at_enqueue(
-        self, entry_module, monkeypatch
-    ):
+    def test_stale_draft_analysis_is_dropped_at_enqueue(self, entry_module, monkeypatch):
         """Race-condition regression: when a newer selection bumps
         ``_spec_draft_analysis_generation`` *while* the parser is mid-
         run, the stale result must be discarded at enqueue time (rather
@@ -1033,9 +981,7 @@ class TestRedirectIntegrity:
 
         monkeypatch.setattr(spec_mod, "parse_gguf_header_simple", parse_and_supersede)
 
-        entry_module.SpecTab._run_spec_draft_gguf_analysis(
-            tab, "/models/draft.gguf", analysis_id=1
-        )
+        entry_module.SpecTab._run_spec_draft_gguf_analysis(tab, "/models/draft.gguf", analysis_id=1)
 
         # Parser MUST have actually been invoked (with the requested
         # path) — proves the stale-result drop happens at the

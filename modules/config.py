@@ -357,7 +357,10 @@ class ConfigManager:
             # Toggle for --jinja (independent of template source)
             "jinja_enabled": self.launcher.jinja_enabled.get(),
             # --- NEW: Save Custom Parameters ---
-            "custom_parameters": self.launcher.custom_parameters_list, # Save the list of strings
+            # Copy so subsequent UI edits don't silently mutate the
+            # stored preset — without this, the live list and the
+            # saved-config dict alias the same Python object.
+            "custom_parameters": list(self.launcher.custom_parameters_list), # Save the list of strings
         }
 
         # Mirror every spec/reasoning/kvu Tk var into the cfg dict. Lives in
@@ -548,7 +551,13 @@ class ConfigManager:
         self.launcher._update_fit_fields_state()
         # --- NEW: Load Custom Parameters ---
         # Default to empty list [] for backward compatibility with older configs
-        self.launcher.custom_parameters_list = cfg.get("custom_parameters", [])
+        # Copy so the live UI list and the stored preset dict are
+        # independent — the launcher mutates this list in-place when
+        # the user adds/removes parameters, and we don't want that to
+        # silently update the saved preset without an explicit save.
+        self.launcher.custom_parameters_list = list(
+            cfg.get("custom_parameters", []) or []
+        )
         self.launcher._update_custom_parameters_listbox() # Update the GUI listbox
 
         # Load environmental variables configuration
@@ -916,21 +925,34 @@ class ConfigManager:
                 if not isinstance(config_data, dict):
                     import_plan.append((raw_name, None, config_data))
                     continue
-                # Only suffix within THIS import batch — a collision
-                # against ``self.launcher.saved_configs`` is the
-                # standard "overwrite existing" behaviour (the user
-                # consciously imported a file that names an existing
-                # config; that's a legitimate replace, not a
-                # duplicate). The preview labels these as
-                # "overwritten" so the user sees them up front.
-                # The previous logic always appended ``_2`` on any
-                # collision, which made imports unable to update
-                # existing presets — every reload created a fresh
-                # ``foo_2`` / ``foo_3`` / ``…`` clone.
+                # Overwrite semantics:
+                # * ``raw_name == sanitized`` (no rename happened):
+                #   the user explicitly named a config; if it
+                #   collides with an existing ``saved_configs``
+                #   entry, that's a legitimate replace (the preview
+                #   labels these as "overwritten"). Within-batch
+                #   collisions still suffix so two imports for the
+                #   same name don't fight.
+                # * ``raw_name != sanitized`` (sanitizer renamed the
+                #   key, e.g. ``"./foo"`` → ``"foo"``): the import
+                #   was already implicitly renamed, so it CANNOT
+                #   silently clobber an unrelated existing ``"foo"``
+                #   the user saved separately. Suffix until unique
+                #   against both ``planned_names`` AND
+                #   ``saved_configs``.
                 final_name = sanitized
-                if final_name in planned_names:
+                renamed = (raw_name != sanitized)
+                collides_in_batch = final_name in planned_names
+                collides_in_saved = final_name in self.launcher.saved_configs
+                if collides_in_batch or (renamed and collides_in_saved):
                     suffix = 2
-                    while f"{sanitized}_{suffix}" in planned_names:
+                    while (
+                        f"{sanitized}_{suffix}" in planned_names
+                        or (
+                            renamed
+                            and f"{sanitized}_{suffix}" in self.launcher.saved_configs
+                        )
+                    ):
                         suffix += 1
                     final_name = f"{sanitized}_{suffix}"
                 planned_names.add(final_name)

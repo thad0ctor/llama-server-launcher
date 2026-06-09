@@ -259,9 +259,7 @@ class TestBuildUpdateScriptBasic:
             (line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")),
             None,
         )
-        assert (
-            array_line is not None
-        ), "EXCLUDE_ARGS=(...) missing from build_update_script output"
+        assert array_line is not None, "EXCLUDE_ARGS=(...) missing from build_update_script output"
         inner = array_line[len("EXCLUDE_ARGS=(") : -1]
         tokens = shlex.split(inner)
         assert "don't_touch/*.tmp" in tokens
@@ -279,6 +277,13 @@ class TestBuildUpdateScriptBasic:
         )
         # Empty string quoted is ''
         assert "''" in s or '""' in s
+        # And the literal Python-None repr must NOT have leaked
+        # through — a regression that does ``f"...{remote_version}"``
+        # without coercing ``None`` first would have rendered as
+        # ``"None"`` in the generated bash. Both ``'None'`` and
+        # ``"None"`` would be a leak; reject both.
+        assert "'None'" not in s
+        assert '"None"' not in s
 
 
 class TestBuildUpdateScriptInjectionResistance:
@@ -555,9 +560,7 @@ class TestDrainVersionQueue:
         about._drain_version_queue()
 
         assert about._version_after_id == "after-1"
-        assert parent.after_calls == [
-            (VERSION_CHECK_POLL_MS, about._drain_version_queue)
-        ]
+        assert parent.after_calls == [(VERSION_CHECK_POLL_MS, about._drain_version_queue)]
         about._version_thread.is_alive.assert_not_called()
 
     def test_completion_sentinel_stops_polling_without_ui_change(self, about):

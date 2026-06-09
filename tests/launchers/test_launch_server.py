@@ -302,7 +302,7 @@ class TestLaunchServerLinuxTerminals:
     reason="Linux-branch test; see TestLaunchServerLinuxTerminals skip note.",
 )
 class TestLaunchServerLinuxFallback:
-    def test_no_terminal_found_uses_shell_true_fallback(
+    def test_no_terminal_found_uses_bash_lc_argv_fallback(
         self, manager, launcher_mock
     ):
         """No supported terminal emulator is found; the code must

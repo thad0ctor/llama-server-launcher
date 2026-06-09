@@ -431,13 +431,15 @@ except Exception as e:
             try:
                 output = result.stdout.strip()
                 if not output:
-                    print("DEBUG: Venv GPU detection returned empty output", file=sys.stderr)
+                    if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+                        print("DEBUG: Venv GPU detection returned empty output", file=sys.stderr)
                     return _unavailable_gpu_info(
                         "Empty output from venv detection", "torch-venv"
                     )
 
                 gpu_info = json.loads(output)
-                print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
+                if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+                    print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
                 return gpu_info
             except json.JSONDecodeError as e:
                 # Raw subprocess stdout / exception text gated behind
@@ -836,6 +838,18 @@ def load_cached_gpu_info(config_dir, venv_path):
     # even though the cache itself reports the system as unavailable.
     if gpu_info.get("available") is False and (
         gpu_info.get("device_count", 0) != 0 or len(devices) != 0
+    ):
+        return None
+    # Symmetric guard: reject ``available=True`` with NO devices and
+    # ``device_count=0``. The launcher treats this as a successful
+    # detection and skips re-probing, so a corrupted cache like
+    # ``{"available": true, "device_count": 0, "devices": []}`` would
+    # otherwise mask a real GPU on the next launch until the user
+    # manually flushed the cache.
+    if (
+        gpu_info.get("available") is True
+        and device_count_value == 0
+        and len(devices) == 0
     ):
         return None
     # Reject caches where ``device_count`` and ``len(devices)`` disagree.
