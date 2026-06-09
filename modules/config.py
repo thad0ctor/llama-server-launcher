@@ -1327,16 +1327,30 @@ class ConfigManager:
                 existing_data = json.loads(
                     self.launcher.config_path.read_text(encoding="utf-8")
                 )
-                # A non-dict top-level (``[...]``, ``"broken"``, etc) is
-                # ALSO a "don't overwrite" signal — we don't know what
-                # the user has, but it isn't an empty dict and the
-                # in-memory state is empty, so blowing it away with our
-                # empty ``configs`` would lose data. Block the
-                # overwrite the same way as the populated-dict branch
-                # below. Without ``isinstance`` we'd hit
-                # ``AttributeError`` on ``.get`` and the whole save
-                # path would crash rather than just refusing.
-                if not isinstance(existing_data, dict) or existing_data.get("configs"):
+                # Three "don't overwrite" cases:
+                # * Non-dict top-level (``[...]``, ``"broken"`` …) —
+                #   the file isn't ours but it isn't empty either, so
+                #   we can't safely replace it.
+                # * Populated ``configs`` dict — the previous behaviour.
+                # * MALFORMED ``configs`` shape (``[]`` / ``""`` /
+                #   ``null`` …). The naive truthy check let an empty
+                #   list slip through; an attacker / disk-corruption
+                #   event could replace a populated file with
+                #   ``{"configs": []}`` and our save would happily
+                #   overwrite it. ``isinstance(..., dict)`` is the
+                #   only valid shape for ``configs``; anything else
+                #   blocks the save.
+                configs_value = (
+                    existing_data.get("configs")
+                    if isinstance(existing_data, dict)
+                    else None
+                )
+                shape_is_safe_empty_dict = (
+                    isinstance(existing_data, dict)
+                    and isinstance(configs_value, dict)
+                    and not configs_value
+                )
+                if not shape_is_safe_empty_dict:
                     print(
                         f"WARNING: Refusing to overwrite populated config at "
                         f"{self.launcher.config_path} with an empty configs dict "

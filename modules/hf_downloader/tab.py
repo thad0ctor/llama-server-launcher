@@ -630,7 +630,7 @@ class HuggingFaceDownloaderTab:
             # branch in ``_on_dependency_probe_result``.
             self.status_var.set(
                 "Timed out waiting for huggingface_hub to appear. "
-                "Refresh deps to probe again."
+                "Click 'Install / update huggingface_hub' to retry."
             )
             self._dep_watch_venv = None
             self._refresh_runtime_state()
@@ -677,7 +677,7 @@ class HuggingFaceDownloaderTab:
             # the install never completed.
             self.status_var.set(
                 "Timed out waiting for huggingface_hub to appear. "
-                "Refresh deps to probe again."
+                "Click 'Install / update huggingface_hub' to retry."
             )
             self._dep_watch_venv = None
             self._refresh_runtime_state()

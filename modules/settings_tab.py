@@ -45,7 +45,19 @@ class SettingsTab:
         repo_dir = getattr(launcher, "repo_dir", None)
         if not isinstance(repo_dir, (str, Path)):
             repo_dir = venv_manager.launcher_repo_dir()
-        self.repo_dir = repo_dir
+        # Normalize to an absolute, expanded ``Path`` so downstream
+        # callers (``describe_venv_target(..., repo_dir=self.repo_dir)``,
+        # ``open_command_in_terminal(..., cwd=self.repo_dir)``) always
+        # receive the same shape. A relative or ``~``-prefixed value
+        # used to vary by launch context — Settings would create one
+        # venv layout while the launch path resolved against a
+        # different cwd. ``strict=False`` keeps the path object even
+        # if the directory hasn't been created yet (the venv-create
+        # flow MAKES the parent later).
+        try:
+            self.repo_dir = Path(repo_dir).expanduser().resolve(strict=False)
+        except Exception:
+            self.repo_dir = Path(repo_dir).expanduser()
 
         s = launcher.app_settings
         self.theme_mode_var = tk.StringVar(value=s.get("ui_theme_mode", "auto"))

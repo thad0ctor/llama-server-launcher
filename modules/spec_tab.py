@@ -853,10 +853,24 @@ class SpecTab:
                 except Exception:
                     pass
             self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+            # Same conditional-clear logic the manual-mode branch
+            # below uses: only overwrite ``spec_draft_device`` when
+            # it's empty OR already equals what the checkboxes would
+            # have produced (so an explicit override like
+            # ``Vulkan0`` / ``CUDA2,SYCL1`` survives a checkbox
+            # refresh). The previous unconditional ``set`` wiped
+            # those overrides on every UI refresh that came through
+            # this fast path.
+            checkbox_derived = ",".join(f"CUDA{i}" for i in valid_selected)
             try:
-                self.spec_draft_device.set(
-                    ",".join(f"CUDA{i}" for i in valid_selected)
-                )
+                current = self.spec_draft_device.get()
+                # Recompute what the checkboxes would have produced
+                # on the previous render so we recognise a value
+                # this code stamped earlier as still "checkbox-set".
+                prior_derived_keys = sorted(loaded_selected) if loaded_selected else []
+                prior_derived = ",".join(f"CUDA{i}" for i in prior_derived_keys)
+                if current in ("", prior_derived):
+                    self.spec_draft_device.set(checkbox_derived)
             except Exception:
                 pass
             try:
