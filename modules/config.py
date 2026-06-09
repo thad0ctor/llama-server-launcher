@@ -506,7 +506,15 @@ class ConfigManager:
         self.launcher.prio.set(cfg.get("prio", "0"))
         self.launcher.temperature.set(cfg.get("temperature", "0.8"))
         self.launcher.min_p.set(cfg.get("min_p", "0.05"))
-        ctx = cfg.get("ctx_size", 2048)
+        # A hand-edited config could ship ``"ctx_size": "foo"`` or
+        # ``"ctx_size": []`` — both would raise inside ``IntVar.set()``
+        # / ``_sync_ctx_display()`` AFTER earlier fields have already
+        # been applied, leaving the load half-done. Coerce to int up
+        # front with the same 2048 default the ``get`` falls back to.
+        try:
+            ctx = int(cfg.get("ctx_size", 2048))
+        except (TypeError, ValueError):
+            ctx = 2048
         self.launcher.ctx_size.set(ctx)
         self.launcher._sync_ctx_display(ctx)  # Manually sync display
         self.launcher.seed.set(cfg.get("seed", "-1"))
@@ -1552,11 +1560,19 @@ class ConfigManager:
         # etc.) would otherwise wipe the file. A user who intentionally deletes
         # every config after a successful load is NOT blocked — the flag is True
         # in that case.
-        if (
-            not self.configs_loaded_successfully
-            and not self.launcher.saved_configs
-            and self.launcher.config_path.exists()
-        ):
+        # The ``not self.launcher.saved_configs`` bypass used to let the
+        # save proceed after a partial recovery — e.g. the user imported
+        # one config or saved a new one after the startup load failed.
+        # That partial save would then overwrite the unreadable-but-
+        # recoverable original file with only the new entry. The
+        # ``configs_loaded_successfully`` flag is the single source of
+        # truth for "this disk file is still in a load-failed state";
+        # while it's False, any in-place write to ``config_path`` risks
+        # destroying recoverable data. Drop the bypass so any save
+        # attempt against an unsafe disk file gets refused until the
+        # user resolves the original file (rename/restore/delete) and
+        # the next successful load flips the flag back to True.
+        if not self.configs_loaded_successfully and self.launcher.config_path.exists():
             try:
                 existing_data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
                 # Three "don't overwrite" cases:

@@ -390,7 +390,24 @@ def default_selected_repo_paths(paths: list[str]) -> tuple[str, ...]:
         primary_weight = min(weights, key=_weight_sort_key)
         # Same shard-set expansion for safetensors / *.bin.
         primary_weight_shards = _shard_siblings(primary_weight, weights)
-        return tuple(dict.fromkeys(primary_weight_shards))
+        # Multi-shard safetensors repos ship a sibling
+        # ``<name>.safetensors.index.json`` that maps tensor → shard.
+        # Without it the loader fails ("missing tensor"), so the
+        # default selection must include it whenever a shard pattern
+        # is detected. The match must be exact (case-insensitive
+        # name + same directory) — a wildcard could pull in unrelated
+        # index files from a multi-checkpoint repo.
+        primary_path = Path(primary_weight)
+        shard_match = _SHARD_SUFFIX_RE.search(primary_path.stem)
+        base_stem = primary_path.stem[: shard_match.start()] if shard_match else primary_path.stem
+        index_name = f"{base_stem}{primary_path.suffix}.index.json"
+        index_lookup = index_name.lower()
+        index_files = [
+            path
+            for path in paths
+            if Path(path).parent == primary_path.parent and Path(path).name.lower() == index_lookup
+        ]
+        return tuple(dict.fromkeys([*primary_weight_shards, *index_files]))
     return tuple(paths[:1])
 
 

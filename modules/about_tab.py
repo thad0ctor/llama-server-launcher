@@ -575,22 +575,37 @@ class AboutTab:
 
             # Open new terminal and run the update script
             if sys.platform.startswith("linux"):
-                # Try different terminal emulators
+                # Try different terminal emulators. The flag families
+                # differ enough that lumping ``xterm`` and
+                # ``xfce4-terminal`` under one ``-e f"bash {path}"``
+                # branch breaks both on script paths with spaces or
+                # shell metacharacters:
+                #   * ``xterm -e PROGRAM [ARGS...]`` consumes the
+                #     remaining argv tokens directly — splitting the
+                #     payload into separate argv elements is the
+                #     correct form (no quoting needed, no word-split).
+                #   * ``xfce4-terminal -e "STRING"`` word-splits the
+                #     STRING in shell-like fashion, so a path with
+                #     spaces must be ``shlex.quote``-protected before
+                #     being embedded.
                 terminals = ["gnome-terminal", "konsole", "xterm", "xfce4-terminal"]
+                quoted_script_path = shlex.quote(str(script_path))
                 for terminal in terminals:
                     try:
                         if terminal == "gnome-terminal":
                             subprocess.Popen([terminal, "--", "bash", str(script_path)], cwd=current_dir)
                         elif terminal == "konsole":
                             subprocess.Popen([terminal, "-e", "bash", str(script_path)], cwd=current_dir)
-                        else:
-                            subprocess.Popen([terminal, "-e", f"bash {script_path}"], cwd=current_dir)
+                        elif terminal == "xterm":
+                            subprocess.Popen([terminal, "-e", "bash", str(script_path)], cwd=current_dir)
+                        else:  # xfce4-terminal
+                            subprocess.Popen([terminal, "-e", f"bash {quoted_script_path}"], cwd=current_dir)
                         break
                     except FileNotFoundError:
                         continue
                 else:
-                    # Fallback to xterm
-                    subprocess.Popen(["xterm", "-e", f"bash {script_path}"], cwd=current_dir)
+                    # Fallback to xterm — same argv form as the loop above.
+                    subprocess.Popen(["xterm", "-e", "bash", str(script_path)], cwd=current_dir)
             elif sys.platform == "darwin":  # macOS
                 subprocess.Popen(["open", "-a", "Terminal", str(script_path)], cwd=current_dir)
             elif sys.platform.startswith("win"):  # Windows

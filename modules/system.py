@@ -275,7 +275,7 @@ def get_gpu_info_with_venv(venv_path=None):
     if smi_info.get("available"):
         if _debug:
             print(
-                f"DEBUG: nvidia-smi GPU detection successful: " f"{smi_info.get('device_count', 0)} devices",
+                f"DEBUG: nvidia-smi GPU detection successful: {smi_info.get('device_count', 0)} devices",
                 file=sys.stderr,
             )
         return smi_info
@@ -546,8 +546,15 @@ except Exception as e:
 
 def _create_fallback_gpu_info(reason):
     """Create fallback GPU info with specific reason, then try current process detection."""
-    print(f"DEBUG: Creating fallback GPU info due to: {reason}", file=sys.stderr)
-    print("DEBUG: Attempting current process GPU detection as fallback", file=sys.stderr)
+    # Gate the diagnostic prints behind LLAMA_LAUNCHER_DEBUG_ENV.
+    # ``reason`` may include venv paths or exception text from the
+    # caller's failure path, and the function is called on every
+    # detection cascade — emitting these unconditionally produces
+    # noise on every startup against a broken/missing venv and
+    # leaks user paths into stderr / journalctl.
+    if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+        print(f"DEBUG: Creating fallback GPU info due to: {reason}", file=sys.stderr)
+        print("DEBUG: Attempting current process GPU detection as fallback", file=sys.stderr)
 
     # Try current process detection as fallback
     fallback_info = get_gpu_info_static()
@@ -964,7 +971,12 @@ def save_cached_gpu_info(config_dir, venv_path, gpu_info):
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
-        print(f"DEBUG: GPU detection cache write failed at " f"{cache_path}: {exc}", file=sys.stderr)
+        # ``WARNING:`` not ``DEBUG:`` — this is an operational
+        # cache-write failure (disk full, permission denied, …)
+        # that runs unconditionally rather than gated behind
+        # ``LLAMA_LAUNCHER_DEBUG_ENV``, so the prefix should
+        # match its actual severity.
+        print(f"WARNING: GPU detection cache write failed at {cache_path}: {exc}", file=sys.stderr)
 
 
 def calculate_total_gguf_size(model_path_str):
