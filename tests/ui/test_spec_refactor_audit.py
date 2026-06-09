@@ -393,6 +393,12 @@ class TestEmissionParity:
             # Default state: no spec flags emitted.
             ("llama.cpp", "none", {}, []),
             # llama.cpp draft-mtp: --spec-type emitted plus draft knobs.
+            # ``expected_flags`` now carries each option token's
+            # follower value too — without that, a regression that
+            # paired ``--spec-draft-n-max`` with the WRONG value
+            # (e.g. truncated to 0, swapped with the n-min value,
+            # or stamped with a hard-coded default) would still
+            # slip past the option-set equality check below.
             (
                 "llama.cpp",
                 "draft-mtp",
@@ -401,7 +407,9 @@ class TestEmissionParity:
                     "--spec-type",
                     "draft-mtp",
                     "--spec-draft-n-max",
+                    "3",
                     "--spec-draft-n-min",
+                    "0",
                 ],
             ),
             # llama.cpp draft-simple with a model selected; emission includes
@@ -410,7 +418,7 @@ class TestEmissionParity:
                 "llama.cpp",
                 "draft-simple",
                 {"spec_draft_n_max": "16"},
-                ["--spec-type", "draft-simple", "--spec-draft-n-max"],
+                ["--spec-type", "draft-simple", "--spec-draft-n-max", "16"],
             ),
             # llama.cpp ngram-mod with mod knobs set.
             (
@@ -425,8 +433,11 @@ class TestEmissionParity:
                     "--spec-type",
                     "ngram-mod",
                     "--spec-ngram-mod-n-min",
+                    "4",
                     "--spec-ngram-mod-n-max",
+                    "10",
                     "--spec-ngram-mod-n-match",
+                    "2",
                 ],
             ),
             # ik_llama suffix with the suffix knobs.
@@ -441,7 +452,9 @@ class TestEmissionParity:
                     "--spec-type",
                     "suffix",
                     "--suffix-pattern-len",
+                    "8",
                     "--suffix-max-depth",
+                    "3",
                 ],
             ),
             # ik_llama mtp draft-capable case.
@@ -449,7 +462,7 @@ class TestEmissionParity:
                 "ik_llama",
                 "mtp",
                 {"spec_draft_n_max": "5"},
-                ["--spec-type", "mtp", "--draft-max"],
+                ["--spec-type", "mtp", "--draft-max", "5"],
             ),
         ],
     )
@@ -542,6 +555,50 @@ class TestEmissionParity:
                 assert token in partial, (
                     f"backend={backend} spec_type={spec_type}: missing "
                     f"value token {token!r}; emitted args={partial!r}"
+                )
+            # Follower-pair assertion: for each option token in
+            # ``expected_flags`` whose NEXT element is a value token,
+            # assert that the same flag in ``partial`` is followed
+            # by the same value. The set-equality check above
+            # confirms the right flag is emitted; this confirms the
+            # right value is bound to it. A regression that swaps
+            # ``--spec-draft-n-max 3`` with ``--spec-draft-n-max 0``
+            # (e.g. pairs n-max with the n-min value) would slip
+            # past the set-membership check above but trips here.
+            option_tokens = expected_long | expected_short
+            for i, flag in enumerate(expected_flags):
+                if not isinstance(flag, str) or flag not in option_tokens:
+                    continue
+                if i + 1 >= len(expected_flags):
+                    continue
+                expected_value = expected_flags[i + 1]
+                if not isinstance(expected_value, str):
+                    continue
+                if expected_value in option_tokens:
+                    # Adjacent flag-flag in the matrix (e.g. a bool
+                    # toggle with no value); skip.
+                    continue
+                # Find the flag's position in ``partial``. If a flag
+                # is emitted twice this picks the first; tests can
+                # tighten that later if needed.
+                try:
+                    j = partial.index(flag)
+                except ValueError:
+                    pytest.fail(
+                        f"backend={backend} spec_type={spec_type}: "
+                        f"flag {flag!r} expected in partial but not "
+                        f"found (partial={partial!r})"
+                    )
+                assert j + 1 < len(partial), (
+                    f"backend={backend} spec_type={spec_type}: flag "
+                    f"{flag!r} emitted without a following value "
+                    f"(partial={partial!r})"
+                )
+                assert partial[j + 1] == expected_value, (
+                    f"backend={backend} spec_type={spec_type}: flag "
+                    f"{flag!r} expected to be followed by "
+                    f"{expected_value!r}, got {partial[j + 1]!r} "
+                    f"(partial={partial!r})"
                 )
 
     def test_mtp_overrides_parallel_8_at_launch(self, real_launcher):

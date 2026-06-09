@@ -36,11 +36,11 @@ from pathlib import Path
 # Event types pushed onto the runner's output queue
 # ─────────────────────────────────────────────────────────────────────────────
 
-EVENT_LINE = "line"           # ("line", text)
-EVENT_STAGE = "stage"         # ("stage", name)
-EVENT_DONE = "done"           # ("done", exit_code)
-EVENT_CANCELLED = "cancelled" # ("cancelled", None)
-EVENT_ERROR = "error"         # ("error", message)
+EVENT_LINE = "line"  # ("line", text)
+EVENT_STAGE = "stage"  # ("stage", name)
+EVENT_DONE = "done"  # ("done", exit_code)
+EVENT_CANCELLED = "cancelled"  # ("cancelled", None)
+EVENT_ERROR = "error"  # ("error", message)
 
 EVENT_QUEUE_MAXSIZE = 4000
 PROC_TERMINATE_WAIT_SECONDS = 5.0
@@ -62,20 +62,22 @@ UPSTREAMS = {
 # Plan / job description
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class BuildPlan:
     """All inputs needed to drive one configure-and-build run."""
-    backend: str                          # "llama.cpp" | "ik_llama"
-    source_dir: str                       # absolute path; clone target if missing
-    build_dir: str                        # absolute (resolved by caller)
-    cmake_args: list[str]                 # e.g. ["-DGGML_CUDA=ON", ...]
+
+    backend: str  # "llama.cpp" | "ik_llama"
+    source_dir: str  # absolute path; clone target if missing
+    build_dir: str  # absolute (resolved by caller)
+    cmake_args: list[str]  # e.g. ["-DGGML_CUDA=ON", ...]
     cmake_env: dict[str, str] = field(default_factory=dict)  # CC, CXX, CUDACXX, CUDA_TOOLKIT_ROOT_DIR
-    jobs: int = 0                         # 0 => omit -j (cmake picks default)
+    jobs: int = 0  # 0 => omit -j (cmake picks default)
     git_clone_if_missing: bool = True
-    git_ref: str = ""                     # checkout this after clone/pull, if set
+    git_ref: str = ""  # checkout this after clone/pull, if set
     git_pull_before_build: bool = False
     clean_build: bool = True
-    generator: str = ""                   # "" = cmake default, else "Ninja", "Unix Makefiles", ...
+    generator: str = ""  # "" = cmake default, else "Ninja", "Unix Makefiles", ...
 
     @property
     def upstream_url(self) -> str:
@@ -99,10 +101,7 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
     # ``cmake -S``, etc. — to fail with a confusing tool-specific error
     # message. Catch it here with a clear cause.
     if src.exists() and src.is_file():
-        raise ValueError(
-            f"source_dir {source_dir!r} is a file, not a directory; "
-            f"refusing to operate."
-        )
+        raise ValueError(f"source_dir {source_dir!r} is a file, not a directory; " f"refusing to operate.")
     build_was_relative = not build.is_absolute()
     if build_was_relative:
         build = src / build
@@ -111,10 +110,7 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
     # ``cmake -B <build_dir>`` fail with a tool-specific error instead
     # of a clear up-front message.
     if build.exists() and build.is_file():
-        raise ValueError(
-            f"build_dir {build_dir!r} is a file, not a directory; "
-            f"refusing to operate."
-        )
+        raise ValueError(f"build_dir {build_dir!r} is a file, not a directory; " f"refusing to operate.")
 
     try:
         build_resolved = build.resolve(strict=False)
@@ -124,8 +120,7 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
 
     if build_resolved == src_resolved or build_resolved in src_resolved.parents:
         raise ValueError(
-            f"Refusing unsafe build dir {build_resolved!s} "
-            f"(would target the source dir or an ancestor)."
+            f"Refusing unsafe build dir {build_resolved!s} " f"(would target the source dir or an ancestor)."
         )
 
     # If the user supplied a RELATIVE build_dir (so we anchored it
@@ -153,12 +148,13 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
 # Upstream-state probe (used by the update banner)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class UpstreamStatus:
     is_git_repo: bool = False
     head_sha: str = ""
     head_subject: str = ""
-    upstream_ref: str = ""        # "origin/main"
+    upstream_ref: str = ""  # "origin/main"
     behind: int = 0
     ahead: int = 0
     last_fetch_at: float = 0.0
@@ -175,8 +171,12 @@ def _run_capture(
 ) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True,
-            timeout=timeout, check=False,
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
             env=env if env is not None else None,
             stdin=stdin if stdin is not None else subprocess.DEVNULL,
         )
@@ -243,6 +243,16 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
     if rc != 0:
         if not status.error:
             status.error = "no upstream tracking branch configured"
+        # Even with no upstream tracking branch configured, ``git fetch``
+        # may have succeeded against ``origin`` in the loop above. The
+        # UI's "last refreshed N seconds ago" indicator reads
+        # ``last_fetch_at`` to decide whether to display a stale-data
+        # warning — without stamping here, a successful fetch that
+        # raced this early-return path would leave that indicator
+        # claiming the data is stale even though a fresh fetch did
+        # land. Mirror the late-return stamp below.
+        if fetched:
+            status.last_fetch_at = time.time()
         return status
     status.upstream_ref = out.strip()
 
@@ -251,7 +261,8 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
         status.head_sha = out.strip()[:12]
 
     rc, out, _ = _run_capture(
-        ["git", "log", "-1", "--pretty=%s", "HEAD"], cwd=str(src),
+        ["git", "log", "-1", "--pretty=%s", "HEAD"],
+        cwd=str(src),
     )
     if rc == 0:
         status.head_subject = out.strip()
@@ -282,6 +293,7 @@ def probe_upstream(source_dir: str, *, do_fetch: bool = True) -> UpstreamStatus:
 # ─────────────────────────────────────────────────────────────────────────────
 # BuildRunner — owns the worker thread
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class BuildRunner:
     """Single-job pipeline runner. Reuse one instance for the tab lifetime."""
@@ -372,9 +384,7 @@ class BuildRunner:
             try:
                 return int(proc.wait(timeout=PROC_TERMINATE_WAIT_SECONDS) or 0)
             except subprocess.TimeoutExpired:
-                self._emit_line(
-                    "Process did not exit after termination; forcing shutdown."
-                )
+                self._emit_line("Process did not exit after termination; forcing shutdown.")
                 self._signal_kill(proc)
                 try:
                     return int(proc.wait(timeout=PROC_KILL_WAIT_SECONDS) or 0)
@@ -411,7 +421,10 @@ class BuildRunner:
             self._dropped_output_lines = 0
         self._cancel.clear()
         self._thread = threading.Thread(
-            target=self._run, args=(plan,), name="BuildRunner", daemon=True,
+            target=self._run,
+            args=(plan,),
+            name="BuildRunner",
+            daemon=True,
         )
         self._thread.start()
         return True
@@ -438,10 +451,7 @@ class BuildRunner:
     def _emit_line(self, text: str) -> None:
         dropped = self._take_dropped_count()
         if dropped:
-            notice = (
-                f"[launcher skipped {dropped} build output line(s) "
-                "while the UI caught up]"
-            )
+            notice = f"[launcher skipped {dropped} build output line(s) " "while the UI caught up]"
             try:
                 self.events.put_nowait((EVENT_LINE, notice))
             except queue.Full:
@@ -458,11 +468,12 @@ class BuildRunner:
     def _emit_event(self, kind: str, payload: object) -> None:
         dropped = self._take_dropped_count()
         if dropped:
-            self.events.put((
-                EVENT_LINE,
-                f"[launcher skipped {dropped} build output line(s) "
-                "while the UI caught up]",
-            ))
+            self.events.put(
+                (
+                    EVENT_LINE,
+                    f"[launcher skipped {dropped} build output line(s) " "while the UI caught up]",
+                )
+            )
         self.events.put((kind, payload))
 
     def _emit_stage(self, name: str) -> None:
@@ -597,6 +608,7 @@ class BuildRunner:
             # reject with a confusing ``ValueError`` mid-run instead
             # of being caught up front.
             import re as _re
+
             _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
             for k, v in (plan.cmake_env or {}).items():
                 if not (isinstance(k, str) and _env_name_re.fullmatch(k)):
@@ -614,16 +626,10 @@ class BuildRunner:
                 try:
                     sv = str(v) if v is not None else ""
                 except Exception:
-                    self._emit_line(
-                        f"WARNING: dropping cmake_env value for {k!r}: "
-                        f"could not coerce to str"
-                    )
+                    self._emit_line(f"WARNING: dropping cmake_env value for {k!r}: " f"could not coerce to str")
                     continue
                 if "\0" in sv:
-                    self._emit_line(
-                        f"WARNING: dropping cmake_env entry {k!r}: "
-                        f"value contains NUL"
-                    )
+                    self._emit_line(f"WARNING: dropping cmake_env entry {k!r}: " f"value contains NUL")
                     continue
                 env[k] = sv
             self._emit_line("$ " + " ".join(shlex.quote(x) for x in cfg_cmd))
@@ -781,6 +787,7 @@ class BuildRunner:
 # Shell-script emission (export a plan as a portable .sh file)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
     """Render a ``BuildPlan`` as a self-contained bash script equivalent to
     what BuildRunner would execute. Stable enough to commit/share.
@@ -851,7 +858,7 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
         # _run() implicitly relies on Popen's cwd being writable; the exported
         # script has no such caller, so create the parent explicitly.
         lines.append('  mkdir -p "$(dirname "$SRC_DIR")"')
-        lines.append(f"  git clone --recursive {shlex.quote(plan.upstream_url)} \"$SRC_DIR\"")
+        lines.append(f'  git clone --recursive {shlex.quote(plan.upstream_url)} "$SRC_DIR"')
         lines.append("fi")
     elif plan.git_clone_if_missing and not plan.upstream_url:
         # Misconfiguration — clone requested without a URL. Fail with a
@@ -897,6 +904,7 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
         # ``CC;echo pwned="x"`` line AND can't trip ``shlex.quote(v)``
         # on a non-string ``v`` or embed a NUL in a bash export.
         import re as _re
+
         _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
         safe_env_items: list[tuple[str, str]] = []
         for k, v in plan.cmake_env.items():
@@ -909,9 +917,7 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
             if "\0" in sv:
                 continue
             safe_env_items.append((k, sv))
-        env_prefix = " ".join(
-            f"{k}={shlex.quote(v)}" for k, v in safe_env_items
-        )
+        env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in safe_env_items)
         if env_prefix:
             env_prefix += " "
 

@@ -32,11 +32,7 @@ def _token_value(payload: dict):
          callers that haven't been updated.
     Empty / unset → ``None`` (anonymous Hub access).
     """
-    env_token = (
-        os.environ.get("HF_TOKEN")
-        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        or ""
-    ).strip()
+    env_token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or "").strip()
     if env_token:
         return env_token
     # Defensive: a hand-edited payload could ship ``"token": null`` /
@@ -91,9 +87,7 @@ def run_list(payload: dict) -> int:
     # the ``.strip()`` would AttributeError on a non-string. Coerce to
     # the empty branch (= "use default branch") for any non-string.
     _revision_raw = payload.get("revision")
-    revision = (
-        _revision_raw.strip() if isinstance(_revision_raw, str) else ""
-    ) or None
+    revision = (_revision_raw.strip() if isinstance(_revision_raw, str) else "") or None
     token = _token_value(payload)
 
     _emit("status", message=f"Loading {repo_id}…")
@@ -215,10 +209,7 @@ def _normalize_path_list(value) -> list[Path]:
     if isinstance(value, (str, Path)):
         return [Path(value)] if str(value) else []
     if not isinstance(value, (list, tuple)):
-        raise TypeError(
-            f"target_dirs must be a list/tuple/str/Path; got "
-            f"{type(value).__name__}"
-        )
+        raise TypeError(f"target_dirs must be a list/tuple/str/Path; got " f"{type(value).__name__}")
     return [Path(item) for item in value if isinstance(item, (str, Path)) and str(item)]
 
 
@@ -239,10 +230,7 @@ def _normalize_pattern_list(value) -> list[str]:
     if isinstance(value, str):
         return [value] if value else []
     if not isinstance(value, (list, tuple)):
-        raise TypeError(
-            f"pattern list must be a list/tuple/str; got "
-            f"{type(value).__name__}"
-        )
+        raise TypeError(f"pattern list must be a list/tuple/str; got " f"{type(value).__name__}")
     return [item for item in value if isinstance(item, str) and item]
 
 
@@ -255,10 +243,7 @@ def _combined_allow_patterns(payload: dict) -> list[str] | None:
         # The old code treated any non-``"selected"`` value as snapshot,
         # so a typo like ``"snapshop"`` silently widened scope to a full
         # repo download. Reject the typo at the runner boundary instead.
-        raise ValueError(
-            f"Unknown download_mode {mode!r}; expected one of "
-            f"{sorted(_ALLOWED_DOWNLOAD_MODES)}."
-        )
+        raise ValueError(f"Unknown download_mode {mode!r}; expected one of " f"{sorted(_ALLOWED_DOWNLOAD_MODES)}.")
     patterns: list[str] = []
     if mode == "selected":
         patterns.extend(_normalize_pattern_list(payload.get("selected_files")))
@@ -275,9 +260,7 @@ def run_download(payload: dict) -> int:
     # the ``.strip()`` would AttributeError on a non-string. Coerce to
     # the empty branch (= "use default branch") for any non-string.
     _revision_raw = payload.get("revision")
-    revision = (
-        _revision_raw.strip() if isinstance(_revision_raw, str) else ""
-    ) or None
+    revision = (_revision_raw.strip() if isinstance(_revision_raw, str) else "") or None
     token = _token_value(payload)
     allow_patterns = _combined_allow_patterns(payload)
     # ``selected`` mode with no selected files AND no include_patterns used
@@ -340,9 +323,7 @@ def run_download(payload: dict) -> int:
                 dir=str(target_dir),
             )
         except OSError as exc:
-            raise OSError(
-                f"Target directory {target_dir} is not writable: {exc}"
-            ) from exc
+            raise OSError(f"Target directory {target_dir} is not writable: {exc}") from exc
         finally:
             if probe_fd is not None:
                 try:
@@ -362,10 +343,7 @@ def run_download(payload: dict) -> int:
                     # ``ls -la`` between runs.
                     _emit(
                         "warn",
-                        message=(
-                            f"Failed to remove writability probe at "
-                            f"{probe_path}: {exc!r}"
-                        ),
+                        message=(f"Failed to remove writability probe at " f"{probe_path}: {exc!r}"),
                     )
 
     for index, target_dir in enumerate(target_dirs, start=1):
@@ -390,7 +368,23 @@ def run_download(payload: dict) -> int:
         }
         if tqdm_class is not None:
             kwargs["tqdm_class"] = tqdm_class
-        snapshot_download(**kwargs)
+        try:
+            snapshot_download(**kwargs)
+        except TypeError as exc:
+            # ``snapshot_download`` only accepts ``tqdm_class`` on
+            # huggingface_hub >= 0.11.0. Older venvs (which the user
+            # may legitimately be on if they're working with a pinned
+            # legacy setup) raise ``TypeError: got an unexpected
+            # keyword argument 'tqdm_class'``. Retry once without it
+            # so the download still proceeds — losing only the
+            # JSON-emitting progress wrapper, not the download
+            # itself. Catch ONLY the specific kwarg-mismatch shape
+            # so genuine TypeError bugs in our payload still
+            # propagate.
+            if "tqdm_class" not in str(exc):
+                raise
+            kwargs.pop("tqdm_class", None)
+            snapshot_download(**kwargs)
         _emit(
             "target-complete",
             target=str(target_dir),

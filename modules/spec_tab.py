@@ -945,6 +945,29 @@ class SpecTab:
                     # list while the UI shows the user's override —
                     # a silent contract mismatch.
                     self.launcher.app_settings["spec_draft_selected_gpus"] = []
+                    # Also clear the live checkbox vars + the
+                    # rendered-selection snapshot so the UI ticks
+                    # match: with a manual override active there is
+                    # no checkbox-derived contribution, and a stale
+                    # snapshot here would let a future refresh
+                    # mistake itself into thinking ``CUDA0,CUDA1``
+                    # was the checkbox-derived string and clear the
+                    # override on the next pass. Use the
+                    # ``_suppress_spec_draft_gpu_events`` flag to
+                    # avoid the per-var trace handler firing in the
+                    # middle of the sweep (same pattern the
+                    # rebuild-from-scratch path uses ~line 897).
+                    self._suppress_spec_draft_gpu_events = True
+                    try:
+                        for var in self.spec_draft_gpu_vars:
+                            try:
+                                if var.get():
+                                    var.set(False)
+                            except Exception:
+                                pass
+                    finally:
+                        self._suppress_spec_draft_gpu_events = False
+                    self._spec_draft_last_rendered_selected = []
             except Exception:
                 pass
             try:
