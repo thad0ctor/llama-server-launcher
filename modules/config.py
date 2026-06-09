@@ -1290,9 +1290,38 @@ class ConfigManager:
             # Ensure model_list_height is a valid int
             if not isinstance(self.launcher.app_settings.get("model_list_height"), int):
                 self.launcher.app_settings["model_list_height"] = 8
-            # Ensure selected_gpus is a list
-            if not isinstance(self.launcher.app_settings.get("selected_gpus"), list):
-                self.launcher.app_settings["selected_gpus"] = []
+
+            # Coerce ``selected_gpus`` / ``gpu_order`` to lists of clean
+            # integer device IDs. Mirrors the per-element normalization
+            # ``_apply_loaded_configuration`` applies when LOADING a
+            # named config — without this, the STARTUP path only
+            # checks the outer container shape, so a hand-edited
+            # ``settings.json`` could ship
+            # ``{"selected_gpus": [true, "0", 1.5]}`` and have those
+            # values survive into ``valid_gpu_indices`` filtering
+            # below. ``bool`` subclasses ``int`` so ``True`` would
+            # become a phantom GPU 1, and ``"0"`` would fail the
+            # ``idx in valid_gpu_indices`` set check because the set
+            # holds ints.
+            def _coerce_gpu_id_list(raw_list):
+                if not isinstance(raw_list, list):
+                    return []
+                cleaned: list[int] = []
+                for raw in raw_list:
+                    if isinstance(raw, bool):
+                        continue
+                    if isinstance(raw, int):
+                        cleaned.append(raw)
+                    elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+                        try:
+                            cleaned.append(int(raw.strip()))
+                        except ValueError:
+                            continue
+                return cleaned
+
+            self.launcher.app_settings["selected_gpus"] = _coerce_gpu_id_list(
+                self.launcher.app_settings.get("selected_gpus")
+            )
             # Validate spec_draft_selected_gpus: must be a list of ints; coerce
             # anything else to [] so legacy/garbage configs can't corrupt the
             # checkbox grid.
@@ -1304,8 +1333,7 @@ class ConfigManager:
                 self.launcher.app_settings["custom_parameters"] = []
             if not isinstance(self.launcher.app_settings.get("selected_mmproj_path"), str):
                 self.launcher.app_settings["selected_mmproj_path"] = ""
-            if not isinstance(self.launcher.app_settings.get("gpu_order"), list):
-                self.launcher.app_settings["gpu_order"] = []
+            self.launcher.app_settings["gpu_order"] = _coerce_gpu_id_list(self.launcher.app_settings.get("gpu_order"))
 
             # UI appearance settings — coerce to expected types so stray edits don't crash startup
             if self.launcher.app_settings.get("ui_theme_mode") not in ("auto", "light", "dark", "specific"):

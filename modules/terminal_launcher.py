@@ -148,8 +148,18 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
     # normally self-delete after running, but if the parent
     # ``cmd`` never starts (PATH issue, AppLocker block, etc.)
     # either file would otherwise leak in ``%TEMP%``.
+    # ``wrapper_path`` is composed into the ``cmd /k`` argument as a
+    # ``call "<path>"`` token, NOT as a bare argv element. Without
+    # the quotes, a temp path containing a shell metacharacter (the
+    # canonical example is ``&`` in a username like ``AT&T``) reaches
+    # cmd's parser unquoted, which then chains the rest of the line
+    # as a separate command — the wrapper never runs and the user
+    # sees a broken terminal. ``subprocess.list2cmdline`` (used by
+    # ``Popen`` on Windows when argv is a list) quotes args containing
+    # whitespace or quote chars but does NOT escape ``&`` / ``|`` /
+    # ``^``, so we have to wrap the path ourselves.
     return (
-        ["cmd", "/c", "start", "", "cmd", "/k", wrapper_path],
+        ["cmd", "/c", "start", "", "cmd", "/k", f'call "{wrapper_path}"'],
         [wrapper_path, payload_path],
     )
 

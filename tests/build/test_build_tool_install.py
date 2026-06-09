@@ -136,14 +136,17 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     argv = popen.call_args.args[0]
     # ``_cmd_keep_open`` writes the user command to a temp PAYLOAD
     # .cmd script and a separate WRAPPER .cmd that ``call``s into
-    # it. ``cmd /k`` points at the wrapper. This two-file split
-    # sidesteps the outer batch parser expanding ``%VAR%`` in the
-    # user command — the payload's line is only parsed once, by
-    # the cmd that runs the payload, the same as if the user had
-    # typed it at a fresh prompt.
+    # it. ``cmd /k`` points at a ``call "<wrapper>"`` token. The
+    # explicit quoting around the path is what protects against
+    # paths containing ``&`` / ``|`` / ``^`` (e.g. usernames like
+    # ``AT&T``) — without it, cmd would chain on the metacharacter
+    # and the wrapper would never run.
     assert argv[:6] == ["cmd", "/c", "start", "", "cmd", "/k"]
-    wrapper_path = argv[6]
-    assert wrapper_path.endswith(".cmd"), f"expected .cmd path, got {wrapper_path!r}"
+    import re as _re
+
+    call_token_match = _re.fullmatch(r'call "(.+\.cmd)"', argv[6])
+    assert call_token_match, f'expected /k arg to be ``call "<wrapper>"``, got {argv[6]!r}'
+    wrapper_path = call_token_match.group(1)
     # Inspect the generated wrapper to verify the contract: it
     # prints the running banner, ``call``s the payload, echoes the
     # exit code, and self-deletes.
