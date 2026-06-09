@@ -203,7 +203,15 @@ def get_gpu_info_from_nvidia_smi(timeout=5):
         for row in reader:
             fields = [part.strip() for part in row]
             if len(fields) < 5:
-                continue
+                # Fail closed on a short row rather than silently
+                # skipping it — a malformed nvidia-smi line means
+                # one or more fields couldn't be parsed, and
+                # quietly returning the rest of the rows would
+                # mask a real driver / format mismatch and let
+                # ``fetch_system_info`` short-circuit on an
+                # incomplete GPU list. Raise so the caller falls
+                # through to the next detector.
+                raise ValueError(f"nvidia-smi row has fewer than 5 fields (got {len(fields)}): {row!r}")
             _nvidia_idx, pci_bus_id, name, memory_total_mib, compute_cap = fields[:5]
             try:
                 total_mib = float(memory_total_mib)

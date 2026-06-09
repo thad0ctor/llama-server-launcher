@@ -380,6 +380,26 @@ class SettingsTab:
         # stale rows into the table after the new probe scheduled
         # below — making the UI show packages from the prior directory.
         self._venv_probe_generation += 1
+        # Cancel any pending QUEUED drain callback too — the
+        # generation bump above only protects worker results from
+        # leaking; an ``after()`` timer that fires next could still
+        # see the OLD rows in the table while it waits for the new
+        # probe. Drop the drain so the table-clear below is the
+        # last word until the new probe lands.
+        drain_id = getattr(self, "_venv_probe_drain_after_id", None)
+        if drain_id is not None:
+            try:
+                self.root.after_cancel(drain_id)
+            except Exception:
+                pass
+            self._venv_probe_drain_after_id = None
+        # Empty the dependency table immediately. Without this, the
+        # rows from the PRIOR venv path stay visible until the
+        # debounced probe lands (up to ``VENV_PROBE_DEBOUNCE_MS``);
+        # if the user clicks Install / Remove during that window
+        # they'd act against a venv that no longer matches what
+        # the table claims is installed.
+        self._rebuild_dependency_rows([])
         self._refresh_venv_summary()
         self._schedule_venv_dependency_probe()
 

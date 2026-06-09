@@ -15,27 +15,21 @@ def test_normalize_repo_input_accepts_plain_repo_id():
 
 
 def test_normalize_repo_input_extracts_revision_from_url():
-    parsed = helpers.normalize_repo_input(
-        "https://huggingface.co/TheBloke/Mistral-7B-GGUF/tree/main"
-    )
+    parsed = helpers.normalize_repo_input("https://huggingface.co/TheBloke/Mistral-7B-GGUF/tree/main")
 
     assert parsed.repo_id == "TheBloke/Mistral-7B-GGUF"
     assert parsed.revision_hint == "main"
 
 
 def test_normalize_repo_input_ignores_tree_subfolder_after_revision():
-    parsed = helpers.normalize_repo_input(
-        "https://huggingface.co/TheBloke/Mistral-7B-GGUF/tree/main/gguf"
-    )
+    parsed = helpers.normalize_repo_input("https://huggingface.co/TheBloke/Mistral-7B-GGUF/tree/main/gguf")
 
     assert parsed.repo_id == "TheBloke/Mistral-7B-GGUF"
     assert parsed.revision_hint == "main"
 
 
 def test_normalize_repo_input_keeps_refs_pr_revision():
-    parsed = helpers.normalize_repo_input(
-        "https://huggingface.co/TheBloke/Mistral-7B-GGUF/tree/refs/pr/7/files"
-    )
+    parsed = helpers.normalize_repo_input("https://huggingface.co/TheBloke/Mistral-7B-GGUF/tree/refs/pr/7/files")
 
     assert parsed.repo_id == "TheBloke/Mistral-7B-GGUF"
     assert parsed.revision_hint == "refs/pr/7"
@@ -221,7 +215,10 @@ def test_runner_download_passes_patterns_and_targets(monkeypatch, tmp_path, caps
     assert calls[0]["allow_patterns"] == ["model.gguf", "README*"]
     assert calls[0]["ignore_patterns"] == ["*.tmp"]
     assert calls[0]["repo_type"] == "model"
-    assert calls[0]["local_dir"] == target
+    # ``local_dir`` now nests the repo under ``<target>/<repo_id>``
+    # so multi-target mirroring doesn't co-mingle files from
+    # different repos in the same model root.
+    assert calls[0]["local_dir"] == target / "TheBloke" / "Test"
     lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert lines[0]["event"] == "target-start"
     assert lines[-1]["event"] == "complete"

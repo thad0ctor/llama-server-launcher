@@ -304,6 +304,18 @@ def run_download(payload: dict) -> int:
     # actionable, and avoids leaving stub directories behind.
     import tempfile
 
+    # ``snapshot_download(local_dir=...)`` materializes the repo files
+    # DIRECTLY into the supplied directory — there's no automatic
+    # ``<repo_id>/`` subdirectory. So if the user picks ``~/models/``
+    # as the target, ``model.safetensors`` / ``config.json`` / etc
+    # land straight under ``~/models/``, mixing files from different
+    # repos and breaking the "select multiple model dirs to mirror
+    # to" use case. The ``_validate_repo_id`` call (helpers.py:163)
+    # already rejects path-traversal segments, backslashes, and
+    # NUL bytes, so joining ``target_dir / repo_id`` is safe.
+    repo_relative = Path(repo_id)
+    target_dirs = [target_dir / repo_relative for target_dir in target_dirs]
+
     for target_dir in target_dirs:
         try:
             target_dir.mkdir(parents=True, exist_ok=True)

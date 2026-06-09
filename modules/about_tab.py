@@ -121,8 +121,17 @@ for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
     [ -e "$dir" ] || continue
     if [ -d "$dir" ]; then
         dirname=$(basename "$dir")
+        # Hardcoded skip list now also covers ``.venv`` / ``venv`` /
+        # ``.tox`` — common virtualenv / tooling caches the user
+        # may have at the repo root. Without this, a local ``.venv``
+        # would be copied into ``backup/`` here AND deleted by the
+        # cleanup loop below, even though the user's `.gitignore`
+        # only ignores bare ``venv``. The cleanup loop applies the
+        # same extended skip list to keep parity — anything we
+        # don't back up must NOT be deleted either, otherwise a
+        # self-update wipes the user's environment.
         case "$dirname" in
-            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache)
+            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache|.venv|venv|.tox)
                 echo "Skipping $dirname (cache/git/static data)"
                 ;;
             *)
@@ -179,8 +188,12 @@ for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
     [ -e "$dir" ] || continue
     if [ -d "$dir" ]; then
         dirname=$(basename "$dir")
+        # Mirror the backup loop's extended skip list — anything we
+        # did NOT back up above must NOT be removed here, otherwise
+        # ``.venv`` / ``venv`` / ``.tox`` would be wiped on every
+        # self-update even though they were intentionally preserved.
         case "$dirname" in
-            backup|.git|images)
+            backup|.git|images|.venv|venv|.tox)
                 echo "Preserving $dirname"
                 ;;
             *)

@@ -1124,15 +1124,22 @@ class SpecTab:
                 # (the persisted indices) so the leftover-string
                 # detection works on first manual-mode render too.
                 #
-                # IMPORTANT: do NOT also gate on ``i < count``. In
-                # manual mode ``count`` is often 0 (manual mode hides
-                # the auto-detected GPU list), and on a cold start
-                # with ``count == 0`` and a persisted ``"CUDA0"`` we
-                # need to recognise ``CUDA0`` as our own leftover and
-                # clear it. Keep only ``i >= 0`` so strictly-coerced
-                # non-negative indices reconstruct the same string
-                # the checkbox UI previously wrote out.
-                indices = sorted(i for i in loaded_selected if i >= 0)
+                # IMPORTANT: do NOT unconditionally gate on
+                # ``i < count``. In manual mode ``count`` is often
+                # 0 (manual mode hides the auto-detected GPU list),
+                # and on a cold start with ``count == 0`` and a
+                # persisted ``"CUDA0"`` we still need to recognise
+                # ``CUDA0`` as our own leftover and clear it. But
+                # when ``count > 0`` the upper bound DOES apply —
+                # without it, a stale config like
+                # ``loaded_selected == {0, 99}`` would reconstruct
+                # ``CUDA0,CUDA99`` and an old checkbox-derived
+                # ``"CUDA0"`` would no longer match, leaking the
+                # stale string into the launch command as a phantom
+                # "manual override". Pick the tighter bound when we
+                # have one and fall back to ``i >= 0`` only when
+                # there are no detected GPUs yet.
+                indices = sorted(i for i in loaded_selected if i >= 0 and (count <= 0 or i < count))
             checkbox_derived = ",".join(f"CUDA{i}" for i in indices)
             try:
                 if self.spec_draft_device.get() == checkbox_derived:
