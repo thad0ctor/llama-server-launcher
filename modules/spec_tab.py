@@ -933,6 +933,18 @@ class SpecTab:
                 if current in ("", prior_derived):
                     self.spec_draft_device.set(checkbox_derived)
                     self._spec_draft_last_rendered_selected = list(valid_selected)
+                else:
+                    # Preserving an explicit manual override
+                    # (``Vulkan0`` / ``CUDA2,SYCL1``). Clear the
+                    # persisted checkbox indices so the launch path's
+                    # ``_resolve_draft_device_value`` actually falls
+                    # back to ``spec_draft_device``. Without this,
+                    # ``app_settings["spec_draft_selected_gpus"]``
+                    # still holds the checkbox indices and the launch
+                    # command emits the checkbox-derived ``CUDA…``
+                    # list while the UI shows the user's override —
+                    # a silent contract mismatch.
+                    self.launcher.app_settings["spec_draft_selected_gpus"] = []
             except Exception:
                 pass
             try:
@@ -1020,6 +1032,15 @@ class SpecTab:
                 if current in ("", prior_derived):
                     self.spec_draft_device.set(checkbox_derived)
                     self._spec_draft_last_rendered_selected = list(valid_selected)
+                else:
+                    # Same rationale as the fast path above: when we
+                    # preserve a manual override here, the persisted
+                    # ``spec_draft_selected_gpus`` must be cleared too
+                    # so the launch-time fallback in
+                    # ``_resolve_draft_device_value`` reads
+                    # ``spec_draft_device`` instead of re-emitting the
+                    # checkbox-derived ``CUDA…`` list.
+                    self.launcher.app_settings["spec_draft_selected_gpus"] = []
             except Exception:
                 pass
         elif manual_mode:
@@ -1056,12 +1077,19 @@ class SpecTab:
                 # we'd treat the leftover as a manual override and
                 # leave it alone — meaning CUDA<i> emission survives
                 # into the launch command after the user toggled
-                # manual mode on. Reconstruct the same valid-filtered
-                # list the non-manual branch would have rendered
-                # (``loaded_selected`` filtered to in-range indices)
-                # so the leftover-string detection works on first
-                # manual-mode render too.
-                indices = sorted(i for i in loaded_selected if 0 <= i < count)
+                # manual mode on. Reconstruct from ``loaded_selected``
+                # (the persisted indices) so the leftover-string
+                # detection works on first manual-mode render too.
+                #
+                # IMPORTANT: do NOT also gate on ``i < count``. In
+                # manual mode ``count`` is often 0 (manual mode hides
+                # the auto-detected GPU list), and on a cold start
+                # with ``count == 0`` and a persisted ``"CUDA0"`` we
+                # need to recognise ``CUDA0`` as our own leftover and
+                # clear it. Keep only ``i >= 0`` so strictly-coerced
+                # non-negative indices reconstruct the same string
+                # the checkbox UI previously wrote out.
+                indices = sorted(i for i in loaded_selected if i >= 0)
             checkbox_derived = ",".join(f"CUDA{i}" for i in indices)
             try:
                 if self.spec_draft_device.get() == checkbox_derived:

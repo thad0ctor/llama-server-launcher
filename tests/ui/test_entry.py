@@ -157,6 +157,13 @@ class TestLauncherHelpers:
         assert applied == []
         assert scheduled == []
         assert launcher._detection_in_progress is False
+        # The stale item MUST have been consumed off the queue — if the
+        # drain merely skipped it without ``get_nowait()``-ing it, a
+        # subsequent drain after the same generation got re-armed
+        # would re-process the same stale tuple and end up applying
+        # it. Asserting the queue is empty locks in the "consumed
+        # and discarded" contract.
+        assert q.empty()
 
 
 # ---------------------------------------------------------------------------

@@ -1456,9 +1456,16 @@ def validate_values(
                 continue
             if isinstance(raw_value, str):
                 normalized = raw_value.strip().lower()
-                # Empty string is accepted (treated as "use default" by
-                # ``values_to_cmake_args``).
-                if not normalized or normalized in {"1", "0", "on", "off", "true", "false", "yes", "no"}:
+                # Empty strings are NOT treated as "use default" for
+                # BOOL — ``values_to_cmake_args`` runs them through
+                # ``_bool_str`` which converts them to ``"OFF"``, so
+                # an empty BOOL silently emits ``-DKEY=OFF`` instead
+                # of letting the upstream cmake default win. Reject
+                # them here so the user sees the bad value before
+                # cmake configure runs and either clears the entry
+                # entirely (removes the key from the persisted dict)
+                # or supplies a real boolean.
+                if normalized in {"1", "0", "on", "off", "true", "false", "yes", "no"}:
                     continue
             errors.append(
                 (

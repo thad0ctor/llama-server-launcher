@@ -377,19 +377,53 @@ def default_selected_repo_paths(paths: list[str]) -> tuple[str, ...]:
         return tuple(dict.fromkeys([*primary_with_shards, *mmproj]))
     weights = [path for path in paths if classify_repo_file(path) == "weights"]
     if weights:
-        # Rank weight candidates the same way GGUFs are ranked so the
-        # default picks a meaningful primary (preferred-token match
-        # first, then alphabetical / shortest path) instead of
-        # whatever happened to land at ``weights[0]`` after the
-        # listing sort. The same ``_gguf_sort_key`` works fine for
-        # safetensors / ``*.bin`` filenames — token rank still falls
-        # through to the alphabetical tiebreak for non-quant
-        # filenames, which is what we want.
-        primary_weight = min(weights, key=_gguf_sort_key)
+        # Rank weight candidates with ``_weight_sort_key``, NOT
+        # ``_gguf_sort_key`` directly. The two differ in their
+        # primary discriminator: weights ranking pushes adapter /
+        # LoRA / optimizer files to the back so a repo containing
+        # ``adapter_model.safetensors`` alongside ``model.safetensors``
+        # doesn't tie-break to the adapter by alphabetical sort —
+        # adapters are NOT a usable primary weight, the base model
+        # is. ``_gguf_sort_key`` falls through unchanged for GGUFs
+        # because their classifier filters out adapters via the
+        # ``.gguf`` extension.
+        primary_weight = min(weights, key=_weight_sort_key)
         # Same shard-set expansion for safetensors / *.bin.
         primary_weight_shards = _shard_siblings(primary_weight, weights)
         return tuple(dict.fromkeys(primary_weight_shards))
     return tuple(paths[:1])
+
+
+# Filename tokens that mark a weights file as NOT the primary
+# (adapters / LoRA / optimizer state). These coexist with the real
+# base-model weights in many repos, and an alphabetical tie-break
+# on ``model.safetensors`` vs ``adapter_model.safetensors`` would
+# silently pick the adapter — useless without the base model.
+_NON_PRIMARY_WEIGHT_TOKENS = (
+    "adapter",
+    "lora",
+    "lo_ra",
+    "optimizer",
+    "optim_",
+    "optim.",
+    "_optim",
+)
+
+
+def _weight_sort_key(path: str) -> tuple[int, int, str, int, str]:
+    """Rank non-GGUF weight candidates with adapter/LoRA files demoted.
+
+    Returns a tuple starting with a 0/1 ``primary_class`` discriminator
+    (0 = real weight, 1 = adapter/LoRA/optimizer), then the same
+    ``_gguf_sort_key`` tuple appended after — so ``min(..., key=_weight_sort_key)``
+    picks a real weight over an adapter, and falls back to the
+    existing preferred-token / alphabetical / length / path
+    tiebreaks within each class.
+    """
+    name = Path(path).name.lower()
+    primary_class = 1 if any(token in name for token in _NON_PRIMARY_WEIGHT_TOKENS) else 0
+    token_rank, name_key, length, path_key = _gguf_sort_key(path)
+    return (primary_class, token_rank, name_key, length, path_key)
 
 
 def _gguf_sort_key(path: str) -> tuple[int, str, int, str]:

@@ -626,6 +626,33 @@ class TestPersistenceParity:
         finally:
             root1.destroy()
 
+        # The disk-shape check above isn't a full round-trip — a break
+        # in the rehydration path (``_apply_loaded_configuration``,
+        # ``resync_spec_tk_vars_from_app_settings``, per-tab load
+        # hooks) would still pass. Spin up a SECOND launcher pointed
+        # at the same config file and apply the named config back, so
+        # we lock in that every Tk var the first launcher persisted
+        # comes back through the load path with the exact value the
+        # save path wrote.
+        try:
+            launcher2, root2 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
+        except tk.TclError as exc:
+            pytest.skip(f"Tk root unavailable for round-trip phase: {exc}")
+        try:
+            # Skip the listbox-selection branch of ``load_configuration``
+            # (which the headless test root doesn't drive) and call the
+            # internal apply hook directly with the persisted dict.
+            cfg_dict = launcher2.saved_configs.get("persist_audit_cfg")
+            assert isinstance(cfg_dict, dict), (
+                f"saved_configs did not rehydrate the named entry; " f"got {type(cfg_dict).__name__}"
+            )
+            launcher2.config_manager._apply_loaded_configuration("persist_audit_cfg", cfg_dict)
+            for name, _vc, _d in ALL_NEW_LAUNCHER_TK_VARS:
+                got = getattr(launcher2, name).get()
+                assert got == targets[name], f"round-trip {name!r}: expected {targets[name]!r}, " f"got {got!r}"
+        finally:
+            root2.destroy()
+
 
 # ---------------------------------------------------------------------------
 # Focus 2c — Load-order re-sync is wired
@@ -897,9 +924,9 @@ class TestExtraAdversarialConfigs:
             # identity-based check so only literal ``True`` /
             # ``False`` bool objects fail.
             assert "abc" not in cleaned
-            assert all(x is not True and x is not False for x in cleaned), (
-                f"bool leaked into cleaned indices: {cleaned!r}"
-            )
+            assert all(
+                x is not True and x is not False for x in cleaned
+            ), f"bool leaked into cleaned indices: {cleaned!r}"
         finally:
             root.destroy()
 

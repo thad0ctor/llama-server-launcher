@@ -37,7 +37,22 @@ class HuggingFaceDownloaderTab:
     def __init__(self, launcher):
         self.launcher = launcher
         self.root = launcher.root
-        self.repo_dir = getattr(launcher, "repo_dir", venv_manager.launcher_repo_dir())
+        # Mirror SettingsTab.__init__: normalize to an absolute,
+        # expanded ``Path`` so the HF download flow (``cwd=`` on the
+        # terminal launch, venv resolution) sees the SAME repo root
+        # regardless of the launcher's incoming shape. A relative or
+        # ``~``-prefixed value used to vary by launch context — the
+        # downloader would build a venv command rooted at one cwd
+        # while the settings tab probed against a different one.
+        # ``strict=False`` keeps the path object even if the
+        # directory hasn't been created yet.
+        raw_repo_dir = getattr(launcher, "repo_dir", None)
+        if not isinstance(raw_repo_dir, (str, Path)):
+            raw_repo_dir = venv_manager.launcher_repo_dir()
+        try:
+            self.repo_dir = Path(raw_repo_dir).expanduser().resolve(strict=False)
+        except Exception:
+            self.repo_dir = Path(raw_repo_dir).expanduser()
         settings = launcher.app_settings
         self.repo_input_var = tk.StringVar(value=settings.get("hf_repo_input", ""))
         self.revision_var = tk.StringVar(value=settings.get("hf_repo_revision", ""))
@@ -159,12 +174,12 @@ class HuggingFaceDownloaderTab:
             # include pattern allow downloading without a loaded
             # listing. Refresh runtime state so the button enables
             # immediately when the user switches mode / types a pattern.
-            self.download_mode_var.trace_add("write", lambda *_a: (
-                self._persist_settings(), self._refresh_runtime_state()
-            )),
-            self.include_patterns_var.trace_add("write", lambda *_a: (
-                self._persist_settings(), self._refresh_runtime_state()
-            )),
+            self.download_mode_var.trace_add(
+                "write", lambda *_a: (self._persist_settings(), self._refresh_runtime_state())
+            ),
+            self.include_patterns_var.trace_add(
+                "write", lambda *_a: (self._persist_settings(), self._refresh_runtime_state())
+            ),
             self.ignore_patterns_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.force_download_var.trace_add("write", lambda *_a: self._persist_settings()),
             self.local_files_only_var.trace_add("write", lambda *_a: self._persist_settings()),
@@ -188,9 +203,7 @@ class HuggingFaceDownloaderTab:
         source.grid(column=0, row=0, columnspan=2, sticky="ew", pady=(0, 8))
         source.columnconfigure(1, weight=1)
         ttk.Label(source, text="Repo ID / URL:").grid(column=0, row=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(source, textvariable=self.repo_input_var, width=48).grid(
-            column=1, row=0, sticky="ew", padx=6, pady=4
-        )
+        ttk.Entry(source, textvariable=self.repo_input_var, width=48).grid(column=1, row=0, sticky="ew", padx=6, pady=4)
         self._load_button = ttk.Button(source, text="Load repo", command=self._on_load_repo)
         self._load_button.grid(column=2, row=0, sticky="w", padx=6, pady=4)
         ttk.Label(source, text="Revision:").grid(column=0, row=1, sticky="w", padx=6, pady=4)
@@ -210,9 +223,7 @@ class HuggingFaceDownloaderTab:
         venv_frame.grid(column=0, row=1, sticky="nsew", padx=(0, 6), pady=(0, 8))
         venv_frame.columnconfigure(1, weight=1)
         ttk.Label(venv_frame, text="Active venv:").grid(column=0, row=0, sticky="w", padx=6, pady=4)
-        ttk.Label(venv_frame, textvariable=self.venv_status_var).grid(
-            column=1, row=0, sticky="w", padx=6, pady=4
-        )
+        ttk.Label(venv_frame, textvariable=self.venv_status_var).grid(column=1, row=0, sticky="w", padx=6, pady=4)
         self._install_button = ttk.Button(
             venv_frame,
             text="Install / update huggingface_hub",
@@ -243,9 +254,15 @@ class HuggingFaceDownloaderTab:
         self._files_listbox.config(yscrollcommand=scroll.set)
         file_buttons = ttk.Frame(files)
         file_buttons.grid(column=0, row=1, sticky="w", padx=6, pady=(0, 6))
-        ttk.Button(file_buttons, text="Select defaults", command=self._select_default_files).pack(side="left", padx=(0, 6))
-        ttk.Button(file_buttons, text="Select all", command=lambda: self._select_all_files(True)).pack(side="left", padx=(0, 6))
-        ttk.Button(file_buttons, text="Clear selection", command=lambda: self._select_all_files(False)).pack(side="left")
+        ttk.Button(file_buttons, text="Select defaults", command=self._select_default_files).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(file_buttons, text="Select all", command=lambda: self._select_all_files(True)).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(file_buttons, text="Clear selection", command=lambda: self._select_all_files(False)).pack(
+            side="left"
+        )
 
         self._options_toggle_btn = ttk.Button(
             main,
@@ -300,10 +317,7 @@ class HuggingFaceDownloaderTab:
         self._refresh_runtime_state()
 
     def _persist_settings(self):
-        selected_targets = [
-            path for path, var in self._selected_target_vars.items()
-            if bool(var.get())
-        ]
+        selected_targets = [path for path, var in self._selected_target_vars.items() if bool(var.get())]
         self.launcher.app_settings["hf_repo_input"] = self.repo_input_var.get()
         self.launcher.app_settings["hf_repo_revision"] = self.revision_var.get()
         self.launcher.app_settings["hf_download_mode"] = self.download_mode_var.get()
@@ -372,15 +386,8 @@ class HuggingFaceDownloaderTab:
         # ``_terminating == False`` hold, but the worker thread may
         # still be spawning or tearing down the subprocess. Without
         # this check, Load/Download briefly re-enable mid-shutdown.
-        worker_alive = bool(
-            self._worker_thread is not None and self._worker_thread.is_alive()
-        )
-        idle = (
-            self._process is None
-            and not self._terminating
-            and not watching
-            and not worker_alive
-        )
+        worker_alive = bool(self._worker_thread is not None and self._worker_thread.is_alive())
+        idle = self._process is None and not self._terminating and not watching and not worker_alive
         if status.available:
             version = f" (v{status.version})" if status.version else ""
             self.venv_status_var.set(f"{active}{version}")
@@ -395,9 +402,7 @@ class HuggingFaceDownloaderTab:
             # so the user has something to pick from.
             mode = self.download_mode_var.get()
             include_patterns_raw = self.include_patterns_var.get().strip()
-            download_ok_without_listing = (
-                mode == "snapshot" or bool(include_patterns_raw)
-            )
+            download_ok_without_listing = mode == "snapshot" or bool(include_patterns_raw)
             self._set_button_state(
                 self._download_button,
                 idle and (bool(self._file_rows) or download_ok_without_listing),
@@ -410,9 +415,7 @@ class HuggingFaceDownloaderTab:
         # Disable Install/Update while an HF runner is active — running
         # ``pip install`` into the same venv concurrently with a list or
         # download can corrupt the env (and pip itself complains loudly).
-        self._set_button_state(
-            self._install_button, python is not None and idle
-        )
+        self._set_button_state(self._install_button, python is not None and idle)
         # ``_refresh_target_rows`` is intentionally NOT called every
         # tick — it destroys and rebuilds the entire target-row
         # widget tree, which (a) churns widgets on every venv probe
@@ -448,9 +451,7 @@ class HuggingFaceDownloaderTab:
         if isinstance(raw_target_dirs, str):
             normalized_targets = [raw_target_dirs] if raw_target_dirs else []
         elif isinstance(raw_target_dirs, (list, tuple)):
-            normalized_targets = [
-                p for p in raw_target_dirs if isinstance(p, str) and p
-            ]
+            normalized_targets = [p for p in raw_target_dirs if isinstance(p, str) and p]
         else:
             normalized_targets = []
         selected_paths = tuple(normalized_targets)
@@ -601,9 +602,7 @@ class HuggingFaceDownloaderTab:
         self._dep_watch_venv = venv_path
         self._dep_watch_deadline = time.monotonic() + self.DEP_WATCH_TIMEOUT_S
         try:
-            self._dep_watch_after_id = self.root.after(
-                self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
-            )
+            self._dep_watch_after_id = self.root.after(self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe)
         except tk.TclError:
             # Tk root already destroyed (e.g. tab teardown during install).
             self._dep_watch_after_id = None
@@ -640,8 +639,7 @@ class HuggingFaceDownloaderTab:
             # "Waiting for it to appear…" message. Mirrors the timeout
             # branch in ``_on_dependency_probe_result``.
             self.status_var.set(
-                "Timed out waiting for huggingface_hub to appear. "
-                "Click 'Install / update huggingface_hub' to retry."
+                "Timed out waiting for huggingface_hub to appear. " "Click 'Install / update huggingface_hub' to retry."
             )
             self._dep_watch_venv = None
             self._refresh_runtime_state()
@@ -650,9 +648,7 @@ class HuggingFaceDownloaderTab:
 
         def worker():
             try:
-                status = venv_manager.probe_dependency_status(
-                    venv_path, dep, platform=sys.platform
-                )
+                status = venv_manager.probe_dependency_status(venv_path, dep, platform=sys.platform)
                 available = bool(status.available)
             except Exception:
                 available = False
@@ -676,9 +672,7 @@ class HuggingFaceDownloaderTab:
             # the status panel stays stuck on the earlier "Waiting for it
             # to appear in the venv…" message even though buttons have
             # already re-enabled — confusing.
-            self.status_var.set(
-                "huggingface_hub is now available in the active venv."
-            )
+            self.status_var.set("huggingface_hub is now available in the active venv.")
             self._dep_watch_venv = None
             self._refresh_runtime_state()
             return
@@ -687,16 +681,13 @@ class HuggingFaceDownloaderTab:
             # used to exit silently, leaving the user with no signal that
             # the install never completed.
             self.status_var.set(
-                "Timed out waiting for huggingface_hub to appear. "
-                "Click 'Install / update huggingface_hub' to retry."
+                "Timed out waiting for huggingface_hub to appear. " "Click 'Install / update huggingface_hub' to retry."
             )
             self._dep_watch_venv = None
             self._refresh_runtime_state()
             return
         try:
-            self._dep_watch_after_id = self.root.after(
-                self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe
-            )
+            self._dep_watch_after_id = self.root.after(self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe)
         except tk.TclError:
             self._dep_watch_after_id = None
             self._dep_watch_venv = None
@@ -753,10 +744,7 @@ class HuggingFaceDownloaderTab:
         self._start_runner("list", payload)
 
     def _on_download(self):
-        selected_targets = [
-            path for path, var in self._selected_target_vars.items()
-            if bool(var.get())
-        ]
+        selected_targets = [path for path, var in self._selected_target_vars.items() if bool(var.get())]
         if not selected_targets:
             messagebox.showerror("No target directory", "Select at least one model directory target.")
             return
@@ -774,11 +762,7 @@ class HuggingFaceDownloaderTab:
         # current repo input. Only require a loaded listing when the
         # user picked specific files from the listbox (``selected``
         # mode + no include patterns).
-        if (
-            download_mode == "selected"
-            and not selected_files
-            and not include_patterns
-        ):
+        if download_mode == "selected" and not selected_files and not include_patterns:
             if not self._file_rows:
                 messagebox.showinfo(
                     "No repo loaded",
@@ -788,8 +772,7 @@ class HuggingFaceDownloaderTab:
                 return
             messagebox.showerror(
                 "No files selected",
-                "Select at least one file, enter an include pattern, or "
-                "switch to repo snapshot mode.",
+                "Select at least one file, enter an include pattern, or " "switch to repo snapshot mode.",
             )
             return
         try:
@@ -830,11 +813,7 @@ class HuggingFaceDownloaderTab:
         # would still be treated as listing-bound and the drift
         # checks below could block it or bind it to a stale
         # ``_loaded_repo_id`` / ``_loaded_revision``.
-        using_loaded_listing = (
-            download_mode == "selected"
-            and bool(selected_files)
-            and bool(self._file_rows)
-        )
+        using_loaded_listing = download_mode == "selected" and bool(selected_files) and bool(self._file_rows)
         if using_loaded_listing:
             # Refuse the download if the input has drifted since the
             # file list was loaded. The selection in
@@ -855,10 +834,7 @@ class HuggingFaceDownloaderTab:
             # default branch" and the user later typing a specific ref
             # must trigger the mismatch dialog. The previous truthy
             # check let the new text silently win.
-            if (
-                self._loaded_revision is not None
-                and current_revision != self._loaded_revision
-            ):
+            if self._loaded_revision is not None and current_revision != self._loaded_revision:
                 messagebox.showerror(
                     "Revision changed since load",
                     f"The file list was loaded for revision {self._loaded_revision!r}, "
@@ -1127,9 +1103,7 @@ class HuggingFaceDownloaderTab:
         # ``self._process``) OR the queue isn't empty. Without the
         # worker-alive check, a late ``process-exit`` event after Cancel
         # was orphaned and the runtime state never got refreshed.
-        worker_alive = bool(
-            self._worker_thread is not None and self._worker_thread.is_alive()
-        )
+        worker_alive = bool(self._worker_thread is not None and self._worker_thread.is_alive())
         if self._process is not None or worker_alive or not self._queue.empty():
             try:
                 self._queue_after_id = self.root.after(self.POLL_MS, self._poll_queue)
@@ -1172,10 +1146,7 @@ class HuggingFaceDownloaderTab:
             # silently leave the field blank in that case and the
             # next download would re-resolve against the default
             # branch instead of the user's submitted ref.
-            if (
-                not self.revision_var.get().strip()
-                and requested_revision
-            ):
+            if not self.revision_var.get().strip() and requested_revision:
                 self.revision_var.set(requested_revision)
             self._file_rows = list(files)
             self._file_path_by_index = [row.path for row in self._file_rows]
@@ -1202,9 +1173,7 @@ class HuggingFaceDownloaderTab:
             # download fetches the same bytes the user saw in the
             # file list. Empty string = older runner / repo without
             # SHA; the download falls back to the ref name.
-            self._pinned_revision_sha = str(
-                event.get("resolved_revision") or ""
-            ).strip()
+            self._pinned_revision_sha = str(event.get("resolved_revision") or "").strip()
             if self._files_listbox is not None:
                 self._files_listbox.delete(0, tk.END)
                 for row in self._file_rows:
@@ -1263,9 +1232,7 @@ class HuggingFaceDownloaderTab:
             # leaked temp files, etc). Surface to the status bar so
             # log scrapers / users notice without aborting the
             # operation. The runner keeps going.
-            self.status_var.set(
-                event.get("message", "Warning from runner.")
-            )
+            self.status_var.set(event.get("message", "Warning from runner."))
             return
         if kind == "process-exit":
             self._finalize_process(event)

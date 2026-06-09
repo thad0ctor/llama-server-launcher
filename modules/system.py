@@ -389,26 +389,37 @@ try:
     
     if torch_available:
         device_count = torch.cuda.device_count()
-        gpu_info = {
-            "available": True,
-            "device_count": device_count,
-            "devices": [],
-            "detection_source": "torch-venv",
-            "message": "Detected via torch in configured venv"
-        }
-        
-        for i in range(device_count):
-            props = torch.cuda.get_device_properties(i)
-            gpu_info["devices"].append({
-                "id": i,
-                "name": props.name,
-                "total_memory_bytes": props.total_memory,
-                "total_memory_gb": round(props.total_memory / (1024**3), 2),
-                "compute_capability": f"{props.major}.{props.minor}",
-                "multi_processor_count": props.multi_processor_count
-            })
-        
-        print(json.dumps(gpu_info))
+        # Mirror ``get_gpu_info_static``: cuda.is_available() can be
+        # True on a CUDA-built torch running against a host with no
+        # visible devices (cloud VM with no devices attached, MIG
+        # mode, CUDA_VISIBLE_DEVICES=""). The cache contract
+        # ``load_cached_gpu_info`` enforces requires available=False
+        # in that case; otherwise the parent's cascade short-circuits
+        # on the empty result and never falls through to the next
+        # backend.
+        if device_count <= 0:
+            print(json.dumps({"available": False, "message": "CUDA reports available but no devices were enumerated in venv", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
+        else:
+            gpu_info = {
+                "available": True,
+                "device_count": device_count,
+                "devices": [],
+                "detection_source": "torch-venv",
+                "message": "Detected via torch in configured venv"
+            }
+
+            for i in range(device_count):
+                props = torch.cuda.get_device_properties(i)
+                gpu_info["devices"].append({
+                    "id": i,
+                    "name": props.name,
+                    "total_memory_bytes": props.total_memory,
+                    "total_memory_gb": round(props.total_memory / (1024**3), 2),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "multi_processor_count": props.multi_processor_count
+                })
+
+            print(json.dumps(gpu_info))
     else:
         print(json.dumps({"available": False, "message": "CUDA not available via PyTorch in venv", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 
@@ -1023,21 +1034,39 @@ def parse_gguf_header_simple(model_path_str):
 
     model_path = Path(model_path_str)
 
-    # Calculate total size across all shards if this is a multi-part file
-    total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
-
     analysis_result = {
         "path": str(model_path),
-        "file_size_bytes": total_size_bytes,
-        "file_size_gb": round(total_size_bytes / (1024**3), 2),
+        "file_size_bytes": 0,
+        "file_size_gb": 0,
         "architecture": "unknown",
         "n_layers": None,
         "metadata": {},
         "error": None,
-        "message": f"Analyzed using simple GGUF parser ({shard_count} shard{'s' if shard_count != 1 else ''})",
-        "shard_count": shard_count,
-        "all_shards": [str(p) for p in all_shards],
+        "message": "Analyzed using simple GGUF parser",
+        "shard_count": 0,
+        "all_shards": [],
     }
+
+    # Calculate total size across all shards if this is a multi-part file.
+    # The shard discovery touches the filesystem and used to live OUTSIDE
+    # the outer ``try`` below, so a stale/deleted model path raised
+    # ``FileNotFoundError`` / ``OSError`` straight out of the function
+    # instead of populating ``analysis_result["error"]``. Callers expect
+    # the error-return contract, so catch OS-level failures here and
+    # short-circuit with the same shape every other failure mode uses.
+    try:
+        total_size_bytes, shard_count, all_shards = calculate_total_gguf_size(model_path_str)
+    except OSError as exc:
+        analysis_result["error"] = f"Failed to inspect GGUF file: {exc}"
+        return analysis_result
+
+    analysis_result["file_size_bytes"] = total_size_bytes
+    analysis_result["file_size_gb"] = round(total_size_bytes / (1024**3), 2)
+    analysis_result["message"] = (
+        f"Analyzed using simple GGUF parser ({shard_count} shard{'s' if shard_count != 1 else ''})"
+    )
+    analysis_result["shard_count"] = shard_count
+    analysis_result["all_shards"] = [str(p) for p in all_shards]
 
     # GGUF type definitions per spec
     # Format: type_id -> (struct_format, size_in_bytes) or None for variable-length types
