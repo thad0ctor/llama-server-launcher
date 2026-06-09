@@ -1049,6 +1049,13 @@ class SpecTab:
             device_str = ",".join(f"CUDA{i}" for i in selected_indices)
             if self.spec_draft_device.get() != device_str:
                 self.spec_draft_device.set(device_str)
+            # Snapshot what THIS code just wrote so a later refresh /
+            # manual-mode flip recognises it as "checkbox-set" via the
+            # conditional-clear logic in
+            # ``_update_spec_draft_gpu_checkboxes``. Without the
+            # update, the snapshot stays at the previous render and
+            # the new ``CUDA…`` string looks like a manual override.
+            self._spec_draft_last_rendered_selected = list(selected_indices)
             try:
                 self.launcher._save_configs()
             except Exception:

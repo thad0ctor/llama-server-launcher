@@ -370,9 +370,16 @@ class ConfigManager:
 
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
         # This is redundant with app_settings, but keeps config self-contained for this tab.
-        cfg["gpu_indices"] = self.launcher.app_settings.get("selected_gpus", [])
+        # Copy so subsequent GPU-checkbox / drag-reorder edits don't
+        # silently mutate the stored preset (same rationale as the
+        # ``custom_parameters`` copy above).
+        cfg["gpu_indices"] = list(
+            self.launcher.app_settings.get("selected_gpus", []) or []
+        )
         # Save GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
-        cfg["gpu_order"] = self.launcher.app_settings.get("gpu_order", [])
+        cfg["gpu_order"] = list(
+            self.launcher.app_settings.get("gpu_order", []) or []
+        )
         # Mirror the draft-GPU checkbox indices into the per-config dict so
         # named-config save/load reinstates the visual checkbox state, not
         # just the comma-joined ``spec_draft_device`` string. Same pattern as
@@ -396,7 +403,12 @@ class ConfigManager:
             return messagebox.showerror("Error","Select a configuration from the list to load.")
         name = self.launcher.config_listbox.get(self.launcher.config_listbox.curselection())
         cfg  = self.launcher.saved_configs.get(name)
-        if not cfg:
+        # ``if not cfg`` conflates a missing entry with a valid-but-
+        # empty dict. The apply path supplies defaults for sparse
+        # configs (see ``_apply_loaded_configuration``), and the
+        # shape guard below already rejects non-dict values, so only
+        # genuinely-missing (``None``) entries should fail fast here.
+        if cfg is None:
              messagebox.showerror("Error", f"Configuration '{name}' data not found.")
              return
         # A hand-edited ``saved_configs`` JSON could land a non-dict
