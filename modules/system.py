@@ -302,9 +302,18 @@ def get_gpu_info_with_venv(venv_path=None):
     attempts.append(f"in-process PyTorch: {static_info.get('message', 'unknown error')}")
     print(f"DEBUG: in-process PyTorch GPU detection unavailable: {static_info.get('message', 'unknown error')}", file=sys.stderr)
 
-    # Every detector failed. Surface a combined message so the user can see
-    # which backends were attempted, instead of only the last one's reason.
-    static_info["message"] = "No GPU detection backend succeeded — " + "; ".join(attempts)
+    # Every detector failed. The full per-backend stderr / exception
+    # text stays in DEBUG-only stderr (already printed above for each
+    # attempt + the combined line below); the UI-facing ``message``
+    # is generic to avoid re-surfacing raw subprocess output / venv
+    # paths in ``gpu_detected_status_var`` after the per-site
+    # sanitization pass.
+    if attempts:
+        print(
+            "DEBUG: GPU detection backends failed: " + "; ".join(attempts),
+            file=sys.stderr,
+        )
+    static_info["message"] = "No GPU detection backend succeeded."
     return static_info
 
 def get_gpu_info_from_venv(venv_path):

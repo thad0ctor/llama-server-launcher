@@ -811,7 +811,19 @@ class HuggingFaceDownloaderTab:
         # different source than the one they last browsed. Skip the
         # mismatch dialogs and the loaded-identity binding in those
         # flows; fall back to the current input.
-        using_loaded_listing = bool(selected_files) and bool(self._file_rows)
+        # Snapshot mode auto-selects default files via
+        # ``_select_default_files``, so ``selected_files`` can be
+        # truthy even when the user explicitly chose "snapshot" (=
+        # download the whole repo). Without the explicit
+        # ``download_mode == "selected"`` guard, a snapshot download
+        # would still be treated as listing-bound and the drift
+        # checks below could block it or bind it to a stale
+        # ``_loaded_repo_id`` / ``_loaded_revision``.
+        using_loaded_listing = (
+            download_mode == "selected"
+            and bool(selected_files)
+            and bool(self._file_rows)
+        )
         if using_loaded_listing:
             # Refuse the download if the input has drifted since the
             # file list was loaded. The selection in

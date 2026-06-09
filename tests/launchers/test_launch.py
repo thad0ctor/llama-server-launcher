@@ -1152,8 +1152,12 @@ class TestSaveShScript:
         launcher_mock.gpu_info = {"device_count": 2}
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        # ``shlex.quote("1,0")`` is identity (no shell metachars); the
-        # saved script emits the bare numeric form now.
+        # Comma-separated numeric strings are safe in bash without
+        # quoting (no shell metacharacters), so the saved script
+        # emits the bare numeric form. ``shlex.quote("1,0")`` would
+        # technically return ``"'1,0'"``, but the launch.py emitter
+        # writes the value verbatim because it knows the contract is
+        # numeric-only.
         assert "export CUDA_VISIBLE_DEVICES=1,0" in text
 
     def test_cuda_visible_devices_cleared_when_gpus_exist_none_selected(

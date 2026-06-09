@@ -549,12 +549,15 @@ class ConfigManager:
         # silently emit an empty ``--chat-template`` and ``current_cfg``
         # round-trips a valid name back to disk.
         raw_saved_predefined = cfg.get("predefined_template_name", default_predefined_key)
-        # Coerce non-string values (a JSON-edited ``null``,
-        # ``false``, or a number) to the default. The downstream
-        # ``predefined_template_name.set`` is a ``tk.StringVar.set``
-        # which would either AttributeError or stringify the value
-        # into a name that doesn't match any template key.
-        if isinstance(raw_saved_predefined, str):
+        # Coerce non-string / blank values to the default. Empty
+        # strings and whitespace-only values are functionally
+        # invalid — ``_update_effective_template_display`` would
+        # emit a blank ``--chat-template`` and the listbox would
+        # show no selection. ``null`` / ``false`` / numeric values
+        # would also break the downstream ``StringVar.set`` /
+        # template-key lookup. Treat all of them the same: fall
+        # back to the default and persist the correction below.
+        if isinstance(raw_saved_predefined, str) and raw_saved_predefined.strip():
             saved_predefined = raw_saved_predefined
         else:
             saved_predefined = default_predefined_key

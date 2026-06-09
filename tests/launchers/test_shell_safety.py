@@ -491,9 +491,12 @@ class TestGpuIndexEdgeCases:
         out = tmp_path / "g.sh"
         text = _save_sh_and_read(manager, launcher_mock, out)
         joined = ",".join(map(str, indices))
-        # ``shlex.quote`` of a bare numeric/comma string round-trips
-        # unchanged, so the saved script emits the value without
-        # surrounding quotes now.
+        # Comma-separated numeric strings contain no shell
+        # metacharacters, so they're safe in bash without quoting.
+        # The launch.py emitter writes ``joined`` verbatim
+        # (``shlex.quote`` would technically wrap it in single
+        # quotes, but the bare form is the actual contract for the
+        # numeric-only field).
         assert f"export CUDA_VISIBLE_DEVICES={joined}" in text
 
     def test_negative_index_emitted_verbatim_not_stripped(

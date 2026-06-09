@@ -412,8 +412,11 @@ class TestCudaVisibleDevicesLiveVsScript:
             fd.asksaveasfilename.return_value = str(tmp_path / "launch.sh")
             manager.save_sh_script()
         saved_text = (tmp_path / "launch.sh").read_text()
-        # ``shlex.quote("1,0")`` round-trips unchanged (no shell meta-
-        # chars), so the saved script now emits the bare numeric form.
+        # Comma-separated numeric strings have no shell metacharacters,
+        # so they're safe in bash without quoting. The launch.py
+        # emitter writes the value verbatim (``shlex.quote("1,0")``
+        # would technically wrap it in single quotes, but the bare
+        # form is the actual contract for the numeric-only field).
         assert "export CUDA_VISIBLE_DEVICES=1,0" in saved_text
 
         # Live-launch script: accept either quoted or unquoted form. Both
