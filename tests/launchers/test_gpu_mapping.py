@@ -334,9 +334,11 @@ class TestCudaVisibleDevicesInShScript:
         launcher_mock.get_ordered_selected_gpus.return_value = [2, 0, 1]
         launcher_mock.gpu_info = {"device_count": 3}
         text = self._write_and_read(manager, launcher_mock, tmp_path / "launch.sh")
-        # Saved bash script now uses ``shlex.quote`` for the value
-        # (single-quoted form on a bare numeric string round-trips
-        # unchanged) — see ``CUDA_VISIBLE_DEVICES`` hardening in launch.py.
+        # Saved bash script uses ``shlex.quote`` for the value, but
+        # comma-separated numeric strings have no shell metacharacters
+        # so ``shlex.quote`` returns them UNQUOTED. The exported line
+        # is therefore the bare ``export CUDA_VISIBLE_DEVICES=2,0,1``
+        # — see the hardening in ``modules/launch.py``.
         assert "export CUDA_VISIBLE_DEVICES=2,0,1" in text, (
             "User reorder must be preserved verbatim in CUDA_VISIBLE_DEVICES — "
             "llama.cpp then sees logical GPU 0 = physical 2, logical 1 = physical 0, "

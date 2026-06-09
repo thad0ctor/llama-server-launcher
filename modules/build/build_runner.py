@@ -753,7 +753,11 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
     src, build = _resolve_safe_build_paths(plan.source_dir, plan.build_dir)
 
     lines: list[str] = []
-    lines.append("#!/bin/bash")
+    # Env-based shebang matches the saved launch script in
+    # ``modules/launch.py`` so a Homebrew, NixOS, or user-installed
+    # bash on PATH wins. Hosts where bash isn't at ``/bin``
+    # otherwise produce a script that fails immediately on execute.
+    lines.append("#!/usr/bin/env bash")
     if header:
         for hl in header.splitlines():
             lines.append(f"# {hl}")

@@ -170,8 +170,15 @@ find {q_current_dir} -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || tru
 find {q_current_dir}/config -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
 find {q_current_dir} -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
 
-# Remove directories (except JSON config dirs, backup, and .git)
-for dir in {q_current_dir}/*; do
+# Remove directories (except JSON config dirs, backup, and .git).
+# Match the backup loop above: iterate dotted entries too so stale
+# hidden directories like ``.github`` / ``.venv`` actually get
+# cleaned up, otherwise they'd survive a self-update and block the
+# new install from placing fresh copies in the same slots.
+# ``[ -e "$dir" ]`` guards against literal patterns when the glob
+# matches nothing.
+for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
+    [ -e "$dir" ] || continue
     if [ -d "$dir" ]; then
         dirname=$(basename "$dir")
         case "$dirname" in
@@ -197,8 +204,13 @@ cd temp_clone
 
 # Move files from temp clone to current directory
 echo "Installing new version..."
-# Move all files except .git and images directories
-find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} {q_current_dir}/ \\; 2>/dev/null || true
+# Move all files except .git and images directories.
+# Drop the ``2>/dev/null || true`` mask: a real ``mv`` failure
+# (target stays occupied by a leftover hidden dir, permission
+# denied, etc.) used to be silently swallowed and the update
+# reported success even though the new files never landed. Let
+# the error propagate so the user sees it.
+find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} {q_current_dir}/ \\;
 echo "Skipped downloading images folder (using existing)"
 cd {q_current_dir}
 rm -rf temp_clone
