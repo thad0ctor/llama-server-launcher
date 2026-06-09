@@ -144,7 +144,15 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
             # never run (https://ss64.com/nt/call.html). Quote the
             # path so spaces in ``%TEMP%`` (e.g. ``C:\Users\Bob
             # Smith\AppData\…``) don't truncate the argument.
-            fh.write(f'call "{payload_path}"\r\n')
+            # Escape literal ``%`` to ``%%`` so a username like
+            # ``%TEST%`` or any other ``%FOO%`` substring in the
+            # payload path doesn't get expanded as a cmd
+            # environment variable when the wrapper line is
+            # parsed (cmd does ``%VAR%`` substitution on every
+            # batch line). ``tempfile.mkstemp`` paths don't
+            # normally contain ``%`` but this is cheap insurance.
+            payload_path_escaped = payload_path.replace("%", "%%")
+            fh.write(f'call "{payload_path_escaped}"\r\n')
             fh.write("echo.\r\n")
             fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
             # Self-delete the wrapper. ``%~f0`` is the full path
@@ -176,9 +184,18 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
     # sees a broken terminal. ``subprocess.list2cmdline`` (used by
     # ``Popen`` on Windows when argv is a list) quotes args containing
     # whitespace or quote chars but does NOT escape ``&`` / ``|`` /
-    # ``^``, so we have to wrap the path ourselves.
+    # ``^``, so we have to wrap the path ourselves. Also escape
+    # literal ``%`` in the wrapper path because cmd parses the
+    # ``/k`` argument string and would otherwise expand any
+    # ``%FOO%`` substring as an env-var reference at launch time.
+    # The ``%=%`` dummy-expansion trick: inserting ``%=%``
+    # between two ``%`` characters breaks cmd's variable-
+    # reference matching because ``=`` is not valid in a name.
+    # ``tempfile.mkstemp`` paths don't normally contain ``%`` but
+    # an exotic ``%TMP%`` value would expose the gap.
+    wrapper_path_escaped = wrapper_path.replace("%", "%=%")
     return (
-        ["cmd", "/c", "start", "", "cmd", "/k", f'call "{wrapper_path}"'],
+        ["cmd", "/c", "start", "", "cmd", "/k", f'call "{wrapper_path_escaped}"'],
         [wrapper_path, payload_path],
     )
 

@@ -706,11 +706,27 @@ def emit_spec_args(launcher, backend, cmd):
                                     # validates against the real file
                                     # under ``$HOME`` instead of being
                                     # silently skipped — ``Path("~/...")``
-                                    # is literal text on POSIX.
-                                    draft_path = Path(mp).expanduser()
-                                    if draft_path.is_file():
+                                    # is literal text on POSIX. Wrap in
+                                    # try/except: ``Path("~unknown_user/foo")``
+                                    # raises ``RuntimeError`` because the
+                                    # named user can't be resolved, and we
+                                    # don't want one malformed path to
+                                    # abort the entire arg-emission loop.
+                                    try:
+                                        draft_path = Path(mp).expanduser()
+                                        is_valid_file = draft_path.is_file()
+                                    except Exception as exc:
+                                        print(
+                                            f"WARNING: draft model path '{mp}' failed to resolve "
+                                            f"({type(exc).__name__}: {exc}); skipping "
+                                            f"--model-draft emission.",
+                                            file=sys.stderr,
+                                        )
+                                        is_valid_file = False
+                                        draft_path = None
+                                    if is_valid_file and draft_path is not None:
                                         cmd.extend(["--model-draft", str(draft_path.resolve())])
-                                    else:
+                                    elif draft_path is not None:
                                         print(
                                             f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
                                             file=sys.stderr,
@@ -845,14 +861,26 @@ def emit_spec_args(launcher, backend, cmd):
                                 mp = mp_var.get().strip()
                                 if mp:
                                     # ``expanduser()`` — same rationale as
-                                    # the ik_llama branch above: ``~/foo.gguf``
-                                    # must validate against the real file
-                                    # under ``$HOME``, not the literal
-                                    # ``~``-prefixed string.
-                                    draft_path = Path(mp).expanduser()
-                                    if draft_path.is_file():
+                                    # the ik_llama branch above. Wrap in
+                                    # try/except for the same reason too:
+                                    # ``Path("~unknown/foo")`` raises
+                                    # ``RuntimeError`` and would otherwise
+                                    # abort the rest of arg emission.
+                                    try:
+                                        draft_path = Path(mp).expanduser()
+                                        is_valid_file = draft_path.is_file()
+                                    except Exception as exc:
+                                        print(
+                                            f"WARNING: draft model path '{mp}' failed to resolve "
+                                            f"({type(exc).__name__}: {exc}); skipping "
+                                            f"--spec-draft-model emission.",
+                                            file=sys.stderr,
+                                        )
+                                        is_valid_file = False
+                                        draft_path = None
+                                    if is_valid_file and draft_path is not None:
                                         cmd.extend(["--spec-draft-model", str(draft_path.resolve())])
-                                    else:
+                                    elif draft_path is not None:
                                         print(
                                             f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
                                             file=sys.stderr,
