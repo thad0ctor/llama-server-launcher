@@ -822,8 +822,15 @@ def values_to_cmake_args(
         if flag.type == BOOL:
             out.append(f"-D{flag.key}={_bool_str(v)}")
         elif flag.type == ENUM:
-            if v:
-                out.append(f"-D{flag.key}={v}")
+            # Strip surrounding whitespace to match the STRING branch
+            # below and the validation pass above (line ~895).
+            # ``"  size  "`` from a hand-edited preset used to land in
+            # cmake as ``-DGGML_CUDA_COMPRESSION_MODE=  size  `` and
+            # fail the configure step with a confusing "no such enum
+            # value" error.
+            sv = "" if v is None else str(v).strip()
+            if sv:
+                out.append(f"-D{flag.key}={sv}")
         else:  # STRING
             sv = "" if v is None else str(v).strip()
             if sv:

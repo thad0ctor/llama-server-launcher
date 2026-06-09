@@ -892,15 +892,23 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
         # ``cmake_env`` keys through ``_ENV_NAME_RE`` at load time, but
         # a ``BuildPlan`` can also be constructed programmatically (the
         # tests do this) or via a future loader that skips the
-        # persistence layer. Re-validate here so the exported script
-        # never emits a shell-unsafe ``CC FLAGS="x"`` /
-        # ``CC;echo pwned="x"`` line.
+        # persistence layer. Re-validate KEY AND VALUE here so the
+        # exported script never emits a shell-unsafe ``CC FLAGS="x"`` /
+        # ``CC;echo pwned="x"`` line AND can't trip ``shlex.quote(v)``
+        # on a non-string ``v`` or embed a NUL in a bash export.
         import re as _re
         _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-        safe_env_items = [
-            (k, v) for k, v in plan.cmake_env.items()
-            if isinstance(k, str) and _env_name_re.fullmatch(k)
-        ]
+        safe_env_items: list[tuple[str, str]] = []
+        for k, v in plan.cmake_env.items():
+            if not (isinstance(k, str) and _env_name_re.fullmatch(k)):
+                continue
+            try:
+                sv = str(v) if v is not None else ""
+            except Exception:
+                continue
+            if "\0" in sv:
+                continue
+            safe_env_items.append((k, sv))
         env_prefix = " ".join(
             f"{k}={shlex.quote(v)}" for k, v in safe_env_items
         )

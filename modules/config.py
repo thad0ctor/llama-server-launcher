@@ -396,6 +396,19 @@ class ConfigManager:
         if not cfg:
              messagebox.showerror("Error", f"Configuration '{name}' data not found.")
              return
+        # A hand-edited ``saved_configs`` JSON could land a non-dict
+        # value (list, scalar, …) under a name. Refuse it cleanly —
+        # the apply path below assumes ``cfg`` is a dict (``cfg.get``,
+        # ``deepcopy`` is fine for both but ``_apply_loaded_configuration``
+        # would crash on a list as it iterates string keys).
+        if not isinstance(cfg, dict):
+            messagebox.showerror(
+                "Error",
+                f"Configuration '{name}' has an invalid shape "
+                f"(expected an object, got {type(cfg).__name__}). "
+                f"This entry is unusable until you re-save it.",
+            )
+            return
 
         # Snapshot the predefined-template name BEFORE
         # ``_apply_loaded_configuration`` runs — that method may remap

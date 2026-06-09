@@ -259,9 +259,9 @@ class TestBuildUpdateScriptBasic:
             (line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")),
             None,
         )
-        assert array_line is not None, (
-            "EXCLUDE_ARGS=(...) missing from build_update_script output"
-        )
+        assert (
+            array_line is not None
+        ), "EXCLUDE_ARGS=(...) missing from build_update_script output"
         inner = array_line[len("EXCLUDE_ARGS=(") : -1]
         tokens = shlex.split(inner)
         assert "don't_touch/*.tmp" in tokens
@@ -427,7 +427,10 @@ class TestCheckVersionOnline:
         call ``_update_version_display`` so the user knows it didn't work."""
         about._update_version_display = MagicMock()
 
-        with patch("modules.about_tab.requests.get", side_effect=requests_module.ConnectionError("unreachable")):
+        with patch(
+            "modules.about_tab.requests.get",
+            side_effect=requests_module.ConnectionError("unreachable"),
+        ):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
@@ -482,7 +485,10 @@ class TestCheckVersionOnline:
         """Timeouts are a subclass of RequestException — same graceful path."""
         about._update_version_display = MagicMock()
 
-        with patch("modules.about_tab.requests.get", side_effect=requests_module.Timeout("slow")):
+        with patch(
+            "modules.about_tab.requests.get",
+            side_effect=requests_module.Timeout("slow"),
+        ):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
@@ -549,7 +555,9 @@ class TestDrainVersionQueue:
         about._drain_version_queue()
 
         assert about._version_after_id == "after-1"
-        assert parent.after_calls == [(VERSION_CHECK_POLL_MS, about._drain_version_queue)]
+        assert parent.after_calls == [
+            (VERSION_CHECK_POLL_MS, about._drain_version_queue)
+        ]
         about._version_thread.is_alive.assert_not_called()
 
     def test_completion_sentinel_stops_polling_without_ui_change(self, about):

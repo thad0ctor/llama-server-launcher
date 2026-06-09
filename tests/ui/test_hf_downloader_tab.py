@@ -60,7 +60,11 @@ def test_setup_disables_actions_without_active_venv(hf_launcher_stub, monkeypatc
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=False,
             error="venv python not found",
         ),
@@ -75,7 +79,9 @@ def test_setup_disables_actions_without_active_venv(hf_launcher_stub, monkeypatc
     assert str(tab._download_button.cget("state")) == "disabled"
 
 
-def test_setup_enables_install_and_load_with_hf_ready(hf_launcher_stub, active_venv, monkeypatch):
+def test_setup_enables_install_and_load_with_hf_ready(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     repo_dir, python = active_venv
     hf_launcher_stub.repo_dir = repo_dir
     hf_launcher_stub.venv_dir.set("")
@@ -85,7 +91,11 @@ def test_setup_enables_install_and_load_with_hf_ready(hf_launcher_stub, active_v
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
@@ -113,7 +123,11 @@ def test_install_button_uses_active_venv(hf_launcher_stub, active_venv, monkeypa
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=False,
             error="missing",
         ),
@@ -135,7 +149,9 @@ def test_install_button_uses_active_venv(hf_launcher_stub, active_venv, monkeypa
     assert launch_mock.call_args.kwargs["cwd"] == repo_dir
 
 
-def test_listing_event_populates_files_and_selects_defaults(hf_launcher_stub, active_venv, monkeypatch):
+def test_listing_event_populates_files_and_selects_defaults(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     repo_dir, _python = active_venv
     hf_launcher_stub.repo_dir = repo_dir
     hf_launcher_stub.venv_dir.set("")
@@ -143,7 +159,11 @@ def test_listing_event_populates_files_and_selects_defaults(hf_launcher_stub, ac
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
@@ -177,7 +197,9 @@ def test_listing_event_populates_files_and_selects_defaults(hf_launcher_stub, ac
     assert tab._refs == ["main"]
 
 
-def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stub, active_venv, monkeypatch):
+def test_download_builds_payload_from_selected_files_and_targets(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     repo_dir, _python = active_venv
     target = repo_dir / "downloads"
     target.mkdir()
@@ -188,7 +210,11 @@ def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stu
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
@@ -244,7 +270,9 @@ def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stu
     assert captured["payload"]["max_workers"] == 6
 
 
-def test_process_exit_failure_updates_status(hf_launcher_stub, active_venv, monkeypatch):
+def test_process_exit_failure_updates_status(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     repo_dir, _python = active_venv
     hf_launcher_stub.repo_dir = repo_dir
     hf_launcher_stub.venv_dir.set("")
@@ -252,7 +280,11 @@ def test_process_exit_failure_updates_status(hf_launcher_stub, active_venv, monk
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
@@ -271,12 +303,14 @@ def test_process_exit_failure_updates_status(hf_launcher_stub, active_venv, monk
     # shows) would have slipped through the previous membership-only
     # assertion. Include the actual stderr token so users see what
     # actually broke without having to dig through subprocess logs.
-    assert "boom" in status, (
-        f"failure status must include subprocess stderr; got {status!r}"
-    )
+    assert (
+        "boom" in status
+    ), f"failure status must include subprocess stderr; got {status!r}"
 
 
-def test_cancel_operation_restores_button_state(hf_launcher_stub, active_venv, monkeypatch):
+def test_cancel_operation_restores_button_state(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     repo_dir, _python = active_venv
     hf_launcher_stub.repo_dir = repo_dir
     hf_launcher_stub.venv_dir.set("")
@@ -284,7 +318,11 @@ def test_cancel_operation_restores_button_state(hf_launcher_stub, active_venv, m
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
@@ -312,7 +350,9 @@ def test_cancel_operation_restores_button_state(hf_launcher_stub, active_venv, m
     assert tab.status_var.get() == "Operation cancelled."
 
 
-def test_run_process_worker_reports_start_failure(hf_launcher_stub, active_venv, monkeypatch):
+def test_run_process_worker_reports_start_failure(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     repo_dir, _python = active_venv
     hf_launcher_stub.repo_dir = repo_dir
     hf_launcher_stub.venv_dir.set("")
@@ -320,7 +360,11 @@ def test_run_process_worker_reports_start_failure(hf_launcher_stub, active_venv,
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
@@ -340,7 +384,9 @@ def test_run_process_worker_reports_start_failure(hf_launcher_stub, active_venv,
     assert event["stderr"]
 
 
-def test_cancel_before_worker_publishes_process_does_not_pin_handle(hf_launcher_stub, active_venv, monkeypatch):
+def test_cancel_before_worker_publishes_process_does_not_pin_handle(
+    hf_launcher_stub, active_venv, monkeypatch
+):
     """Cancel that wins the race against ``self._process = proc`` must not
     leave a stale handle pinned on the tab.
 
@@ -359,7 +405,11 @@ def test_cancel_before_worker_publishes_process_does_not_pin_handle(hf_launcher_
         venv_manager,
         "probe_dependency_status",
         lambda *args, **kwargs: venv_manager.DependencyStatus(
-            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            dependency=next(
+                dep
+                for dep in venv_manager.MANAGED_DEPENDENCIES
+                if dep.key == "huggingface_hub"
+            ),
             available=True,
             version="1.0.0",
         ),
