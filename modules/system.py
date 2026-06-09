@@ -335,12 +335,13 @@ def get_gpu_info_from_venv(venv_path):
             python_exe = venv_path / "python"  # Some venv structures
     
     if not python_exe.exists():
-        # Full venv path stays in DEBUG-only output so support /
-        # bug reports can include it on request. The UI-facing
-        # ``message`` is intentionally generic — raw paths leak
-        # usernames / home directories into screenshots and the
-        # tab's status text.
-        print(f"DEBUG: Python executable not found in venv: {venv_path}", file=sys.stderr)
+        # Full venv path is path-bearing — gate behind
+        # ``LLAMA_LAUNCHER_DEBUG_ENV=1`` so the home dir / username
+        # doesn't end up in stderr / journalctl on every startup
+        # against a misconfigured venv. The UI ``message`` already
+        # uses generic copy.
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print(f"DEBUG: Python executable not found in venv: {venv_path}", file=sys.stderr)
         # Return an "unavailable" marker — ``get_gpu_info_with_venv`` is
         # the single owner of the in-process torch fallback. Returning a
         # second ``get_gpu_info_static()`` here would re-run the same slow
@@ -395,7 +396,11 @@ except Exception as e:
 '''
     
     try:
-        print(f"DEBUG: Running GPU detection in venv: {venv_path}", file=sys.stderr)
+        # Same reasoning as above — gate the path-bearing line behind
+        # the debug env so normal-path stderr stays free of user
+        # home/username text.
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print(f"DEBUG: Running GPU detection in venv: {venv_path}", file=sys.stderr)
         # Run the detection script in the virtual environment
         result = subprocess.run(
             [str(python_exe), "-c", detection_script],

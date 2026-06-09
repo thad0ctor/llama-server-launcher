@@ -29,6 +29,7 @@ the ones a user would meaningfully set in the build tab.
 
 from __future__ import annotations
 
+import os as _os
 import re
 import shlex
 import sys
@@ -826,8 +827,7 @@ def values_to_cmake_args(
         # ``posix=True`` (the default) treats ``\`` as an escape, which
         # mangles Windows paths like ``-DCMAKE_PREFIX_PATH=C:\path\to\lib``
         # into ``-DCMAKE_PREFIX_PATH=C:pathtoli``. Use platform-appropriate
-        # quoting rules.
-        import os as _os
+        # quoting rules. ``_os`` is imported at module level.
         try:
             out.extend(shlex.split(extra_cmake_args, posix=(_os.name != "nt")))
         except ValueError:

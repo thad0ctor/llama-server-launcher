@@ -63,17 +63,27 @@ def _cmd_keep_open(command: str) -> tuple[list[str], str]:
     with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as fh:
         fh.write("@echo off\r\n")
         fh.write("echo Running command...\r\n")
-        # Wrap the user command in ``cmd /d /c`` so control always
-        # returns to THIS .cmd. Without the nested cmd, a user
-        # command that invokes another ``.bat`` / ``.cmd`` without
-        # the ``call`` prefix would transfer control to that
-        # script and our exit-code echo + ``del "%~f0"`` would
-        # never run (cmd's batch-chain semantics — see
-        # https://ss64.com/nt/call.html). ``/d`` skips AutoRun
-        # registry hooks so we don't accidentally trigger user
-        # environment scripts between the wrapper and the actual
-        # command.
-        fh.write(f"cmd /d /c {command}\r\n")
+        # Wrap the user command in ``cmd /d /c "<command>"`` so
+        # control always returns to THIS .cmd AND so shell
+        # metacharacters (``&`` / ``|`` / ``>`` / …) are handled by
+        # the INNER cmd, not parsed at the outer wrapper level
+        # where they could chain into / redirect the wrapper
+        # itself. The double-quote pair around ``<command>`` is the
+        # documented ``cmd /c`` quoting form for arguments
+        # containing metacharacters: cmd strips ONLY the leading
+        # and trailing quote (not embedded quotes) when ``/c`` is
+        # used, leaving the inner cmd to parse the literal payload.
+        # See https://ss64.com/nt/cmd.html "Path Quoting Rules".
+        #
+        # Without the nested cmd, a user command that invokes
+        # another ``.bat`` / ``.cmd`` without the ``call`` prefix
+        # would transfer control to that script and our exit-code
+        # echo + ``del "%~f0"`` would never run (cmd's batch-chain
+        # semantics — see https://ss64.com/nt/call.html).
+        # ``/d`` skips AutoRun registry hooks so we don't
+        # accidentally trigger user environment scripts between
+        # the wrapper and the actual command.
+        fh.write(f'cmd /d /c "{command}"\r\n')
         fh.write("echo.\r\n")
         fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
         # Self-delete after the user dismisses the keep-open shell.
