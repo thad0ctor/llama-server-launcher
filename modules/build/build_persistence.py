@@ -88,14 +88,14 @@ def _safe_bool(value: Any, *, default: bool = False) -> bool:
 @dataclass
 class BuildConfig:
     name: str
-    backend: str = "llama.cpp"          # "llama.cpp" | "ik_llama"
+    backend: str = "llama.cpp"  # "llama.cpp" | "ik_llama"
     source_dir: str = ""
     build_dir: str = "build"
-    git_ref: str = ""                   # empty = leave as-is
+    git_ref: str = ""  # empty = leave as-is
     git_pull_before_build: bool = False
     clean_build: bool = True
-    jobs: int = 0                       # 0 = auto (use nproc)
-    cuda_archs: str = ""                # CMAKE_CUDA_ARCHITECTURES value
+    jobs: int = 0  # 0 = auto (use nproc)
+    cuda_archs: str = ""  # CMAKE_CUDA_ARCHITECTURES value
     env: dict[str, str] = field(default_factory=dict)
     flag_values: dict[str, Any] = field(default_factory=dict)
     extra_cmake_args: str = ""
@@ -218,9 +218,7 @@ class BuildConfig:
             # ``build_dir is empty``.
             build_dir=(_as_str(data.get("build_dir"), "build").strip() or "build"),
             git_ref=_as_str(data.get("git_ref"), ""),
-            git_pull_before_build=_safe_bool(
-                data.get("git_pull_before_build", False), default=False
-            ),
+            git_pull_before_build=_safe_bool(data.get("git_pull_before_build", False), default=False),
             clean_build=_safe_bool(data.get("clean_build", True), default=True),
             jobs=_safe_int(data.get("jobs", 0)),
             cuda_archs=_as_str(data.get("cuda_archs"), ""),
@@ -229,11 +227,7 @@ class BuildConfig:
             # Default non-mapping values to {} so one bad field doesn't make
             # the whole config disappear from the UI.
             env=_coerce_env(data.get("env")),
-            flag_values=(
-                dict(data["flag_values"])
-                if isinstance(data.get("flag_values"), Mapping)
-                else {}
-            ),
+            flag_values=(dict(data["flag_values"]) if isinstance(data.get("flag_values"), Mapping) else {}),
             extra_cmake_args=_as_str(data.get("extra_cmake_args"), ""),
             ui_state=_coerce_ui_state(data.get("ui_state")),
             created_at=_as_str(data.get("created_at"), ""),
@@ -328,22 +322,24 @@ class BuildConfigStore:
                 file=sys.stderr,
             )
             return False
-        if isinstance(configs, dict):
-            for raw_name, data in configs.items():
-                if not isinstance(raw_name, str) or not isinstance(data, dict):
-                    continue
-                # ``save()`` / ``rename()`` already reject blank names;
-                # the loader must agree or a JSON-edited file with
-                # ``{"   ": {...}}`` would survive the round-trip and
-                # become an unselectable phantom entry. Trim here so the
-                # in-memory key matches what ``save`` would produce.
-                name = raw_name.strip()
-                if not name:
-                    continue
-                try:
-                    self._cache[name] = BuildConfig.from_json(name, data)
-                except Exception as exc:
-                    print(f"WARN: skipping build config {name!r}: {exc}", file=sys.stderr)
+        # ``configs`` is guaranteed to be a dict here — the
+        # ``not isinstance(configs, dict)`` branch above already
+        # returns False on any other shape.
+        for raw_name, data in configs.items():
+            if not isinstance(raw_name, str) or not isinstance(data, dict):
+                continue
+            # ``save()`` / ``rename()`` already reject blank names;
+            # the loader must agree or a JSON-edited file with
+            # ``{"   ": {...}}`` would survive the round-trip and
+            # become an unselectable phantom entry. Trim here so the
+            # in-memory key matches what ``save`` would produce.
+            name = raw_name.strip()
+            if not name:
+                continue
+            try:
+                self._cache[name] = BuildConfig.from_json(name, data)
+            except Exception as exc:
+                print(f"WARN: skipping build config {name!r}: {exc}", file=sys.stderr)
         self._loaded = True
         return True
 
@@ -415,27 +411,34 @@ class BuildConfigStore:
             return False
         # Normalize + reject blank names so we don't create unusable entries
         # (e.g. {"": {...}} which would be invisible in the picker).
-        cfg.name = (cfg.name or "").strip()
-        if not cfg.name:
-            print("WARN: refusing to save build config with empty name",
-                  file=sys.stderr)
+        # Compute the normalized name LOCALLY and clone the cfg before
+        # writing any normalized fields — the previous implementation
+        # mutated ``cfg.name`` / ``cfg.created_at`` / ``cfg.last_used_at``
+        # in place, which surprised callers when ``save()`` then
+        # returned False (e.g. ``_save`` failed) but the caller's
+        # ``cfg`` still carried our normalized field values.
+        normalized_name = (cfg.name or "").strip()
+        if not normalized_name:
+            print("WARN: refusing to save build config with empty name", file=sys.stderr)
             return False
-        if not cfg.created_at:
-            cfg.created_at = _utcnow_iso()
-        if not cfg.last_used_at:
-            cfg.last_used_at = cfg.created_at
-        # Snapshot prior state AND store an independent copy so a failed
-        # ``_save`` can roll back to the original. Aliasing would defeat
-        # the rollback if the caller continued to mutate ``cfg`` after we
-        # returned.
-        prior = self._cache.get(cfg.name)
+        stored_cfg = _clone_cfg(cfg)
+        stored_cfg.name = normalized_name
+        if not stored_cfg.created_at:
+            stored_cfg.created_at = _utcnow_iso()
+        if not stored_cfg.last_used_at:
+            stored_cfg.last_used_at = stored_cfg.created_at
+        # Snapshot prior state so a failed ``_save`` can roll back to
+        # the original. ``stored_cfg`` is already an independent clone
+        # of the input, so no further deepcopy is needed when stashing
+        # it into the cache.
+        prior = self._cache.get(normalized_name)
         prior_snapshot = _clone_cfg(prior) if prior is not None else None
-        self._cache[cfg.name] = _clone_cfg(cfg)
+        self._cache[normalized_name] = stored_cfg
         if not self._save():
             if prior_snapshot is not None:
-                self._cache[cfg.name] = prior_snapshot
+                self._cache[normalized_name] = prior_snapshot
             else:
-                self._cache.pop(cfg.name, None)
+                self._cache.pop(normalized_name, None)
             return False
         return True
 

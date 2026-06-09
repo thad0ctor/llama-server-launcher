@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import shlex
 import shutil
 import signal
@@ -30,6 +31,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+# Strict cmake-env variable name regex used by both the live
+# ``BuildRunner._run`` path and the exported ``plan_to_shell_script``
+# generator. Module-level so the pattern compiles once at import
+# rather than on every build. Mirrors ``_ENV_NAME_RE`` in
+# ``build_persistence.py``.
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -606,15 +615,14 @@ class BuildRunner:
             # ``BuildPlan`` could ship a key like ``"CC FLAGS"`` /
             # ``"CC;echo pwned"`` that ``subprocess.Popen`` would
             # reject with a confusing ``ValueError`` mid-run instead
-            # of being caught up front.
-            import re as _re
-
-            _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+            # of being caught up front. The module-level
+            # ``_ENV_NAME_RE`` is reused here so the pattern only
+            # compiles once.
             for k, v in (plan.cmake_env or {}).items():
-                if not (isinstance(k, str) and _env_name_re.fullmatch(k)):
+                if not (isinstance(k, str) and _ENV_NAME_RE.fullmatch(k)):
                     self._emit_line(
                         f"WARNING: dropping cmake_env entry with invalid name "
-                        f"{k!r} (must match {_env_name_re.pattern!r})"
+                        f"{k!r} (must match {_ENV_NAME_RE.pattern!r})"
                     )
                     continue
                 # Coerce values to str AND reject embedded NULs.
@@ -902,13 +910,12 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
         # persistence layer. Re-validate KEY AND VALUE here so the
         # exported script never emits a shell-unsafe ``CC FLAGS="x"`` /
         # ``CC;echo pwned="x"`` line AND can't trip ``shlex.quote(v)``
-        # on a non-string ``v`` or embed a NUL in a bash export.
-        import re as _re
-
-        _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+        # on a non-string ``v`` or embed a NUL in a bash export. Reuse
+        # the module-level ``_ENV_NAME_RE`` so the pattern compiles
+        # once at import, not on every script export.
         safe_env_items: list[tuple[str, str]] = []
         for k, v in plan.cmake_env.items():
-            if not (isinstance(k, str) and _env_name_re.fullmatch(k)):
+            if not (isinstance(k, str) and _ENV_NAME_RE.fullmatch(k)):
                 continue
             try:
                 sv = str(v) if v is not None else ""

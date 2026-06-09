@@ -1221,7 +1221,21 @@ class SpecTab:
                 )
                 self._spec_draft_analysis_thread = t
         if need_spawn:
-            t.start()
+            try:
+                t.start()
+            except Exception:
+                # ``Thread.start()`` can raise ``RuntimeError`` (already
+                # started — shouldn't happen here) or ``OSError`` on
+                # systems that hit a thread-creation limit. The
+                # worker-active latch was set under the lock above
+                # before ``start()`` ran; without rolling it back the
+                # next request would see ``_spec_draft_worker_active``
+                # still True and skip the respawn, so the GGUF analysis
+                # path silently goes dead until a process restart.
+                with self._get_spec_draft_analysis_lock():
+                    self._spec_draft_worker_active = False
+                    self._spec_draft_analysis_thread = None
+                raise
         if self._spec_draft_analysis_after_id is None:
             try:
                 self._spec_draft_analysis_after_id = self.launcher.root.after(
