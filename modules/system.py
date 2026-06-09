@@ -823,15 +823,20 @@ def get_cpu_info_static():
         if PSUTIL_AVAILABLE and psutil:
             logical_cores = psutil.cpu_count(logical=True)
             physical_cores = psutil.cpu_count(logical=False)
+            # Clamp both counts to at least 1. ``psutil`` can legitimately
+            # return ``None`` (handled by the existing fallback) but in
+            # rare containers it has been observed to return ``0`` for
+            # ``physical_cores``, and ``logical_cores // 2`` on
+            # ``logical_cores == 1`` produces ``0`` too. A zero count
+            # would propagate into ``--threads 0`` on the launch
+            # command line and the server would refuse to start.
+            resolved_logical = logical_cores if logical_cores is not None else 4
+            resolved_physical = (
+                physical_cores if physical_cores is not None else (resolved_logical // 2 if resolved_logical > 0 else 2)
+            )
             return {
-                "logical_cores": (
-                    logical_cores if logical_cores is not None else 4
-                ),  # Default to 4 if psutil somehow returns None
-                "physical_cores": (
-                    physical_cores
-                    if physical_cores is not None
-                    else (logical_cores // 2 if logical_cores is not None and logical_cores > 0 else 2)
-                ),  # Estimate physical if needed
+                "logical_cores": max(1, resolved_logical),
+                "physical_cores": max(1, resolved_physical),
                 "model_name": "N/A",  # psutil doesn't easily give model name cross-platform
             }
         else:

@@ -89,10 +89,17 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
             # its own cmd instance so control returns here before
             # the tail runs. Documented quoting form:
             # https://ss64.com/nt/cmd.html — the ``""…""`` double-
-            # double survives one strip-pass for payloads with their
-            # own embedded quotes. ``/d`` skips AutoRun.
-            escaped_command = command.replace('"', '""')
-            fh.write(f'cmd /d /c ""{escaped_command}""\r\n')
+            # double is the documented form for protecting embedded
+            # double-quotes in the payload from the outer cmd's
+            # quote-stripping pass. Do NOT also escape ``"`` →
+            # ``""`` inside ``command`` itself: cmd doesn't apply
+            # a recursive unescape on the inner content (the
+            # outer pair-strip happens ONCE), so doubling a payload
+            # quote ``msiexec /i "C:\foo.msi"`` to
+            # ``msiexec /i ""C:\foo.msi""`` would leave the wrong
+            # number of quotes in the parsed command line.
+            # ``/d`` skips AutoRun.
+            fh.write(f'cmd /d /c ""{command}""\r\n')
             # Hand the user command's exit code back to the wrapper
             # via ``exit /b`` so ``%ERRORLEVEL%`` in the wrapper
             # reflects the payload's status rather than the

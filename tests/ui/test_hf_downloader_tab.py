@@ -105,7 +105,7 @@ def test_setup_enables_install_and_load_with_hf_ready(hf_launcher_stub, active_v
 
 
 def test_install_button_uses_active_venv(hf_launcher_stub, active_venv, monkeypatch):
-    repo_dir, _python = active_venv
+    repo_dir, python = active_venv
     hf_launcher_stub.repo_dir = repo_dir
     hf_launcher_stub.venv_dir.set("")
     launch_mock = MagicMock()
@@ -136,7 +136,7 @@ def test_install_button_uses_active_venv(hf_launcher_stub, active_venv, monkeypa
     # ``.stem`` is ``python``), not a bare ``pip`` that could pick up
     # the system Python and silently install into the wrong site —
     # this is the whole point of routing through ``venv_manager``.
-    assert str(_python) in cmd_str
+    assert str(python) in cmd_str
     assert launch_mock.call_args.kwargs["cwd"] == repo_dir
 
 

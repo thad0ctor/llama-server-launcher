@@ -8,7 +8,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from modules.hf_downloader.helpers import parse_bool as _parse_bool
+from modules.hf_downloader.helpers import _validate_repo_id, parse_bool as _parse_bool
 
 
 def _emit(event: str, **payload) -> None:
@@ -255,6 +255,22 @@ def run_download(payload: dict) -> int:
     from huggingface_hub import snapshot_download
 
     repo_id = payload["repo_id"]
+    # Re-validate ``repo_id`` here, not just on the helper side. This
+    # entrypoint runs as a subprocess that reads its payload from a
+    # JSON file on disk; a hand-edited or attacker-supplied payload
+    # could bypass the UI's ``normalize_repo_input`` /
+    # ``_validate_repo_id`` calls and ship an absolute path
+    # (``/etc/passwd``) or ``..`` segments. The
+    # ``target_dir / Path(repo_id)`` join below silently DROPS
+    # ``target_dir`` when the right-hand side is absolute, and
+    # ``..`` segments would escape the configured target root —
+    # both let the writability probe + ``snapshot_download`` create
+    # or write OUTSIDE the user's selected model directories. The
+    # helper raises ``ValueError`` on any traversal-style segment,
+    # so reuse it instead of duplicating the rule.
+    if not isinstance(repo_id, str):
+        raise ValueError(f"repo_id must be a string; got {type(repo_id).__name__}")
+    _validate_repo_id(repo_id)
     # Mirror ``_token_value``'s defensive coercion. A hand-edited
     # payload could ship ``"revision": false`` / ``null`` / ``0`` and
     # the ``.strip()`` would AttributeError on a non-string. Coerce to
