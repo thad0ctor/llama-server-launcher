@@ -198,8 +198,16 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
 
     if text.startswith("hf://"):
         path = text[5:]
-        if path.startswith("model/"):
-            path = path[6:]
+        # Accept both ``hf://model/<owner>/<repo>`` and the plural
+        # ``hf://models/<owner>/<repo>`` form — the HTTP branch
+        # below already strips both, so the hf:// branch matching
+        # only the singular previously left a leading ``models``
+        # segment that survived into ``repo_id = "models/<owner>"``
+        # and failed the ``repo_type="model"`` lookup at the runner.
+        for prefix in ("models/", "model/"):
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
+                break
         parts = [part for part in path.split("/") if part]
         # Mirror the same dataset/space rejection the https:// branch does
         # below. Without this, ``hf://datasets/<owner>/<repo>`` is silently

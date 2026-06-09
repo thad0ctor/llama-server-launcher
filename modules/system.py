@@ -95,6 +95,16 @@ except ImportError:
     PSUTIL_AVAILABLE = False
     psutil = None
     print("Warning: psutil library not found. RAM and CPU information may be limited.", file=sys.stderr)
+except Exception as e:
+    # A binary-incompatible or partially-installed ``psutil`` (e.g.
+    # broken native extension after a Python upgrade, missing
+    # platform-specific .so file) can raise non-ImportError exceptions
+    # at import time. The dependency is optional — surface a warning
+    # and keep the launcher startable instead of crashing the whole
+    # process. Mirrors the ``requests`` handling above.
+    PSUTIL_AVAILABLE = False
+    psutil = None
+    print(f"Warning: psutil import failed: {e}", file=sys.stderr)
 
 
 # --- Dependency Check (Printed to console/stderr) ---
@@ -1170,6 +1180,13 @@ def parse_gguf_header_simple(model_path_str):
                 return None
             return struct.unpack(fmt, value_bytes)[0]
         else:
+            # Caller (see ~line 1341) is responsible for rejecting
+            # ``value_type not in GGUF_TYPES`` BEFORE invoking
+            # ``read_value`` and bailing out of the metadata loop —
+            # this branch is unreachable in practice. Returning
+            # ``None`` here used to silently desynchronise the parse
+            # stream because the unknown value's bytes were never
+            # consumed. The pre-call guard makes that impossible.
             return None
 
     # Hard cap on recursion for nested array-of-arrays metadata. GGUF files in
@@ -1323,6 +1340,23 @@ def parse_gguf_header_simple(model_path_str):
                             )
                             break
                         continue
+
+                    # Fail closed on unknown scalar metadata types
+                    # BEFORE invoking ``read_value`` — the function
+                    # consumes zero bytes for unrecognised types, so
+                    # a silent ``continue`` here would let the next
+                    # iteration read the unknown payload as the next
+                    # key length and the rest of the metadata parse
+                    # would desynchronise into garbage keys. Surface
+                    # an error and break out of the loop so the
+                    # caller can decide whether to fall back to
+                    # heuristic layer-count detection or report the
+                    # parse failure. Array type 9 is handled above.
+                    if value_type not in GGUF_TYPES:
+                        analysis_result["error"] = (
+                            f"Unsupported GGUF metadata value_type {value_type!r} for key '{key}'"
+                        )
+                        break
 
                     # Read the value
                     value = read_value(f, value_type)

@@ -521,7 +521,15 @@ class TestEmissionParity:
         expected_long = _long_option_tokens(expected_flags)
         expected_short = _short_option_tokens(expected_flags)
         if spec_type == "none":
-            # type=none → no spec/draft option tokens AT ALL.
+            # type=none → no spec/draft option tokens AT ALL. The
+            # option-set equality below catches every ``--spec-*`` /
+            # ``--draft-*`` / ``--suffix-*`` / short-form flag, but a
+            # regression that emitted a BARE value token (e.g. a
+            # stray ``"draft-mtp"`` argv element with no preceding
+            # ``--spec-type``) wouldn't be caught by the option-only
+            # filter. Assert ``partial == []`` so the no-emission
+            # contract covers any token shape, not just options.
+            assert partial == [], f"backend={backend} spec_type=none must emit nothing; " f"got partial={partial!r}"
             assert emitted_long == set() and emitted_short == set(), (
                 f"backend={backend} spec_type=none must emit no spec/draft/suffix "
                 f"flags; got long={emitted_long!r} short={emitted_short!r} "
