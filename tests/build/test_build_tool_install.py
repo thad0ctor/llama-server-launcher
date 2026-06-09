@@ -107,6 +107,7 @@ def test_terminal_launcher_uses_osascript_on_macos(monkeypatch, tmp_path):
     # Pull the script path out of the AppleScript and read it back to
     # confirm the bash payload actually got the user's command + cwd.
     import re as _re
+
     m = _re.search(r"do script \"([^\"]+\.command)\"", argv[2])
     assert m, f"Could not extract script path from {argv[2]!r}"
     script_path = m.group(1)
@@ -119,6 +120,7 @@ def test_terminal_launcher_uses_osascript_on_macos(monkeypatch, tmp_path):
     finally:
         try:
             import os as _os
+
             _os.unlink(script_path)
         except OSError:
             pass
@@ -132,43 +134,58 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     terminal_launcher.open_command_in_terminal("winget install --id Kitware.CMake -e")
 
     argv = popen.call_args.args[0]
-    # ``_cmd_keep_open`` now writes the user command to a temp .cmd
-    # script and points ``cmd /k`` at the file (rather than passing
-    # the wrapped command inline). This sidesteps both ``!literal!``
-    # delayed-expansion AND ``%VAR%`` outer-parser expansion, so a
-    # path with ``%PATH%`` in it survives intact.
+    # ``_cmd_keep_open`` writes the user command to a temp PAYLOAD
+    # .cmd script and a separate WRAPPER .cmd that ``call``s into
+    # it. ``cmd /k`` points at the wrapper. This two-file split
+    # sidesteps the outer batch parser expanding ``%VAR%`` in the
+    # user command — the payload's line is only parsed once, by
+    # the cmd that runs the payload, the same as if the user had
+    # typed it at a fresh prompt.
     assert argv[:6] == ["cmd", "/c", "start", "", "cmd", "/k"]
-    script_path = argv[6]
-    assert script_path.endswith(".cmd"), f"expected .cmd path, got {script_path!r}"
-    # Inspect the generated batch file to verify the wrapper contract
-    # (header, user command, exit-code echo, self-delete).
+    wrapper_path = argv[6]
+    assert wrapper_path.endswith(".cmd"), f"expected .cmd path, got {wrapper_path!r}"
+    # Inspect the generated wrapper to verify the contract: it
+    # prints the running banner, ``call``s the payload, echoes the
+    # exit code, and self-deletes.
     import os as _os
+
     try:
-        with open(script_path, encoding="utf-8") as fh:
-            body = fh.read()
+        with open(wrapper_path, encoding="utf-8") as fh:
+            wrapper_body = fh.read()
     finally:
         try:
-            _os.unlink(script_path)
+            _os.unlink(wrapper_path)
         except OSError:
             pass
-    assert "winget install --id Kitware.CMake -e" in body
-    assert "Running command..." in body
-    # User command must be wrapped in ``cmd /d /c ""..."" `` so:
-    #   * a ``.bat`` / ``.cmd`` payload returns control to the
-    #     wrapper for the exit-code echo and the self-delete line,
-    #   * shell metacharacters (``&`` / ``|`` / ``>``) are parsed
-    #     by the INNER cmd not the outer wrapper,
-    #   * embedded double quotes in the user payload (e.g.
-    #     ``msiexec /i "C:\…\foo.msi"``) survive cmd's outer-quote
-    #     stripping. The double-double form is the documented
-    #     cmd-without-/S workaround.
-    # ``/d`` skips AutoRun registry hooks.
-    assert 'cmd /d /c ""winget install --id Kitware.CMake -e""' in body
-    # ``%ERRORLEVEL%`` (single ``%``) is the runtime value inside a
-    # batch file — the previous ``%%`` form was needed only because
-    # the string went through ``cmd /c``'s parser first.
-    assert "Command finished with exit code %ERRORLEVEL%." in body
-    assert 'del "%~f0"' in body
+    assert "Running command..." in wrapper_body
+    # The wrapper should NOT embed the user command inline — the
+    # whole point of the rewrite was to avoid the outer batch
+    # parser ever seeing the user's string. It should only have a
+    # ``call "<payload_path>"`` reference.
+    assert "winget install --id Kitware.CMake -e" not in wrapper_body
+    import re
+
+    call_match = re.search(r'call "([^"]+\.cmd)"', wrapper_body)
+    assert call_match, f"wrapper missing call line; body={wrapper_body!r}"
+    payload_path = call_match.group(1)
+    # ``%ERRORLEVEL%`` (single ``%``) is the runtime value inside
+    # a batch file — bytes used to be ``%%`` only because the
+    # string went through ``cmd /c``'s parser first.
+    assert "Command finished with exit code %ERRORLEVEL%." in wrapper_body
+    assert 'del "%~f0"' in wrapper_body
+    # And the payload itself should contain the user command on
+    # its own line + an exit-code passthrough + self-delete.
+    try:
+        with open(payload_path, encoding="utf-8") as fh:
+            payload_body = fh.read()
+    finally:
+        try:
+            _os.unlink(payload_path)
+        except OSError:
+            pass
+    assert "winget install --id Kitware.CMake -e" in payload_body
+    assert 'del "%~f0"' in payload_body
+    assert "exit /b" in payload_body.lower()
 
 
 def test_build_tab_generator_defaults_to_cmake_label(tk_root, tmp_path, monkeypatch):

@@ -78,6 +78,7 @@ TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 # Check for requests module (required for version checking)
 try:
     import requests
+
     REQUESTS_AVAILABLE = True
 except ImportError:
     REQUESTS_AVAILABLE = False
@@ -88,6 +89,7 @@ except Exception as e:
 
 try:
     import psutil
+
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
@@ -124,6 +126,7 @@ if MISSING_DEPS:
 # ═════════════════════════════════════════════════════════════════════
 #  Helper Functions (These remain outside the class as they don't need 'self')
 # ═════════════════════════════════════════════════════════════════════
+
 
 def _load_torch_module():
     """Import torch lazily for the torch fallback path."""
@@ -207,15 +210,17 @@ def get_gpu_info_from_nvidia_smi(timeout=5):
             except (TypeError, ValueError):
                 total_mib = 0.0
             total_bytes = int(total_mib * 1024 * 1024)
-            rows.append({
-                "pci_bus_id": pci_bus_id,
-                "name": name or "Unknown GPU",
-                "total_memory_bytes": total_bytes,
-                "total_memory_gb": round(total_bytes / (1024**3), 2),
-                "compute_capability": _normalize_compute_capability(compute_cap),
-                # nvidia-smi does not expose SM count through the query API.
-                "multi_processor_count": None,
-            })
+            rows.append(
+                {
+                    "pci_bus_id": pci_bus_id,
+                    "name": name or "Unknown GPU",
+                    "total_memory_bytes": total_bytes,
+                    "total_memory_gb": round(total_bytes / (1024**3), 2),
+                    "compute_capability": _normalize_compute_capability(compute_cap),
+                    # nvidia-smi does not expose SM count through the query API.
+                    "multi_processor_count": None,
+                }
+            )
     except Exception as exc:
         return _unavailable_gpu_info(f"Failed to parse nvidia-smi output: {exc}", "nvidia-smi")
 
@@ -270,14 +275,15 @@ def get_gpu_info_with_venv(venv_path=None):
     if smi_info.get("available"):
         if _debug:
             print(
-                f"DEBUG: nvidia-smi GPU detection successful: "
-                f"{smi_info.get('device_count', 0)} devices",
+                f"DEBUG: nvidia-smi GPU detection successful: " f"{smi_info.get('device_count', 0)} devices",
                 file=sys.stderr,
             )
         return smi_info
     attempts.append(f"nvidia-smi: {smi_info.get('message', 'unknown error')}")
     if _debug:
-        print(f"DEBUG: nvidia-smi GPU detection unavailable: {smi_info.get('message', 'unknown error')}", file=sys.stderr)
+        print(
+            f"DEBUG: nvidia-smi GPU detection unavailable: {smi_info.get('message', 'unknown error')}", file=sys.stderr
+        )
 
     # Call ``get_gpu_info_from_venv`` whenever a venv was configured, even
     # when the directory doesn't exist yet — the helper returns a
@@ -290,14 +296,16 @@ def get_gpu_info_with_venv(venv_path=None):
         if venv_info.get("available"):
             if _debug:
                 print(
-                    f"DEBUG: venv PyTorch GPU detection successful: "
-                    f"{venv_info.get('device_count', 0)} devices",
+                    f"DEBUG: venv PyTorch GPU detection successful: " f"{venv_info.get('device_count', 0)} devices",
                     file=sys.stderr,
                 )
             return venv_info
         attempts.append(f"venv PyTorch: {venv_info.get('message', 'unknown error')}")
         if _debug:
-            print(f"DEBUG: venv PyTorch GPU detection unavailable: {venv_info.get('message', 'unknown error')}", file=sys.stderr)
+            print(
+                f"DEBUG: venv PyTorch GPU detection unavailable: {venv_info.get('message', 'unknown error')}",
+                file=sys.stderr,
+            )
 
     # Final fallback: current process. Useful when the configured venv has
     # no torch but the launcher's own interpreter does.
@@ -305,14 +313,16 @@ def get_gpu_info_with_venv(venv_path=None):
     if static_info.get("available"):
         if _debug:
             print(
-                f"DEBUG: in-process PyTorch GPU detection successful: "
-                f"{static_info.get('device_count', 0)} devices",
+                f"DEBUG: in-process PyTorch GPU detection successful: " f"{static_info.get('device_count', 0)} devices",
                 file=sys.stderr,
             )
         return static_info
     attempts.append(f"in-process PyTorch: {static_info.get('message', 'unknown error')}")
     if _debug:
-        print(f"DEBUG: in-process PyTorch GPU detection unavailable: {static_info.get('message', 'unknown error')}", file=sys.stderr)
+        print(
+            f"DEBUG: in-process PyTorch GPU detection unavailable: {static_info.get('message', 'unknown error')}",
+            file=sys.stderr,
+        )
 
     # Every detector failed. The full per-backend stderr / exception
     # text stays in DEBUG-only stderr (already printed above for each
@@ -328,14 +338,15 @@ def get_gpu_info_with_venv(venv_path=None):
     static_info["message"] = "No GPU detection backend succeeded."
     return static_info
 
+
 def get_gpu_info_from_venv(venv_path):
     """Get GPU information by running PyTorch detection in a virtual environment."""
     import subprocess
     import json
     from pathlib import Path
-    
+
     venv_path = Path(venv_path)
-    
+
     # Determine the Python executable in the venv
     if sys.platform == "win32":
         python_exe = venv_path / "Scripts" / "python.exe"
@@ -345,7 +356,7 @@ def get_gpu_info_from_venv(venv_path):
         python_exe = venv_path / "bin" / "python"
         if not python_exe.exists():
             python_exe = venv_path / "python"  # Some venv structures
-    
+
     if not python_exe.exists():
         # Full venv path is path-bearing — gate behind
         # ``LLAMA_LAUNCHER_DEBUG_ENV=1`` so the home dir / username
@@ -362,9 +373,9 @@ def get_gpu_info_from_venv(venv_path):
             "Python executable not found in virtual environment.",
             "torch-venv",
         )
-    
+
     # Create a small Python script to check for PyTorch/CUDA in the venv
-    detection_script = '''
+    detection_script = """
 import sys
 import os
 import json
@@ -405,8 +416,8 @@ except ImportError:
     print(json.dumps({"available": False, "message": "PyTorch not found in venv", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 except Exception as e:
     print(json.dumps({"available": False, "message": f"Error in venv GPU detection: {e}", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
-'''
-    
+"""
+
     try:
         # Same reasoning as above — gate the path-bearing line behind
         # the debug env so normal-path stderr stays free of user
@@ -414,13 +425,8 @@ except Exception as e:
         if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
             print(f"DEBUG: Running GPU detection in venv: {venv_path}", file=sys.stderr)
         # Run the detection script in the virtual environment
-        result = subprocess.run(
-            [str(python_exe), "-c", detection_script],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
+        result = subprocess.run([str(python_exe), "-c", detection_script], capture_output=True, text=True, timeout=30)
+
         # Every error path here returns an ``_unavailable_gpu_info`` marker
         # for ``source="torch-venv"`` so the orchestrator
         # (``get_gpu_info_with_venv``) owns the single in-process torch
@@ -433,9 +439,7 @@ except Exception as e:
                 if not output:
                     if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
                         print("DEBUG: Venv GPU detection returned empty output", file=sys.stderr)
-                    return _unavailable_gpu_info(
-                        "Empty output from venv detection", "torch-venv"
-                    )
+                    return _unavailable_gpu_info("Empty output from venv detection", "torch-venv")
 
                 gpu_info = json.loads(output)
                 # The detection script SHOULD emit a JSON object, but
@@ -456,7 +460,10 @@ except Exception as e:
                         "torch-venv",
                     )
                 if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
-                    print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
+                    print(
+                        f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices",
+                        file=sys.stderr,
+                    )
                 return gpu_info
             except json.JSONDecodeError as e:
                 # Raw subprocess stdout / exception text gated behind
@@ -478,9 +485,7 @@ except Exception as e:
 
             # Check for specific error types
             if "ModuleNotFoundError" in error_msg or "ImportError" in error_msg:
-                return _unavailable_gpu_info(
-                    "Required modules not found in venv", "torch-venv"
-                )
+                return _unavailable_gpu_info("Required modules not found in venv", "torch-venv")
             elif "CUDA" in error_msg:
                 return _unavailable_gpu_info("CUDA error in venv", "torch-venv")
             else:
@@ -512,29 +517,28 @@ except Exception as e:
         # the other exception sites in this function.
         if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
             print(
-                f"DEBUG: Unexpected exception during venv GPU detection: "
-                f"{type(e).__name__}: {e}",
+                f"DEBUG: Unexpected exception during venv GPU detection: " f"{type(e).__name__}: {e}",
                 file=sys.stderr,
             )
-        return _unavailable_gpu_info(
-            f"Unexpected error: {type(e).__name__}", "torch-venv"
-        )
+        return _unavailable_gpu_info(f"Unexpected error: {type(e).__name__}", "torch-venv")
+
 
 def _create_fallback_gpu_info(reason):
     """Create fallback GPU info with specific reason, then try current process detection."""
     print(f"DEBUG: Creating fallback GPU info due to: {reason}", file=sys.stderr)
     print("DEBUG: Attempting current process GPU detection as fallback", file=sys.stderr)
-    
+
     # Try current process detection as fallback
     fallback_info = get_gpu_info_static()
-    
+
     # If current process detection also fails, return a clear error message
-    if not fallback_info.get('available', False):
-        fallback_info['message'] = f"Venv detection failed ({reason}), current process also failed"
+    if not fallback_info.get("available", False):
+        fallback_info["message"] = f"Venv detection failed ({reason}), current process also failed"
     else:
-        fallback_info['message'] = f"Using current process (venv failed: {reason})"
-    
+        fallback_info["message"] = f"Using current process (venv failed: {reason})"
+
     return fallback_info
+
 
 def get_gpu_info_static():
     """Get GPU information using PyTorch (static method)."""
@@ -558,28 +562,41 @@ def get_gpu_info_static():
 
     try:
         device_count = torch_module.cuda.device_count()
+        # ``cuda.is_available()`` can return True on a torch build that
+        # was compiled with CUDA but is running on a host with no
+        # CUDA-capable devices visible (driver missing, MIG mode,
+        # ``CUDA_VISIBLE_DEVICES=""``). In that case ``device_count == 0``
+        # and the empty ``devices: []`` would otherwise be reported as
+        # ``available: True``, which downstream UI treats as a usable GPU.
+        if device_count <= 0:
+            return _unavailable_gpu_info(
+                "CUDA reports available but no devices were enumerated.",
+                "torch",
+            )
         gpu_info = {
             "available": True,
             "device_count": device_count,
             "devices": [],
             "detection_source": "torch",
-            "message": "Detected via torch"
+            "message": "Detected via torch",
         }
 
         for i in range(device_count):
             props = torch_module.cuda.get_device_properties(i)
             # Getting free memory can be slow/problematic in some envs, skip for basic info
             # free_mem, total_mem = torch.cuda.mem_get_info(i)
-            gpu_info["devices"].append({
-                "id": i,
-                "name": props.name,
-                "total_memory_bytes": props.total_memory,
-                "total_memory_gb": round(props.total_memory / (1024**3), 2),
-                # "free_memory_bytes": free_mem,
-                # "free_memory_gb": round(free_mem / (1024**3), 2),
-                "compute_capability": f"{props.major}.{props.minor}",
-                "multi_processor_count": props.multi_processor_count
-            })
+            gpu_info["devices"].append(
+                {
+                    "id": i,
+                    "name": props.name,
+                    "total_memory_bytes": props.total_memory,
+                    "total_memory_gb": round(props.total_memory / (1024**3), 2),
+                    # "free_memory_bytes": free_mem,
+                    # "free_memory_gb": round(free_mem / (1024**3), 2),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "multi_processor_count": props.multi_processor_count,
+                }
+            )
         return gpu_info
     except Exception as e:
         # Raw exception text + traceback gated behind the debug env
@@ -653,9 +670,7 @@ def format_gpu_mapping_table(gpu_info):
     col_widths = [max(len(row[i]) for row in rows) for i in range(4)]
 
     def _fmt(row):
-        return "  " + " | ".join(
-            cell.ljust(col_widths[i]) for i, cell in enumerate(row)
-        )
+        return "  " + " | ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(row))
 
     header_row = _fmt(rows[0])
     sep = "  " + "-+-".join("-" * w for w in col_widths)
@@ -703,45 +718,48 @@ def get_ram_info_static():
                         "total_ram_bytes": memoryInfo.ullTotalPhys,
                         "total_ram_gb": round(memoryInfo.ullTotalPhys / (1024**3), 2),
                         "available_ram_bytes": memoryInfo.ullAvailPhys,
-                        "available_ram_gb": round(memoryInfo.ullAvailPhys / (1024**3), 2)
+                        "available_ram_gb": round(memoryInfo.ullAvailPhys / (1024**3), 2),
                     }
                 else:
                     # Fallback to psutil if ctypes call fails on Windows
                     if PSUTIL_AVAILABLE and psutil:
-                         try:
-                              mem = psutil.virtual_memory()
-                              return {
+                        try:
+                            mem = psutil.virtual_memory()
+                            return {
                                 "total_ram_bytes": mem.total,
                                 "total_ram_gb": round(mem.total / (1024**3), 2),
                                 "available_ram_bytes": mem.available,
-                                "available_ram_gb": round(mem.available / (1024**3), 2)
-                              }
-                         except Exception as e_psutil_win:
-                              print(f"Windows psutil RAM check failed: {e_psutil_win}", file=sys.stderr)
-                              return {"error": f"Windows RAM checks failed (ctypes: GlobalMemoryStatusEx failed, psutil: {e_psutil_win})"}
+                                "available_ram_gb": round(mem.available / (1024**3), 2),
+                            }
+                        except Exception as e_psutil_win:
+                            print(f"Windows psutil RAM check failed: {e_psutil_win}", file=sys.stderr)
+                            return {
+                                "error": f"Windows RAM checks failed (ctypes: GlobalMemoryStatusEx failed, psutil: {e_psutil_win})"
+                            }
                     else:
-                         print("Windows ctypes GlobalMemoryStatusEx failed, psutil not available.", file=sys.stderr)
-                         return {"error": "Windows RAM check failed (ctypes: GlobalMemoryStatusEx failed, psutil not available)"}
-
+                        print("Windows ctypes GlobalMemoryStatusEx failed, psutil not available.", file=sys.stderr)
+                        return {
+                            "error": "Windows RAM check failed (ctypes: GlobalMemoryStatusEx failed, psutil not available)"
+                        }
 
             except Exception as e_win:
-                 # Fallback if ctypes fails unexpectedly or psutil is available
-                 if PSUTIL_AVAILABLE and psutil:
-                      try:
-                           mem = psutil.virtual_memory()
-                           return {
-                             "total_ram_bytes": mem.total,
-                             "total_ram_gb": round(mem.total / (1024**3), 2),
-                             "available_ram_bytes": mem.available,
-                             "available_ram_gb": round(mem.available / (1024**3), 2)
-                           }
-                      except Exception as e_psutil:
-                           print(f"Windows psutil RAM check failed: {e_psutil}", file=sys.stderr)
-                           return {"error": f"Windows RAM checks failed (ctypes: {e_win}, psutil: {e_psutil})"}
+                # Fallback if ctypes fails unexpectedly or psutil is available
+                if PSUTIL_AVAILABLE and psutil:
+                    try:
+                        mem = psutil.virtual_memory()
+                        return {
+                            "total_ram_bytes": mem.total,
+                            "total_ram_gb": round(mem.total / (1024**3), 2),
+                            "available_ram_bytes": mem.available,
+                            "available_ram_gb": round(mem.available / (1024**3), 2),
+                        }
+                    except Exception as e_psutil:
+                        print(f"Windows psutil RAM check failed: {e_psutil}", file=sys.stderr)
+                        return {"error": f"Windows RAM checks failed (ctypes: {e_win}, psutil: {e_psutil})"}
 
-                 else:
-                     print(f"Windows RAM check failed (ctypes: {e_win}, psutil not available)", file=sys.stderr)
-                     return {"error": f"Windows RAM check failed (ctypes: {e_win}, psutil not available)"}
+                else:
+                    print(f"Windows RAM check failed (ctypes: {e_win}, psutil not available)", file=sys.stderr)
+                    return {"error": f"Windows RAM check failed (ctypes: {e_win}, psutil not available)"}
 
         elif PSUTIL_AVAILABLE and psutil:  # Linux, macOS, etc. with psutil
             try:
@@ -750,17 +768,18 @@ def get_ram_info_static():
                     "total_ram_bytes": mem.total,
                     "total_ram_gb": round(mem.total / (1024**3), 2),
                     "available_ram_bytes": mem.available,
-                    "available_ram_gb": round(mem.available / (1024**3), 2)
+                    "available_ram_gb": round(mem.available / (1024**3), 2),
                 }
             except Exception as e_psutil:
-                 print(f"psutil RAM check failed: {e_psutil}", file=sys.stderr)
-                 return {"error": f"psutil RAM check failed: {e_psutil}"}
+                print(f"psutil RAM check failed: {e_psutil}", file=sys.stderr)
+                return {"error": f"psutil RAM check failed: {e_psutil}"}
 
         else:
-             return {"error": "psutil not installed, cannot get RAM info on this platform."}
+            return {"error": "psutil not installed, cannot get RAM info on this platform."}
     except Exception as e:
         print(f"Failed to get RAM info: {str(e)}", file=sys.stderr)
         return {"error": f"Failed to get RAM info: {str(e)}"}
+
 
 def get_cpu_info_static():
     """Get system CPU information (static method)."""
@@ -769,12 +788,22 @@ def get_cpu_info_static():
             logical_cores = psutil.cpu_count(logical=True)
             physical_cores = psutil.cpu_count(logical=False)
             return {
-                "logical_cores": logical_cores if logical_cores is not None else 4, # Default to 4 if psutil somehow returns None
-                "physical_cores": physical_cores if physical_cores is not None else (logical_cores // 2 if logical_cores is not None and logical_cores > 0 else 2), # Estimate physical if needed
-                "model_name": "N/A" # psutil doesn't easily give model name cross-platform
+                "logical_cores": (
+                    logical_cores if logical_cores is not None else 4
+                ),  # Default to 4 if psutil somehow returns None
+                "physical_cores": (
+                    physical_cores
+                    if physical_cores is not None
+                    else (logical_cores // 2 if logical_cores is not None and logical_cores > 0 else 2)
+                ),  # Estimate physical if needed
+                "model_name": "N/A",  # psutil doesn't easily give model name cross-platform
             }
         else:
-             return {"error": "psutil not installed, cannot get CPU info.", "logical_cores": 4, "physical_cores": 2} # Default to sensible minimums
+            return {
+                "error": "psutil not installed, cannot get CPU info.",
+                "logical_cores": 4,
+                "physical_cores": 2,
+            }  # Default to sensible minimums
     except Exception as e:
         print(f"Failed to get CPU info: {str(e)}", file=sys.stderr)
         return {"error": f"Failed to get CPU info: {str(e)}", "logical_cores": 4, "physical_cores": 2}
@@ -858,9 +887,7 @@ def load_cached_gpu_info(config_dir, venv_path):
     # ``fetch_system_info`` would happily copy the (non-empty) devices
     # list into ``detected_gpu_devices`` and resurrect phantom GPU rows
     # even though the cache itself reports the system as unavailable.
-    if gpu_info.get("available") is False and (
-        gpu_info.get("device_count", 0) != 0 or len(devices) != 0
-    ):
+    if gpu_info.get("available") is False and (gpu_info.get("device_count", 0) != 0 or len(devices) != 0):
         return None
     # Symmetric guard: reject ``available=True`` with NO devices and
     # ``device_count=0``. The launcher treats this as a successful
@@ -868,11 +895,7 @@ def load_cached_gpu_info(config_dir, venv_path):
     # ``{"available": true, "device_count": 0, "devices": []}`` would
     # otherwise mask a real GPU on the next launch until the user
     # manually flushed the cache.
-    if (
-        gpu_info.get("available") is True
-        and device_count_value == 0
-        and len(devices) == 0
-    ):
+    if gpu_info.get("available") is True and device_count_value == 0 and len(devices) == 0:
         return None
     # Reject caches where ``device_count`` and ``len(devices)`` disagree.
     # A truncated/edited cache where these don't match would resurrect
@@ -897,11 +920,7 @@ def load_cached_gpu_info(config_dir, venv_path):
     # ``id == 1``.
     for expected_id, device in enumerate(devices):
         device_id = device.get("id")
-        if (
-            not isinstance(device_id, int)
-            or isinstance(device_id, bool)
-            or device_id != expected_id
-        ):
+        if not isinstance(device_id, int) or isinstance(device_id, bool) or device_id != expected_id:
             return None
     return gpu_info
 
@@ -924,22 +943,21 @@ def save_cached_gpu_info(config_dir, venv_path, gpu_info):
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
-        print(f"DEBUG: GPU detection cache write failed at "
-              f"{cache_path}: {exc}", file=sys.stderr)
+        print(f"DEBUG: GPU detection cache write failed at " f"{cache_path}: {exc}", file=sys.stderr)
 
 
 def calculate_total_gguf_size(model_path_str):
     """Calculate total size across all GGUF shards if this is a multi-part file."""
     import re
     from pathlib import Path
-    
+
     model_path = Path(model_path_str)
-    
+
     # Check if this looks like a multi-part GGUF file (e.g., "00001-of-00003.gguf").
     # Capture the separator and extension literally so we can reproduce the
     # original filename case when looking up sibling shards on case-sensitive
     # filesystems (e.g., "-OF-" / ".GGUF" stays uppercase).
-    shard_pattern = re.search(r'-(\d+)(-of-)(\d+)(\.gguf)$', model_path.name, re.IGNORECASE)
+    shard_pattern = re.search(r"-(\d+)(-of-)(\d+)(\.gguf)$", model_path.name, re.IGNORECASE)
     if not shard_pattern:
         # Not a multi-part file, return single file size
         return model_path.stat().st_size, 1, [model_path]
@@ -952,7 +970,7 @@ def calculate_total_gguf_size(model_path_str):
     print(f"DEBUG: Detected multi-part GGUF: shard {current_shard} of {total_shards}", file=sys.stderr)
 
     # Find all related shard files
-    base_name = model_path.name[:shard_pattern.start()]  # Everything before "-00001-of-00003.gguf"
+    base_name = model_path.name[: shard_pattern.start()]  # Everything before "-00001-of-00003.gguf"
     parent_dir = model_path.parent
 
     total_size = 0
@@ -962,21 +980,23 @@ def calculate_total_gguf_size(model_path_str):
     for shard_num in range(1, total_shards + 1):
         shard_name = f"{base_name}-{shard_num:05d}{separator}{total_shards:05d}{extension}"
         shard_path = parent_dir / shard_name
-        
+
         if shard_path.exists():
             shard_size = shard_path.stat().st_size
             total_size += shard_size
             found_shards.append(shard_path)
-            print(f"DEBUG: Found shard {shard_num}: {shard_path.name} ({shard_size / (1024**3):.2f} GB)", file=sys.stderr)
+            print(
+                f"DEBUG: Found shard {shard_num}: {shard_path.name} ({shard_size / (1024**3):.2f} GB)", file=sys.stderr
+            )
         else:
             missing_shards.append(shard_name)
             print(f"DEBUG: Missing shard {shard_num}: {shard_name}", file=sys.stderr)
-    
+
     if missing_shards:
         print(f"WARNING: Missing {len(missing_shards)} shards: {missing_shards}", file=sys.stderr)
         # Return what we found, but note it's incomplete
         return total_size, len(found_shards), found_shards
-    
+
     print(f"DEBUG: Total size across {total_shards} shards: {total_size / (1024**3):.2f} GB", file=sys.stderr)
     return total_size, total_shards, found_shards
 
@@ -1016,25 +1036,25 @@ def parse_gguf_header_simple(model_path_str):
         "error": None,
         "message": f"Analyzed using simple GGUF parser ({shard_count} shard{'s' if shard_count != 1 else ''})",
         "shard_count": shard_count,
-        "all_shards": [str(p) for p in all_shards]
+        "all_shards": [str(p) for p in all_shards],
     }
 
     # GGUF type definitions per spec
     # Format: type_id -> (struct_format, size_in_bytes) or None for variable-length types
     GGUF_TYPES = {
-        0:  ('<B', 1),   # UINT8
-        1:  ('<b', 1),   # INT8
-        2:  ('<H', 2),   # UINT16
-        3:  ('<h', 2),   # INT16
-        4:  ('<I', 4),   # UINT32
-        5:  ('<i', 4),   # INT32
-        6:  ('<f', 4),   # FLOAT32
-        7:  ('<b', 1),   # BOOL (stored as int8)
-        8:  None,        # STRING (variable length)
-        9:  None,        # ARRAY (variable length)
-        10: ('<Q', 8),   # UINT64
-        11: ('<q', 8),   # INT64
-        12: ('<d', 8),   # FLOAT64
+        0: ("<B", 1),  # UINT8
+        1: ("<b", 1),  # INT8
+        2: ("<H", 2),  # UINT16
+        3: ("<h", 2),  # INT16
+        4: ("<I", 4),  # UINT32
+        5: ("<i", 4),  # INT32
+        6: ("<f", 4),  # FLOAT32
+        7: ("<b", 1),  # BOOL (stored as int8)
+        8: None,  # STRING (variable length)
+        9: None,  # ARRAY (variable length)
+        10: ("<Q", 8),  # UINT64
+        11: ("<q", 8),  # INT64
+        12: ("<d", 8),  # FLOAT64
     }
 
     # Soft cap for a single string value; values larger than this are still
@@ -1048,7 +1068,7 @@ def parse_gguf_header_simple(model_path_str):
             value_len_bytes = f.read(8)
             if len(value_len_bytes) < 8:
                 return None
-            value_len = struct.unpack('<Q', value_len_bytes)[0]
+            value_len = struct.unpack("<Q", value_len_bytes)[0]
             # Check the soft cap BEFORE allocating, so a corrupted or
             # adversarial value_len claim (e.g. 5 GB) can't OOM the parser
             # on a legitimately large GGUF that actually has those bytes.
@@ -1073,12 +1093,12 @@ def parse_gguf_header_simple(model_path_str):
             value_bytes = f.read(value_len)
             if len(value_bytes) < value_len:
                 return None
-            return value_bytes.decode('utf-8', errors='replace')
+            return value_bytes.decode("utf-8", errors="replace")
         elif value_type == 7:  # BOOL
             bool_byte = f.read(1)
             if len(bool_byte) < 1:
                 return None
-            return struct.unpack('<b', bool_byte)[0] != 0
+            return struct.unpack("<b", bool_byte)[0] != 0
         elif value_type in GGUF_TYPES and GGUF_TYPES[value_type] is not None:
             fmt, size = GGUF_TYPES[value_type]
             value_bytes = f.read(size)
@@ -1111,8 +1131,7 @@ def parse_gguf_header_simple(model_path_str):
         """
         if depth > _MAX_NESTING_DEPTH:
             print(
-                f"WARNING: GGUF nested array exceeds max depth "
-                f"{_MAX_NESTING_DEPTH}; aborting parse.",
+                f"WARNING: GGUF nested array exceeds max depth " f"{_MAX_NESTING_DEPTH}; aborting parse.",
                 file=sys.stderr,
             )
             return False
@@ -1122,7 +1141,7 @@ def parse_gguf_header_simple(model_path_str):
                 str_len_bytes = f.read(8)
                 if len(str_len_bytes) < 8:
                     return False
-                str_len = struct.unpack('<Q', str_len_bytes)[0]
+                str_len = struct.unpack("<Q", str_len_bytes)[0]
                 # Don't blindly seek past EOF — a corrupted/adversarial
                 # str_len could send the stream so far past the end that a
                 # subsequent read appears truncated but the loop mistakes
@@ -1138,8 +1157,8 @@ def parse_gguf_header_simple(model_path_str):
                 inner_len_bytes = f.read(8)
                 if len(inner_type_bytes) < 4 or len(inner_len_bytes) < 8:
                     return False
-                inner_type = struct.unpack('<I', inner_type_bytes)[0]
-                inner_len = struct.unpack('<Q', inner_len_bytes)[0]
+                inner_type = struct.unpack("<I", inner_type_bytes)[0]
+                inner_len = struct.unpack("<Q", inner_len_bytes)[0]
                 if not skip_array(f, inner_type, inner_len, depth + 1):
                     return False
             return True
@@ -1155,24 +1174,21 @@ def parse_gguf_header_simple(model_path_str):
             return True
         else:
             print(
-                f"WARNING: GGUF array has unknown element type {array_type}; "
-                f"cannot skip safely, aborting parse.",
+                f"WARNING: GGUF array has unknown element type {array_type}; " f"cannot skip safely, aborting parse.",
                 file=sys.stderr,
             )
             return False
 
     try:
-        with open(model_path, 'rb') as f:
+        with open(model_path, "rb") as f:
             # Read GGUF magic number
             magic = f.read(4)
-            if magic != b'GGUF':
+            if magic != b"GGUF":
                 # The spec allowed a short-lived big-endian variant ('FUGG'
                 # when read little-endian). Detect and reject it with a
                 # clear error rather than silently misparsing.
-                if magic == b'FUGG':
-                    analysis_result["error"] = (
-                        "Big-endian GGUF files are not supported by this parser"
-                    )
+                if magic == b"FUGG":
+                    analysis_result["error"] = "Big-endian GGUF files are not supported by this parser"
                 else:
                     analysis_result["error"] = "Not a valid GGUF file"
                 return analysis_result
@@ -1182,15 +1198,13 @@ def parse_gguf_header_simple(model_path_str):
             if len(version_bytes) < 4:
                 analysis_result["error"] = "Failed to parse GGUF header: truncated version field"
                 return analysis_result
-            version = struct.unpack('<I', version_bytes)[0]
+            version = struct.unpack("<I", version_bytes)[0]
 
             # Only GGUF v2 and v3 are widely used; v1 had a different layout
             # and anything beyond v3 is unknown to this parser. Flag it
             # clearly instead of silently producing garbage output.
             if version not in (2, 3):
-                analysis_result["error"] = (
-                    f"Unsupported GGUF version {version}; expected 2 or 3"
-                )
+                analysis_result["error"] = f"Unsupported GGUF version {version}; expected 2 or 3"
                 return analysis_result
 
             # Read tensor count and metadata count
@@ -1199,8 +1213,8 @@ def parse_gguf_header_simple(model_path_str):
             if len(tc_bytes) < 8 or len(mc_bytes) < 8:
                 analysis_result["error"] = "Failed to parse GGUF header: truncated counts"
                 return analysis_result
-            tensor_count = struct.unpack('<Q', tc_bytes)[0]
-            metadata_count = struct.unpack('<Q', mc_bytes)[0]
+            tensor_count = struct.unpack("<Q", tc_bytes)[0]
+            metadata_count = struct.unpack("<Q", mc_bytes)[0]
 
             # Track what we've found for early exit
             found_architecture = False
@@ -1214,19 +1228,19 @@ def parse_gguf_header_simple(model_path_str):
                     key_len_bytes = f.read(8)
                     if len(key_len_bytes) < 8:
                         break
-                    key_len = struct.unpack('<Q', key_len_bytes)[0]
+                    key_len = struct.unpack("<Q", key_len_bytes)[0]
                     if key_len > 1000:  # Key names should be reasonable length
                         break
                     key_bytes = f.read(key_len)
                     if len(key_bytes) < key_len:
                         break
-                    key = key_bytes.decode('utf-8', errors='replace')
+                    key = key_bytes.decode("utf-8", errors="replace")
 
                     # Read value type
                     type_bytes = f.read(4)
                     if len(type_bytes) < 4:
                         break
-                    value_type = struct.unpack('<I', type_bytes)[0]
+                    value_type = struct.unpack("<I", type_bytes)[0]
 
                     # Handle arrays specially (type 9)
                     if value_type == 9:  # ARRAY
@@ -1234,12 +1248,15 @@ def parse_gguf_header_simple(model_path_str):
                         array_len_bytes = f.read(8)
                         if len(array_type_bytes) < 4 or len(array_len_bytes) < 8:
                             break
-                        array_type = struct.unpack('<I', array_type_bytes)[0]
-                        array_len = struct.unpack('<Q', array_len_bytes)[0]
+                        array_type = struct.unpack("<I", array_type_bytes)[0]
+                        array_len = struct.unpack("<Q", array_len_bytes)[0]
 
                         # Skip the array data (no limit on array size - tokenizers can have 150k+ elements)
                         if not skip_array(f, array_type, array_len):
-                            print(f"DEBUG: Failed to skip array for key '{key}': type {array_type}, length {array_len}", file=sys.stderr)
+                            print(
+                                f"DEBUG: Failed to skip array for key '{key}': type {array_type}, length {array_len}",
+                                file=sys.stderr,
+                            )
                             break
                         continue
 
@@ -1261,14 +1278,23 @@ def parse_gguf_header_simple(model_path_str):
                             if isinstance(value, (int, float)) and value > 0:
                                 analysis_result["n_layers"] = int(value)
                                 found_block_count = True
-                                print(f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}", file=sys.stderr)
+                                print(
+                                    f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}",
+                                    file=sys.stderr,
+                                )
 
                         # Also check for generic block_count patterns
-                        elif any(pattern in key.lower() for pattern in ['.block_count', '.n_layers', '.layer_count', '.num_layer']):
+                        elif any(
+                            pattern in key.lower()
+                            for pattern in [".block_count", ".n_layers", ".layer_count", ".num_layer"]
+                        ):
                             if isinstance(value, (int, float)) and value > 0:
                                 analysis_result["n_layers"] = int(value)
                                 found_block_count = True
-                                print(f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}", file=sys.stderr)
+                                print(
+                                    f"DEBUG: Found layer count in key '{key}': {analysis_result['n_layers']}",
+                                    file=sys.stderr,
+                                )
 
                     # Early exit if we have both architecture and block_count
                     if found_architecture and found_block_count:
@@ -1285,22 +1311,40 @@ def parse_gguf_header_simple(model_path_str):
                 file_size_gb = analysis_result["file_size_gb"]
                 if file_size_gb > 100:  # Very large model (100+ GB)
                     estimated_layers = 120  # Conservative estimate for huge models
-                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on very large file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                    print(
+                        f"DEBUG: No layer count found, estimating {estimated_layers} layers based on very large file size ({file_size_gb:.1f} GB)",
+                        file=sys.stderr,
+                    )
                 elif file_size_gb > 50:  # Large model (50-100 GB)
                     estimated_layers = 80
-                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on large file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                    print(
+                        f"DEBUG: No layer count found, estimating {estimated_layers} layers based on large file size ({file_size_gb:.1f} GB)",
+                        file=sys.stderr,
+                    )
                 elif file_size_gb > 20:  # Medium-large model (20-50 GB)
                     estimated_layers = 60
-                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on medium-large file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                    print(
+                        f"DEBUG: No layer count found, estimating {estimated_layers} layers based on medium-large file size ({file_size_gb:.1f} GB)",
+                        file=sys.stderr,
+                    )
                 elif file_size_gb > 10:  # Medium model (10-20 GB)
                     estimated_layers = 40
-                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on medium file size ({file_size_gb:.1f} GB)", file=sys.stderr)
-                elif file_size_gb > 3:   # Small-medium model (3-10 GB)
+                    print(
+                        f"DEBUG: No layer count found, estimating {estimated_layers} layers based on medium file size ({file_size_gb:.1f} GB)",
+                        file=sys.stderr,
+                    )
+                elif file_size_gb > 3:  # Small-medium model (3-10 GB)
                     estimated_layers = 32
-                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small-medium file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                    print(
+                        f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small-medium file size ({file_size_gb:.1f} GB)",
+                        file=sys.stderr,
+                    )
                 else:  # Small model (< 3 GB)
                     estimated_layers = 24
-                    print(f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small file size ({file_size_gb:.1f} GB)", file=sys.stderr)
+                    print(
+                        f"DEBUG: No layer count found, estimating {estimated_layers} layers based on small file size ({file_size_gb:.1f} GB)",
+                        file=sys.stderr,
+                    )
 
                 analysis_result["n_layers"] = estimated_layers
                 analysis_result["message"] += f" (estimated {estimated_layers} layers from file size)"
@@ -1314,11 +1358,11 @@ def parse_gguf_header_simple(model_path_str):
 
 class SystemInfoManager:
     """Manages system information fetching and processing for the launcher."""
-    
+
     def __init__(self, launcher_instance):
         """Initialize with reference to the main launcher instance."""
         self.launcher = launcher_instance
-    
+
     def fetch_system_info(self, venv_path=None, defer_tk_writes=False):
         """Fetches GPU, RAM, and CPU info and populates class attributes.
 
@@ -1350,15 +1394,15 @@ class SystemInfoManager:
 
         self.launcher.gpu_info = get_gpu_info_with_venv(venv_path)
         self.launcher.ram_info = get_ram_info_static()
-        self.launcher.cpu_info = get_cpu_info_static() # Fetch CPU info here
+        self.launcher.cpu_info = get_cpu_info_static()  # Fetch CPU info here
 
         print(f"GPU Info: {self.launcher.gpu_info}", file=sys.stderr)
         if not self.launcher.gpu_info["available"] and "message" in self.launcher.gpu_info:
-             print(f"GPU Detection Info: {self.launcher.gpu_info['message']}", file=sys.stderr)
+            print(f"GPU Detection Info: {self.launcher.gpu_info['message']}", file=sys.stderr)
         if "error" in self.launcher.ram_info:
-             print(f"RAM Detection Error: {self.launcher.ram_info['error']}", file=sys.stderr)
+            print(f"RAM Detection Error: {self.launcher.ram_info['error']}", file=sys.stderr)
         if "error" in self.launcher.cpu_info:
-             print(f"CPU Detection Error: {self.launcher.cpu_info['error']}", file=sys.stderr)
+            print(f"CPU Detection Error: {self.launcher.cpu_info['error']}", file=sys.stderr)
 
         # Store detected devices separately for easier access
         self.launcher.detected_gpu_devices = self.launcher.gpu_info.get("devices", [])
@@ -1370,7 +1414,9 @@ class SystemInfoManager:
         log_gpu_mapping(self.launcher.gpu_info)
         # Store logical/physical cores for initial thread defaults and recommendations
         self.launcher.logical_cores = self.launcher.cpu_info.get("logical_cores", 4)
-        self.launcher.physical_cores = self.launcher.cpu_info.get("physical_cores", 2) # Use fallback 2 if psutil failed or physical count is 0
+        self.launcher.physical_cores = self.launcher.cpu_info.get(
+            "physical_cores", 2
+        )  # Use fallback 2 if psutil failed or physical count is 0
 
         if defer_tk_writes:
             # Worker path: do NOT touch any Tk var here. The main-thread
@@ -1383,15 +1429,13 @@ class SystemInfoManager:
         physical = self.launcher.physical_cores
         logical = self.launcher.logical_cores
         gpu_msg = ""
-        if not self.launcher.gpu_info['available'] and self.launcher.gpu_info.get('message'):
-            gpu_msg = self.launcher.gpu_info['message']
+        if not self.launcher.gpu_info["available"] and self.launcher.gpu_info.get("message"):
+            gpu_msg = self.launcher.gpu_info["message"]
         for var_name, value in (
             ("threads", str(physical)),
             ("threads_batch", str(logical)),
-            ("recommended_threads_var",
-             f"Recommended: {physical} (Your CPU physical cores)"),
-            ("recommended_threads_batch_var",
-             f"Recommended: {logical} (Your CPU logical cores)"),
+            ("recommended_threads_var", f"Recommended: {physical} (Your CPU physical cores)"),
+            ("recommended_threads_batch_var", f"Recommended: {logical} (Your CPU logical cores)"),
             ("gpu_detected_status_var", gpu_msg),
         ):
             try:

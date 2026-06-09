@@ -16,42 +16,54 @@ def _bash_hold_open(command: str) -> str:
         'echo "Running command..."; '
         f"{command}; "
         "status=$?; "
-        'echo; '
-        'if [[ $status -eq 0 ]]; then '
+        "echo; "
+        "if [[ $status -eq 0 ]]; then "
         'echo "Command completed successfully."; '
-        'else '
+        "else "
         'echo "Command failed with exit code $status."; '
-        'fi; '
-        'if [[ -t 1 || $status -ne 0 ]]; then '
+        "fi; "
+        "if [[ -t 1 || $status -ne 0 ]]; then "
         'read -rp "Press Enter to close..." </dev/tty; '
         "fi; "
         "exit $status"
     )
 
 
-def _cmd_keep_open(command: str) -> tuple[list[str], str]:
+def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
     """Return a Windows ``cmd`` invocation that reports success/failure.
 
-    Writes the user command to a temporary ``.cmd`` batch file and
-    executes that. The previous inline form ``cmd /c start "" cmd /k
-    "<wrapped>"`` had two layered cmd parsers eating tokens from the
-    user's command before it ran:
+    Writes the user command to a SEPARATE payload ``.cmd`` file and a
+    wrapper ``.cmd`` that calls into it. Both files self-delete after
+    running so they don't accumulate in ``%TEMP%``.
+
+    The two-file split exists because the earlier inline form
+    ``cmd /d /c ""{command}""`` embedded inside the wrapper script
+    re-introduced the OUTER batch parser at the moment the wrapper
+    line was read. cmd.exe expands ``%FOO%`` while parsing each
+    line of a ``.cmd``, BEFORE the line is handed to the child
+    ``cmd /d /c`` — so a user command of ``echo %PATH%`` was being
+    substituted by the wrapper's own environment, not the payload's.
+    Putting the user command on its own line in a dedicated .cmd
+    that the wrapper merely ``call``s side-steps that: the parsing
+    happens once, inside the payload, the same as if the user had
+    typed it at a fresh cmd prompt.
+
+    Other layered-cmd problems we previously worked around:
 
     * ``!literal!`` was expanded as a delayed-expansion variable
       (``/v:on``). Dropping ``/v:on`` solved that.
-    * ``%PATH%`` / ``%VAR%`` was expanded by the OUTER ``cmd`` at
-      parse time regardless of delayed expansion. The batch-file
-      approach side-steps it because the user's line lives inside a
-      .cmd file that the inner ``cmd /k`` reads directly — no outer
-      parser involved.
-
-    The script self-deletes via ``del "%~f0"`` after running so the
-    temp file doesn't accumulate.
+    * Wrapping in ``cmd /d /c ""…""`` was added so a payload with
+      its own double-quotes (``msiexec /i "C:\\…\\foo.msi"``)
+      survived parsing — that argument no longer applies because
+      the payload lives in its own file now and is invoked by
+      ``call "<path>"`` instead of being a quoted argument.
     """
     import tempfile
-    fd, script_path = tempfile.mkstemp(
-        suffix=".cmd", prefix="llama-launcher-", text=False
-    )
+
+    # Payload file: holds the user's command verbatim, on its own
+    # line, with NO outer wrapper around it. cmd will parse this
+    # line ONCE when the wrapper calls into it.
+    payload_fd, payload_path = tempfile.mkstemp(suffix=".cmd", prefix="llama-launcher-payload-", text=False)
     # cmd.exe requires CRLF line endings in .cmd files for reliable
     # parsing; ``newline=""`` + explicit ``\r\n`` ensures that even
     # on POSIX hosts running cross-platform tooling. Use
@@ -60,56 +72,69 @@ def _cmd_keep_open(command: str) -> tuple[list[str], str]:
     # interpret the file with the active code page (usually CP1252
     # on US-English Windows) and corrupt anything outside that
     # subset.
-    with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as fh:
-        fh.write("@echo off\r\n")
-        fh.write("echo Running command...\r\n")
-        # Wrap the user command in ``cmd /d /c "<command>"`` so
-        # control always returns to THIS .cmd AND so shell
-        # metacharacters (``&`` / ``|`` / ``>`` / …) are handled by
-        # the INNER cmd, not parsed at the outer wrapper level
-        # where they could chain into / redirect the wrapper
-        # itself. The double-quote pair around ``<command>`` is the
-        # documented ``cmd /c`` quoting form for arguments
-        # containing metacharacters: cmd strips ONLY the leading
-        # and trailing quote (not embedded quotes) when ``/c`` is
-        # used, leaving the inner cmd to parse the literal payload.
-        # See https://ss64.com/nt/cmd.html "Path Quoting Rules".
-        #
-        # Without the nested cmd, a user command that invokes
-        # another ``.bat`` / ``.cmd`` without the ``call`` prefix
-        # would transfer control to that script and our exit-code
-        # echo + ``del "%~f0"`` would never run (cmd's batch-chain
-        # semantics — see https://ss64.com/nt/call.html).
-        # ``/d`` skips AutoRun registry hooks so we don't
-        # accidentally trigger user environment scripts between
-        # the wrapper and the actual command.
-        # ``cmd /d /c "<command>"`` strips the OUTER pair of quotes
-        # at parse time, but a payload with its OWN double quotes
-        # (e.g. ``msiexec /i "C:\…\foo.msi"``) sees its inner
-        # quotes consumed too because cmd treats the FIRST and LAST
-        # ``"`` of the line as the outer delimiters. The
-        # documented workaround is ``cmd /d /c ""…""`` — when the
-        # /S flag isn't set, cmd strips ONE outer pair and leaves
-        # the inner one intact, so embedded quotes survive.
-        # See https://ss64.com/nt/cmd.html — "When Command
-        # Extensions are Enabled" + "Path Quoting Rules".
-        fh.write(f'cmd /d /c ""{command}""\r\n')
-        fh.write("echo.\r\n")
-        fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
-        # Self-delete after the user dismisses the keep-open shell.
-        # ``%~f0`` is the full path of the running .cmd. The user can
-        # type ``exit`` or close the window to trigger ``cmd /k``'s
-        # final return; once it returns, the next prompt would still
-        # be alive, so we ``del`` BEFORE ``exit`` from the script's
-        # last line (the user's ``cmd /k`` shell stays open for them
-        # to inspect output, but the script file itself is gone).
-        fh.write('del "%~f0"\r\n')
-    # Return BOTH the argv AND the script path so the caller can
-    # clean up the temp file on ``Popen`` failure. The script
-    # normally self-deletes via ``del "%~f0"`` after running, but
-    # if the parent ``cmd`` never starts (PATH issue, AppLocker
-    # block, etc.) the file would otherwise leak in TEMP.
-    return ["cmd", "/c", "start", "", "cmd", "/k", script_path], script_path
+    try:
+        with os.fdopen(payload_fd, "w", encoding="utf-8-sig", newline="") as fh:
+            fh.write("@echo off\r\n")
+            fh.write(f"{command}\r\n")
+            # Hand the user command's exit code back to the wrapper
+            # via ``exit /b`` so ``%ERRORLEVEL%`` in the wrapper
+            # reflects the payload's status rather than the
+            # ``del`` below. The wrapper checks ERRORLEVEL after
+            # the call to print the success/failure summary.
+            fh.write("set _LLAMA_LAUNCHER_RC=%ERRORLEVEL%\r\n")
+            # Self-delete the payload before returning — we don't
+            # want it surviving past the call, and the wrapper has
+            # already loaded our line into the running cmd.
+            fh.write('del "%~f0"\r\n')
+            fh.write("exit /b %_LLAMA_LAUNCHER_RC%\r\n")
+    except Exception:
+        try:
+            os.unlink(payload_path)
+        except OSError:
+            pass
+        raise
+
+    # Wrapper file: prints the running banner, ``call``s the
+    # payload (so control returns here even if the payload is a
+    # batch chain or invokes another .cmd without ``call``), then
+    # echoes the exit code and self-deletes.
+    wrapper_fd, wrapper_path = tempfile.mkstemp(suffix=".cmd", prefix="llama-launcher-", text=False)
+    try:
+        with os.fdopen(wrapper_fd, "w", encoding="utf-8-sig", newline="") as fh:
+            fh.write("@echo off\r\n")
+            fh.write("echo Running command...\r\n")
+            # ``call`` so control returns to this wrapper after
+            # the payload finishes — without ``call``, batch-chain
+            # semantics transfer control to the payload script and
+            # the wrapper's exit-code echo + self-delete would
+            # never run (https://ss64.com/nt/call.html). Quote the
+            # path so spaces in ``%TEMP%`` (e.g. ``C:\Users\Bob
+            # Smith\AppData\…``) don't truncate the argument.
+            fh.write(f'call "{payload_path}"\r\n')
+            fh.write("echo.\r\n")
+            fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
+            # Self-delete the wrapper. ``%~f0`` is the full path
+            # of the running .cmd. The user's ``cmd /k`` shell
+            # stays open after this so they can inspect output,
+            # but the script file itself is gone.
+            fh.write('del "%~f0"\r\n')
+    except Exception:
+        for path in (payload_path, wrapper_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        raise
+
+    # Return BOTH the argv AND BOTH script paths so the caller can
+    # clean up the temp files on ``Popen`` failure. The scripts
+    # normally self-delete after running, but if the parent
+    # ``cmd`` never starts (PATH issue, AppLocker block, etc.)
+    # either file would otherwise leak in ``%TEMP%``.
+    return (
+        ["cmd", "/c", "start", "", "cmd", "/k", wrapper_path],
+        [wrapper_path, payload_path],
+    )
 
 
 def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> None:
@@ -149,9 +174,7 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         env_terminal_key = Path(env_terminal_raw).name if env_terminal_raw else ""
         ordered_terms: list[tuple[str, str]] = []
         if env_terminal_raw:
-            ordered_terms.append(
-                (env_terminal_raw, env_terminal_key or env_terminal_raw)
-            )
+            ordered_terms.append((env_terminal_raw, env_terminal_key or env_terminal_raw))
         ordered_terms.extend(
             [
                 ("x-terminal-emulator", "x-terminal-emulator"),
@@ -174,10 +197,7 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
                 # ``PermissionError`` halfway down the loop with the
                 # remaining candidates unexamined.
                 candidate = Path(terminal_name)
-                if (
-                    candidate.is_file()
-                    and os.access(str(candidate), os.X_OK)
-                ):
+                if candidate.is_file() and os.access(str(candidate), os.X_OK):
                     terminal_path = str(candidate)
                 else:
                     terminal_path = None
@@ -187,9 +207,7 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
                 continue
             # An emulator not in our argument map (e.g. user-set $TERMINAL
             # pointing at something exotic) gets a safe default of ``-e``.
-            args = emulator_args.get(
-                terminal_key, ["-e", "bash", "-lc", term_command]
-            )
+            args = emulator_args.get(terminal_key, ["-e", "bash", "-lc", term_command])
             subprocess.Popen([str(Path(terminal_path).resolve()), *args], cwd=cwd_text)
             return
         raise FileNotFoundError("No supported terminal emulator found")
@@ -211,9 +229,7 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
             # follow-ups run from whatever the previous cwd was even
             # if cd failed. Wrap in ``{ ...; }`` so the cd guards the
             # WHOLE payload.
-            bash_payload = (
-                f"cd {shlex.quote(cwd_text)} && {{ {bash_payload}; }}"
-            )
+            bash_payload = f"cd {shlex.quote(cwd_text)} && {{ {bash_payload}; }}"
         fd, script_path = tempfile.mkstemp(suffix=".command", prefix="llama-launcher-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -230,10 +246,8 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
                 # variable inside the trap body with double-quoted
                 # expansion. The trap body is a single-quoted string so
                 # ``$LLAMA_LAUNCHER_SCRIPT_PATH`` survives until trap fires.
-                fh.write(
-                    f"LLAMA_LAUNCHER_SCRIPT_PATH={shlex.quote(script_path)}\n"
-                )
-                fh.write('trap \'rm -f "$LLAMA_LAUNCHER_SCRIPT_PATH"\' EXIT\n')
+                fh.write(f"LLAMA_LAUNCHER_SCRIPT_PATH={shlex.quote(script_path)}\n")
+                fh.write("trap 'rm -f \"$LLAMA_LAUNCHER_SCRIPT_PATH\"' EXIT\n")
                 fh.write(bash_payload)
                 fh.write("\n")
             os.chmod(script_path, 0o755)
@@ -255,12 +269,7 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         #      AppleScript.
         shell_cmd = shlex.quote(script_path)
         escaped_path = shell_cmd.replace("\\", "\\\\").replace('"', '\\"')
-        applescript = (
-            'tell application "Terminal"\n'
-            f'    do script "{escaped_path}"\n'
-            "    activate\n"
-            "end tell\n"
-        )
+        applescript = 'tell application "Terminal"\n' f'    do script "{escaped_path}"\n' "    activate\n" "end tell\n"
         # The script self-deletes once Terminal.app runs it, but if
         # ``osascript`` itself fails to spawn (PATH issue, sandbox denial,
         # OS resource limit) that self-delete never runs and the temp
@@ -278,19 +287,20 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         return
 
     if sys.platform.startswith("win"):
-        argv, script_path = _cmd_keep_open(command)
+        argv, script_paths = _cmd_keep_open(command)
         try:
             subprocess.Popen(argv, cwd=cwd_text)
         except Exception:
             # ``Popen`` blew up before the inner ``cmd /k`` had a
-            # chance to execute the script's self-delete line.
-            # Clean the temp file ourselves so we don't litter
-            # ``%TEMP%`` on repeated failures. Mirrors the
-            # macOS branch's cleanup.
-            try:
-                os.unlink(script_path)
-            except OSError:
-                pass
+            # chance to execute the scripts' self-delete lines.
+            # Clean BOTH the wrapper and the payload ourselves so
+            # we don't litter ``%TEMP%`` on repeated failures.
+            # Mirrors the macOS branch's cleanup.
+            for path in script_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
             raise
         return
 

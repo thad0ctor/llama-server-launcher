@@ -452,6 +452,10 @@ class TestCheckVersionOnline:
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
+        # The display refresh MUST happen on the failure path too —
+        # otherwise the label stays stuck on the prior status (often
+        # ``"Checking..."``) until the next successful check.
+        about._update_version_display.assert_called_once()
 
     def test_up_to_date_sets_current(self, about, requests_module):
         """Remote matches local → status ``Current`` and no update button."""
@@ -497,6 +501,10 @@ class TestCheckVersionOnline:
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
+        # Timeouts share the same failure path as ConnectionError /
+        # HTTP 500 — the display must refresh, not stay on
+        # ``"Checking..."``.
+        about._update_version_display.assert_called_once()
 
     def test_malformed_200_body_treated_as_check_failed(self, about, requests_module):
         """A ``200 OK`` with a blank or unparseable body is NOT a valid

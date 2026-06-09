@@ -17,19 +17,19 @@ class SettingsTab:
 
     THEME_MODE_LABELS = [
         ("Auto (follow OS/default)", "auto"),
-        ("Light",                    "light"),
-        ("Dark",                     "dark"),
-        ("Specific theme…",          "specific"),
+        ("Light", "light"),
+        ("Dark", "dark"),
+        ("Specific theme…", "specific"),
     ]
 
     # Mutually-exclusive font size presets. "0" = system default, "custom" = manual override.
     FONT_SIZE_PRESETS = [
-        ("Default",  "0"),
-        ("10",       "10"),
-        ("12",       "12"),
-        ("14",       "14"),
-        ("16",       "16"),
-        ("20",       "20"),
+        ("Default", "0"),
+        ("10", "10"),
+        ("12", "12"),
+        ("14", "14"),
+        ("16", "16"),
+        ("20", "20"),
     ]
     FONT_SIZE_MAX = 32  # exclusive upper bound for custom override
     VENV_PROBE_DEBOUNCE_MS = 400
@@ -149,75 +149,85 @@ class SettingsTab:
         parent.columnconfigure(1, weight=1)
 
         row = 0
-        ttk.Label(parent, text="UI Appearance", font=("TkDefaultFont", 12, "bold")) \
-            .grid(column=0, row=row, columnspan=3, sticky="w", padx=10, pady=(10, 5))
+        ttk.Label(parent, text="UI Appearance", font=("TkDefaultFont", 12, "bold")).grid(
+            column=0, row=row, columnspan=3, sticky="w", padx=10, pady=(10, 5)
+        )
         row += 1
-        ttk.Separator(parent, orient="horizontal") \
-            .grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(0, 10))
+        ttk.Separator(parent, orient="horizontal").grid(
+            column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(0, 10)
+        )
         row += 1
 
         # --- Theme mode ---
-        ttk.Label(parent, text="Theme mode:") \
-            .grid(column=0, row=row, sticky="w", padx=10, pady=4)
+        ttk.Label(parent, text="Theme mode:").grid(column=0, row=row, sticky="w", padx=10, pady=4)
         mode_frame = ttk.Frame(parent)
         mode_frame.grid(column=1, row=row, columnspan=2, sticky="w", padx=5, pady=4)
         for label, value in self.THEME_MODE_LABELS:
             ttk.Radiobutton(
-                mode_frame, text=label, value=value,
+                mode_frame,
+                text=label,
+                value=value,
                 variable=self.theme_mode_var,
                 command=self._on_theme_mode_changed,
             ).pack(side="left", padx=(0, 10))
         row += 1
 
         # --- Specific theme picker ---
-        ttk.Label(parent, text="Specific theme:") \
-            .grid(column=0, row=row, sticky="w", padx=10, pady=4)
+        ttk.Label(parent, text="Specific theme:").grid(column=0, row=row, sticky="w", padx=10, pady=4)
         available = ui_theme.list_available_themes(self.root)
         self.theme_combo = ttk.Combobox(
-            parent, textvariable=self.theme_name_var,
-            values=available, state="readonly", width=30,
+            parent,
+            textvariable=self.theme_name_var,
+            values=available,
+            state="readonly",
+            width=30,
         )
         self.theme_combo.grid(column=1, row=row, sticky="w", padx=5, pady=4)
-        ttk.Label(parent, text="(used when mode = Specific)", font=("TkSmallCaptionFont",)) \
-            .grid(column=2, row=row, sticky="w", padx=5, pady=4)
+        ttk.Label(parent, text="(used when mode = Specific)", font=("TkSmallCaptionFont",)).grid(
+            column=2, row=row, sticky="w", padx=5, pady=4
+        )
         row += 1
 
-        ttk.Separator(parent, orient="horizontal") \
-            .grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=10)
+        ttk.Separator(parent, orient="horizontal").grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=10)
         row += 1
 
         # --- Font family ---
-        ttk.Label(parent, text="Font family:") \
-            .grid(column=0, row=row, sticky="w", padx=10, pady=4)
+        ttk.Label(parent, text="Font family:").grid(column=0, row=row, sticky="w", padx=10, pady=4)
         # Cache the system font list so _apply_and_save can validate against
         # it without re-querying Tk every time.
         self._available_font_families = ui_theme.list_font_families(self.root)
         self.font_family_combo = ttk.Combobox(
-            parent, textvariable=self.font_family_var,
-            values=[""] + self._available_font_families, width=30,
+            parent,
+            textvariable=self.font_family_var,
+            values=[""] + self._available_font_families,
+            width=30,
         )
         self.font_family_combo.grid(column=1, row=row, sticky="w", padx=5, pady=4)
-        ttk.Label(parent, text="(blank = system default)", font=("TkSmallCaptionFont",)) \
-            .grid(column=2, row=row, sticky="w", padx=5, pady=4)
+        ttk.Label(parent, text="(blank = system default)", font=("TkSmallCaptionFont",)).grid(
+            column=2, row=row, sticky="w", padx=5, pady=4
+        )
         row += 1
 
         # --- Font size (preset radios + custom override) ---
-        ttk.Label(parent, text="Font size:") \
-            .grid(column=0, row=row, sticky="nw", padx=10, pady=4)
+        ttk.Label(parent, text="Font size:").grid(column=0, row=row, sticky="nw", padx=10, pady=4)
         size_frame = ttk.Frame(parent)
         size_frame.grid(column=1, row=row, columnspan=2, sticky="w", padx=5, pady=4)
 
         # Presets
         for label, value in self.FONT_SIZE_PRESETS:
             ttk.Radiobutton(
-                size_frame, text=label, value=value,
+                size_frame,
+                text=label,
+                value=value,
                 variable=self.font_size_choice_var,
                 command=self._on_font_size_choice_changed,
             ).pack(side="left", padx=(0, 8))
 
         # Custom radio + entry
         ttk.Radiobutton(
-            size_frame, text="Custom:", value="custom",
+            size_frame,
+            text="Custom:",
+            value="custom",
             variable=self.font_size_choice_var,
             command=self._on_font_size_choice_changed,
         ).pack(side="left", padx=(0, 4))
@@ -225,15 +235,19 @@ class SettingsTab:
         # Validation: restrict typing to digits only; range check happens at apply time.
         vcmd = (self.root.register(self._validate_custom_digit), "%P")
         self.font_size_custom_entry = ttk.Entry(
-            size_frame, textvariable=self.font_size_custom_var,
-            width=4, validate="key", validatecommand=vcmd,
+            size_frame,
+            textvariable=self.font_size_custom_var,
+            width=4,
+            validate="key",
+            validatecommand=vcmd,
         )
         self.font_size_custom_entry.pack(side="left")
         # Typing in the entry auto-selects the Custom radio so the user doesn't
         # have to click it manually.
         self.font_size_custom_entry.bind("<KeyRelease>", self._on_custom_entry_keyrelease)
-        ttk.Label(size_frame, text=f"  (must be < {self.FONT_SIZE_MAX})",
-                  font=("TkSmallCaptionFont",)).pack(side="left")
+        ttk.Label(size_frame, text=f"  (must be < {self.FONT_SIZE_MAX})", font=("TkSmallCaptionFont",)).pack(
+            side="left"
+        )
         row += 1
 
         ttk.Label(
@@ -246,15 +260,13 @@ class SettingsTab:
         # --- Action buttons ---
         btns = ttk.Frame(parent)
         btns.grid(column=0, row=row, columnspan=3, sticky="w", padx=10, pady=(10, 5))
-        ttk.Button(btns, text="Apply & Save", command=self._apply_and_save) \
-            .pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="Reset to Defaults", command=self._reset_defaults) \
-            .pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Apply & Save", command=self._apply_and_save).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Reset to Defaults", command=self._reset_defaults).pack(side="left", padx=(0, 8))
         row += 1
 
-        ttk.Label(parent, textvariable=self._status_var,
-                  foreground="#5a9", font=("TkSmallCaptionFont",)) \
-            .grid(column=0, row=row, columnspan=3, sticky="w", padx=10, pady=(0, 10))
+        ttk.Label(parent, textvariable=self._status_var, foreground="#5a9", font=("TkSmallCaptionFont",)).grid(
+            column=0, row=row, columnspan=3, sticky="w", padx=10, pady=(0, 10)
+        )
         row += 1
 
         # --- Active appearance readout ---
@@ -267,8 +279,9 @@ class SettingsTab:
         ttk.Label(info_frame, textvariable=self._info_font_var).grid(column=1, row=1, sticky="w", padx=6, pady=2)
         row += 1
 
-        ttk.Separator(parent, orient="horizontal") \
-            .grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(10, 10))
+        ttk.Separator(parent, orient="horizontal").grid(
+            column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(10, 10)
+        )
         row += 1
 
         self._build_venv_section(parent, row)
@@ -285,36 +298,34 @@ class SettingsTab:
         lf.grid(column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=(0, 10))
         lf.columnconfigure(1, weight=1)
 
-        ttk.Label(lf, text="Virtual environment:") \
-            .grid(column=0, row=0, sticky="w", padx=6, pady=4)
-        ttk.Entry(lf, textvariable=self.venv_dir_var, width=48) \
-            .grid(column=1, row=0, columnspan=2, sticky="ew", padx=4, pady=4)
+        ttk.Label(lf, text="Virtual environment:").grid(column=0, row=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(lf, textvariable=self.venv_dir_var, width=48).grid(
+            column=1, row=0, columnspan=2, sticky="ew", padx=4, pady=4
+        )
         ttk.Label(
             lf,
             text="Leave blank to use the repo default venv folder.",
             font=("TkSmallCaptionFont",),
         ).grid(column=1, row=1, columnspan=2, sticky="w", padx=4)
 
-        ttk.Label(lf, text="Effective path:") \
-            .grid(column=0, row=2, sticky="w", padx=6, pady=4)
-        ttk.Label(lf, textvariable=self._venv_effective_var) \
-            .grid(column=1, row=2, columnspan=2, sticky="w", padx=4, pady=4)
+        ttk.Label(lf, text="Effective path:").grid(column=0, row=2, sticky="w", padx=6, pady=4)
+        ttk.Label(lf, textvariable=self._venv_effective_var).grid(
+            column=1, row=2, columnspan=2, sticky="w", padx=4, pady=4
+        )
 
-        ttk.Label(lf, text="Status:") \
-            .grid(column=0, row=3, sticky="w", padx=6, pady=4)
-        ttk.Label(lf, textvariable=self._venv_status_var) \
-            .grid(column=1, row=3, columnspan=2, sticky="w", padx=4, pady=4)
+        ttk.Label(lf, text="Status:").grid(column=0, row=3, sticky="w", padx=6, pady=4)
+        ttk.Label(lf, textvariable=self._venv_status_var).grid(
+            column=1, row=3, columnspan=2, sticky="w", padx=4, pady=4
+        )
 
         btns = ttk.Frame(lf)
         btns.grid(column=1, row=4, columnspan=2, sticky="w", padx=4, pady=(4, 6))
-        ttk.Button(btns, text="Create venv", command=self._on_create_venv) \
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Remove venv", command=self._on_remove_venv) \
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Refresh deps", command=self._schedule_venv_dependency_probe) \
-            .pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Clear path", command=lambda: self.venv_dir_var.set("")) \
-            .pack(side="left")
+        ttk.Button(btns, text="Create venv", command=self._on_create_venv).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Remove venv", command=self._on_remove_venv).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Refresh deps", command=self._schedule_venv_dependency_probe).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(btns, text="Clear path", command=lambda: self.venv_dir_var.set("")).pack(side="left")
 
         ttk.Label(
             lf,
@@ -361,6 +372,14 @@ class SettingsTab:
         self._on_font_size_choice_changed()
 
     def _on_venv_dir_changed(self):
+        # Bump generation so any worker already mid-flight against the
+        # OLD venv path silently drops its result via the existing
+        # ``generation == self._venv_probe_generation`` check
+        # (~line 472). Without this, a probe that started moments
+        # before the user edited the venv-dir entry would land its
+        # stale rows into the table after the new probe scheduled
+        # below — making the UI show packages from the prior directory.
+        self._venv_probe_generation += 1
         self._refresh_venv_summary()
         self._schedule_venv_dependency_probe()
 
@@ -376,13 +395,9 @@ class SettingsTab:
             self._venv_status_var.set("Virtual environment not created yet.")
         if info.uses_default:
             if active_path:
-                self._venv_note_var.set(
-                    f"Blank entry activates the repo default venv: {active_path}"
-                )
+                self._venv_note_var.set(f"Blank entry activates the repo default venv: {active_path}")
             else:
-                self._venv_note_var.set(
-                    f"Blank entry creates or probes the repo default path: {info.effective_dir}"
-                )
+                self._venv_note_var.set(f"Blank entry creates or probes the repo default path: {info.effective_dir}")
         else:
             self._venv_note_var.set(
                 "Relative paths resolve from the repo root, and launch/GPU detection use this same resolved path."
@@ -418,9 +433,7 @@ class SettingsTab:
                     pass
                 self._venv_probe_drain_after_id = None
             self._rebuild_dependency_rows([])
-            self._venv_action_status_var.set(
-                "Create a venv or point this field at an existing one to manage packages."
-            )
+            self._venv_action_status_var.set("Create a venv or point this field at an existing one to manage packages.")
             return
         self._venv_action_status_var.set("Checking managed packages…")
         threading.Thread(
@@ -440,9 +453,7 @@ class SettingsTab:
             except Exception:
                 pass
         try:
-            self._venv_probe_drain_after_id = self.root.after(
-                75, self._drain_venv_dependency_probe
-            )
+            self._venv_probe_drain_after_id = self.root.after(75, self._drain_venv_dependency_probe)
         except tk.TclError:
             self._venv_probe_drain_after_id = None
 
@@ -486,17 +497,17 @@ class SettingsTab:
         for child in frame.winfo_children():
             child.destroy()
         status_by_key = {row.dependency.key: row for row in statuses}
-        has_venv = self._current_venv_info().looks_like_venv and bool(
-            self._current_active_venv_path()
-        )
+        has_venv = self._current_venv_info().looks_like_venv and bool(self._current_active_venv_path())
         for row_index, dep in enumerate(venv_manager.MANAGED_DEPENDENCIES):
             status = status_by_key.get(dep.key)
             can_install = bool(has_venv and status is not None and not status.available)
-            can_remove = bool(
-                has_venv and status is not None and status.available and not dep.required
-            )
+            can_remove = bool(has_venv and status is not None and status.available and not dep.required)
             ttk.Label(frame, text=f"{dep.label}:").grid(
-                column=0, row=row_index, sticky="nw", padx=4, pady=4,
+                column=0,
+                row=row_index,
+                sticky="nw",
+                padx=4,
+                pady=4,
             )
             ttk.Label(
                 frame,
@@ -611,9 +622,7 @@ class SettingsTab:
         # intent so the next launch/launcher continues to resolve it
         # against the active repo_dir. ``info.effective_dir`` is only
         # used internally for the actual ``python -m venv`` invocation.
-        self._venv_action_status_var.set(
-            f"Opened terminal to create venv at {info.effective_dir}."
-        )
+        self._venv_action_status_var.set(f"Opened terminal to create venv at {info.effective_dir}.")
         messagebox.showinfo(
             "Create venv",
             "Opened a terminal to create the virtual environment. The terminal will report success or failure; refresh deps when it finishes.",
@@ -646,9 +655,7 @@ class SettingsTab:
         except Exception as exc:
             messagebox.showerror("Remove venv", f"Failed to remove venv:\n{exc}")
             return
-        self._venv_action_status_var.set(
-            f"Opened terminal to remove venv at {info.effective_dir}."
-        )
+        self._venv_action_status_var.set(f"Opened terminal to remove venv at {info.effective_dir}.")
         # Bump the probe generation BEFORE clearing the table so any
         # in-flight ``_schedule_venv_dependency_probe`` worker that
         # completes after this point silently drops its result via
@@ -691,9 +698,7 @@ class SettingsTab:
                 pass
             self._venv_remove_refresh_after_id = None
         try:
-            self._venv_remove_refresh_after_id = self.root.after(
-                2000, self._run_remove_venv_refresh
-            )
+            self._venv_remove_refresh_after_id = self.root.after(2000, self._run_remove_venv_refresh)
         except tk.TclError:
             self._venv_remove_refresh_after_id = None
 
@@ -722,9 +727,7 @@ class SettingsTab:
         except Exception as exc:
             messagebox.showerror("Install dependency", f"Failed to install dependency:\n{exc}")
             return
-        self._venv_action_status_var.set(
-            f"Opened terminal to install {dependency.package_name}."
-        )
+        self._venv_action_status_var.set(f"Opened terminal to install {dependency.package_name}.")
 
     def _on_remove_dependency(self, dependency):
         info = self._current_venv_info()
@@ -740,9 +743,7 @@ class SettingsTab:
         except Exception as exc:
             messagebox.showerror("Remove dependency", f"Failed to remove dependency:\n{exc}")
             return
-        self._venv_action_status_var.set(
-            f"Opened terminal to remove {dependency.package_name}."
-        )
+        self._venv_action_status_var.set(f"Opened terminal to remove {dependency.package_name}.")
 
     def _validate_custom_digit(self, proposed):
         """Entry validatecommand: only allow empty or pure digit strings up to 3 chars."""
@@ -776,8 +777,7 @@ class SettingsTab:
         except (TypeError, ValueError):
             return 0
 
-    def _persist_ui_settings(self, new_values, failure_title,
-                             failure_prefix, log_prefix):
+    def _persist_ui_settings(self, new_values, failure_title, failure_prefix, log_prefix):
         """Apply a dict of new UI settings to app_settings and save.
 
         Snapshots the keys we're about to touch first, so that if
@@ -900,10 +900,10 @@ class SettingsTab:
         # persist values the user was told weren't saved.
         if not self._persist_ui_settings(
             {
-                "ui_theme_mode":  mode,
-                "ui_theme_name":  theme_name,
+                "ui_theme_mode": mode,
+                "ui_theme_name": theme_name,
                 "ui_font_family": family,
-                "ui_font_size":   size,
+                "ui_font_size": size,
             },
             failure_title="Save failed",
             failure_prefix="Could not persist settings",
@@ -938,8 +938,11 @@ class SettingsTab:
 
         try:
             ui_theme.apply_ui_preferences(
-                self.root, theme_mode="auto",
-                explicit_theme=None, font_family="", font_size=0,
+                self.root,
+                theme_mode="auto",
+                explicit_theme=None,
+                font_family="",
+                font_size=0,
             )
         except Exception as e:
             # Same rationale as _apply_and_save: never mutate / persist a
@@ -953,10 +956,10 @@ class SettingsTab:
         # persist values the user was told weren't saved.
         if not self._persist_ui_settings(
             {
-                "ui_theme_mode":  "auto",
-                "ui_theme_name":  "",
+                "ui_theme_mode": "auto",
+                "ui_theme_name": "",
                 "ui_font_family": "",
-                "ui_font_size":   0,
+                "ui_font_size": 0,
             },
             failure_title="Save failed",
             failure_prefix="Could not persist reset",

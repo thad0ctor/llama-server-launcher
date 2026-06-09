@@ -132,6 +132,11 @@ def test_install_button_uses_active_venv(hf_launcher_stub, active_venv, monkeypa
     cmd_str = launch_mock.call_args.args[0]
     assert "pip" in cmd_str and "install" in cmd_str
     assert "huggingface_hub[cli]" in cmd_str
+    # The install command MUST invoke the venv's interpreter (its
+    # ``.stem`` is ``python``), not a bare ``pip`` that could pick up
+    # the system Python and silently install into the wrong site —
+    # this is the whole point of routing through ``venv_manager``.
+    assert str(_python) in cmd_str
     assert launch_mock.call_args.kwargs["cwd"] == repo_dir
 
 

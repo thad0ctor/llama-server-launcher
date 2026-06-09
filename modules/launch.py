@@ -276,21 +276,17 @@ class LaunchManager:
 
         if self.launcher.fit_ctx.get().strip():
             print(
-                "DEBUG: ik_llama has no --fit-ctx equivalent; "
-                "ignoring fit_ctx value",
+                "DEBUG: ik_llama has no --fit-ctx equivalent; " "ignoring fit_ctx value",
                 file=sys.stderr,
             )
 
         fit_target_val = self.launcher.fit_target.get().strip()
         if fit_target_val and fit_target_val != "1024":
-            margin_supported = (not probe) or self._backend_supports_flag(
-                exe_path, "--fit-margin"
-            )
+            margin_supported = (not probe) or self._backend_supports_flag(exe_path, "--fit-margin")
             if margin_supported:
                 cmd.extend(["--fit-margin", fit_target_val])
                 print(
-                    f"DEBUG: Adding --fit-margin {fit_target_val} "
-                    f"(mapped from fit_target, probed={probe})",
+                    f"DEBUG: Adding --fit-margin {fit_target_val} " f"(mapped from fit_target, probed={probe})",
                     file=sys.stderr,
                 )
             else:
@@ -328,18 +324,29 @@ class LaunchManager:
             messagebox.showerror("Error", f"{backend_name} root directory is not set.")
             return None
         try:
-            backend_base_dir = Path(backend_dir_str).resolve() # Resolve the base dir
-            if not backend_base_dir.is_dir(): raise NotADirectoryError()
+            backend_base_dir = Path(backend_dir_str).resolve()  # Resolve the base dir
+            if not backend_base_dir.is_dir():
+                raise NotADirectoryError()
         except Exception:
-             messagebox.showerror("Error", f"Invalid {backend_name} directory:\n{backend_dir_str}")
-             return None
+            messagebox.showerror("Error", f"Invalid {backend_name} directory:\n{backend_dir_str}")
+            return None
 
         # Find server executable for the selected backend
         exe_path = self._find_server_executable(backend_base_dir, backend)
         if not exe_path:
-            search_locs_str = "\n - ".join([str(p) for p in [
-                 Path("."), Path("build/bin/Release"), Path("build/bin"), Path("build"), Path("bin"), Path("server")
-            ]])
+            search_locs_str = "\n - ".join(
+                [
+                    str(p)
+                    for p in [
+                        Path("."),
+                        Path("build/bin/Release"),
+                        Path("build/bin"),
+                        Path("build"),
+                        Path("bin"),
+                        Path("server"),
+                    ]
+                ]
+            )
 
             # Get backend-specific executable names for error message
             if backend == "ik_llama":
@@ -350,10 +357,12 @@ class LaunchManager:
                 backend_display = "llama.cpp"
 
             exe_names_str = "', '".join(exe_names)
-            messagebox.showerror("Executable Not Found",
-                                 f"Could not find '{exe_names_str}' within:\n{backend_base_dir}\n\n"
-                                 f"Searched in common relative locations like:\n - {search_locs_str}\n\n"
-                                 f"Please ensure {backend_display} is built and the directory is correct.")
+            messagebox.showerror(
+                "Executable Not Found",
+                f"Could not find '{exe_names_str}' within:\n{backend_base_dir}\n\n"
+                f"Searched in common relative locations like:\n - {search_locs_str}\n\n"
+                f"Please ensure {backend_display} is built and the directory is correct.",
+            )
             return None
 
         cmd = [str(exe_path)]
@@ -364,43 +373,50 @@ class LaunchManager:
             messagebox.showerror("Error", "No model selected. Please scan and select a model from the list.")
             return None
         try:
-            model_path_obj = Path(model_full_path_str).resolve() # Resolve the path from the variable
+            model_path_obj = Path(model_full_path_str).resolve()  # Resolve the path from the variable
             # Cross-check if the resolved path matches the one from our scan results
             # This handles cases where the user might manually type a path or the saved path is slightly different
             selected_name = ""
             sel = self.launcher.model_listbox.curselection()
-            if sel: selected_name = self.launcher.model_listbox.get(sel[0])
+            if sel:
+                selected_name = self.launcher.model_listbox.get(sel[0])
 
             scan_matched_path = self.launcher.found_models.get(selected_name)
 
             if scan_matched_path and scan_matched_path == model_path_obj:
-                 # The path from the variable matches the resolved path of the selected item from the scan. Use it.
-                 final_model_path = str(model_path_obj)
+                # The path from the variable matches the resolved path of the selected item from the scan. Use it.
+                final_model_path = str(model_path_obj)
             elif model_path_obj.is_file():
-                 # The path from the variable is a valid file, but doesn't match the scan result for the selected item (or no item selected).
-                 # This could happen if the user manually pasted a path. Use it, but maybe warn?
-                 # For now, just use it if it's a valid file.
-                 final_model_path = str(model_path_obj)
-                 if selected_name and (not scan_matched_path or scan_matched_path != model_path_obj):
-                     print(f"Warning: Model path from entry '{model_full_path_str}' doesn't exactly match the selected item '{selected_name}' from scan ('{scan_matched_path if scan_matched_path else 'Not in scan list'}'). Using path from entry.", file=sys.stderr)
+                # The path from the variable is a valid file, but doesn't match the scan result for the selected item (or no item selected).
+                # This could happen if the user manually pasted a path. Use it, but maybe warn?
+                # For now, just use it if it's a valid file.
+                final_model_path = str(model_path_obj)
+                if selected_name and (not scan_matched_path or scan_matched_path != model_path_obj):
+                    print(
+                        f"Warning: Model path from entry '{model_full_path_str}' doesn't exactly match the selected item '{selected_name}' from scan ('{scan_matched_path if scan_matched_path else 'Not in scan list'}'). Using path from entry.",
+                        file=sys.stderr,
+                    )
             else:
-                 # The path from the variable is not a valid file and doesn't match the scan result for the selected item.
-                 error_msg = f"Invalid or missing model file:\n{model_full_path_str}"
-                 if selected_name: error_msg += f"\n(Selected in GUI: {selected_name})"
-                 error_msg += "\n\nPlease re-scan models or select a valid model file."
-                 messagebox.showerror("Error", error_msg)
-                 return None
+                # The path from the variable is not a valid file and doesn't match the scan result for the selected item.
+                error_msg = f"Invalid or missing model file:\n{model_full_path_str}"
+                if selected_name:
+                    error_msg += f"\n(Selected in GUI: {selected_name})"
+                error_msg += "\n\nPlease re-scan models or select a valid model file."
+                messagebox.showerror("Error", error_msg)
+                return None
 
         except Exception as e:
-             # Catch other exceptions during path validation
-             selected_name = ""
-             sel = self.launcher.model_listbox.curselection()
-             if sel: selected_name = self.launcher.model_listbox.get(sel[0])
-             error_msg = f"Error validating model path:\n{model_full_path_str}\nError: {e}"
-             if selected_name: error_msg += f"\n(Selected in GUI: {selected_name})"
-             error_msg += "\n\nPlease re-scan models or select a valid model."
-             messagebox.showerror("Error", error_msg)
-             return None
+            # Catch other exceptions during path validation
+            selected_name = ""
+            sel = self.launcher.model_listbox.curselection()
+            if sel:
+                selected_name = self.launcher.model_listbox.get(sel[0])
+            error_msg = f"Error validating model path:\n{model_full_path_str}\nError: {e}"
+            if selected_name:
+                error_msg += f"\n(Selected in GUI: {selected_name})"
+            error_msg += "\n\nPlease re-scan models or select a valid model."
+            messagebox.showerror("Error", error_msg)
+            return None
 
         cmd.extend(["-m", final_model_path])
 
@@ -412,23 +428,22 @@ class LaunchManager:
         no_mmproj_set = False
         try:
             no_mmproj_var = getattr(self.launcher, "no_mmproj", None)
-            no_mmproj_set = bool(
-                no_mmproj_var is not None
-                and no_mmproj_var.get()
-                and backend != "ik_llama"
-            )
+            no_mmproj_set = bool(no_mmproj_var is not None and no_mmproj_var.get() and backend != "ik_llama")
         except Exception:
             no_mmproj_set = False
         if no_mmproj_set and self.launcher.mmproj_enabled.get():
             print(
-                "INFO: --no-mmproj is set; skipping --mmproj auto-detection to "
-                "avoid a contradictory flag pair.",
+                "INFO: --no-mmproj is set; skipping --mmproj auto-detection to " "avoid a contradictory flag pair.",
                 file=sys.stderr,
             )
         if self.launcher.mmproj_enabled.get() and not no_mmproj_set:
             try:
                 mmproj_file = None
-                selected_mmproj_str = self.launcher.selected_mmproj_path.get().strip() if hasattr(self.launcher, "selected_mmproj_path") else ""
+                selected_mmproj_str = (
+                    self.launcher.selected_mmproj_path.get().strip()
+                    if hasattr(self.launcher, "selected_mmproj_path")
+                    else ""
+                )
                 if selected_mmproj_str:
                     selected_mmproj = Path(selected_mmproj_str).resolve()
                     if selected_mmproj.is_file():
@@ -448,11 +463,10 @@ class LaunchManager:
                         for pattern in (r"\.gguf\.part\d+of\d+$", r"-\d+-of-\d+\.gguf$"):
                             normalized_name = re.sub(pattern, ".gguf", normalized_name, flags=re.I)
                         model_stem_l = re.sub(r"\.gguf$", "", normalized_name, flags=re.I)
-                        candidates = [
-                            c for c in model_dir.iterdir()
-                            if c.is_file() and "mmproj" in c.name.lower()
-                        ]
-                        preferred = next((c for c in candidates if model_stem_l and model_stem_l in c.name.lower()), None)
+                        candidates = [c for c in model_dir.iterdir() if c.is_file() and "mmproj" in c.name.lower()]
+                        preferred = next(
+                            (c for c in candidates if model_stem_l and model_stem_l in c.name.lower()), None
+                        )
                         mmproj_file = preferred or (candidates[0] if candidates else None)
 
                 if mmproj_file:
@@ -489,11 +503,11 @@ class LaunchManager:
             # subprocess per launch — not one per flag.
             def _probe(flag, _exe=exe_path):
                 return self._backend_supports_flag(_exe, flag)
+
             reasoning_supports = _probe
         emit_reasoning_args(self.launcher, cmd, supports_flag=reasoning_supports)
         emit_kv_unify_args(self.launcher, backend, cmd)
         emit_no_mmproj_arg(self.launcher, backend, cmd)
-
 
         # --- Other Arguments ---
         # --- KV Cache Type ---
@@ -516,7 +530,9 @@ class LaunchManager:
                 cmd.extend(["--cache-type-v", kv_cache_type_val])
                 print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
         else:
-            print("DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk/-ctv is enabled", file=sys.stderr)
+            print(
+                "DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk/-ctv is enabled", file=sys.stderr
+            )
 
         # Remove the separate V cache type handling since we always want it to match K
         # v_cache_type_val = self.launcher.cache_type_v.get().strip()
@@ -530,8 +546,10 @@ class LaunchManager:
         # The _add_arg helper needs to compare against the *llama.cpp* default for omission.
         # But the default *value* shown in the GUI should still be physical cores.
         # Let's compare against the llama.cpp default (logical cores) when deciding whether to *add* the arg.
-        self.add_arg(cmd, "--threads", self.launcher.threads.get(), str(self.launcher.logical_cores)) # Omit if matches llama.cpp default (logical)
-        self.add_arg(cmd, "--threads-batch", self.launcher.threads_batch.get())              # Always pass (no default comparison)
+        self.add_arg(
+            cmd, "--threads", self.launcher.threads.get(), str(self.launcher.logical_cores)
+        )  # Omit if matches llama.cpp default (logical)
+        self.add_arg(cmd, "--threads-batch", self.launcher.threads_batch.get())  # Always pass (no default comparison)
 
         # Llama.cpp internal defaults: --batch-size=512, --ubatch-size=512
         # Always pass batch settings regardless of default values
@@ -539,7 +557,7 @@ class LaunchManager:
         self.add_arg(cmd, "--ubatch-size", self.launcher.ubatch_size.get())
 
         # Llama.cpp internal defaults: --ctx-size=2048, --seed=-1, --temp=0.8, --min-p=0.05
-        self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()), "2048") # Use str() for int var
+        self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()), "2048")  # Use str() for int var
         self.add_arg(cmd, "--seed", self.launcher.seed.get(), "-1")
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
@@ -550,7 +568,7 @@ class LaunchManager:
 
         # Add --tensor-split if the value is non-empty
         # Use add_arg which handles the non-empty check
-        self.add_arg(cmd, "--tensor-split", tensor_split_val, "") # Add if non-empty string is provided by user
+        self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
 
         # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
         # This argument will now be added regardless of the --tensor-split value
@@ -589,44 +607,47 @@ class LaunchManager:
             self._build_llama_cpp_fit_args(cmd)
 
         # Memory options
-        self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get()) # Omit if False (default)
-        self.add_arg(cmd, "--mlock", self.launcher.mlock.get()) # Omit if False (default)
-        self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get()) # Omit if False (default)
+        self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get())  # Omit if False (default)
+        self.add_arg(cmd, "--mlock", self.launcher.mlock.get())  # Omit if False (default)
+        self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get())  # Omit if False (default)
 
         # Performance options
-        self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0") # Omit if 0 (default)
+        self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0")  # Omit if 0 (default)
 
         # MTP enforces single-slot operation (-np 1). resolve_effective_parallel
         # applies the override + stderr warning when MTP is active; see
         # modules/spec_launch.py for rationale.
         parallel_val = resolve_effective_parallel(self.launcher, backend)
-        self.add_arg(cmd, "--parallel", parallel_val, "1") # Omit if 1 (default)
+        self.add_arg(cmd, "--parallel", parallel_val, "1")  # Omit if 1 (default)
 
         # --- MoE CPU options ---
-        self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get()) # Omit if False (default)
-        self.add_arg(cmd, "--n-cpu-moe", self.launcher.n_cpu_moe.get(), "") # Omit if empty (default)
+        self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get())  # Omit if False (default)
+        self.add_arg(cmd, "--n-cpu-moe", self.launcher.n_cpu_moe.get(), "")  # Omit if empty (default)
 
         # --- NEW: Generation options ---
-        self.add_arg(cmd, "--ignore-eos", self.launcher.ignore_eos.get()) # Omit if False (default)
-        self.add_arg(cmd, "--n-predict", self.launcher.n_predict.get(), "-1") # Omit if -1 (default)
+        self.add_arg(cmd, "--ignore-eos", self.launcher.ignore_eos.get())  # Omit if False (default)
+        self.add_arg(cmd, "--n-predict", self.launcher.n_predict.get(), "-1")  # Omit if -1 (default)
 
         # --- Network Settings ---
-        self.add_arg(cmd, "--host", self.launcher.host.get(), "127.0.0.1") # Add host if not default
-        self.add_arg(cmd, "--port", self.launcher.port.get(), "8080") # Add port if not default
+        self.add_arg(cmd, "--host", self.launcher.host.get(), "127.0.0.1")  # Add host if not default
+        self.add_arg(cmd, "--port", self.launcher.port.get(), "8080")  # Add port if not default
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Add --chat-template option ONLY if the source is not "default" (llama.cpp decides)
         source = self.launcher.template_source.get()
         if source in ["predefined", "custom"]:
-             effective_template = self.launcher.current_template_display.get().strip()
-             if effective_template: # Only add the argument if the effective template string is non-empty
-                  # No default_value check needed here because if it's empty, the arg isn't added anyway by the outer if
-                  cmd.extend(["--chat-template", effective_template])
-                  print(f"DEBUG: Adding --chat-template: {effective_template[:50]}...", file=sys.stderr)
-             else:
-                  print("DEBUG: Chat template source is predefined/custom, but effective template string is empty. Omitting --chat-template.", file=sys.stderr)
-        else: # source == "default"
-             print("DEBUG: Chat template source is 'Let llama.cpp Decide'. Omitting --chat-template.", file=sys.stderr)
+            effective_template = self.launcher.current_template_display.get().strip()
+            if effective_template:  # Only add the argument if the effective template string is non-empty
+                # No default_value check needed here because if it's empty, the arg isn't added anyway by the outer if
+                cmd.extend(["--chat-template", effective_template])
+                print(f"DEBUG: Adding --chat-template: {effective_template[:50]}...", file=sys.stderr)
+            else:
+                print(
+                    "DEBUG: Chat template source is predefined/custom, but effective template string is empty. Omitting --chat-template.",
+                    file=sys.stderr,
+                )
+        else:  # source == "default"
+            print("DEBUG: Chat template source is 'Let llama.cpp Decide'. Omitting --chat-template.", file=sys.stderr)
 
         # --- Jinja rendering (server-side chat template engine) ---
         # --jinja is a standalone boolean flag on both llama-server and ik_llama-server.
@@ -645,7 +666,10 @@ class LaunchManager:
                 print(f"DEBUG: Added custom param: {param_string} -> {split_params}", file=sys.stderr)
             except Exception as e:
                 print(f"WARNING: Could not parse custom parameter '{param_string}': {e}. Skipping.", file=sys.stderr)
-                messagebox.showwarning("Custom Parameter Warning", f"Could not parse custom parameter '{param_string}': {e}\nIt will be ignored.")
+                messagebox.showwarning(
+                    "Custom Parameter Warning",
+                    f"Could not parse custom parameter '{param_string}': {e}\nIt will be ignored.",
+                )
 
         # --- NEW: Add ik_llama Specific Flags ---
         if backend == "ik_llama":
@@ -675,42 +699,63 @@ class LaunchManager:
         # PCIe devices), so this advisory's "the script will set
         # CUDA_VISIBLE_DEVICES=..." claim becomes a lie. Skip it entirely.
         cuda_action, _cuda_val = self._resolve_cuda_visible_devices_action()
-        cuda_export_active = (cuda_action == "export")
+        cuda_export_active = cuda_action == "export"
 
         # Only warn if GPUs were detected, the user selected a *subset*, --tensor-split is not used,
         # AND the resolver will actually export CUDA_VISIBLE_DEVICES (skips manual mode).
-        if cuda_export_active and detected_gpu_count > 0 and len(effective_gpus) > 0 and len(effective_gpus) < detected_gpu_count and not tensor_split_val:
-             # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
-             print(f"\nINFO: Specific GPUs ({effective_indices_str}) were selected via checkboxes, but --tensor-split was not used.", file=sys.stderr)
-             # The PowerShell script will set CUDA_VISIBLE_DEVICES, so the warning applies more generally now.
-             print("      llama-server might default to using all available GPUs unless restricted by CUDA_VISIBLE_DEVICES environment variable.", file=sys.stderr)
-             if draft_only_gpus:
-                  # Draft GPUs unioned into the visible set: warn the user
-                  # that the main model can spill onto them unless they
-                  # constrain it via --tensor-split. This is the explicit
-                  # tradeoff of Option C (auto-union + advisory).
-                  print(
-                      f"      INFO: GPUs {draft_only_gpus} were added to CUDA_VISIBLE_DEVICES for the draft model. "
-                      f"Without --tensor-split the main model can spill onto them; "
-                      f"set --tensor-split to keep the main model on {ordered_selected_gpus}.",
-                      file=sys.stderr,
-                  )
-             if sys.platform != "win32":
-                  # Only print the bash/export example on Linux/macOS if needed
-                  print(f"      To restrict server to GPUs {effective_indices_str}, set CUDA_VISIBLE_DEVICES={effective_indices_str} environment variable *before* launching (e.g., 'export CUDA_VISIBLE_DEVICES={effective_indices_str}' on Linux/macOS bash).", file=sys.stderr)
-             else:
-                 # On Windows, the script *will* set it if GPUs are selected, but reinforce
-                  print(f"      The generated PowerShell script will set CUDA_VISIBLE_DEVICES={effective_indices_str}.", file=sys.stderr)
+        if (
+            cuda_export_active
+            and detected_gpu_count > 0
+            and len(effective_gpus) > 0
+            and len(effective_gpus) < detected_gpu_count
+            and not tensor_split_val
+        ):
+            # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
+            print(
+                f"\nINFO: Specific GPUs ({effective_indices_str}) were selected via checkboxes, but --tensor-split was not used.",
+                file=sys.stderr,
+            )
+            # The PowerShell script will set CUDA_VISIBLE_DEVICES, so the warning applies more generally now.
+            print(
+                "      llama-server might default to using all available GPUs unless restricted by CUDA_VISIBLE_DEVICES environment variable.",
+                file=sys.stderr,
+            )
+            if draft_only_gpus:
+                # Draft GPUs unioned into the visible set: warn the user
+                # that the main model can spill onto them unless they
+                # constrain it via --tensor-split. This is the explicit
+                # tradeoff of Option C (auto-union + advisory).
+                print(
+                    f"      INFO: GPUs {draft_only_gpus} were added to CUDA_VISIBLE_DEVICES for the draft model. "
+                    f"Without --tensor-split the main model can spill onto them; "
+                    f"set --tensor-split to keep the main model on {ordered_selected_gpus}.",
+                    file=sys.stderr,
+                )
+            if sys.platform != "win32":
+                # Only print the bash/export example on Linux/macOS if needed
+                print(
+                    f"      To restrict server to GPUs {effective_indices_str}, set CUDA_VISIBLE_DEVICES={effective_indices_str} environment variable *before* launching (e.g., 'export CUDA_VISIBLE_DEVICES={effective_indices_str}' on Linux/macOS bash).",
+                    file=sys.stderr,
+                )
+            else:
+                # On Windows, the script *will* set it if GPUs are selected, but reinforce
+                print(
+                    f"      The generated PowerShell script will set CUDA_VISIBLE_DEVICES={effective_indices_str}.",
+                    file=sys.stderr,
+                )
 
-             print("      Alternatively, use --tensor-split to explicitly assign layers.", file=sys.stderr)
+            print("      Alternatively, use --tensor-split to explicitly assign layers.", file=sys.stderr)
         elif len(ordered_selected_gpus) > 0 and detected_gpu_count > 0:
-             # If GPUs were selected (and there are GPUs), maybe a general reminder about env vars?
-             # Or just assume the user knows if they selected. Keep the message only for subset selection without tensor-split.
-             pass
+            # If GPUs were selected (and there are GPUs), maybe a general reminder about env vars?
+            # Or just assume the user knows if they selected. Keep the message only for subset selection without tensor-split.
+            pass
 
         # Keep the info message about precedence if tensor-split is present, as the server will likely still follow it.
         if tensor_split_val:
-             print(f"INFO: --tensor-split is set ('{tensor_split_val}'), this usually takes precedence over --n-gpu-layers for layer distribution.", file=sys.stderr)
+            print(
+                f"INFO: --tensor-split is set ('{tensor_split_val}'), this usually takes precedence over --n-gpu-layers for layer distribution.",
+                file=sys.stderr,
+            )
 
         print("\n--- Generated Command ---", file=sys.stderr)
         # Use shlex.quote to make command printable and copy-pasteable in shells
@@ -735,12 +780,12 @@ class LaunchManager:
         # Define common potential locations relative to the base directory
         # Use Path objects directly for platform-independent path joining
         search_paths_rel = [
-            Path("."), # Current directory (might be where user launched from, useful for local builds)
+            Path("."),  # Current directory (might be where user launched from, useful for local builds)
             Path("build/bin/Release"),
             Path("build/bin"),
             Path("build"),
             Path("bin"),
-            Path("server"), # Some build scripts might put it directly in 'server'
+            Path("server"),  # Some build scripts might put it directly in 'server'
         ]
 
         # Search in common relative paths first
@@ -750,7 +795,7 @@ class LaunchManager:
                 full_path = llama_base_dir / rel_path / exe_name
                 if full_path.is_file():
                     print(f"DEBUG: Found server executable at: {full_path}", file=sys.stderr)
-                    return full_path.resolve() # Return the resolved path
+                    return full_path.resolve()  # Return the resolved path
 
         # As a last resort, check if the base directory *itself* is the bin directory
         # and contains the executable directly. This handles cases where build puts it
@@ -758,11 +803,14 @@ class LaunchManager:
         for exe_name in exe_names:
             direct_path = llama_base_dir / exe_name
             if direct_path.is_file():
-                 print(f"DEBUG: Found server executable directly in base dir: {direct_path}", file=sys.stderr)
-                 return direct_path.resolve()
+                print(f"DEBUG: Found server executable directly in base dir: {direct_path}", file=sys.stderr)
+                return direct_path.resolve()
 
-        print(f"DEBUG: Server executable '{', '.join(exe_names)}' not found in {llama_base_dir} or common subdirectories.", file=sys.stderr)
-        return None # Executable not found anywhere
+        print(
+            f"DEBUG: Server executable '{', '.join(exe_names)}' not found in {llama_base_dir} or common subdirectories.",
+            file=sys.stderr,
+        )
+        return None  # Executable not found anywhere
 
     def _get_llama_cpp_executable_names(self):
         """Get possible executable names for llama.cpp backend."""
@@ -813,7 +861,7 @@ class LaunchManager:
         survive verbatim (e.g. file paths used for ``. <path>``); use
         :meth:`_ps_escape_single_quoted` instead.
         """
-        return s.replace('`', '``').replace('"', '`"')
+        return s.replace("`", "``").replace('"', '`"')
 
     @staticmethod
     def _ps_escape_single_quoted(s):
@@ -871,9 +919,7 @@ class LaunchManager:
             current = cmd_list[i]
             if current == "--chat-template":
                 if i + 1 >= len(cmd_list):
-                    raise ValueError(
-                        "Malformed cmd_list: --chat-template flag has no value"
-                    )
+                    raise ValueError("Malformed cmd_list: --chat-template flag has no value")
                 template_string = cmd_list[i + 1]
                 escaped_template = template_string.replace("'", "''")
                 parts.append("--chat-template")
@@ -896,19 +942,19 @@ class LaunchManager:
 
         if is_bool_var:
             if value.get():
-                 cmd_list.append(arg_name)
-                 print(f"DEBUG: Adding flag '{arg_name}' (True)", file=sys.stderr)
+                cmd_list.append(arg_name)
+                print(f"DEBUG: Adding flag '{arg_name}' (True)", file=sys.stderr)
             else:
-                 print(f"DEBUG: Omitting flag '{arg_name}' (False)", file=sys.stderr)
+                print(f"DEBUG: Omitting flag '{arg_name}' (False)", file=sys.stderr)
             return
 
         if is_bool_py:
-             if value:
-                  cmd_list.append(arg_name)
-                  print(f"DEBUG: Adding flag '{arg_name}' (True)", file=sys.stderr)
-             else:
-                  print(f"DEBUG: Omitting flag '{arg_name}' (False)", file=sys.stderr)
-             return
+            if value:
+                cmd_list.append(arg_name)
+                print(f"DEBUG: Adding flag '{arg_name}' (True)", file=sys.stderr)
+            else:
+                print(f"DEBUG: Omitting flag '{arg_name}' (False)", file=sys.stderr)
+            return
 
         # Handle non-boolean arguments (string, int, float)
         # Get the string representation of the value
@@ -923,18 +969,24 @@ class LaunchManager:
         # Logic:
         # Add the arg and value if actual_value_str is non-empty AND (default_value_str is None OR actual_value_str != default_value_str).
 
-        if actual_value_str: # Check if the user entered *any* value
-             if default_value_str is None or actual_value_str != default_value_str:
-                 # Add the argument if there's no default to compare against,
-                 # OR if the user's value is different from the default.
-                 cmd_list.extend([arg_name, actual_value_str])
-                 print(f"DEBUG: Adding '{arg_name} {actual_value_str}' (non-default)", file=sys.stderr)
-             else:
-                 # User entered the exact default value. Omit the argument.
-                 print(f"DEBUG: Omitting '{arg_name} {actual_value_str}' as it matches default '{default_value_str}'", file=sys.stderr)
+        if actual_value_str:  # Check if the user entered *any* value
+            if default_value_str is None or actual_value_str != default_value_str:
+                # Add the argument if there's no default to compare against,
+                # OR if the user's value is different from the default.
+                cmd_list.extend([arg_name, actual_value_str])
+                print(f"DEBUG: Adding '{arg_name} {actual_value_str}' (non-default)", file=sys.stderr)
+            else:
+                # User entered the exact default value. Omit the argument.
+                print(
+                    f"DEBUG: Omitting '{arg_name} {actual_value_str}' as it matches default '{default_value_str}'",
+                    file=sys.stderr,
+                )
         else:
-             # User entered an empty string. Omit the argument.
-             print(f"DEBUG: Omitting '{arg_name}' due to empty value. Default '{default_value_str}' will be used.", file=sys.stderr)
+            # User entered an empty string. Omit the argument.
+            print(
+                f"DEBUG: Omitting '{arg_name}' due to empty value. Default '{default_value_str}' will be used.",
+                file=sys.stderr,
+            )
 
     def _resolve_cuda_visible_devices_action(self):
         """Decide how generated scripts should handle ``CUDA_VISIBLE_DEVICES``.
@@ -995,7 +1047,7 @@ class LaunchManager:
         venv_path_str = self._effective_venv_path()
         use_venv = bool(venv_path_str)
 
-        tmp_path = None # Initialize tmp_path outside try/except/finally
+        tmp_path = None  # Initialize tmp_path outside try/except/finally
 
         # Resolve how to handle CUDA_VISIBLE_DEVICES for the child process.
         # The action is shared across the Windows (PowerShell) and POSIX (bash)
@@ -1006,15 +1058,13 @@ class LaunchManager:
         if cuda_action != "export":
             cuda_devices_value = ""
 
-        try: # Main try block for creating script and launching process
+        try:  # Main try block for creating script and launching process
             if sys.platform == "win32":
                 # --- MODIFIED: Use temporary PowerShell script instead of batch file ---
                 # Use mkstemp to create a secure temporary file with .ps1 suffix
                 # Use text=True and encoding='utf-8' for cross-platform safety, although file handle needs closing
-                fd, tmp_path = tempfile.mkstemp(suffix=".ps1",
-                                                prefix="llamacpp_launch_",
-                                                text=False)
-                os.close(fd) # Close the file descriptor immediately
+                fd, tmp_path = tempfile.mkstemp(suffix=".ps1", prefix="llamacpp_launch_", text=False)
+                os.close(fd)  # Close the file descriptor immediately
 
                 # Use utf-8 encoding explicitly as templates can contain wide chars
                 with open(tmp_path, "w", encoding="utf-8") as f:
@@ -1027,13 +1077,17 @@ class LaunchManager:
                     f.write(f"    Launches the {backend_display} server with saved settings.\n\n")
                     f.write(" .DESCRIPTION\n")
                     f.write(f"    Autogenerated PowerShell script from {backend_display} Launcher GUI.\n")
-                    f.write(f"    Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server.\n")
+                    f.write(
+                        f"    Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server.\n"
+                    )
                     f.write("#>\n\n")
                     f.write("$ErrorActionPreference = 'Continue'\n\n")
-                    f.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
+                    f.write(
+                        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n"
+                    )
 
                     # --- Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering ---
-                    f.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
+                    f.write("# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n")
                     f.write('$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"\n\n')
 
                     # --- Add CUDA_VISIBLE_DEVICES action ---
@@ -1049,11 +1103,13 @@ class LaunchManager:
                         f.write(f"Write-Host 'Setting CUDA_VISIBLE_DEVICES={quoted_cuda}' -ForegroundColor DarkCyan\n")
                         f.write(f"$env:CUDA_VISIBLE_DEVICES='{quoted_cuda}'\n\n")
                     elif cuda_action == "unset":
-                         # GPUs detected but none selected, or manual GPU mode —
-                         # either way, clear CUDA_VISIBLE_DEVICES so an inherited
-                         # shell value can't silently re-enable filtered hardware.
-                         f.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
-                         f.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
+                        # GPUs detected but none selected, or manual GPU mode —
+                        # either way, clear CUDA_VISIBLE_DEVICES so an inherited
+                        # shell value can't silently re-enable filtered hardware.
+                        f.write(
+                            'Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n'
+                        )
+                        f.write("Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n")
 
                     # --- Add Environmental Variables ---
                     env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
@@ -1073,20 +1129,27 @@ class LaunchManager:
                             # have interpolated those.
                             escaped_value = self._ps_escape_single_quoted(str(var_value))
                             f.write(f"$env:{var_name}='{escaped_value}'\n")
-                        f.write('\n')
+                        f.write("\n")
 
                     if use_venv:
                         venv_path = Path(venv_path_str).resolve()
                         # Check for Activate.ps1
                         act_script = venv_path / "Scripts" / "Activate.ps1"
                         if not act_script.is_file():
-                            messagebox.showerror("Error", f"Venv activation script (Activate.ps1) not found:\n{act_script}")
+                            messagebox.showerror(
+                                "Error", f"Venv activation script (Activate.ps1) not found:\n{act_script}"
+                            )
                             # Note: Cleanup will be attempted in finally if tmp_path was created
                             # Clean up temporary file before returning on error
                             if tmp_path is not None:
-                                 try: Path(tmp_path).unlink()
-                                 except OSError as e: print(f"Warning: Failed to delete temporary script {tmp_path} after venv error: {e}", file=sys.stderr)
-                            return # Exit the launch process
+                                try:
+                                    Path(tmp_path).unlink()
+                                except OSError as e:
+                                    print(
+                                        f"Warning: Failed to delete temporary script {tmp_path} after venv error: {e}",
+                                        file=sys.stderr,
+                                    )
+                            return  # Exit the launch process
 
                         # Use dot-sourcing (. .\path\to\Activate.ps1) to activate in the current shell
                         # Format path with forward slashes for PowerShell compatibility and quote it
@@ -1097,9 +1160,13 @@ class LaunchManager:
                         quoted_ps_act_path = f"'{self._ps_escape_single_quoted(ps_act_path)}'"
                         quoted_ps_venv_str = f"'{self._ps_escape_single_quoted(venv_path_str)}'"
 
-                        f.write(f'Write-Host "Activating virtual environment: " -NoNewline -ForegroundColor Cyan; Write-Host {quoted_ps_venv_str} -ForegroundColor Cyan\n')
+                        f.write(
+                            f'Write-Host "Activating virtual environment: " -NoNewline -ForegroundColor Cyan; Write-Host {quoted_ps_venv_str} -ForegroundColor Cyan\n'
+                        )
                         # Use try/catch to report activation errors but continue
-                        f.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Use global:LASTEXITCODE and pause on error
+                        f.write(
+                            f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n'
+                        )  # Use global:LASTEXITCODE and pause on error
 
                     f.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
@@ -1107,29 +1174,30 @@ class LaunchManager:
                     try:
                         ps_cmd_parts = self._build_ps_cmd_parts(cmd_list)
                     except ValueError as ve:
-                        messagebox.showerror(
-                            "Launch Error",
-                            f"Internal error building launch command: {ve}"
-                        )
+                        messagebox.showerror("Launch Error", f"Internal error building launch command: {ve}")
                         print(f"ERROR: {ve}", file=sys.stderr)
                         if tmp_path is not None:
-                            try: Path(tmp_path).unlink()
-                            except OSError: pass
+                            try:
+                                Path(tmp_path).unlink()
+                            except OSError:
+                                pass
                         return
                     f.write(" ".join(ps_cmd_parts) + "\n\n")
 
                     # Add error check after the command in case llama-server returns a non-zero exit code
                     # Check $LASTEXITCODE, not global:LASTEXITCODE for the server process itself
-                    f.write('if ($LASTEXITCODE -ne 0) {\n')
+                    f.write("if ($LASTEXITCODE -ne 0) {\n")
                     f.write('    Write-Error "Llama-server exited with error code: $LASTEXITCODE."\n')
-                    f.write('    $global:LASTEXITCODE = $LASTEXITCODE # Propagate error code\n') # Propagate for the pause logic
-                    f.write('}\n')
+                    f.write(
+                        "    $global:LASTEXITCODE = $LASTEXITCODE # Propagate error code\n"
+                    )  # Propagate for the pause logic
+                    f.write("}\n")
                     f.write('Write-Host "Server process likely finished or detached." -ForegroundColor Yellow\n')
                     # Pause if script is run directly by double-clicking or outside an interactive shell
                     # Also pause if an error occurred ($global:LASTEXITCODE -ne 0)
                     f.write('if ($Host.Name -eq "ConsoleHost" -or $global:LASTEXITCODE -ne 0) {\n')
                     f.write('    Read-Host -Prompt "Press Enter to close..."\n')
-                    f.write('}\n')
+                    f.write("}\n")
 
                 # Launch the temporary PowerShell file in a new console window
                 # Use shell=False and explicitly call powershell.exe
@@ -1138,10 +1206,13 @@ class LaunchManager:
                 # Use the full path to powershell.exe if needed, but it's usually in PATH
                 # Using -File is crucial to execute the script correctly
                 # Use resolved path for reliability
-                subprocess.Popen(['powershell.exe', '-ExecutionPolicy', 'Bypass', '-File', str(Path(tmp_path).resolve())],
-                                shell=False, creationflags=subprocess.CREATE_NEW_CONSOLE)
+                subprocess.Popen(
+                    ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(Path(tmp_path).resolve())],
+                    shell=False,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
 
-            else: # Linux/macOS (Existing logic using bash -c)
+            else:  # Linux/macOS (Existing logic using bash -c)
                 # The quoting logic for bash -c using shlex.quote is generally robust.
                 # We don't need to special-case --chat-template here using single quotes
                 # because shlex.quote handles embedding complex strings correctly for bash.
@@ -1157,7 +1228,7 @@ class LaunchManager:
                     act_script = venv_path / "bin" / "activate"
                     if not act_script.is_file():
                         messagebox.showerror("Error", f"Venv activation script not found:\n{act_script}")
-                        return # Exit the launch process
+                        return  # Exit the launch process
 
                 # --- Build the bash script content as an ordered list of commands
                 # chained with ' && ', then append the server launch + pause trailer
@@ -1168,11 +1239,11 @@ class LaunchManager:
 
                 if use_venv:
                     # ``act_script`` was validated above.
-                    commands.append(f'source {shlex.quote(str(act_script))}')
+                    commands.append(f"source {shlex.quote(str(act_script))}")
                     commands.append('echo "Virtual environment activated."')
 
                 # CUDA_DEVICE_ORDER is always set for consistent PCIe ordering
-                commands.append('export CUDA_DEVICE_ORDER=PCI_BUS_ID')
+                commands.append("export CUDA_DEVICE_ORDER=PCI_BUS_ID")
 
                 if cuda_action == "export":
                     # ``shlex.quote`` the GPU-index string for the same
@@ -1180,15 +1251,13 @@ class LaunchManager:
                     # bash branch does — defense in depth against a
                     # future resolver bug emitting a non-numeric token
                     # that would otherwise be interpreted by bash.
-                    commands.append(
-                        f"export CUDA_VISIBLE_DEVICES={shlex.quote(str(cuda_devices_value))}"
-                    )
+                    commands.append(f"export CUDA_VISIBLE_DEVICES={shlex.quote(str(cuda_devices_value))}")
                     commands.append('echo "Setting CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"')
                 elif cuda_action == "unset":
                     # GPUs detected but none selected, or manual GPU mode —
                     # either way, clear CUDA_VISIBLE_DEVICES so an inherited
                     # shell value can't silently re-enable filtered hardware.
-                    commands.append('unset CUDA_VISIBLE_DEVICES')
+                    commands.append("unset CUDA_VISIBLE_DEVICES")
                     commands.append('echo "Clearing CUDA_VISIBLE_DEVICES environment variable."')
 
                 env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
@@ -1226,10 +1295,7 @@ class LaunchManager:
                         # escaping.
                         text_value = str(var_value)
                         escaped_value = (
-                            text_value.replace('\\', '\\\\')
-                                     .replace('"', '\\"')
-                                     .replace('$', '\\$')
-                                     .replace('`', '\\`')
+                            text_value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
                         )
                         commands.append(f'export {var_name}="{escaped_value}"')
 
@@ -1240,23 +1306,23 @@ class LaunchManager:
                 # attach the exit-status capture + pause trailer with ';'.
                 # Using </dev/tty ensures read prompts even if stdout is redirected.
                 pause_trailer = (
-                    ' ; command_status=$? ; '
-                    'if [[ -t 1 || $command_status -ne 0 ]]; then '
+                    " ; command_status=$? ; "
+                    "if [[ -t 1 || $command_status -ne 0 ]]; then "
                     'read -rp "Press Enter to close..." </dev/tty ; fi ; '
-                    'exit $command_status'
+                    "exit $command_status"
                 )
                 full_script_content = " && ".join(commands) + pause_trailer
 
                 # Attempt to launch in a new terminal window
                 # Use 'bash -c' to execute the command string.
                 # Find common terminal emulators.
-                terminals = ['gnome-terminal', 'konsole', 'xfce4-terminal', 'xterm', 'iterm'] # Add iTerm for macOS
+                terminals = ["gnome-terminal", "konsole", "xfce4-terminal", "xterm", "iterm"]  # Add iTerm for macOS
                 launched = False
                 for term in terminals:
                     term_path = shutil.which(term)
                     if term_path:
                         # Use the full path to the terminal executable
-                        term_cmd_base = [str(Path(term_path).resolve())] # Resolve terminal path too
+                        term_cmd_base = [str(Path(term_path).resolve())]  # Resolve terminal path too
                         # Pass the command string to bash -c as a single argument
                         # Note: This doesn't need shell=True
                         # Different terminals use different flags to execute a command and stay open.
@@ -1266,39 +1332,52 @@ class LaunchManager:
                         # -e followed by command for iterm
                         # Let's try common patterns, starting with -e
                         term_cmds = []
-                        if term in ['gnome-terminal', 'xfce4-terminal', 'iterm']:
-                             # gnome-terminal/xfce4-terminal/iterm expect -- followed by command string or list
-                             # Pass 'bash -c command_string' as arguments after --
-                             # Remove the extra single quotes around the command string
-                             term_cmds.append(term_cmd_base + ['--', 'bash', '-c', full_script_content])
-                        elif term == 'konsole':
-                             # Konsole needs --noclose and -e followed by the command list or string
-                             term_cmds.append(term_cmd_base + ['--noclose', '-e', 'bash', '-c', full_script_content])
-                        elif term == 'xterm':
-                             # xterm can often take the command directly after its own flags
-                             term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', full_script_content])
-                             # Another xterm pattern
-                             term_cmds.append(term_cmd_base + ['-e', 'bash', '-c', full_script_content])
+                        if term in ["gnome-terminal", "xfce4-terminal", "iterm"]:
+                            # gnome-terminal/xfce4-terminal/iterm expect -- followed by command string or list
+                            # Pass 'bash -c command_string' as arguments after --
+                            # Remove the extra single quotes around the command string
+                            term_cmds.append(term_cmd_base + ["--", "bash", "-c", full_script_content])
+                        elif term == "konsole":
+                            # Konsole needs --noclose and -e followed by the command list or string
+                            term_cmds.append(term_cmd_base + ["--noclose", "-e", "bash", "-c", full_script_content])
+                        elif term == "xterm":
+                            # xterm can often take the command directly after its own flags
+                            term_cmds.append(term_cmd_base + ["-e", "bash", "-c", full_script_content])
+                            # Another xterm pattern
+                            term_cmds.append(term_cmd_base + ["-e", "bash", "-c", full_script_content])
 
                         for term_cmd_parts in term_cmds:
                             print(f"DEBUG: Attempting launch with terminal: {term_cmd_parts}", file=sys.stderr)
                             try:
                                 subprocess.Popen(term_cmd_parts, shell=False)
                                 launched = True
-                                break # Stop after the first successful launch
+                                break  # Stop after the first successful launch
                             except FileNotFoundError:
-                                print(f"DEBUG: Terminal '{term}' not found or not executable using shell=False with these flags.", file=sys.stderr)
-                                continue # Try next set of flags or next terminal
+                                print(
+                                    f"DEBUG: Terminal '{term}' not found or not executable using shell=False with these flags.",
+                                    file=sys.stderr,
+                                )
+                                continue  # Try next set of flags or next terminal
                             except Exception as term_err:
-                                print(f"DEBUG: Failed to launch with {term} using shell=False: {term_err}", file=sys.stderr)
-                                continue # Try next set of flags or next terminal
+                                print(
+                                    f"DEBUG: Failed to launch with {term} using shell=False: {term_err}",
+                                    file=sys.stderr,
+                                )
+                                continue  # Try next set of flags or next terminal
 
-                        if launched: break # Stop checking terminals after successful launch
+                        if launched:
+                            break  # Stop checking terminals after successful launch
 
                 if not launched:
                     # Fallback: Try launching directly without a specific terminal wrapper.
-                    print("WARNING: Could not find a supported terminal emulator. Attempting direct launch.", file=sys.stderr)
-                    messagebox.showwarning("Terminal Not Found", "Could not find a supported terminal emulator (gnome-terminal, konsole, xfce4-terminal, xterm, iterm).\nAttempting to launch directly.\n\nThe server output might appear in the GUI's console or launch in the background.")
+                    print(
+                        "WARNING: Could not find a supported terminal emulator. Attempting direct launch.",
+                        file=sys.stderr,
+                    )
+                    messagebox.showwarning(
+                        "Terminal Not Found",
+                        "Could not find a supported terminal emulator (gnome-terminal, konsole, xfce4-terminal, xterm, iterm).\nAttempting to launch directly.\n\nThe server output might appear in the GUI's console or launch in the background.",
+                    )
 
                     try:
                         # ``full_script_content`` may contain ``source
@@ -1319,19 +1398,21 @@ class LaunchManager:
                             [bash_executable, "-lc", full_script_content],
                             shell=False,
                         )
-                        launched = True # Mark as launched even if it's a fallback method
+                        launched = True  # Mark as launched even if it's a fallback method
 
                     except Exception as direct_launch_err:
                         messagebox.showerror("Launch Error", f"Failed to launch server directly:\n{direct_launch_err}")
                         print(f"ERROR: Failed to launch server directly: {direct_launch_err}", file=sys.stderr)
                         traceback.print_exc(file=sys.stderr)
-                        launched = False # Mark as failed if fallback also fails
+                        launched = False  # Mark as failed if fallback also fails
 
                 if not launched:
                     # Final fallback/error message if direct launch also failed
-                    messagebox.showerror("Launch Error", "Could not find a supported terminal or launch the server script directly.")
+                    messagebox.showerror(
+                        "Launch Error", "Could not find a supported terminal or launch the server script directly."
+                    )
 
-        except Exception as exc: # Catch any errors during script writing or initial subprocess launch setup
+        except Exception as exc:  # Catch any errors during script writing or initial subprocess launch setup
             messagebox.showerror("Launch Error", f"An unexpected error occurred during launch preparation:\n{exc}")
             print(f"Unexpected error during launch preparation: {exc}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
@@ -1357,39 +1438,44 @@ class LaunchManager:
             messagebox.showwarning(
                 "Launcher Directory Warning",
                 f"Could not create launcher directory:\n{launchers_dir}\n\n"
-                f"Falling back to repository root.\nError: {exc}"
+                f"Falling back to repository root.\nError: {exc}",
             )
             return repo_root
 
     def save_ps1_script(self):
         """Save a PowerShell script with the current configuration."""
         cmd_list = self.build_cmd()
-        if not cmd_list: return
+        if not cmd_list:
+            return
 
         # --- FIX: Use the actual selected model name from the listbox ---
         selected_model_name = ""
         selection = self.launcher.model_listbox.curselection()
         if selection:
-             selected_model_name = self.launcher.model_listbox.get(selection[0])
+            selected_model_name = self.launcher.model_listbox.get(selection[0])
 
         default_name = "launch_llama_server.ps1"
-        if selected_model_name: # Check the correct variable here
+        if selected_model_name:  # Check the correct variable here
             # Sanitize model name for filename
-            model_name_part = re.sub(r'[\\/*?:"<>| ]', '_', selected_model_name)
-            model_name_part = model_name_part[:50].strip('_') # Ensure no trailing underscore
+            model_name_part = re.sub(r'[\\/*?:"<>| ]', "_", selected_model_name)
+            model_name_part = model_name_part[:50].strip("_")  # Ensure no trailing underscore
             if model_name_part:
                 default_name = f"launch_{model_name_part}.ps1"
             else:
-                default_name = "launch_selected_model.ps1" # Fallback if name is empty after sanitizing
+                default_name = "launch_selected_model.ps1"  # Fallback if name is empty after sanitizing
 
-            if not default_name.lower().endswith(".ps1"): default_name += ".ps1"
+            if not default_name.lower().endswith(".ps1"):
+                default_name += ".ps1"
 
         launchers_dir = self._get_launchers_dir()
-        path = filedialog.asksaveasfilename(defaultextension=".ps1",
-                                            initialfile=default_name,
-                                            initialdir=str(launchers_dir),
-                                            filetypes=[("PowerShell Script", "*.ps1"), ("All Files", "*.*")])
-        if not path: return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".ps1",
+            initialfile=default_name,
+            initialdir=str(launchers_dir),
+            filetypes=[("PowerShell Script", "*.ps1"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
 
         try:
             with open(path, "w", encoding="utf-8") as fh:
@@ -1402,13 +1488,17 @@ class LaunchManager:
                 fh.write(f"    Launches the {backend_display} server with saved settings.\n\n")
                 fh.write(" .DESCRIPTION\n")
                 fh.write(f"    Autogenerated PowerShell script from {backend_display} Launcher GUI.\n")
-                fh.write(f"    Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server.\n")
+                fh.write(
+                    f"    Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server.\n"
+                )
                 fh.write("#>\n\n")
                 fh.write("$ErrorActionPreference = 'Continue'\n\n")
-                fh.write('[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n')
+                fh.write(
+                    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8 # Set console output encoding to UTF-8\n\n"
+                )
 
                 # --- Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering ---
-                fh.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
+                fh.write("# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n")
                 fh.write('$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"\n\n')
 
                 # --- Add CUDA_VISIBLE_DEVICES action ---
@@ -1420,11 +1510,13 @@ class LaunchManager:
                     fh.write(f"Write-Host 'Setting CUDA_VISIBLE_DEVICES={quoted_cuda}' -ForegroundColor DarkCyan\n")
                     fh.write(f"$env:CUDA_VISIBLE_DEVICES='{quoted_cuda}'\n\n")
                 elif cuda_action == "unset":
-                     # GPUs detected but none selected, or manual GPU mode —
-                     # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
-                     # filtering real hardware via synthetic/stale indices.
-                     fh.write('Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n')
-                     fh.write('Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n')
+                    # GPUs detected but none selected, or manual GPU mode —
+                    # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
+                    # filtering real hardware via synthetic/stale indices.
+                    fh.write(
+                        'Write-Host "Clearing CUDA_VISIBLE_DEVICES environment variable." -ForegroundColor DarkCyan\n'
+                    )
+                    fh.write("Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue\n\n")
 
                 # --- Add Environmental Variables ---
                 env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
@@ -1442,24 +1534,28 @@ class LaunchManager:
                         # containing PowerShell expansion sequences.
                         escaped_value = self._ps_escape_single_quoted(str(var_value))
                         fh.write(f"$env:{var_name}='{escaped_value}'\n")
-                    fh.write('\n')
+                    fh.write("\n")
 
                 venv = self._effective_venv_path()
                 if venv:
                     try:
-                        venv_path = Path(venv).resolve() # Resolve venv path for script
+                        venv_path = Path(venv).resolve()  # Resolve venv path for script
 
                         # Check for multiple activation script locations (cross-platform support)
                         possible_scripts = [
-                            venv_path / "Scripts" / "Activate.ps1",     # Windows
-                            venv_path / "bin" / "Activate.ps1",        # Linux/macOS with PowerShell Core
-                            venv_path / "Scripts" / "activate.ps1",    # Alternative naming
-                            venv_path / "bin" / "activate.ps1"         # Alternative naming
+                            venv_path / "Scripts" / "Activate.ps1",  # Windows
+                            venv_path / "bin" / "Activate.ps1",  # Linux/macOS with PowerShell Core
+                            venv_path / "Scripts" / "activate.ps1",  # Alternative naming
+                            venv_path / "bin" / "activate.ps1",  # Alternative naming
                         ]
 
                         act_script = None
                         for script_path in possible_scripts:
-                            if script_path.exists():
+                            # ``is_file()`` not ``exists()`` so a
+                            # directory or socket at that path doesn't
+                            # get selected — only a real file is a
+                            # legitimate activator script.
+                            if script_path.is_file():
                                 act_script = script_path
                                 break
 
@@ -1473,10 +1569,14 @@ class LaunchManager:
                             quoted_ps_act_path = f"'{self._ps_escape_single_quoted(ps_act_path)}'"
                             quoted_ps_venv = f"'{self._ps_escape_single_quoted(str(venv))}'"
 
-                            fh.write(f'Write-Host "Activating virtual environment: " -NoNewline -ForegroundColor Cyan; Write-Host {quoted_ps_venv} -ForegroundColor Cyan\n')
+                            fh.write(
+                                f'Write-Host "Activating virtual environment: " -NoNewline -ForegroundColor Cyan; Write-Host {quoted_ps_venv} -ForegroundColor Cyan\n'
+                            )
                             # Use 'try/catch' to report activation errors but continue if not critical
                             # Use a quoted string for the path in the command
-                            fh.write(f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n') # Add exit code on failure and pause
+                            fh.write(
+                                f'try {{ . {quoted_ps_act_path} }} catch {{ Write-Warning "Failed to activate venv: $($_.Exception.Message)"; $global:LASTEXITCODE=1; Start-Sleep -Seconds 2 }}\n\n'
+                            )  # Add exit code on failure and pause
 
                         else:
                             # Same hardening as the activate line above: emit
@@ -1485,22 +1585,16 @@ class LaunchManager:
                             # path text can't be expanded when the saved
                             # script runs.
                             checked_paths = [str(p) for p in possible_scripts]
-                            warning_msg = (
-                                f"Virtual environment activation script not found in venv: {venv}"
-                            )
+                            warning_msg = f"Virtual environment activation script not found in venv: {venv}"
                             checked_msg = f"Checked locations: {', '.join(checked_paths)}"
+                            fh.write(f"Write-Warning '{self._ps_escape_single_quoted(warning_msg)}'\n")
+                            fh.write(f"Write-Warning '{self._ps_escape_single_quoted(checked_msg)}'\n")
                             fh.write(
-                                f"Write-Warning '{self._ps_escape_single_quoted(warning_msg)}'\n"
+                                'Write-Warning "Note: PowerShell scripts work on Windows, Linux, and macOS with PowerShell Core installed."\n\n'
                             )
-                            fh.write(
-                                f"Write-Warning '{self._ps_escape_single_quoted(checked_msg)}'\n"
-                            )
-                            fh.write('Write-Warning "Note: PowerShell scripts work on Windows, Linux, and macOS with PowerShell Core installed."\n\n')
                     except Exception as path_ex:
                         warn_msg = f"Could not process venv path '{venv}': {path_ex}"
-                        fh.write(
-                            f"Write-Warning '{self._ps_escape_single_quoted(warn_msg)}'\n\n"
-                        )
+                        fh.write(f"Write-Warning '{self._ps_escape_single_quoted(warn_msg)}'\n\n")
 
                 fh.write(f'Write-Host "Launching {backend.replace("_", "-")}-server..." -ForegroundColor Green\n')
 
@@ -1508,27 +1602,26 @@ class LaunchManager:
                 try:
                     ps_cmd_parts = self._build_ps_cmd_parts(cmd_list)
                 except ValueError as ve:
-                    messagebox.showerror(
-                        "Script Save Error",
-                        f"Internal error building command: {ve}"
-                    )
+                    messagebox.showerror("Script Save Error", f"Internal error building command: {ve}")
                     print(f"ERROR: {ve}", file=sys.stderr)
                     return
                 fh.write(" ".join(ps_cmd_parts) + "\n\n")
 
                 # Check for non-zero exit code after the command
                 # Check $LASTEXITCODE, not global:LASTEXITCODE for the server process itself
-                fh.write('if ($LASTEXITCODE -ne 0) {\n')
+                fh.write("if ($LASTEXITCODE -ne 0) {\n")
                 fh.write('    Write-Error "Llama-server exited with error code: $LASTEXITCODE."\n')
-                fh.write('    $global:LASTEXITCODE = $LASTEXITCODE # Propagate error code\n') # Propagate for the pause logic
-                fh.write('}\n')
+                fh.write(
+                    "    $global:LASTEXITCODE = $LASTEXITCODE # Propagate error code\n"
+                )  # Propagate for the pause logic
+                fh.write("}\n")
                 fh.write('Write-Host "Server process likely finished or detached." -ForegroundColor Yellow\n')
-                fh.write('# Pause if script is run directly by double-clicking or outside an interactive shell\n')
+                fh.write("# Pause if script is run directly by double-clicking or outside an interactive shell\n")
                 # Check if the host is ConsoleHost (typical when double-clicking or run from explorer)
                 # Also pause if an error occurred ($global:LASTEXITCODE -ne 0)
                 fh.write('if ($Host.Name -eq "ConsoleHost" -or $global:LASTEXITCODE -ne 0) {\n')
-                fh.write('    Read-Host -Prompt "Press Enter to close..."\n') # Added ... for consistency
-                fh.write('}\n')
+                fh.write('    Read-Host -Prompt "Press Enter to close..."\n')  # Added ... for consistency
+                fh.write("}\n")
 
             messagebox.showinfo("Saved", f"PowerShell script written to:\n{path}")
         except Exception as exc:
@@ -1539,32 +1632,37 @@ class LaunchManager:
     def save_sh_script(self):
         """Save a bash script with the current configuration."""
         cmd_list = self.build_cmd()
-        if not cmd_list: return
+        if not cmd_list:
+            return
 
         # --- Use the actual selected model name from the listbox ---
         selected_model_name = ""
         selection = self.launcher.model_listbox.curselection()
         if selection:
-             selected_model_name = self.launcher.model_listbox.get(selection[0])
+            selected_model_name = self.launcher.model_listbox.get(selection[0])
 
         default_name = "launch_llama_server.sh"
         if selected_model_name:
             # Sanitize model name for filename
-            model_name_part = re.sub(r'[\\/*?:"<>| ]', '_', selected_model_name)
-            model_name_part = model_name_part[:50].strip('_') # Ensure no trailing underscore
+            model_name_part = re.sub(r'[\\/*?:"<>| ]', "_", selected_model_name)
+            model_name_part = model_name_part[:50].strip("_")  # Ensure no trailing underscore
             if model_name_part:
                 default_name = f"launch_{model_name_part}.sh"
             else:
-                default_name = "launch_selected_model.sh" # Fallback if name is empty after sanitizing
+                default_name = "launch_selected_model.sh"  # Fallback if name is empty after sanitizing
 
-            if not default_name.lower().endswith(".sh"): default_name += ".sh"
+            if not default_name.lower().endswith(".sh"):
+                default_name += ".sh"
 
         launchers_dir = self._get_launchers_dir()
-        path = filedialog.asksaveasfilename(defaultextension=".sh",
-                                            initialfile=default_name,
-                                            initialdir=str(launchers_dir),
-                                            filetypes=[("Bash Script", "*.sh"), ("All Files", "*.*")])
-        if not path: return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".sh",
+            initialfile=default_name,
+            initialdir=str(launchers_dir),
+            filetypes=[("Bash Script", "*.sh"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
 
         try:
             with open(path, "w", encoding="utf-8") as fh:
@@ -1581,13 +1679,15 @@ class LaunchManager:
                 # would otherwise fail immediately when run directly.
                 fh.write("#!/usr/bin/env bash\n")
                 fh.write(f"# Autogenerated bash script from {backend_display} Launcher GUI\n")
-                fh.write(f"# Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server\n\n")
+                fh.write(
+                    f"# Activates virtual environment (if configured) and starts {backend.replace('_', '-')}-server\n\n"
+                )
 
                 fh.write("set -e  # Exit on any error\n\n")
 
                 # --- Set CUDA_DEVICE_ORDER for consistent PCIe bus ordering ---
-                fh.write('# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n')
-                fh.write('export CUDA_DEVICE_ORDER=PCI_BUS_ID\n\n')
+                fh.write("# Ensure GPU ordering matches PCIe bus order (consistent with nvidia-smi)\n")
+                fh.write("export CUDA_DEVICE_ORDER=PCI_BUS_ID\n\n")
 
                 # --- Add CUDA_VISIBLE_DEVICES action ---
                 cuda_action, cuda_devices_value = self._resolve_cuda_visible_devices_action()
@@ -1597,16 +1697,14 @@ class LaunchManager:
                     # echo line uses ``printf`` form to stay consistent
                     # with the other shell-quoted messages in this block.
                     quoted_cuda = shlex.quote(str(cuda_devices_value))
-                    fh.write(
-                        f"printf '%s\\n' {shlex.quote(f'Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}')}\n"
-                    )
+                    fh.write(f"printf '%s\\n' {shlex.quote(f'Setting CUDA_VISIBLE_DEVICES={cuda_devices_value}')}\n")
                     fh.write(f"export CUDA_VISIBLE_DEVICES={quoted_cuda}\n\n")
                 elif cuda_action == "unset":
-                     # GPUs detected but none selected, or manual GPU mode —
-                     # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
-                     # filtering real hardware via synthetic/stale indices.
-                     fh.write('echo "Clearing CUDA_VISIBLE_DEVICES environment variable."\n')
-                     fh.write('unset CUDA_VISIBLE_DEVICES\n\n')
+                    # GPUs detected but none selected, or manual GPU mode —
+                    # either way, clear CUDA_VISIBLE_DEVICES to avoid silently
+                    # filtering real hardware via synthetic/stale indices.
+                    fh.write('echo "Clearing CUDA_VISIBLE_DEVICES environment variable."\n')
+                    fh.write("unset CUDA_VISIBLE_DEVICES\n\n")
 
                 # --- Add Environmental Variables ---
                 env_vars = self.launcher.env_vars_manager.get_enabled_env_vars()
@@ -1630,18 +1728,15 @@ class LaunchManager:
                         # the .sh writer — matches launch_server().
                         text_value = str(var_value)
                         escaped_value = (
-                            text_value.replace('\\', '\\\\')
-                                     .replace('"', '\\"')
-                                     .replace('$', '\\$')
-                                     .replace('`', '\\`')
+                            text_value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
                         )
                         fh.write(f'export {var_name}="{escaped_value}"\n')
-                    fh.write('\n')
+                    fh.write("\n")
 
                 venv = self._effective_venv_path()
                 if venv:
                     try:
-                        venv_path = Path(venv).resolve() # Resolve venv path for script
+                        venv_path = Path(venv).resolve()  # Resolve venv path for script
                         # Check for both bin/activate (Linux/macOS) and Scripts/activate (Windows in WSL/Cygwin)
                         activate_script = venv_path / "bin" / "activate"
                         if not activate_script.exists():
@@ -1658,11 +1753,11 @@ class LaunchManager:
                             # would be evaluated when the saved script
                             # ran — i.e. before the safe ``source`` line.
                             quoted_activate_path = shlex.quote(str(activate_script))
-                            activating_msg = shlex.quote(
-                                f"Activating virtual environment: {venv}"
-                            )
+                            activating_msg = shlex.quote(f"Activating virtual environment: {venv}")
                             fh.write(f"printf '%s\\n' {activating_msg}\n")
-                            fh.write(f'source {quoted_activate_path} || {{ echo "Failed to activate venv"; exit 1; }}\n\n')
+                            fh.write(
+                                f'source {quoted_activate_path} || {{ echo "Failed to activate venv"; exit 1; }}\n\n'
+                            )
                         else:
                             warn_msg = shlex.quote(
                                 f"Warning: Virtual environment activation script not found at: {activate_script}"
@@ -1674,9 +1769,7 @@ class LaunchManager:
                             fh.write(f"printf '%s\\n' {warn_msg}\n")
                             fh.write(f"printf '%s\\n' {also_msg}\n\n")
                     except Exception as path_ex:
-                        exc_msg = shlex.quote(
-                            f"Warning: Could not process venv path '{venv}': {path_ex}"
-                        )
+                        exc_msg = shlex.quote(f"Warning: Could not process venv path '{venv}': {path_ex}")
                         fh.write(f"printf '%s\\n' {exc_msg}\n\n")
 
                 # Get backend information for script header
@@ -1692,16 +1785,16 @@ class LaunchManager:
                 while i < len(cmd_list):
                     current_arg = cmd_list[i]
                     if current_arg == "--chat-template" and i + 1 < len(cmd_list):
-                         template_string = cmd_list[i+1]
-                         # Use single quotes for template to preserve special characters
-                         escaped_template_string = template_string.replace("'", "'\"'\"'")
-                         bash_cmd_parts.append("--chat-template")
-                         bash_cmd_parts.append(f"'{escaped_template_string}'")
-                         i += 2 # Skip both flag and value
+                        template_string = cmd_list[i + 1]
+                        # Use single quotes for template to preserve special characters
+                        escaped_template_string = template_string.replace("'", "'\"'\"'")
+                        bash_cmd_parts.append("--chat-template")
+                        bash_cmd_parts.append(f"'{escaped_template_string}'")
+                        i += 2  # Skip both flag and value
                     else:
-                         # Standard quoting for other args using shlex.quote which is bash-compatible
-                         bash_cmd_parts.append(shlex.quote(current_arg))
-                         i += 1
+                        # Standard quoting for other args using shlex.quote which is bash-compatible
+                        bash_cmd_parts.append(shlex.quote(current_arg))
+                        i += 1
 
                 # ``set -e`` was emitted at the top of the script, so a
                 # bare ``<launch-cmd>`` followed by ``exit_code=$?`` /
@@ -1711,15 +1804,15 @@ class LaunchManager:
                 # errexit just around the launch call so the diagnostic
                 # block (with its targeted echo + ``exit $exit_code``)
                 # is the actual handler.
-                fh.write('set +e\n')
+                fh.write("set +e\n")
                 fh.write(" ".join(bash_cmd_parts) + "\n")
-                fh.write('exit_code=$?\n')
-                fh.write('set -e\n\n')
+                fh.write("exit_code=$?\n")
+                fh.write("set -e\n\n")
                 # Check exit code after the command
-                fh.write('if [ $exit_code -ne 0 ]; then\n')
+                fh.write("if [ $exit_code -ne 0 ]; then\n")
                 fh.write('    echo "Error: llama-server exited with error code: $exit_code" >&2\n')
-                fh.write('    exit $exit_code\n')
-                fh.write('fi\n')
+                fh.write("    exit $exit_code\n")
+                fh.write("fi\n")
                 fh.write('echo "Server process finished."\n')
 
             # Make the script executable

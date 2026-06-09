@@ -133,6 +133,33 @@ def test_gpu_info_static_multiple_devices_preserve_order(
     assert [d["compute_capability"] for d in info["devices"]] == ["7.5", "8.0", "8.9"]
 
 
+def test_gpu_info_static_zero_devices_treated_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cuda.is_available()`` can return True on a CUDA-built torch
+    running against a host with no visible devices (driver gone, MIG
+    mode, ``CUDA_VISIBLE_DEVICES=""``). In that case the device-count
+    query returns 0. The live torch path must NOT report
+    ``available=True`` with an empty devices list — that violates
+    the contract ``load_cached_gpu_info`` enforces and makes
+    ``fetch_system_info`` short-circuit instead of falling through
+    to the next backend.
+    """
+    fake_cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        device_count=lambda: 0,
+        get_device_properties=lambda i: None,
+    )
+    monkeypatch.setattr(sysmod, "torch", types.SimpleNamespace(cuda=fake_cuda))
+    monkeypatch.setattr(sysmod, "TORCH_AVAILABLE", True)
+
+    info = sysmod.get_gpu_info_static()
+
+    assert info["available"] is False
+    assert info["device_count"] == 0
+    assert info["devices"] == []
+
+
 def test_gpu_info_static_sets_cuda_device_order_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -19,6 +19,7 @@ import shutil
 
 try:
     import requests
+
     REQUESTS_AVAILABLE = True
 except ImportError:
     requests = None
@@ -28,8 +29,7 @@ VERSION_CHECK_POLL_MS = 100
 _VERSION_CHECK_COMPLETE = object()
 
 
-def build_update_script(current_dir, backup_path, current_version, remote_version,
-                        github_url, exclusions):
+def build_update_script(current_dir, backup_path, current_version, remote_version, github_url, exclusions):
     """Build the bash update script text.
 
     Pure helper extracted from :meth:`AboutTab._generate_update_script` so it
@@ -82,9 +82,7 @@ def build_update_script(current_dir, backup_path, current_version, remote_versio
     # shlex.quote'd; bash parses the single-quoted form inside the array
     # literal and stores the raw pattern as one array element — safe even if
     # the pattern contains apostrophes or whitespace.
-    exclusions_fragment = "".join(
-        f" -o -name {shlex.quote(str(p))} -prune" for p in exclusions
-    )
+    exclusions_fragment = "".join(f" -o -name {shlex.quote(str(p))} -prune" for p in exclusions)
 
     script = f"""#!/bin/bash
 set -e
@@ -275,7 +273,9 @@ class AboutTab:
     def __init__(self):
         self.version = self._load_version()
         self.github_url = "https://github.com/thad0ctor/llama-server-launcher"
-        self.github_version_url = "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/config/version"
+        self.github_version_url = (
+            "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/config/version"
+        )
         self.donate_url = "https://www.paypal.me/thad0ctor"
         self.version_status = "Checking..."
         self.remote_version = None
@@ -319,16 +319,16 @@ class AboutTab:
                 self._mark_dead()
         except Exception:
             pass
-        
+
     def _load_version(self):
         """Load version from the version file."""
         try:
             # Get the repo root directory (this module lives in modules/)
             script_dir = Path(__file__).parent.parent
             version_file = script_dir / "config" / "version"
-            
+
             if version_file.exists():
-                with open(version_file, 'r', encoding='utf-8') as f:
+                with open(version_file, "r", encoding="utf-8") as f:
                     version = f.read().strip()
                     return version if version else "Unknown"
             else:
@@ -336,32 +336,32 @@ class AboutTab:
         except Exception as e:
             print(f"Error loading version: {e}", file=sys.stderr)
             return "Unknown"
-    
+
     def _parse_version(self, version_str):
         """Parse version string in format YYYY-MM-DD-REV to comparable tuple."""
         try:
             if version_str in ["Unknown", "Version file not found"]:
                 return (0, 0, 0, 0)
-            
-            parts = version_str.strip().split('-')
+
+            parts = version_str.strip().split("-")
             if len(parts) != 4:
                 return (0, 0, 0, 0)
-            
+
             year = int(parts[0])
             month = int(parts[1])
             day = int(parts[2])
             rev = int(parts[3])
-            
+
             return (year, month, day, rev)
         except (ValueError, IndexError):
             return (0, 0, 0, 0)
-    
+
     def _is_version_newer(self, current_version, remote_version):
         """Compare two versions to determine if remote is newer."""
         current_tuple = self._parse_version(current_version)
         remote_tuple = self._parse_version(remote_version)
         return remote_tuple > current_tuple
-    
+
     def _widget_alive(self):
         """Return True iff the About tab is still mounted.
 
@@ -419,11 +419,7 @@ class AboutTab:
                 if not remote_version or self._parse_version(remote_version) == (0, 0, 0, 0):
                     self._post_version_result(generation, "Check Failed", remote_version or None)
                 else:
-                    status = (
-                        "Update Available"
-                        if self._is_version_newer(self.version, remote_version)
-                        else "Current"
-                    )
+                    status = "Update Available" if self._is_version_newer(self.version, remote_version) else "Current"
                     self._post_version_result(generation, status, remote_version)
             else:
                 self._post_version_result(generation, "Check Failed", None)
@@ -447,11 +443,7 @@ class AboutTab:
         self._version_queue.put((generation, status, remote_version))
 
     def _schedule_version_queue_drain(self):
-        if (
-            self._version_after_id is None
-            and self._parent is not None
-            and self._version_check_pending
-        ):
+        if self._version_after_id is None and self._parent is not None and self._version_check_pending:
             try:
                 self._version_after_id = self._parent.after(
                     VERSION_CHECK_POLL_MS,
@@ -491,6 +483,14 @@ class AboutTab:
                 self._version_check_pending = False
                 return
 
+            # Defensive: the queue should only ever carry 3-tuples
+            # (generation, status, remote_version) from
+            # ``_version_check_worker``, but a malformed entry from
+            # a future producer / corrupted state would otherwise
+            # raise ``ValueError`` mid-drain and leave
+            # ``_version_check_pending`` stuck True. Skip it.
+            if not isinstance(item, (tuple, list)) or len(item) != 3:
+                continue
             _, status, remote_version = item
             if not self._widget_alive():
                 return
@@ -507,7 +507,7 @@ class AboutTab:
             # ``_version_check_pending``, the drain would never be
             # rescheduled to clean it up).
             continue
-    
+
     def _update_version_display(self):
         """Update the version display with status.
 
@@ -540,75 +540,70 @@ class AboutTab:
             self.update_button.pack(pady=(10, 0))
         except (tk.TclError, RuntimeError):
             pass
-    
+
     def _perform_update(self):
         """Perform the auto-update process."""
         result = messagebox.askyesno(
-            "Auto Update", 
+            "Auto Update",
             f"Update from {self.version} to {self.remote_version}?\n\n"
             "This will:\n"
             "• Create a backup of current files (excluding JSON files)\n"
             "• Clone the latest version from GitHub\n"
             "• Open a new terminal window\n\n"
             "Continue with update?",
-            icon='question'
+            icon="question",
         )
-        
+
         if result:
             self._start_update_process()
-    
+
     def _start_update_process(self):
         """Start the update process in a new terminal."""
         try:
             # Get the repo root directory (this module lives in modules/)
             current_dir = Path(__file__).parent.parent
-            
+
             # Create update script
             script_content = self._generate_update_script(current_dir)
             script_path = current_dir / "update_script.sh"
-            
-            with open(script_path, 'w', encoding='utf-8') as f:
+
+            with open(script_path, "w", encoding="utf-8") as f:
                 f.write(script_content)
-            
+
             # Make script executable
             os.chmod(script_path, 0o755)
-            
+
             # Open new terminal and run the update script
-            if sys.platform.startswith('linux'):
+            if sys.platform.startswith("linux"):
                 # Try different terminal emulators
-                terminals = ['gnome-terminal', 'konsole', 'xterm', 'xfce4-terminal']
+                terminals = ["gnome-terminal", "konsole", "xterm", "xfce4-terminal"]
                 for terminal in terminals:
                     try:
-                        if terminal == 'gnome-terminal':
-                            subprocess.Popen([terminal, '--', 'bash', str(script_path)], 
-                                           cwd=current_dir)
-                        elif terminal == 'konsole':
-                            subprocess.Popen([terminal, '-e', 'bash', str(script_path)], 
-                                           cwd=current_dir)
+                        if terminal == "gnome-terminal":
+                            subprocess.Popen([terminal, "--", "bash", str(script_path)], cwd=current_dir)
+                        elif terminal == "konsole":
+                            subprocess.Popen([terminal, "-e", "bash", str(script_path)], cwd=current_dir)
                         else:
-                            subprocess.Popen([terminal, '-e', f'bash {script_path}'], 
-                                           cwd=current_dir)
+                            subprocess.Popen([terminal, "-e", f"bash {script_path}"], cwd=current_dir)
                         break
                     except FileNotFoundError:
                         continue
                 else:
                     # Fallback to xterm
-                    subprocess.Popen(['xterm', '-e', f'bash {script_path}'], 
-                                   cwd=current_dir)
-            elif sys.platform == 'darwin':  # macOS
-                subprocess.Popen(['open', '-a', 'Terminal', str(script_path)], 
-                               cwd=current_dir)
-            elif sys.platform.startswith('win'):  # Windows
-                subprocess.Popen(['cmd', '/c', 'start', 'cmd', '/k', str(script_path)], 
-                               cwd=current_dir, shell=True)
-            
-            messagebox.showinfo("Update Started", 
-                              "Update process started in new terminal window.\n"
-                              "Please follow the instructions in the terminal.")
-            
+                    subprocess.Popen(["xterm", "-e", f"bash {script_path}"], cwd=current_dir)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.Popen(["open", "-a", "Terminal", str(script_path)], cwd=current_dir)
+            elif sys.platform.startswith("win"):  # Windows
+                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", str(script_path)], cwd=current_dir, shell=True)
+
+            messagebox.showinfo(
+                "Update Started",
+                "Update process started in new terminal window.\n" "Please follow the instructions in the terminal.",
+            )
+
         except Exception as e:
             messagebox.showerror("Update Error", f"Failed to start update process:\n{str(e)}")
-    
+
     def _generate_update_script(self, current_dir):
         """Generate the update script content.
 
@@ -633,7 +628,7 @@ class AboutTab:
             github_url=self.github_url,
             exclusions=exclusions,
         )
-    
+
     def _get_backup_exclusions(self, current_dir):
         """Return a list of raw ``.gitignore``-style exclusion patterns.
 
@@ -645,33 +640,44 @@ class AboutTab:
         or inject into the generated update script.
         """
         patterns = [
-            "__pycache__", "*.pyc", "*.pyo", "*.pyd",
-            ".pytest_cache", ".mypy_cache", ".coverage",
-            "*.egg-info", ".tox", ".venv", "venv",
-            ".DS_Store", "Thumbs.db", "*.tmp", "*.log",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            "*.pyd",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".coverage",
+            "*.egg-info",
+            ".tox",
+            ".venv",
+            "venv",
+            ".DS_Store",
+            "Thumbs.db",
+            "*.tmp",
+            "*.log",
         ]
         gitignore_path = current_dir / ".gitignore"
 
         try:
             if gitignore_path.exists():
-                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                with open(gitignore_path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith('#'):
+                        if line and not line.startswith("#"):
                             patterns.append(line)
         except Exception as e:
             print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
 
         # Drop any accidentally-empty entries.
         return [p for p in patterns if p]
-    
+
     def _open_url(self, url):
         """Open URL in the default web browser."""
         try:
             webbrowser.open(url)
         except Exception as e:
             print(f"Error opening URL {url}: {e}", file=sys.stderr)
-    
+
     def setup_about_tab(self, parent):
         """Set up the About tab UI."""
         # Re-arm teardown state in case this AboutTab is being remounted.
@@ -724,40 +730,42 @@ class AboutTab:
         # Create main frame with padding
         main_frame = ttk.Frame(parent, padding=20)
         main_frame.pack(fill="both", expand=True)
-        
+
         # Configure grid weights for centering
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(0, weight=1)
-        
+
         # Create content frame
         content_frame = ttk.Frame(main_frame)
         content_frame.grid(row=0, column=0, sticky="")
-        
+
         row = 0
-        
+
         # Title
-        title_label = ttk.Label(content_frame, text="Llama.cpp Server Launcher", 
-                               font=("TkDefaultFont", 16, "bold"))
+        title_label = ttk.Label(content_frame, text="Llama.cpp Server Launcher", font=("TkDefaultFont", 16, "bold"))
         title_label.grid(row=row, column=0, pady=(0, 20))
         row += 1
-        
+
         # Version information
         version_frame = ttk.LabelFrame(content_frame, text="Version Information", padding=15)
         version_frame.grid(row=row, column=0, sticky="ew", pady=(0, 15))
         row += 1
-        
+
         # Version label that will be updated
-        self.version_label = ttk.Label(version_frame, 
-                                     text=f"Version: {self.version} ({self.version_status})", 
-                                     font=("TkDefaultFont", 11))
+        self.version_label = ttk.Label(
+            version_frame, text=f"Version: {self.version} ({self.version_status})", font=("TkDefaultFont", 11)
+        )
         self.version_label.pack(anchor="w")
-        
+
         # Update button (initially hidden)
-        self.update_button = ttk.Button(version_frame, text="🔄 Update Available - Click to Update", 
-                                      command=self._perform_update,
-                                      style="Accent.TButton")  # Use accent style if available
+        self.update_button = ttk.Button(
+            version_frame,
+            text="🔄 Update Available - Click to Update",
+            command=self._perform_update,
+            style="Accent.TButton",
+        )  # Use accent style if available
         # Don't pack initially - will be shown when update is available
-        
+
         if REQUESTS_AVAILABLE:
             # Start version check in background; results are applied by the Tk thread.
             # ``_version_queue`` is recreated so any stale items left in
@@ -777,55 +785,53 @@ class AboutTab:
         else:
             self.version_status = "requests not installed"
             self._update_version_display()
-        
+
         # Project information
         project_frame = ttk.LabelFrame(content_frame, text="Project Information", padding=15)
         project_frame.grid(row=row, column=0, sticky="ew", pady=(0, 15))
         row += 1
-        
+
         # Description
-        description = ("A user-friendly GUI to easily configure and launch the llama.cpp server, "
-                      "manage model configurations, set environment variables, and generate launch scripts.")
+        description = (
+            "A user-friendly GUI to easily configure and launch the llama.cpp server, "
+            "manage model configurations, set environment variables, and generate launch scripts."
+        )
         desc_label = ttk.Label(project_frame, text=description, wraplength=400, justify="left")
         desc_label.pack(anchor="w", pady=(0, 10))
-        
+
         # GitHub link
         github_frame = ttk.Frame(project_frame)
         github_frame.pack(fill="x", pady=(0, 5))
-        
+
         ttk.Label(github_frame, text="GitHub Repository:").pack(side="left")
-        github_button = ttk.Button(github_frame, text="Visit GitHub", 
-                                  command=lambda: self._open_url(self.github_url))
+        github_button = ttk.Button(github_frame, text="Visit GitHub", command=lambda: self._open_url(self.github_url))
         github_button.pack(side="right")
-        
+
         # Support section
         support_frame = ttk.LabelFrame(content_frame, text="Support the Project", padding=15)
         support_frame.grid(row=row, column=0, sticky="ew", pady=(0, 15))
         row += 1
-        
-        support_text = ("If you find this tool useful, consider supporting its development!")
+
+        support_text = "If you find this tool useful, consider supporting its development!"
         support_label = ttk.Label(support_frame, text=support_text, wraplength=400, justify="left")
         support_label.pack(anchor="w", pady=(0, 10))
-        
+
         # Donate button
         donate_frame = ttk.Frame(support_frame)
         donate_frame.pack(fill="x")
-        
+
         ttk.Label(donate_frame, text="Donate via PayPal:").pack(side="left")
-        donate_button = ttk.Button(donate_frame, text="💝 Donate", 
-                                  command=lambda: self._open_url(self.donate_url))
+        donate_button = ttk.Button(donate_frame, text="💝 Donate", command=lambda: self._open_url(self.donate_url))
         donate_button.pack(side="right")
-        
+
         # Credits section
         credits_frame = ttk.LabelFrame(content_frame, text="Credits", padding=15)
         credits_frame.grid(row=row, column=0, sticky="ew")
-        
-        credits_text = ("Built with Python and Tkinter\n"
-                       "Designed for use with llama.cpp\n"
-                       "Created by thad0ctor")
+
+        credits_text = "Built with Python and Tkinter\n" "Designed for use with llama.cpp\n" "Created by thad0ctor"
         credits_label = ttk.Label(credits_frame, text=credits_text, justify="left")
         credits_label.pack(anchor="w")
-        
+
         # Configure column weights for proper sizing
         content_frame.columnconfigure(0, weight=1)
         version_frame.columnconfigure(0, weight=1)
@@ -837,4 +843,4 @@ class AboutTab:
 # Factory function for creating the about tab
 def create_about_tab():
     """Factory function to create an AboutTab instance."""
-    return AboutTab() 
+    return AboutTab()

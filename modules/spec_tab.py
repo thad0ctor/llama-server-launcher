@@ -31,7 +31,15 @@ SPEC_DRAFT_ANALYSIS_POLL_MS = 80
 # omission). Module-level so tests can import and assert against the SAME
 # tuple the UI actually uses — preventing silent drift when the set changes.
 SPEC_DRAFT_CACHE_TYPE_VALUES = (
-    "", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k",
+    "",
+    "f16",
+    "f32",
+    "q8_0",
+    "q4_0",
+    "q4_1",
+    "q5_0",
+    "q5_1",
+    "q6_k",
 )
 
 
@@ -101,34 +109,34 @@ class SpecTab:
         # Master toggle: when False, no --spec-* / --draft-* flags are emitted.
         # Initial values are sourced from app_settings so they persist across
         # sessions (same pattern as mmproj/selected_mmproj_path).
-        self.spec_enabled        = tk.BooleanVar(value=ib(app_settings, "spec_enabled"))
-        self.spec_type           = tk.StringVar(value=is_(app_settings, "spec_type", "none") or "none")
+        self.spec_enabled = tk.BooleanVar(value=ib(app_settings, "spec_enabled"))
+        self.spec_type = tk.StringVar(value=is_(app_settings, "spec_type", "none") or "none")
         # Common draft controls (numeric entries; blank = use binary default).
-        self.spec_draft_n_max    = tk.StringVar(value=is_(app_settings, "spec_draft_n_max"))
-        self.spec_draft_n_min    = tk.StringVar(value=is_(app_settings, "spec_draft_n_min"))
-        self.spec_draft_p_min    = tk.StringVar(value=is_(app_settings, "spec_draft_p_min"))
-        self.spec_draft_p_split  = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))   # llama.cpp only
+        self.spec_draft_n_max = tk.StringVar(value=is_(app_settings, "spec_draft_n_max"))
+        self.spec_draft_n_min = tk.StringVar(value=is_(app_settings, "spec_draft_n_min"))
+        self.spec_draft_p_min = tk.StringVar(value=is_(app_settings, "spec_draft_p_min"))
+        self.spec_draft_p_split = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))  # llama.cpp only
         # Draft model selection.
-        self.spec_draft_model    = tk.StringVar(value=is_(app_settings, "spec_draft_model"))    # -md path
+        self.spec_draft_model = tk.StringVar(value=is_(app_settings, "spec_draft_model"))  # -md path
         # Opt-in for ik_llama+mtp: when False, hide the draft picker UI AND
         # suppress --model-draft / draft offload emission so the embedded MTP
         # head in the base GGUF is used. Required-draft modes (draft-simple /
         # draft-eagle3 on llama.cpp) ignore this and always emit draft flags.
         self.spec_use_draft_model = tk.BooleanVar(value=ib(app_settings, "spec_use_draft_model"))
-        self.spec_draft_ngl      = tk.StringVar(value=is_(app_settings, "spec_draft_ngl"))
-        self.spec_draft_device   = tk.StringVar(value=is_(app_settings, "spec_draft_device"))
-        self.spec_draft_ctk      = tk.StringVar(value=is_(app_settings, "spec_draft_ctk"))
-        self.spec_draft_ctv      = tk.StringVar(value=is_(app_settings, "spec_draft_ctv"))
-        self.spec_draft_cpu_moe  = tk.BooleanVar(value=ib(app_settings, "spec_draft_cpu_moe"))  # llama.cpp only
-        self.spec_draft_n_cpu_moe= tk.StringVar(value=is_(app_settings, "spec_draft_n_cpu_moe"))  # llama.cpp only
+        self.spec_draft_ngl = tk.StringVar(value=is_(app_settings, "spec_draft_ngl"))
+        self.spec_draft_device = tk.StringVar(value=is_(app_settings, "spec_draft_device"))
+        self.spec_draft_ctk = tk.StringVar(value=is_(app_settings, "spec_draft_ctk"))
+        self.spec_draft_ctv = tk.StringVar(value=is_(app_settings, "spec_draft_ctv"))
+        self.spec_draft_cpu_moe = tk.BooleanVar(value=ib(app_settings, "spec_draft_cpu_moe"))  # llama.cpp only
+        self.spec_draft_n_cpu_moe = tk.StringVar(value=is_(app_settings, "spec_draft_n_cpu_moe"))  # llama.cpp only
         # Derived/UI state for the draft model's GPU layer slider + status (mirrors
         # self.n_gpu_layers_int / self.max_gpu_layers / self.gpu_layers_status_var
         # for the main model). Not persisted directly — set after draft GGUF
         # analysis succeeds and consumed only by the slider widget + status label.
-        self.spec_draft_ngl_int           = tk.IntVar(value=0)
-        self.max_spec_draft_gpu_layers    = tk.IntVar(value=0)
+        self.spec_draft_ngl_int = tk.IntVar(value=0)
+        self.max_spec_draft_gpu_layers = tk.IntVar(value=0)
         self.spec_draft_layers_status_var = tk.StringVar(value="Select draft model to see layer info")
-        self.current_spec_draft_analysis  = {}  # mirrors self.current_model_analysis
+        self.current_spec_draft_analysis = {}  # mirrors self.current_model_analysis
         self._spec_draft_analysis_generation = 0
         self._spec_draft_analysis_queue = queue.Queue()
         self._spec_draft_analysis_lock = Lock()
@@ -154,31 +162,36 @@ class SpecTab:
         # ``CUDA…`` string in ``spec_draft_device`` and the next
         # comparison treats it as a manual override.
         self._spec_draft_last_rendered_selected: list[int] = []
+        # Suppresses ``_on_spec_draft_gpu_selection_changed`` for the
+        # duration of a programmatic ``var.set(...)`` sweep in
+        # ``_update_spec_draft_gpu_checkboxes``. See the handler for
+        # the full rationale.
+        self._suppress_spec_draft_gpu_events: bool = False
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
-        self.spec_ngram_simple_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
-        self.spec_ngram_simple_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
+        self.spec_ngram_simple_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
+        self.spec_ngram_simple_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
         self.spec_ngram_simple_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_min_hits"))
-        self.spec_ngram_mapk_size_n     = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_n"))
-        self.spec_ngram_mapk_size_m     = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_m"))
-        self.spec_ngram_mapk_min_hits   = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_min_hits"))
-        self.spec_ngram_mapk4v_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_n"))
-        self.spec_ngram_mapk4v_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_m"))
+        self.spec_ngram_mapk_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_n"))
+        self.spec_ngram_mapk_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_m"))
+        self.spec_ngram_mapk_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_min_hits"))
+        self.spec_ngram_mapk4v_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_n"))
+        self.spec_ngram_mapk4v_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_m"))
         self.spec_ngram_mapk4v_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_min_hits"))
-        self.spec_ngram_mod_n_min       = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_min"))
-        self.spec_ngram_mod_n_max       = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_max"))
-        self.spec_ngram_mod_n_match     = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_match"))
+        self.spec_ngram_mod_n_min = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_min"))
+        self.spec_ngram_mod_n_max = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_max"))
+        self.spec_ngram_mod_n_match = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_match"))
         # Shared single ngram set used by ik_llama (one --spec-ngram-* set).
-        self.spec_ngram_size_n          = tk.StringVar(value=is_(app_settings, "spec_ngram_size_n"))
-        self.spec_ngram_size_m          = tk.StringVar(value=is_(app_settings, "spec_ngram_size_m"))
-        self.spec_ngram_min_hits        = tk.StringVar(value=is_(app_settings, "spec_ngram_min_hits"))
+        self.spec_ngram_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_size_n"))
+        self.spec_ngram_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_size_m"))
+        self.spec_ngram_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_min_hits"))
         # Suffix tuning (ik_llama only).
-        self.spec_suffix_pattern_len    = tk.StringVar(value=is_(app_settings, "spec_suffix_pattern_len"))
-        self.spec_suffix_max_depth      = tk.StringVar(value=is_(app_settings, "spec_suffix_max_depth"))
+        self.spec_suffix_pattern_len = tk.StringVar(value=is_(app_settings, "spec_suffix_pattern_len"))
+        self.spec_suffix_max_depth = tk.StringVar(value=is_(app_settings, "spec_suffix_max_depth"))
         # ik_llama extras.
-        self.spec_autotune              = tk.BooleanVar(value=ib(app_settings, "spec_autotune"))
-        self.spec_draft_params          = tk.StringVar(value=is_(app_settings, "spec_draft_params"))  # -draft "k=v,k=v"
+        self.spec_autotune = tk.BooleanVar(value=ib(app_settings, "spec_autotune"))
+        self.spec_draft_params = tk.StringVar(value=is_(app_settings, "spec_draft_params"))  # -draft "k=v,k=v"
         # llama.cpp vision toggle.
-        self.no_mmproj                  = tk.BooleanVar(value=ib(app_settings, "no_mmproj"))  # --no-mmproj
+        self.no_mmproj = tk.BooleanVar(value=ib(app_settings, "no_mmproj"))  # --no-mmproj
 
         # Hint/status vars populated by setup_tab. Pre-create here so test
         # stubs (which don't run setup_tab) can still call refresh helpers.
@@ -232,11 +245,11 @@ class SpecTab:
         r = 0
 
         # --- Header / master toggle ---
-        ttk.Label(inner, text="MTP / Speculative Decoding", font=("TkDefaultFont", 12, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4)
+        ttk.Label(inner, text="MTP / Speculative Decoding", font=("TkDefaultFont", 12, "bold")).grid(
+            column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4
+        )
         r += 1
-        ttk.Separator(inner, orient="horizontal")\
-            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5)
+        ttk.Separator(inner, orient="horizontal").grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5)
         r += 1
 
         master_cb = ttk.Checkbutton(
@@ -249,13 +262,15 @@ class SpecTab:
         self._spec_widgets["master_cb"] = master_cb
 
         self.spec_status_var = tk.StringVar(value="")
-        ttk.Label(inner, textvariable=self.spec_status_var, foreground="gray")\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4)
+        ttk.Label(inner, textvariable=self.spec_status_var, foreground="gray").grid(
+            column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4
+        )
         r += 1
 
         # --- Speculative type ---
-        ttk.Label(inner, text="Speculative type:", font=("TkDefaultFont", 10, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4)
+        ttk.Label(inner, text="Speculative type:", font=("TkDefaultFont", 10, "bold")).grid(
+            column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4
+        )
         r += 1
         type_combo = ttk.Combobox(
             inner,
@@ -297,8 +312,9 @@ class SpecTab:
         e_pmin.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["p_min"] = e_pmin
         self.spec_pmin_hint_var = tk.StringVar(value="")
-        ttk.Label(sec, textvariable=self.spec_pmin_hint_var, foreground="gray")\
-            .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
+        ttk.Label(sec, textvariable=self.spec_pmin_hint_var, foreground="gray").grid(
+            column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2
+        )
 
         sr += 1
         ttk.Label(sec, text="p-split:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
@@ -306,29 +322,32 @@ class SpecTab:
         e_psplit.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["p_split"] = e_psplit
         self.spec_psplit_hint_var = tk.StringVar(value="(llama.cpp only)")
-        ttk.Label(sec, textvariable=self.spec_psplit_hint_var, foreground="gray")\
-            .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
+        ttk.Label(sec, textvariable=self.spec_psplit_hint_var, foreground="gray").grid(
+            column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2
+        )
 
         # MTP requires --parallel 1 (single-slot operation). The trace
         # callbacks force this when MTP is selected, but show the hint
         # so users understand what's happening and can verify.
         sr += 1
         self.spec_parallel_hint_var = tk.StringVar(value="")
-        ttk.Label(sec, textvariable=self.spec_parallel_hint_var,
-                  foreground="#888888", font=("TkSmallCaptionFont"))\
-            .grid(column=0, row=sr, columnspan=4, sticky="w", padx=6, pady=(4, 2))
+        ttk.Label(
+            sec, textvariable=self.spec_parallel_hint_var, foreground="#888888", font=("TkSmallCaptionFont")
+        ).grid(column=0, row=sr, columnspan=4, sticky="w", padx=6, pady=(4, 2))
 
         # Reset-to-default button: overwrites all four common controls with
         # the recommended values for the current spec_type. For ngram/suffix
         # types (which have no recommended defaults), clears the fields.
         sr += 1
-        reset_btn = ttk.Button(sec, text="Reset to defaults",
-                               command=self._reset_spec_defaults)
+        reset_btn = ttk.Button(sec, text="Reset to defaults", command=self._reset_spec_defaults)
         reset_btn.grid(column=0, row=sr, sticky="w", padx=6, pady=(6, 4))
         self._spec_widgets["reset_defaults_btn"] = reset_btn
-        ttk.Label(sec, text="Overwrites n-max / n-min / p-min / p-split with the recommended defaults for the active type.",
-                  foreground="#888888", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=sr, columnspan=3, sticky="w", padx=4, pady=(6, 4))
+        ttk.Label(
+            sec,
+            text="Overwrites n-max / n-min / p-min / p-split with the recommended defaults for the active type.",
+            foreground="#888888",
+            font=("TkSmallCaptionFont"),
+        ).grid(column=1, row=sr, columnspan=3, sticky="w", padx=4, pady=(6, 4))
 
         # --- Draft model section ---
         # Picks the draft GGUF from the same scanned-models pool as the
@@ -347,7 +366,7 @@ class SpecTab:
         self.spec_use_draft_cb = ttk.Checkbutton(
             sec,
             text="Use a separate draft model "
-                 "(optional for ik_llama MTP — leave unchecked to use the embedded head from the base GGUF)",
+            "(optional for ik_llama MTP — leave unchecked to use the embedded head from the base GGUF)",
             variable=self.spec_use_draft_model,
         )
         self.spec_use_draft_cb.grid(column=0, row=0, sticky="w", padx=6, pady=(4, 2), columnspan=4)
@@ -398,7 +417,10 @@ class SpecTab:
 
         # Entry stays NORMAL so the user can type a value even before analysis.
         self.spec_draft_ngl_entry = ttk.Entry(
-            draft_ngl_frame, textvariable=self.spec_draft_ngl, width=6, state=tk.NORMAL,
+            draft_ngl_frame,
+            textvariable=self.spec_draft_ngl,
+            width=6,
+            state=tk.NORMAL,
         )
         self.spec_draft_ngl_entry.grid(column=0, row=0, sticky="w", padx=(0, 10))
 
@@ -443,7 +465,12 @@ class SpecTab:
         ttk.Label(sec, text="Draft devices (-devd):").grid(column=0, row=sr, sticky="nw", padx=6, pady=2)
         self.spec_draft_gpu_checkbox_frame = ttk.Frame(sec)
         self.spec_draft_gpu_checkbox_frame.grid(
-            column=1, row=sr, columnspan=3, sticky="ew", padx=4, pady=2,
+            column=1,
+            row=sr,
+            columnspan=3,
+            sticky="ew",
+            padx=4,
+            pady=2,
         )
         self.spec_draft_gpu_vars = []
         # Register the parent frame so _refresh_spec_tab_state's enable/disable
@@ -456,15 +483,21 @@ class SpecTab:
         # already treats "" as omission so behavior is unchanged.
         ttk.Label(sec, text="Draft K cache type (-ctkd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_ctk_combo = ttk.Combobox(
-            sec, textvariable=self.spec_draft_ctk, width=10,
-            values=SPEC_DRAFT_CACHE_TYPE_VALUES, state="readonly",
+            sec,
+            textvariable=self.spec_draft_ctk,
+            width=10,
+            values=SPEC_DRAFT_CACHE_TYPE_VALUES,
+            state="readonly",
         )
         self.spec_draft_ctk_combo.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_ctk"] = self.spec_draft_ctk_combo
         ttk.Label(sec, text="Draft V cache type (-ctvd):").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_ctv_combo = ttk.Combobox(
-            sec, textvariable=self.spec_draft_ctv, width=10,
-            values=SPEC_DRAFT_CACHE_TYPE_VALUES, state="readonly",
+            sec,
+            textvariable=self.spec_draft_ctv,
+            width=10,
+            values=SPEC_DRAFT_CACHE_TYPE_VALUES,
+            state="readonly",
         )
         self.spec_draft_ctv_combo.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_ctv"] = self.spec_draft_ctv_combo
@@ -486,19 +519,26 @@ class SpecTab:
         # checkbox. _refresh_spec_tab_state grid_remove()s these as a group when
         # ik_llama+mtp is active and spec_use_draft_model is False (so the
         # section collapses to just the checkbox); grid()s them back otherwise.
-        self._spec_draft_inner_widgets = [
-            w for w in sec.winfo_children() if w is not self.spec_use_draft_cb
-        ]
+        self._spec_draft_inner_widgets = [w for w in sec.winfo_children() if w is not self.spec_use_draft_cb]
 
         # --- Ngram tuning (llama.cpp per-variant; ik_llama shared) ---
         # Per-variant simple/mapk/mapk4v/mod groups for llama.cpp:
         for key, label, vars_triplet in [
-            ("ngram_simple", "Ngram simple (--spec-ngram-simple-*)",
-             (self.spec_ngram_simple_size_n, self.spec_ngram_simple_size_m, self.spec_ngram_simple_min_hits)),
-            ("ngram_mapk", "Ngram map-k (--spec-ngram-map-k-*)",
-             (self.spec_ngram_mapk_size_n, self.spec_ngram_mapk_size_m, self.spec_ngram_mapk_min_hits)),
-            ("ngram_mapk4v", "Ngram map-k4v (--spec-ngram-map-k4v-*)",
-             (self.spec_ngram_mapk4v_size_n, self.spec_ngram_mapk4v_size_m, self.spec_ngram_mapk4v_min_hits)),
+            (
+                "ngram_simple",
+                "Ngram simple (--spec-ngram-simple-*)",
+                (self.spec_ngram_simple_size_n, self.spec_ngram_simple_size_m, self.spec_ngram_simple_min_hits),
+            ),
+            (
+                "ngram_mapk",
+                "Ngram map-k (--spec-ngram-map-k-*)",
+                (self.spec_ngram_mapk_size_n, self.spec_ngram_mapk_size_m, self.spec_ngram_mapk_min_hits),
+            ),
+            (
+                "ngram_mapk4v",
+                "Ngram map-k4v (--spec-ngram-map-k4v-*)",
+                (self.spec_ngram_mapk4v_size_n, self.spec_ngram_mapk4v_size_m, self.spec_ngram_mapk4v_min_hits),
+            ),
         ]:
             sec = ttk.LabelFrame(inner, text=label)
             sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
@@ -522,14 +562,17 @@ class SpecTab:
         self._spec_sections["ngram_mod"] = sec
         r += 1
         ttk.Label(sec, text="n-min:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_min, width=10)\
-            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_min, width=10).grid(
+            column=1, row=0, sticky="w", padx=4, pady=2
+        )
         ttk.Label(sec, text="n-max:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_max, width=10)\
-            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_max, width=10).grid(
+            column=3, row=0, sticky="w", padx=4, pady=2
+        )
         ttk.Label(sec, text="n-match:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_match, width=10)\
-            .grid(column=1, row=1, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_match, width=10).grid(
+            column=1, row=1, sticky="w", padx=4, pady=2
+        )
 
         # Shared ngram set (ik_llama uses a single set across all ngram types):
         sec = ttk.LabelFrame(inner, text="Ngram tuning (--spec-ngram-*)")
@@ -539,14 +582,13 @@ class SpecTab:
         self._spec_sections["ngram_shared"] = sec
         r += 1
         ttk.Label(sec, text="size-n:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_size_n, width=10)\
-            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_size_n, width=10).grid(column=1, row=0, sticky="w", padx=4, pady=2)
         ttk.Label(sec, text="size-m:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_size_m, width=10)\
-            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_size_m, width=10).grid(column=3, row=0, sticky="w", padx=4, pady=2)
         ttk.Label(sec, text="min-hits:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_min_hits, width=10)\
-            .grid(column=1, row=1, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_min_hits, width=10).grid(
+            column=1, row=1, sticky="w", padx=4, pady=2
+        )
 
         # --- Suffix (ik_llama only) ---
         sec = ttk.LabelFrame(inner, text="Suffix tuning (ik_llama, --suffix-*)")
@@ -555,11 +597,13 @@ class SpecTab:
         self._spec_sections["suffix"] = sec
         r += 1
         ttk.Label(sec, text="pattern-len:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_suffix_pattern_len, width=10)\
-            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_suffix_pattern_len, width=10).grid(
+            column=1, row=0, sticky="w", padx=4, pady=2
+        )
         ttk.Label(sec, text="max-depth:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_suffix_max_depth, width=10)\
-            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_suffix_max_depth, width=10).grid(
+            column=3, row=0, sticky="w", padx=4, pady=2
+        )
 
         # --- ik_llama extras ---
         sec = ttk.LabelFrame(inner, text="ik_llama extras")
@@ -573,8 +617,9 @@ class SpecTab:
             variable=self.spec_autotune,
         ).grid(column=0, row=0, sticky="w", padx=6, pady=2, columnspan=2)
         ttk.Label(sec, text="Draft params (-draft):").grid(column=0, row=1, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_draft_params)\
-            .grid(column=1, row=1, sticky="ew", padx=4, pady=2, columnspan=2)
+        ttk.Entry(sec, textvariable=self.spec_draft_params).grid(
+            column=1, row=1, sticky="ew", padx=4, pady=2, columnspan=2
+        )
         ttk.Label(
             sec,
             text='Free-form comma list, e.g. "k=v,k=v"',
@@ -660,10 +705,7 @@ class SpecTab:
                 self._update_ui_after_spec_draft_analysis(main_analysis)
             else:
                 self.spec_draft_layers_status_var.set("Analyzing draft model...")
-                if (
-                    hasattr(self, "spec_draft_ngl_slider")
-                    and self.spec_draft_ngl_slider.winfo_exists()
-                ):
+                if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
                     self.spec_draft_ngl_slider.config(state=tk.DISABLED)
                 self.current_spec_draft_analysis = {}
                 self._start_spec_draft_gguf_analysis(full_path_str)
@@ -719,10 +761,7 @@ class SpecTab:
 
     def _sync_spec_draft_gpu_layers_from_slider(self, value_str):
         """Slider callback for the draft layers control."""
-        if (
-            not hasattr(self, "spec_draft_ngl_entry")
-            or not self.spec_draft_ngl_entry.winfo_exists()
-        ):
+        if not hasattr(self, "spec_draft_ngl_entry") or not self.spec_draft_ngl_entry.winfo_exists():
             return
         try:
             value = int(float(value_str))
@@ -735,10 +774,7 @@ class SpecTab:
 
     def _sync_spec_draft_gpu_layers_from_entry(self, event=None):
         """FocusOut/Return callback for the draft layers entry."""
-        if (
-            not hasattr(self, "spec_draft_ngl_entry")
-            or not self.spec_draft_ngl_entry.winfo_exists()
-        ):
+        if not hasattr(self, "spec_draft_ngl_entry") or not self.spec_draft_ngl_entry.winfo_exists():
             return
         current_str = self.spec_draft_ngl.get().strip()
         if current_str == "":
@@ -794,10 +830,7 @@ class SpecTab:
         (post-detection refresh was destroying + recreating 8 checkboxes
         every time even when nothing changed).
         """
-        if (
-            not hasattr(self, "spec_draft_gpu_checkbox_frame")
-            or not self.spec_draft_gpu_checkbox_frame.winfo_exists()
-        ):
+        if not hasattr(self, "spec_draft_gpu_checkbox_frame") or not self.spec_draft_gpu_checkbox_frame.winfo_exists():
             return
 
         gpu_info = getattr(self.launcher, "gpu_info", {})
@@ -829,17 +862,17 @@ class SpecTab:
         # Manual GPU mode disables draft device emission entirely — the
         # manual GPU list isn't real CUDA hardware, so we can't tell the
         # binary "use CUDA<i>" reliably.
-        manual_mode = bool(
-            getattr(getattr(self.launcher, "manual_gpu_mode", None), "get", lambda: False)()
-        )
+        manual_mode = bool(getattr(getattr(self.launcher, "manual_gpu_mode", None), "get", lambda: False)())
 
         new_fp = (
             manual_mode,
             count,
             tuple(
-                (detected_devices[i].get("name", "")
-                 if i < len(detected_devices) and isinstance(detected_devices[i], dict)
-                 else "")
+                (
+                    detected_devices[i].get("name", "")
+                    if i < len(detected_devices) and isinstance(detected_devices[i], dict)
+                    else ""
+                )
                 for i in range(count)
             ),
         )
@@ -852,15 +885,28 @@ class SpecTab:
             and len(self.spec_draft_gpu_vars) == count
         ):
             valid_selected = []
-            for i, var in enumerate(self.spec_draft_gpu_vars):
-                desired = i in loaded_selected
-                if desired:
-                    valid_selected.append(i)
-                try:
-                    if var.get() != desired:
-                        var.set(desired)
-                except Exception:
-                    pass
+            # Suppress the per-var trace handler during this
+            # programmatic ``var.set(desired)`` sweep. The handler
+            # (``_on_spec_draft_gpu_selection_changed``) would
+            # otherwise fire mid-loop on every flipped checkbox and
+            # write a PARTIAL ``CUDA…`` string into
+            # ``spec_draft_device`` before the loop finishes —
+            # producing transient intermediate values that the
+            # conditional-clear logic below then sees and
+            # mis-classifies as "manual override".
+            self._suppress_spec_draft_gpu_events = True
+            try:
+                for i, var in enumerate(self.spec_draft_gpu_vars):
+                    desired = i in loaded_selected
+                    if desired:
+                        valid_selected.append(i)
+                    try:
+                        if var.get() != desired:
+                            var.set(desired)
+                    except Exception:
+                        pass
+            finally:
+                self._suppress_spec_draft_gpu_events = False
             self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
             # Same conditional-clear logic the manual-mode branch
             # below uses: only overwrite ``spec_draft_device`` when
@@ -883,12 +929,7 @@ class SpecTab:
                 # subclass that bypasses ``__init__``) don't crash on
                 # a missing attribute; an empty list correctly
                 # represents "no prior render".
-                prior_derived = ",".join(
-                    f"CUDA{i}"
-                    for i in getattr(
-                        self, "_spec_draft_last_rendered_selected", []
-                    )
-                )
+                prior_derived = ",".join(f"CUDA{i}" for i in getattr(self, "_spec_draft_last_rendered_selected", []))
                 if current in ("", prior_derived):
                     self.spec_draft_device.set(checkbox_derived)
                     self._spec_draft_last_rendered_selected = list(valid_selected)
@@ -914,11 +955,7 @@ class SpecTab:
         if count > 0 and not manual_mode:
             MAX_GPUS_PER_ROW = 3
             for i in range(count):
-                gpu_details = (
-                    detected_devices[i]
-                    if i < len(detected_devices)
-                    else {}
-                )
+                gpu_details = detected_devices[i] if i < len(detected_devices) else {}
                 is_selected = i in loaded_selected
                 if is_selected:
                     valid_selected.append(i)
@@ -942,8 +979,11 @@ class SpecTab:
         else:
             ttk.Label(
                 self.spec_draft_gpu_checkbox_frame,
-                text=("No CUDA devices detected." if not manual_mode
-                      else "Draft device selection disabled in manual GPU mode."),
+                text=(
+                    "No CUDA devices detected."
+                    if not manual_mode
+                    else "Draft device selection disabled in manual GPU mode."
+                ),
                 foreground="orange",
             ).grid(row=0, column=0, sticky="w", padx=5, pady=3)
 
@@ -976,12 +1016,7 @@ class SpecTab:
                 # subclass that bypasses ``__init__``) don't crash on
                 # a missing attribute; an empty list correctly
                 # represents "no prior render".
-                prior_derived = ",".join(
-                    f"CUDA{i}"
-                    for i in getattr(
-                        self, "_spec_draft_last_rendered_selected", []
-                    )
-                )
+                prior_derived = ",".join(f"CUDA{i}" for i in getattr(self, "_spec_draft_last_rendered_selected", []))
                 if current in ("", prior_derived):
                     self.spec_draft_device.set(checkbox_derived)
                     self._spec_draft_last_rendered_selected = list(valid_selected)
@@ -1011,12 +1046,7 @@ class SpecTab:
             # value AND the manual-mode flip cleanly clears it.
             # ``getattr`` defaults to ``[]`` so test stubs and any
             # subclass that bypasses ``__init__`` don't crash.
-            checkbox_derived = ",".join(
-                f"CUDA{i}"
-                for i in getattr(
-                    self, "_spec_draft_last_rendered_selected", []
-                )
-            )
+            checkbox_derived = ",".join(f"CUDA{i}" for i in getattr(self, "_spec_draft_last_rendered_selected", []))
             try:
                 if self.spec_draft_device.get() == checkbox_derived:
                     self.spec_draft_device.set("")
@@ -1041,10 +1071,15 @@ class SpecTab:
         emission blocks consume. CUDA prefix is hardcoded because the
         launcher's GPU detection is CUDA-only.
         """
+        # Programmatic ``var.set(...)`` sweeps in
+        # ``_update_spec_draft_gpu_checkboxes`` set this flag for the
+        # duration of the for-loop so we don't fire on each
+        # intermediate flip and stamp a partial ``CUDA…`` string
+        # into ``spec_draft_device`` before the sweep completes.
+        if getattr(self, "_suppress_spec_draft_gpu_events", False):
+            return
         try:
-            selected_indices = [
-                i for i, v in enumerate(self.spec_draft_gpu_vars) if v.get()
-            ]
+            selected_indices = [i for i, v in enumerate(self.spec_draft_gpu_vars) if v.get()]
             self.launcher.app_settings["spec_draft_selected_gpus"] = selected_indices
             device_str = ",".join(f"CUDA{i}" for i in selected_indices)
             if self.spec_draft_device.get() != device_str:
@@ -1127,9 +1162,7 @@ class SpecTab:
         IDLE_TIMEOUT_S = 2.0
         try:
             while True:
-                signalled = self._spec_draft_request_event.wait(
-                    timeout=IDLE_TIMEOUT_S
-                )
+                signalled = self._spec_draft_request_event.wait(timeout=IDLE_TIMEOUT_S)
                 with self._get_spec_draft_analysis_lock():
                     pending = self._spec_draft_latest_path
                     analysis_id = self._spec_draft_analysis_generation
@@ -1161,9 +1194,7 @@ class SpecTab:
                     # latest path.
                     if analysis_id != self._spec_draft_analysis_generation:
                         continue
-                    self._spec_draft_analysis_queue.put(
-                        (analysis_id, analysis_result)
-                    )
+                    self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
         except Exception:
             # Worker exception is fatal for this worker; let the next
             # selection re-spawn a fresh one rather than masquerade as
@@ -1204,8 +1235,7 @@ class SpecTab:
         except queue.Empty:
             pass
         if (
-            self._spec_draft_analysis_thread
-            and self._spec_draft_analysis_thread.is_alive()
+            self._spec_draft_analysis_thread and self._spec_draft_analysis_thread.is_alive()
         ) or not self._spec_draft_analysis_queue.empty():
             try:
                 self._spec_draft_analysis_after_id = self.launcher.root.after(
@@ -1227,22 +1257,14 @@ class SpecTab:
             msg = error if error else "Could not determine layers"
             self.spec_draft_layers_status_var.set(f"{msg} (manual entry available)")
             self.max_spec_draft_gpu_layers.set(0)
-            if (
-                hasattr(self, "spec_draft_ngl_slider")
-                and self.spec_draft_ngl_slider.winfo_exists()
-            ):
+            if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
                 self.spec_draft_ngl_slider.config(to=0, state=tk.DISABLED)
             return
         # Success: enable slider and update status. Mirrors main +1 for output.
         max_offloadable = n_layers + 1
         self.max_spec_draft_gpu_layers.set(max_offloadable)
-        self.spec_draft_layers_status_var.set(
-            f"Max Layers: {max_offloadable} ({n_layers} blocks + output)"
-        )
-        if (
-            hasattr(self, "spec_draft_ngl_slider")
-            and self.spec_draft_ngl_slider.winfo_exists()
-        ):
+        self.spec_draft_layers_status_var.set(f"Max Layers: {max_offloadable} ({n_layers} blocks + output)")
+        if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
             self.spec_draft_ngl_slider.config(to=max_offloadable, state=tk.NORMAL)
         # Re-sync entry -> int so the slider reflects the entry's current value.
         try:
@@ -1378,7 +1400,7 @@ class SpecTab:
             return
 
         backend = self.backend_selection.get() if hasattr(self, "backend_selection") else "llama.cpp"
-        is_ik = (backend == "ik_llama")
+        is_ik = backend == "ik_llama"
         enabled = bool(self.spec_enabled.get())
         spec_type = (self.spec_type.get() or "none").strip()
 
@@ -1429,6 +1451,7 @@ class SpecTab:
                         _walk(child)
                         continue
                     _set_state(child, state)
+
             _walk(sec)
 
         type_combo_target_state = "normal" if enabled else "disabled"
