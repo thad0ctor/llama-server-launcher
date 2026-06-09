@@ -518,6 +518,22 @@ class TestEmissionParity:
                 f"expected={expected_short!r} emitted={emitted_short!r} "
                 f"partial={partial!r}"
             )
+            # Value-token presence: ``expected_flags`` carries non-
+            # option tokens too (e.g. ``"draft-mtp"`` as the value of
+            # ``--spec-type``). The two set-equalities above only
+            # cover option flags, so a regression that emits the
+            # right ``--spec-type`` flag with the WRONG value would
+            # slip through. Assert every non-option token in
+            # ``expected_flags`` shows up SOMEWHERE in ``partial``.
+            for token in expected_flags:
+                if not isinstance(token, str):
+                    continue
+                if token in expected_long or token in expected_short:
+                    continue  # option token, already covered above
+                assert token in partial, (
+                    f"backend={backend} spec_type={spec_type}: missing "
+                    f"value token {token!r}; emitted args={partial!r}"
+                )
 
     def test_mtp_overrides_parallel_8_at_launch(self, real_launcher):
         """MTP requires --parallel 1. If the user has parallel=8 in config
@@ -919,12 +935,18 @@ class TestRedirectIntegrity:
         # the production code crashes with AttributeError.
         tab._get_spec_draft_analysis_lock = lambda: tab._spec_draft_analysis_lock
 
+        # Track invocation so a regression that short-circuits
+        # ``_run_spec_draft_gguf_analysis`` (and never calls the
+        # parser) doesn't trivially pass via the empty-queue check.
+        parse_calls: list[str] = []
+
         def parse_and_supersede(path):
             # Simulates a concurrent newer selection bumping the
             # generation counter while THIS parse is still running.
             # When ``_run_spec_draft_gguf_analysis`` re-checks the
             # generation post-parse, it must notice the bump and drop
             # the result instead of enqueueing it.
+            parse_calls.append(path)
             tab._spec_draft_analysis_generation = 2
             return {"path": path}
 
@@ -932,4 +954,13 @@ class TestRedirectIntegrity:
 
         entry_module.SpecTab._run_spec_draft_gguf_analysis(tab, "/models/draft.gguf", analysis_id=1)
 
+        # Parser MUST have actually been invoked (with the requested
+        # path) — proves the stale-result drop happens at the
+        # POST-parse generation check, not from a pre-parse
+        # short-circuit that would have made this test pass for the
+        # wrong reason.
+        assert parse_calls == ["/models/draft.gguf"], (
+            f"parser must run once for the requested draft; got {parse_calls!r}"
+        )
+        # AND the stale result is silently dropped at enqueue time.
         assert tab._spec_draft_analysis_queue.empty()

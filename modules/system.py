@@ -488,7 +488,15 @@ except Exception as e:
             print(f"DEBUG: Permission denied accessing venv: {venv_path}", file=sys.stderr)
         return _unavailable_gpu_info("Permission denied", "torch-venv")
     except Exception as e:
-        print(f"DEBUG: Unexpected exception during venv GPU detection: {type(e).__name__}: {e}", file=sys.stderr)
+        # Raw exception text can include venv paths / module names /
+        # subprocess fragments. Gate behind the debug env to match
+        # the other exception sites in this function.
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print(
+                f"DEBUG: Unexpected exception during venv GPU detection: "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
         return _unavailable_gpu_info(
             f"Unexpected error: {type(e).__name__}", "torch-venv"
         )

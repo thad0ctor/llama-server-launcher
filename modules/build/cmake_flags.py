@@ -912,7 +912,19 @@ def validate_values(
     # text — building static libs makes the dynamic-backend loader
     # nonsensical). Surface this at start-build validation rather than
     # letting cmake fail with a less obvious linker error.
-    if _truthy(values, "GGML_BACKEND_DL") and not _truthy(values, "BUILD_SHARED_LIBS"):
+    #
+    # Only check when ``GGML_BACKEND_DL`` is APPLICABLE to the chosen
+    # backend (ik_llama doesn't ship the dynamic-backend loader, so a
+    # stale config with ``GGML_BACKEND_DL=True`` left over from a
+    # llama.cpp preset would otherwise fire a confusing "missing
+    # BUILD_SHARED_LIBS" error on a build that's going to silently
+    # drop the flag at emit time anyway.
+    applicable_keys = {flag.key for flag in flags_for_backend(backend)}
+    if (
+        "GGML_BACKEND_DL" in applicable_keys
+        and _truthy(values, "GGML_BACKEND_DL")
+        and not _truthy(values, "BUILD_SHARED_LIBS")
+    ):
         errors.append(
             (
                 "Dynamic backend loading",

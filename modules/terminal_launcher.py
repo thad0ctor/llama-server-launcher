@@ -83,7 +83,17 @@ def _cmd_keep_open(command: str) -> tuple[list[str], str]:
         # ``/d`` skips AutoRun registry hooks so we don't
         # accidentally trigger user environment scripts between
         # the wrapper and the actual command.
-        fh.write(f'cmd /d /c "{command}"\r\n')
+        # ``cmd /d /c "<command>"`` strips the OUTER pair of quotes
+        # at parse time, but a payload with its OWN double quotes
+        # (e.g. ``msiexec /i "C:\…\foo.msi"``) sees its inner
+        # quotes consumed too because cmd treats the FIRST and LAST
+        # ``"`` of the line as the outer delimiters. The
+        # documented workaround is ``cmd /d /c ""…""`` — when the
+        # /S flag isn't set, cmd strips ONE outer pair and leaves
+        # the inner one intact, so embedded quotes survive.
+        # See https://ss64.com/nt/cmd.html — "When Command
+        # Extensions are Enabled" + "Path Quoting Rules".
+        fh.write(f'cmd /d /c ""{command}""\r\n')
         fh.write("echo.\r\n")
         fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
         # Self-delete after the user dismisses the keep-open shell.

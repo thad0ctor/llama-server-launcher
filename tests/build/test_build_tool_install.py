@@ -153,13 +153,17 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
             pass
     assert "winget install --id Kitware.CMake -e" in body
     assert "Running command..." in body
-    # User command must be wrapped in ``cmd /d /c "..."`` so:
+    # User command must be wrapped in ``cmd /d /c ""..."" `` so:
     #   * a ``.bat`` / ``.cmd`` payload returns control to the
     #     wrapper for the exit-code echo and the self-delete line,
     #   * shell metacharacters (``&`` / ``|`` / ``>``) are parsed
-    #     by the INNER cmd not the outer wrapper.
+    #     by the INNER cmd not the outer wrapper,
+    #   * embedded double quotes in the user payload (e.g.
+    #     ``msiexec /i "C:\…\foo.msi"``) survive cmd's outer-quote
+    #     stripping. The double-double form is the documented
+    #     cmd-without-/S workaround.
     # ``/d`` skips AutoRun registry hooks.
-    assert 'cmd /d /c "winget install --id Kitware.CMake -e"' in body
+    assert 'cmd /d /c ""winget install --id Kitware.CMake -e""' in body
     # ``%ERRORLEVEL%`` (single ``%``) is the runtime value inside a
     # batch file — the previous ``%%`` form was needed only because
     # the string went through ``cmd /c``'s parser first.

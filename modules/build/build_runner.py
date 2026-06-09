@@ -599,13 +599,33 @@ class BuildRunner:
             import re as _re
             _env_name_re = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
             for k, v in (plan.cmake_env or {}).items():
-                if isinstance(k, str) and _env_name_re.fullmatch(k):
-                    env[k] = v
-                else:
+                if not (isinstance(k, str) and _env_name_re.fullmatch(k)):
                     self._emit_line(
-                        f"WARNING: dropping invalid cmake_env entry "
+                        f"WARNING: dropping cmake_env entry with invalid name "
                         f"{k!r} (must match {_env_name_re.pattern!r})"
                     )
+                    continue
+                # Coerce values to str AND reject embedded NULs.
+                # ``subprocess.Popen(env=...)`` rejects non-string
+                # values with a confusing TypeError, and NUL in a
+                # value breaks the C-level env emitter on POSIX
+                # / corrupts the bash export line in the exported
+                # script.
+                try:
+                    sv = str(v) if v is not None else ""
+                except Exception:
+                    self._emit_line(
+                        f"WARNING: dropping cmake_env value for {k!r}: "
+                        f"could not coerce to str"
+                    )
+                    continue
+                if "\0" in sv:
+                    self._emit_line(
+                        f"WARNING: dropping cmake_env entry {k!r}: "
+                        f"value contains NUL"
+                    )
+                    continue
+                env[k] = sv
             self._emit_line("$ " + " ".join(shlex.quote(x) for x in cfg_cmd))
             rc = self._stream(cfg_cmd, cwd=str(src), env=env)
             if self._cancel.is_set():

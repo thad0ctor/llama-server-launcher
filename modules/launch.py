@@ -199,6 +199,23 @@ class LaunchManager:
         repo_dir = getattr(self.launcher, "repo_dir", None)
         if not isinstance(repo_dir, (str, Path)):
             repo_dir = venv_manager.launcher_repo_dir()
+        else:
+            # Normalize: a ``~``-prefixed or relative launcher
+            # ``repo_dir`` would otherwise produce a different
+            # ``resolve_active_venv_path`` result than the Settings
+            # tab (which already normalizes via
+            # ``.expanduser().resolve(strict=False)``). Both paths
+            # MUST resolve to the same venv directory or Settings
+            # creates one venv layout while launch resolves
+            # against another.
+            try:
+                repo_dir = Path(repo_dir).expanduser().resolve(strict=False)
+            except Exception:
+                # Last-ditch fallback for an unresolvable path
+                # (broken symlink loop, permission deny on a
+                # parent). Use the unresolved form rather than
+                # crash the entire launch path.
+                repo_dir = Path(repo_dir).expanduser()
         return venv_manager.resolve_active_venv_path(
             raw_path,
             repo_dir=repo_dir,
