@@ -420,7 +420,14 @@ def build_install_dependency_command(
     if python is None:
         python = venv_python_candidates(target, platform=platform)[0]
     pkg = dependency.install_name or dependency.package_name
-    args = [str(python), "-m", "pip", "install", pkg]
+    # ``--upgrade`` so the UI's "Install / update" button actually
+    # advances the package version when it's already installed.
+    # Without this, ``pip install <pkg>`` is a no-op when the venv
+    # already has the package and the update path silently does
+    # nothing — even though the button label promises an update.
+    # pip treats ``--upgrade`` as "install OR upgrade", so the
+    # fresh-install path still works correctly.
+    args = [str(python), "-m", "pip", "install", "--upgrade", pkg]
     return _shell_join(args, platform=platform)
 
 

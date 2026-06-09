@@ -79,6 +79,16 @@ def collect_spec_into_cfg(launcher, cfg):
     ``spec_draft_selected_gpus`` mirror so the checkbox state round-trips
     in the named-config payload.
     """
+    # Mirror the persisted draft-GPU checkbox state into the named
+    # config too. Without this, saving a named config drops the
+    # ``spec_draft_selected_gpus`` selection — ``spec_tab`` and
+    # ``spec_launch`` both still read this key from app_settings,
+    # so a load of the named config would restore everything else
+    # but reset the draft-GPU checkboxes to empty. Coerce on save
+    # too so a stale ``[True, "1"]`` shape can't round-trip.
+    cfg["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(
+        launcher.app_settings.get("spec_draft_selected_gpus", [])
+    )
     cfg["spec_enabled"] = launcher.spec_enabled.get()
     cfg["spec_type"] = launcher.spec_type.get()
     cfg["spec_draft_n_max"] = launcher.spec_draft_n_max.get()
@@ -137,6 +147,15 @@ def load_spec_from_cfg(launcher, cfg):
     checkbox grid can render it; this function performs the coercion and
     returns the cleaned list as a side effect on the cfg dict.
     """
+
+    # Restore the persisted draft-GPU checkbox state. The cfg's
+    # value goes through ``coerce_spec_draft_selected_gpus`` so a
+    # hand-edited config carrying booleans / floats / strings
+    # can't corrupt the checkbox grid. Mirror the cleaned list
+    # back onto cfg too so the load_configuration caller (which
+    # copies ``cfg`` into ``launcher.app_settings``) sees the
+    # coerced shape, not the raw input.
+    cfg["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(cfg.get("spec_draft_selected_gpus", []))
 
     def _spec_bool(key):
         val = cfg.get(key, False)

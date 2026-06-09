@@ -27,9 +27,7 @@ def test_resolve_venv_dir_blank_uses_repo_default(tmp_path):
 
 
 def test_resolve_venv_dir_relative_uses_repo_dir(tmp_path):
-    assert venv_manager.resolve_venv_dir("envs/dev", repo_dir=tmp_path) == (
-        tmp_path / "envs" / "dev"
-    ).resolve()
+    assert venv_manager.resolve_venv_dir("envs/dev", repo_dir=tmp_path) == (tmp_path / "envs" / "dev").resolve()
 
 
 def test_describe_venv_target_marks_blank_as_default(tmp_path):
@@ -152,9 +150,9 @@ def test_build_bootstrap_venv_command_installs_managed_packages(tmp_path):
     # ``-m venv`` check still pins the venv-creation contract.
     import re as _re
 
-    assert _re.search(r"\S+\s+-m\s+venv", command), (
-        f"expected a ``<interpreter> -m venv`` invocation in command: {command!r}"
-    )
+    assert _re.search(
+        r"\S+\s+-m\s+venv", command
+    ), f"expected a ``<interpreter> -m venv`` invocation in command: {command!r}"
     assert "pip install --upgrade pip" in command
     assert "pip install requests" in command
     assert "torch" not in command
@@ -206,7 +204,11 @@ def test_build_install_dependency_command_uses_venv_python(tmp_path):
     )
 
     assert str(exe) in command
-    assert "pip install requests" in command
+    # The install command now passes ``--upgrade`` so the UI's
+    # "Install / update" button advances the package version when
+    # already installed instead of being a silent no-op. Match the
+    # new shape with the flag between ``install`` and the package.
+    assert "pip install --upgrade requests" in command
 
 
 def test_build_install_dependency_command_quotes_windows_python(tmp_path):
