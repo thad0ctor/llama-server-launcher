@@ -202,14 +202,18 @@ def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stu
     tab.include_patterns_var.set("README*")
     tab.ignore_patterns_var.set("*.tmp")
     tab.max_workers_var.set("6")
-    # The real runner emits ``revision`` in its listing payload — the
-    # tab now pins ``_loaded_revision`` from that so a mid-flight edit
-    # to ``revision_var`` doesn't silently retarget the download.
+    # The real runner emits ``revision`` (the ref name) AND
+    # ``resolved_revision`` (the commit SHA) in its listing payload.
+    # The tab pins ``_pinned_revision_sha`` from the latter so a
+    # download binds to the exact bytes the user saw in the file
+    # list, even if the branch moves between listing and download.
+    fake_sha = "deadbeefcafe1234"
     tab._handle_event(
         {
             "event": "listing",
             "repo_id": "TheBloke/Test",
             "revision": "main",
+            "resolved_revision": fake_sha,
             "refs": [{"name": "main", "kind": "branch"}],
             "files": [{"path": "model.gguf", "size_bytes": 120, "kind": "gguf"}],
         }
@@ -224,6 +228,15 @@ def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stu
 
     assert captured["action"] == "download"
     assert captured["payload"]["repo_id"] == "TheBloke/Test"
+    # Pinned-SHA verification: even though ``revision_var`` (the
+    # combobox the user sees) reads ``"main"``, the download payload
+    # MUST send the SHA — that's the whole point of pinning.
+    # A regression that reads the editable combobox instead of the
+    # pinned attribute would emit ``"main"`` here.
+    assert captured["payload"]["revision"] == fake_sha, (
+        f"download must pin to the resolved SHA, not the editable "
+        f"revision_var value; got {captured['payload']['revision']!r}"
+    )
     assert captured["payload"]["selected_files"] == ["model.gguf"]
     assert captured["payload"]["target_dirs"] == [str(target.resolve())]
     assert captured["payload"]["include_patterns"] == ["README*"]

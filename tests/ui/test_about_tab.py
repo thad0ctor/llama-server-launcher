@@ -487,6 +487,39 @@ class TestCheckVersionOnline:
 
         assert about.version_status == "Check Failed"
 
+    def test_malformed_200_body_treated_as_check_failed(self, about, requests_module):
+        """A ``200 OK`` with a blank or unparseable body is NOT a valid
+        version string — ``_check_version_online`` must surface
+        ``"Check Failed"`` so the label doesn't display the literal
+        garbage text or stay stuck on ``"Checking..."``. Locks in
+        the dedicated post-200 sanity branch.
+        """
+        about._update_version_display = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = ""  # truly blank — common 200-with-no-CDN-body
+
+        with patch("modules.about_tab.requests.get", return_value=fake_resp):
+            about._check_version_online()
+
+        assert about.version_status == "Check Failed"
+        assert about._update_version_display.called
+
+    def test_garbage_200_body_treated_as_check_failed(self, about, requests_module):
+        """Same regression as above but with a non-empty but
+        unparseable body — ``"hello"`` isn't a SemVer / build number.
+        """
+        about._update_version_display = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "hello"
+
+        with patch("modules.about_tab.requests.get", return_value=fake_resp):
+            about._check_version_online()
+
+        assert about.version_status == "Check Failed"
+        assert about._update_version_display.called
+
 
 # ---------------------------------------------------------------------------
 # _drain_version_queue — worker completion race

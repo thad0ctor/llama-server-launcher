@@ -25,10 +25,18 @@ from pathlib import Path
 # Comma-separated list of ``<Backend><Int>`` device tokens (e.g.
 # ``CUDA0``, ``Vulkan1``, ``SYCL0``, ``Metal0``). Used to validate the
 # free-text ``spec_draft_device`` override before passing it to the
-# launcher command line — accepts every backend name llama.cpp recognizes
-# while rejecting shell metacharacters / whitespace / path separators
-# that have no legitimate place in a device token.
-_re_csv_cuda = re.compile(r"[A-Za-z]+\d+(?:,[A-Za-z]+\d+)*")
+# launcher command line — restricted to backend names llama.cpp /
+# ik_llama actually recognise so a tokens like ``Banana0`` /
+# ``__init__0`` can't slip through the loose ``[A-Za-z]+`` previously
+# used. New backends can be added to the whitelist below as upstream
+# adds them. Case-insensitive: users sometimes type ``cuda0`` /
+# ``vulkan0``.
+_SPEC_DRAFT_BACKEND_NAMES = ("CUDA", "Vulkan", "SYCL", "Metal", "ROCm", "HIP", "CPU")
+_re_csv_cuda = re.compile(
+    r"(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+"
+    r"(?:,(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+)*",
+    re.IGNORECASE,
+)
 
 
 # Per-backend allowed values for `--spec-type`. Used to validate spec_type

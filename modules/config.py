@@ -496,7 +496,24 @@ class ConfigManager:
         self.launcher.config_name.set(name) # Set the config name entry
 
         # --- Backend Selection ---
-        self.launcher.backend_selection.set(cfg.get("backend_selection", "llama.cpp"))
+        # Normalize legacy backend names before setting the Tk var.
+        # The build-tab flow keys off ``"llama.cpp"`` / ``"ik_llama"``;
+        # an older saved config with ``"ik_llama.cpp"`` (the pre-rename
+        # value) used to leave the app in a third state the
+        # backend-sync paths didn't recognise until the user toggled
+        # it manually. Unknown values fall back to ``"llama.cpp"``.
+        raw_backend = cfg.get("backend_selection", "llama.cpp")
+        if raw_backend == "ik_llama.cpp":
+            backend = "ik_llama"
+        elif raw_backend in ("llama.cpp", "ik_llama"):
+            backend = raw_backend
+        else:
+            backend = "llama.cpp"
+        self.launcher.backend_selection.set(backend)
+        if isinstance(cfg, dict) and cfg.get("backend_selection") != backend:
+            # Persist the normalized value so the next save writes the
+            # canonical name and the warning won't re-fire.
+            cfg["backend_selection"] = backend
 
         # --- NEW: Load new parameters ---
         self.launcher.ignore_eos.set(cfg.get("ignore_eos", False))
@@ -893,18 +910,21 @@ class ConfigManager:
                 if not isinstance(config_data, dict):
                     import_plan.append((raw_name, None, config_data))
                     continue
-                # Disambiguate against both existing saved configs AND
-                # names already chosen earlier in this batch.
+                # Only suffix within THIS import batch — a collision
+                # against ``self.launcher.saved_configs`` is the
+                # standard "overwrite existing" behaviour (the user
+                # consciously imported a file that names an existing
+                # config; that's a legitimate replace, not a
+                # duplicate). The preview labels these as
+                # "overwritten" so the user sees them up front.
+                # The previous logic always appended ``_2`` on any
+                # collision, which made imports unable to update
+                # existing presets — every reload created a fresh
+                # ``foo_2`` / ``foo_3`` / ``…`` clone.
                 final_name = sanitized
-                if (
-                    final_name in self.launcher.saved_configs
-                    or final_name in planned_names
-                ):
+                if final_name in planned_names:
                     suffix = 2
-                    while (
-                        f"{sanitized}_{suffix}" in self.launcher.saved_configs
-                        or f"{sanitized}_{suffix}" in planned_names
-                    ):
+                    while f"{sanitized}_{suffix}" in planned_names:
                         suffix += 1
                     final_name = f"{sanitized}_{suffix}"
                 planned_names.add(final_name)

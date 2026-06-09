@@ -150,7 +150,10 @@ class TestLoadConfiguration:
         assert launcher.no_kv_offload.get() is True
         assert launcher.host.get() == "192.168.1.1"
         assert launcher.port.get() == "9090"
-        assert launcher.backend_selection.get() == "ik_llama.cpp"
+        # Legacy ``ik_llama.cpp`` saved value is normalized to the
+        # canonical ``ik_llama`` by ``_apply_loaded_configuration``
+        # (matches the build-tab's own keys).
+        assert launcher.backend_selection.get() == "ik_llama"
         assert launcher.ignore_eos.get() is True
         assert launcher.n_predict.get() == "512"
         assert launcher.cpu_moe.get() is True

@@ -29,6 +29,7 @@ the ones a user would meaningfully set in the build tab.
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 from collections.abc import Callable
@@ -164,6 +165,46 @@ def _validate_power_of_two(v: str) -> str | None:
     return None
 
 
+# ``\d+`` + optional ``a``/``f`` (Hopper / Blackwell variants) +
+# optional ``-real`` / ``-virtual`` suffix. nvcc 13.2 syntax. The
+# Build tab's auto-detect produces tokens like ``86-real`` /
+# ``120a-real``; manual entries need to follow the same shape or
+# cmake will reject the whole list at configure time.
+_CUDA_ARCH_TOKEN_RE = re.compile(
+    r"^\d{2,3}[af]?(?:-real|-virtual)?$",
+    re.IGNORECASE,
+)
+
+
+def _validate_cuda_archs(v: str) -> str | None:
+    """Accept a ``;``-separated cmake-style CUDA arch list.
+
+    Each token must look like ``<digits>[a|f][-real|-virtual]`` —
+    e.g. ``86``, ``86-real``, ``120a-real``, ``90-virtual``. Empty
+    tokens (from a trailing ``;`` or ``;;``) and unparseable
+    tokens fail the validator so cmake doesn't reject the whole
+    build at configure time. Mirrors the auto-detect output shape.
+    """
+    s = v.strip()
+    if not s:
+        return None
+    tokens = s.split(";")
+    bad: list[str] = []
+    for token in tokens:
+        candidate = token.strip()
+        if not candidate:
+            return "empty entry in semicolon-separated list"
+        if not _CUDA_ARCH_TOKEN_RE.match(candidate):
+            bad.append(candidate)
+    if bad:
+        return (
+            f"invalid CUDA arch token(s): {bad!r}. "
+            "Use ``<digits>[a|f][-real|-virtual]`` (e.g. ``86`` / "
+            "``86-real`` / ``120a-real``)."
+        )
+    return None
+
+
 def _validate_positive_int(v: str) -> str | None:
     s = v.strip()
     try:
@@ -260,6 +301,7 @@ FLAGS: list[CMakeFlag] = [
     CMakeFlag("CMAKE_CUDA_ARCHITECTURES", "CUDA architectures", "CUDA", STRING, "",
               visible_when=_cuda_on,
               placeholder="86-real;120a-real;120-real",
+              validate=_validate_cuda_archs,
               help=("Standard cmake variable. Semi-colon list of <code>[-real|-virtual]. "
                     "Use the auto-detect button to populate from your GPUs.")),
 

@@ -172,10 +172,23 @@ def test_probe_current_python_dependencies_reports_availability(monkeypatch):
 
 
 def test_build_install_dependency_command_uses_venv_python(tmp_path):
+    import os as _os
+    import sys as _sys
+
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
     exe = bindir / "python"
     exe.write_text("", encoding="utf-8")
+    # ``locate_venv_python`` requires the interpreter to be
+    # executable on POSIX. Without ``chmod`` the helper falls back
+    # to other candidates and this test stops actually exercising
+    # the interpreter-discovery branch it's named after. Skip the
+    # chmod on Windows because there's no exec bit to set.
+    if not _sys.platform.startswith("win"):
+        _os.chmod(exe, 0o755)
+    # Sanity-check that ``locate_venv_python`` actually finds our
+    # fixture exe so the assertion below proves the right thing.
+    assert venv_manager.locate_venv_python(tmp_path, platform="linux") == exe
 
     command = venv_manager.build_install_dependency_command(
         tmp_path,
