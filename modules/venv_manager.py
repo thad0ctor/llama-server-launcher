@@ -628,11 +628,44 @@ print(json.dumps({"available": available, "version": version, "error": error}))
             error=f"bad probe output: {exc}",
         )
 
+    # ``json.loads`` can return a non-dict (a list, string, scalar)
+    # if the probe script's stdout is malformed. ``payload.get(...)``
+    # would then raise ``AttributeError`` and surface as a generic
+    # exception upstream. Treat any non-dict shape as a probe failure
+    # so the caller sees a clean ``available=False`` with a hint.
+    if not isinstance(payload, dict):
+        return DependencyStatus(
+            dependency=dependency,
+            available=False,
+            error=f"probe payload was not an object (got {type(payload).__name__})",
+        )
+
+    # ``bool(...)`` on a string is truthy for any non-empty value —
+    # ``bool("false")`` is ``True``, which would make the launcher
+    # think a missing dep was actually installed. Normalize through
+    # the standard "1/0/true/false/yes/no/on/off" form (case-
+    # insensitive) so a stringly-typed payload from a future probe
+    # script can't silently flip the state.
+    raw_available = payload.get("available")
+    if isinstance(raw_available, bool):
+        available = raw_available
+    elif isinstance(raw_available, (int, float)) and not isinstance(raw_available, bool):
+        available = bool(raw_available)
+    elif isinstance(raw_available, str):
+        available = raw_available.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        available = False
+
+    raw_version = payload.get("version")
+    version = raw_version if isinstance(raw_version, str) else None
+    raw_error = payload.get("error")
+    error = raw_error if isinstance(raw_error, str) else None
+
     return DependencyStatus(
         dependency=dependency,
-        available=bool(payload.get("available")),
-        version=payload.get("version"),
-        error=payload.get("error"),
+        available=available,
+        version=version,
+        error=error,
     )
 
 

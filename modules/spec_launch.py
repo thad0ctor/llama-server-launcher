@@ -632,7 +632,21 @@ def emit_spec_args(launcher, backend, cmd):
         spec_enabled_var = getattr(launcher, "spec_enabled", None)
         if spec_enabled_var is not None and spec_enabled_var.get():
             spec_type_var = getattr(launcher, "spec_type", None)
-            spec_type = spec_type_var.get().strip() if spec_type_var is not None else ""
+            # Defensively coerce the Tk var value. A mocked launcher in
+            # tests / a freshly-rebuilt SpecTab caught between resync
+            # and the user's first edit could leave ``spec_type_var``
+            # holding a non-string (e.g. ``None`` from a MagicMock
+            # that wasn't configured) — calling ``.strip()`` straight
+            # on that would crash the spec-emission block entirely,
+            # taking the whole launch with it. Treat any non-string
+            # as the empty branch (= "don't emit any spec flag").
+            raw_spec_type = spec_type_var.get() if spec_type_var is not None else ""
+            if isinstance(raw_spec_type, str):
+                spec_type = raw_spec_type.strip()
+            elif raw_spec_type is None:
+                spec_type = ""
+            else:
+                spec_type = str(raw_spec_type).strip()
             # Reject unknown spec_type values before forwarding them — a
             # stale/hand-edited config can otherwise emit a garbage value
             # and crash the server at startup. Per-backend whitelists
