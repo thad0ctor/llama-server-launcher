@@ -82,6 +82,17 @@ def run_list(payload: dict) -> int:
 
     api = HfApi()
     repo_id = payload["repo_id"]
+    # Re-validate ``repo_id`` here too, not just in ``run_download``.
+    # This entrypoint also reads its payload from a JSON file on disk
+    # and a hand-edited / attacker-supplied payload could ship an
+    # absolute path (``/etc/passwd``) or traversal-style segments.
+    # ``HfApi.list_repo_refs`` / ``model_info`` would then issue
+    # requests with an attacker-controlled path component. The helper
+    # raises ``ValueError`` on any traversal-style segment, so reuse
+    # it instead of duplicating the rule.
+    if not isinstance(repo_id, str):
+        raise ValueError(f"repo_id must be a string; got {type(repo_id).__name__}")
+    _validate_repo_id(repo_id)
     # Mirror ``_token_value``'s defensive coercion. A hand-edited
     # payload could ship ``"revision": false`` / ``null`` / ``0`` and
     # the ``.strip()`` would AttributeError on a non-string. Coerce to

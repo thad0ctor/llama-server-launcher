@@ -197,12 +197,22 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         #      typically installed on each desktop. Without this, a system
         #      that happens to have xterm installed alongside konsole on
         #      KDE used to silently get xterm.
+        # ``term_command`` is already built by ``_bash_hold_open`` which
+        # adds its own ``read -rp "Press Enter to close..."`` prompt
+        # before exiting. The emulator-level ``--noclose`` (konsole) /
+        # ``--hold`` (xfce4-terminal) / ``-hold`` (xterm) flags
+        # DUPLICATE that hold behavior — the user would see the bash
+        # prompt, dismiss it, and then be stuck staring at a
+        # "process exited normally, press a key to close window"
+        # banner from the terminal emulator itself. Drop the flags
+        # so the in-script prompt is the single source of hold-open
+        # behavior across emulators.
         emulator_args: dict[str, list[str]] = {
             "gnome-terminal": ["--", "bash", "-lc", term_command],
-            "konsole": ["--noclose", "-e", "bash", "-lc", term_command],
-            "xfce4-terminal": ["--hold", "-e", f"bash -lc {shlex.quote(term_command)}"],
+            "konsole": ["-e", "bash", "-lc", term_command],
+            "xfce4-terminal": ["-e", f"bash -lc {shlex.quote(term_command)}"],
             "x-terminal-emulator": ["-e", "bash", "-lc", term_command],
-            "xterm": ["-hold", "-e", "bash", "-lc", term_command],
+            "xterm": ["-e", "bash", "-lc", term_command],
         }
         env_terminal_raw = os.environ.get("TERMINAL", "").strip()
         # ``$TERMINAL`` is conventionally a name (``gnome-terminal``), but

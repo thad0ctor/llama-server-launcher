@@ -168,7 +168,32 @@ done
 echo "Backup completed in: "{q_backup_path}
 echo ""
 
-# Remove old files (keep JSON files and backup directory)
+# Clone the replacement tree BEFORE wiping the current install.
+# The previous order (delete-then-clone) would self-destruct on any
+# clone failure (no network, git missing, server down) — ``set -e``
+# would abort right after the wipe, leaving the user with only the
+# manual backup to recover from. Clone into a sibling temp dir
+# OUTSIDE ``{q_current_dir}`` so the cleanup loop below can't reach
+# it, then verify the clone actually produced a non-empty tree
+# before touching the live install.
+echo "Cloning latest version from GitHub..."
+TEMP_CLONE_DIR=$(mktemp -d) || {{ echo "ERROR: mktemp failed; refusing to proceed" >&2; exit 1; }}
+# Cleanup the temp dir on any exit so we don't leave it lying
+# around after success / interruption. The find/move below
+# clears most of it; ``rm -rf`` covers the rest.
+trap 'rm -rf "$TEMP_CLONE_DIR"' EXIT
+git clone {q_github_url} "$TEMP_CLONE_DIR/repo"
+if [ ! -d "$TEMP_CLONE_DIR/repo" ] || [ -z "$(ls -A "$TEMP_CLONE_DIR/repo" 2>/dev/null)" ]; then
+    echo "ERROR: git clone produced an empty tree; refusing to wipe current install" >&2
+    exit 1
+fi
+echo "Clone verified — proceeding with install."
+echo ""
+
+# Remove old files (keep JSON files and backup directory). Safe to
+# proceed now that we have a verified replacement tree at
+# ``$TEMP_CLONE_DIR/repo``; any subsequent failure leaves a
+# recoverable state because the new files exist on disk.
 echo "Removing old files for clean installation..."
 
 # Remove Python files and other source files
@@ -207,24 +232,18 @@ done
 echo "Old files cleaned up."
 echo ""
 
-# Clone new version
-echo "Cloning latest version from GitHub..."
-cd {q_current_dir}
-git clone {q_github_url} temp_clone
-cd temp_clone
-
-# Move files from temp clone to current directory
-echo "Installing new version..."
-# Move all files except .git and images directories.
-# Drop the ``2>/dev/null || true`` mask: a real ``mv`` failure
-# (target stays occupied by a leftover hidden dir, permission
+# Move files from the verified temp clone into the current
+# directory. Drop the ``2>/dev/null || true`` mask: a real ``mv``
+# failure (target stays occupied by a leftover hidden dir, perm
 # denied, etc.) used to be silently swallowed and the update
 # reported success even though the new files never landed. Let
 # the error propagate so the user sees it.
+echo "Installing new version..."
+cd "$TEMP_CLONE_DIR/repo"
 find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} {q_current_dir}/ \\;
 echo "Skipped downloading images folder (using existing)"
 cd {q_current_dir}
-rm -rf temp_clone
+# ``$TEMP_CLONE_DIR`` is cleaned up by the trap above.
 
 # Restore user-owned gitignored state from backup. The fresh clone never
 # contains llama_cpp_launcher_configs.json (it's gitignored), so without this

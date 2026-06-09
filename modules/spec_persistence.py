@@ -156,6 +156,21 @@ def load_spec_from_cfg(launcher, cfg):
     # copies ``cfg`` into ``launcher.app_settings``) sees the
     # coerced shape, not the raw input.
     cfg["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(cfg.get("spec_draft_selected_gpus", []))
+    # Mirror ``validate_spec_app_settings``'s non-CUDA override
+    # normalization here too. Without this, loading a named config
+    # whose ``spec_draft_device`` is set to a non-CUDA backend
+    # (Vulkan / Metal / SYCL / ROCm / HIP / CPU) AND whose
+    # ``spec_draft_selected_gpus`` still carried the leftover CUDA
+    # checkbox indices would push the stale CUDA list into
+    # ``launcher.app_settings`` — the launch path's
+    # ``_resolve_draft_device_value`` would then emit the CUDA
+    # list instead of falling back to the device override.
+    raw_device = cfg.get("spec_draft_device", "")
+    if isinstance(raw_device, str) and raw_device.strip():
+        device_token = raw_device.strip().upper()
+        non_cuda_markers = ("VULKAN", "METAL", "SYCL", "ROCM", "HIP", "CPU")
+        if any(marker in device_token for marker in non_cuda_markers):
+            cfg["spec_draft_selected_gpus"] = []
 
     def _spec_bool(key):
         val = cfg.get(key, False)

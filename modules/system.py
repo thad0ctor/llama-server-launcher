@@ -1384,14 +1384,23 @@ def parse_gguf_header_simple(model_path_str):
                     # a silent ``continue`` here would let the next
                     # iteration read the unknown payload as the next
                     # key length and the rest of the metadata parse
-                    # would desynchronise into garbage keys. Surface
-                    # an error and break out of the loop so the
-                    # caller can decide whether to fall back to
-                    # heuristic layer-count detection or report the
-                    # parse failure. Array type 9 is handled above.
+                    # would desynchronise into garbage keys. Break
+                    # out of the loop so the parse can't go off the
+                    # rails, but DO NOT set ``analysis_result["error"]``:
+                    # downstream consumers (notably
+                    # ``SpecTab._update_ui_after_spec_draft_analysis``)
+                    # treat that field as a fatal parse failure and
+                    # skip the size-based ``n_layers`` heuristic that
+                    # enables the draft-layer slider. An unknown
+                    # type is a partial-parse, not a fatal one — emit
+                    # a stderr warning and let the heuristic fallback
+                    # take over. Array type 9 is handled above.
                     if value_type not in GGUF_TYPES:
-                        analysis_result["error"] = (
-                            f"Unsupported GGUF metadata value_type {value_type!r} for key '{key}'"
+                        print(
+                            f"WARNING: GGUF metadata parse hit unsupported value_type "
+                            f"{value_type!r} for key {key!r}; aborting metadata loop "
+                            f"and falling through to size-based heuristics.",
+                            file=sys.stderr,
                         )
                         break
 
