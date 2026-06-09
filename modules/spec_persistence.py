@@ -254,6 +254,19 @@ def validate_spec_app_settings(app_settings):
     if not app_settings.get("spec_type"):
         app_settings["spec_type"] = "none"
 
+    # Coerce ``spec_draft_selected_gpus`` to its canonical
+    # list-of-ints shape on EVERY startup, not just the non-CUDA
+    # override branch below. ``spec_tab`` and ``spec_launch`` both
+    # read this key from ``app_settings`` directly; a hand-edited
+    # value like ``"1"`` (string), ``[True, "x"]`` (mixed), or a
+    # bare int could survive the existing per-key validation above
+    # and crash later set() / membership checks. ``coerce_…``
+    # drops bools, accepts ints + numeric strings, and falls back
+    # to ``[]`` for anything else.
+    app_settings["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(
+        app_settings.get("spec_draft_selected_gpus", [])
+    )
+
     # If ``spec_draft_device`` is a NON-CUDA override (``Vulkan0``,
     # ``Metal0``, ``SYCL1``, ``ROCm0``, ``HIP1``, ``CPU0``), the user
     # intends a manual draft device — the CUDA checkbox-derived list
@@ -273,8 +286,11 @@ def validate_spec_app_settings(app_settings):
         device_token = raw_device.strip().upper()
         non_cuda_markers = ("VULKAN", "METAL", "SYCL", "ROCM", "HIP", "CPU")
         if any(marker in device_token for marker in non_cuda_markers):
-            persisted_gpus = app_settings.get("spec_draft_selected_gpus")
-            if persisted_gpus:
+            # ``app_settings["spec_draft_selected_gpus"]`` is now
+            # guaranteed to be a list (coerced unconditionally
+            # above), so the dict lookup can't return ``None`` /
+            # surprise scalar types.
+            if app_settings["spec_draft_selected_gpus"]:
                 app_settings["spec_draft_selected_gpus"] = []
 
 

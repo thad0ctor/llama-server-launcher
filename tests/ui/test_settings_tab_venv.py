@@ -181,7 +181,7 @@ def test_install_dependency_requires_detected_venv(settings_tab, monkeypatch, tm
 
 @posix_only
 def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monkeypatch, tmp_path):
-    _make_fake_venv(tmp_path)
+    python_path = _make_fake_venv(tmp_path)
     dep = _managed_dep("huggingface_hub")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
@@ -195,11 +195,17 @@ def test_install_dependency_opens_terminal_for_existing_venv(settings_tab, monke
     cmd_str = launch_mock.call_args.args[0]
     assert "pip" in cmd_str and "install" in cmd_str
     assert "huggingface_hub[cli]" in cmd_str
+    # The command MUST be bound to the VENV's interpreter, not a
+    # bare ``pip`` that would pick up the system Python's site-
+    # packages — this is the whole reason ``settings_tab`` routes
+    # the install through ``venv_manager.build_install_dependency_command``
+    # instead of just shelling out.
+    assert str(python_path) in cmd_str
 
 
 @posix_only
 def test_remove_dependency_opens_terminal_for_existing_venv(settings_tab, monkeypatch, tmp_path):
-    _make_fake_venv(tmp_path)
+    python_path = _make_fake_venv(tmp_path)
     dep = _managed_dep("psutil")
     launch_mock = MagicMock()
     monkeypatch.setattr(settings_tab, "_schedule_venv_dependency_probe", lambda: None)
@@ -210,7 +216,11 @@ def test_remove_dependency_opens_terminal_for_existing_venv(settings_tab, monkey
     settings_tab._on_remove_dependency(dep)
 
     launch_mock.assert_called_once()
-    assert "pip uninstall -y psutil" in launch_mock.call_args.args[0]
+    cmd_str = launch_mock.call_args.args[0]
+    assert "pip uninstall -y psutil" in cmd_str
+    # Same rationale as the install test above — uninstall must
+    # target the venv's interpreter, not the system pip's.
+    assert str(python_path) in cmd_str
 
 
 def test_format_dependency_status_includes_version_and_torch_note():

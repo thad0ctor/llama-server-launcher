@@ -1037,10 +1037,22 @@ def calculate_total_gguf_size(model_path_str):
         # Not a multi-part file, return single file size
         return model_path.stat().st_size, 1, [model_path]
 
-    current_shard = int(shard_pattern.group(1))
+    current_shard_text = shard_pattern.group(1)
+    current_shard = int(current_shard_text)
     separator = shard_pattern.group(2)
-    total_shards = int(shard_pattern.group(3))
+    total_shards_text = shard_pattern.group(3)
+    total_shards = int(total_shards_text)
     extension = shard_pattern.group(4)
+    # Preserve the ORIGINAL zero-pad widths of the shard / total
+    # tokens when reconstructing sibling filenames. ``\d+`` accepts
+    # any width (e.g. ``-1-of-3.gguf``, ``-001-of-003.gguf``), but
+    # the previous ``:05d`` lookup hard-coded 5 digits. A repo
+    # using the 1-digit or 3-digit form would silently miss every
+    # sibling shard and ``calculate_total_gguf_size`` would report
+    # the partial single-file size + 1 shard, breaking the layer-
+    # count / total-size heuristics downstream.
+    current_width = len(current_shard_text)
+    total_width = len(total_shards_text)
 
     print(f"DEBUG: Detected multi-part GGUF: shard {current_shard} of {total_shards}", file=sys.stderr)
 
@@ -1053,7 +1065,13 @@ def calculate_total_gguf_size(model_path_str):
     missing_shards = []
 
     for shard_num in range(1, total_shards + 1):
-        shard_name = f"{base_name}-{shard_num:05d}{separator}{total_shards:05d}{extension}"
+        shard_name = (
+            f"{base_name}-"
+            f"{shard_num:0{current_width}d}"
+            f"{separator}"
+            f"{total_shards:0{total_width}d}"
+            f"{extension}"
+        )
         shard_path = parent_dir / shard_name
 
         if shard_path.exists():

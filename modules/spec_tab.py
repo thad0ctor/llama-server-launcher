@@ -708,6 +708,19 @@ class SpecTab:
                 if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
                     self.spec_draft_ngl_slider.config(state=tk.DISABLED)
                 self.current_spec_draft_analysis = {}
+                # Reset the layer-count bound BEFORE kicking off the
+                # background analysis. ``_refresh_spec_tab_state``
+                # (and the lazy-tab re-render) read
+                # ``max_spec_draft_gpu_layers`` as the slider's
+                # upper bound; if a previous analysis left it >0,
+                # an intermediate refresh between now and the
+                # analysis-complete callback would re-enable the
+                # slider against the OLD model's bound while the
+                # status label still says "Analyzing...".
+                try:
+                    self.max_spec_draft_gpu_layers.set(0)
+                except Exception:
+                    pass
                 self._start_spec_draft_gguf_analysis(full_path_str)
         except Exception as e:
             print(f"WARN: _on_spec_draft_model_selected failed: {e}", file=sys.stderr)
