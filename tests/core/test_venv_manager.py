@@ -145,7 +145,16 @@ def test_default_venv_base_python_args_prefers_py_launcher_on_windows(monkeypatc
 def test_build_bootstrap_venv_command_installs_managed_packages(tmp_path):
     command = venv_manager.build_bootstrap_venv_command(tmp_path / "venv", platform="linux")
 
-    assert "python3 -m venv" in command or "python -m venv" in command
+    # Don't hard-code ``python3`` / ``python`` — ``build_bootstrap_venv_command``
+    # picks the launcher's preferred interpreter via ``shutil.which``, so the
+    # exact basename depends on the host (and could be ``py`` on Windows or a
+    # full path like ``/usr/bin/python3`` on some installs). The generic
+    # ``-m venv`` check still pins the venv-creation contract.
+    import re as _re
+
+    assert _re.search(r"\S+\s+-m\s+venv", command), (
+        f"expected a ``<interpreter> -m venv`` invocation in command: {command!r}"
+    )
     assert "pip install --upgrade pip" in command
     assert "pip install requests" in command
     assert "torch" not in command

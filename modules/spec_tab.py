@@ -145,6 +145,15 @@ class SpecTab:
         self._spec_draft_latest_path: str | None = None
         self._spec_draft_request_event = Event()
         self._spec_draft_worker_active = False
+        # Snapshot of the SELECTION the checkbox UI last rendered into
+        # ``spec_draft_device``. Used by the conditional-clear logic so
+        # ``prior_derived`` reflects what the UI actually wrote — not
+        # the (possibly stale) value in ``app_settings`` /
+        # ``loaded_selected``. Without this snapshot, a change to
+        # ``spec_draft_selected_gpus`` between refreshes leaves the OLD
+        # ``CUDA…`` string in ``spec_draft_device`` and the next
+        # comparison treats it as a manual override.
+        self._spec_draft_last_rendered_selected: list[int] = []
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
         self.spec_ngram_simple_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
         self.spec_ngram_simple_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
@@ -864,13 +873,25 @@ class SpecTab:
             checkbox_derived = ",".join(f"CUDA{i}" for i in valid_selected)
             try:
                 current = self.spec_draft_device.get()
-                # Recompute what the checkboxes would have produced
-                # on the previous render so we recognise a value
-                # this code stamped earlier as still "checkbox-set".
-                prior_derived_keys = sorted(loaded_selected) if loaded_selected else []
-                prior_derived = ",".join(f"CUDA{i}" for i in prior_derived_keys)
+                # Compare against what THIS code last actually wrote
+                # into ``spec_draft_device`` — not ``loaded_selected``
+                # (which is the NEW persisted set after a possible
+                # external mutation). Using the live snapshot
+                # prevents a stale ``CUDA…`` string from being
+                # treated as a manual override.
+                # ``getattr(..., [])`` so older test stubs (and any
+                # subclass that bypasses ``__init__``) don't crash on
+                # a missing attribute; an empty list correctly
+                # represents "no prior render".
+                prior_derived = ",".join(
+                    f"CUDA{i}"
+                    for i in getattr(
+                        self, "_spec_draft_last_rendered_selected", []
+                    )
+                )
                 if current in ("", prior_derived):
                     self.spec_draft_device.set(checkbox_derived)
+                    self._spec_draft_last_rendered_selected = list(valid_selected)
             except Exception:
                 pass
             try:
@@ -947,18 +968,23 @@ class SpecTab:
             checkbox_derived = ",".join(f"CUDA{i}" for i in valid_selected)
             try:
                 current = self.spec_draft_device.get()
-                # Recompute what the checkboxes would have produced
-                # on the previous render — clamped to detected count
-                # so a stale ``CUDA99`` doesn't make the value look
-                # like a manual override when it isn't.
+                # Compare against what THIS code last actually wrote
+                # — same rationale as the fast path above. The
+                # snapshot is updated after a successful ``set``
+                # below so future refreshes recognise our own value.
+                # ``getattr(..., [])`` so older test stubs (and any
+                # subclass that bypasses ``__init__``) don't crash on
+                # a missing attribute; an empty list correctly
+                # represents "no prior render".
                 prior_derived = ",".join(
                     f"CUDA{i}"
-                    for i in sorted(
-                        idx for idx in loaded_selected if 0 <= idx < count
+                    for i in getattr(
+                        self, "_spec_draft_last_rendered_selected", []
                     )
                 )
                 if current in ("", prior_derived):
                     self.spec_draft_device.set(checkbox_derived)
+                    self._spec_draft_last_rendered_selected = list(valid_selected)
             except Exception:
                 pass
         elif manual_mode:
@@ -980,16 +1006,23 @@ class SpecTab:
             # ``CUDA99`` baked into ``spec_draft_device`` would never
             # match the recomputed string and we'd treat it as a
             # manual override, which it isn't.
-            sanitized_for_compare = [
-                i for i in sorted(loaded_selected)
-                if count == 0 or 0 <= i < count
-            ]
+            # Compare against the live snapshot of what THIS code
+            # last wrote, so we recognise our own checkbox-derived
+            # value AND the manual-mode flip cleanly clears it.
+            # ``getattr`` defaults to ``[]`` so test stubs and any
+            # subclass that bypasses ``__init__`` don't crash.
             checkbox_derived = ",".join(
-                f"CUDA{i}" for i in sanitized_for_compare
+                f"CUDA{i}"
+                for i in getattr(
+                    self, "_spec_draft_last_rendered_selected", []
+                )
             )
             try:
                 if self.spec_draft_device.get() == checkbox_derived:
                     self.spec_draft_device.set("")
+                    # Clear the snapshot too — there's nothing
+                    # checkbox-derived in the field now.
+                    self._spec_draft_last_rendered_selected = []
             except Exception:
                 pass
 

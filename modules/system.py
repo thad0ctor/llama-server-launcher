@@ -438,6 +438,23 @@ except Exception as e:
                     )
 
                 gpu_info = json.loads(output)
+                # The detection script SHOULD emit a JSON object, but
+                # a stale wrapper script / partial flush could leave
+                # us with a list or scalar. ``gpu_info.get(...)``
+                # would crash downstream — fall back to the next
+                # detector instead by returning a clean unavailable
+                # marker.
+                if not isinstance(gpu_info, dict):
+                    if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+                        print(
+                            f"DEBUG: Venv GPU detection returned non-dict "
+                            f"({type(gpu_info).__name__}); treating as failure",
+                            file=sys.stderr,
+                        )
+                    return _unavailable_gpu_info(
+                        "GPU detection returned malformed output.",
+                        "torch-venv",
+                    )
                 if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
                     print(f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices", file=sys.stderr)
                 return gpu_info

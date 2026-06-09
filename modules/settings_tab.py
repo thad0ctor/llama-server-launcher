@@ -658,6 +658,21 @@ class SettingsTab:
         # "installed" rows BACK into the table we just cleared,
         # making it look like the rm didn't actually run.
         self._venv_probe_generation += 1
+        # Also cancel any QUEUED probe callbacks — the generation bump
+        # only covers workers that have already started. A pending
+        # ``after()`` timer would otherwise fire, schedule a fresh
+        # probe (which bumps the generation again), and restore the
+        # old "installed" rows while the delete terminal is still
+        # running. Mirrors the ``_venv_remove_refresh_after_id``
+        # cancel pattern below.
+        for attr in ("_venv_probe_after_id", "_venv_probe_drain_after_id"):
+            pending_id = getattr(self, attr, None)
+            if pending_id is not None:
+                try:
+                    self.root.after_cancel(pending_id)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         # Clear the dependency table immediately so the UI doesn't keep
         # showing "installed" rows for packages whose venv is being
         # deleted in another terminal. Schedule a refresh ~2 s later so

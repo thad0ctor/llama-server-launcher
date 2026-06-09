@@ -413,7 +413,13 @@ class HuggingFaceDownloaderTab:
         self._set_button_state(
             self._install_button, python is not None and idle
         )
-        self._refresh_target_rows()
+        # ``_refresh_target_rows`` is intentionally NOT called every
+        # tick — it destroys and rebuilds the entire target-row
+        # widget tree, which (a) churns widgets on every venv probe
+        # and (b) re-fires the per-row trace_add callbacks. The
+        # initial render happens in ``setup_tab``; subsequent
+        # rebuilds are user-triggered (Refresh button) or driven by
+        # model-dirs changes via dedicated handlers.
 
     def _refresh_target_rows(self):
         if self._target_container is None:
@@ -458,7 +464,12 @@ class HuggingFaceDownloaderTab:
                 self._target_container,
                 text="No model directories configured on the Main tab.",
             ).grid(column=0, row=0, sticky="w")
-            self._persist_settings()
+            # Do NOT call ``_persist_settings`` here — it would write
+            # ``hf_target_dirs=[]`` to the config, erasing the user's
+            # prior selections any time this UI is rendered with no
+            # currently-configured model dirs (e.g. the first paint
+            # before Main tab loads). The user's stored target list
+            # should only change when they explicitly toggle a row.
             return
         for row, option in enumerate(state.options):
             var = tk.BooleanVar(value=option.selected)
