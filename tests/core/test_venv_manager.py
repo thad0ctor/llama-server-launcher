@@ -203,10 +203,13 @@ def test_build_install_dependency_command_quotes_windows_python(tmp_path):
     )
 
     assert f'"{exe}"' in command
-    # huggingface_hub[cli] is the actual install_name; bare "huggingface_hub"
-    # would skip the entry-point. Both forms must round-trip quoted.
+    # ``huggingface_hub[cli]`` is the actual ``install_name``; the bare
+    # ``huggingface_hub`` package would skip the ``hf`` CLI entry-point
+    # that the runner is invoked through. Assert the full quoted form
+    # so a regression that drops the ``[cli]`` extras suffix can't slip
+    # past the looser substring match.
     assert '"pip" "install"' in command
-    assert "huggingface_hub" in command
+    assert '"huggingface_hub[cli]"' in command
 
 
 def test_build_remove_venv_command_windows_uses_rmdir(tmp_path):
