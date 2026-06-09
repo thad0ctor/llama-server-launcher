@@ -1046,7 +1046,23 @@ class SpecTab:
             # value AND the manual-mode flip cleanly clears it.
             # ``getattr`` defaults to ``[]`` so test stubs and any
             # subclass that bypasses ``__init__`` don't crash.
-            checkbox_derived = ",".join(f"CUDA{i}" for i in getattr(self, "_spec_draft_last_rendered_selected", []))
+            indices = getattr(self, "_spec_draft_last_rendered_selected", [])
+            if not indices:
+                # First render in manual mode after a non-manual session
+                # leaves the snapshot empty even though ``app_settings``
+                # may still hold the persisted checkbox-derived
+                # ``"CUDA0,CUDA1"`` string. Without a fallback, the
+                # snapshot-derived ``checkbox_derived`` is ``""`` and
+                # we'd treat the leftover as a manual override and
+                # leave it alone — meaning CUDA<i> emission survives
+                # into the launch command after the user toggled
+                # manual mode on. Reconstruct the same valid-filtered
+                # list the non-manual branch would have rendered
+                # (``loaded_selected`` filtered to in-range indices)
+                # so the leftover-string detection works on first
+                # manual-mode render too.
+                indices = sorted(i for i in loaded_selected if 0 <= i < count)
+            checkbox_derived = ",".join(f"CUDA{i}" for i in indices)
             try:
                 if self.spec_draft_device.get() == checkbox_derived:
                     self.spec_draft_device.set("")

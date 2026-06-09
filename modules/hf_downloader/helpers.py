@@ -180,10 +180,7 @@ def _validate_repo_id(repo_id: str) -> None:
     # forensic example: ``owner/../../../etc/passwd/repo``.
     parts = repo_id.split("/")
     if any(seg in {"", ".", ".."} for seg in parts):
-        raise ValueError(
-            f"Repo ID {repo_id!r} contains a path-traversal segment "
-            f"(``.``/``..``/empty); refusing."
-        )
+        raise ValueError(f"Repo ID {repo_id!r} contains a path-traversal segment " f"(``.``/``..``/empty); refusing.")
     if "\\" in repo_id or "\x00" in repo_id or "%" in repo_id:
         # Backslash is the Windows separator; NUL terminates C strings;
         # ``%`` could be the leading byte of a URL-encoded ``..``.
@@ -239,10 +236,7 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
             # and fail much later in the runner.
             if parts and parts[0] in {"datasets", "spaces"}:
                 kind = parts[0]
-                raise ValueError(
-                    f"This is a HuggingFace {kind} URL; this tab only downloads "
-                    "model repos."
-                )
+                raise ValueError(f"This is a HuggingFace {kind} URL; this tab only downloads " "model repos.")
             if len(parts) < 2:
                 raise ValueError("Repo input must include both owner and repo name.")
             repo_id = "/".join(parts[:2])
@@ -276,6 +270,19 @@ def normalize_repo_input(raw: str) -> ParsedRepoInput:
         )
     if parts[0] in {"models", "model"}:
         parts = parts[1:]
+        # After stripping the optional ``model``/``models`` prefix the
+        # NEW first segment must also be re-validated — otherwise a URL
+        # like ``huggingface.co/model/datasets/<owner>/<repo>`` would
+        # slip past the earlier check (whose ``parts[0]`` was
+        # ``"model"``) and end up being treated as a model repo, which
+        # the downstream ``repo_type="model"`` would then fail on with
+        # a baffling 404.
+        if parts and parts[0] in {"datasets", "spaces"}:
+            kind = parts[0]
+            raise ValueError(
+                f"This is a HuggingFace {kind} URL; this tab only downloads "
+                "model repos. Paste a ``huggingface.co/<owner>/<repo>`` URL."
+            )
     if len(parts) < 2:
         raise ValueError("Repo URL must include both owner and repo name.")
     repo_id = "/".join(parts[:2])
@@ -410,7 +417,9 @@ def summarize_repo_listing(
         for item in refs_payload
         if item.get("name")
     )
-    default_paths = set(default_selected_repo_paths([str(item.get("path", "")) for item in files_payload if item.get("path")]))
+    default_paths = set(
+        default_selected_repo_paths([str(item.get("path", "")) for item in files_payload if item.get("path")])
+    )
     files = tuple(
         HfRepoFile(
             path=str(item.get("path", "")),
@@ -440,9 +449,7 @@ def collect_target_directory_options(
         if not selected_path_str:
             continue
         try:
-            normalized_selected.add(
-                str(Path(selected_path_str).expanduser().resolve())
-            )
+            normalized_selected.add(str(Path(selected_path_str).expanduser().resolve()))
         except (OSError, ValueError, TypeError, RuntimeError):
             continue
     options: list[TargetDirectoryOption] = []

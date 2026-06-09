@@ -594,7 +594,12 @@ class AboutTab:
             elif sys.platform == "darwin":  # macOS
                 subprocess.Popen(["open", "-a", "Terminal", str(script_path)], cwd=current_dir)
             elif sys.platform.startswith("win"):  # Windows
-                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", str(script_path)], cwd=current_dir, shell=True)
+                # ``shell=True`` is redundant here — we're already
+                # invoking ``cmd.exe`` explicitly via argv, so the
+                # extra cmd-wrapping layer ``shell=True`` would add
+                # only obscures argv parsing without changing what
+                # gets run. Pass the argv directly.
+                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", str(script_path)], cwd=current_dir)
 
             messagebox.showinfo(
                 "Update Started",

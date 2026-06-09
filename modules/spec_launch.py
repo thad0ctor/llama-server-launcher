@@ -33,8 +33,7 @@ from pathlib import Path
 # ``vulkan0``.
 _SPEC_DRAFT_BACKEND_NAMES = ("CUDA", "Vulkan", "SYCL", "Metal", "ROCm", "HIP", "CPU")
 _re_csv_cuda = re.compile(
-    r"(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+"
-    r"(?:,(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+)*",
+    r"(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+" r"(?:,(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+)*",
     re.IGNORECASE,
 )
 
@@ -43,17 +42,31 @@ _re_csv_cuda = re.compile(
 # coming from saved/imported configs before emission; an unknown string can
 # crash the server at startup, so reject it with a stderr warning instead.
 # Sets mirror the UI's per-backend dropdown choices.
-_ALLOWED_SPEC_TYPES_LLAMA_CPP = frozenset({
-    "none",
-    "draft-simple", "draft-eagle3", "draft-mtp",
-    "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache",
-})
-_ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset({
-    "none",
-    "mtp",
-    "ngram-cache", "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod",
-    "suffix",
-})
+_ALLOWED_SPEC_TYPES_LLAMA_CPP = frozenset(
+    {
+        "none",
+        "draft-simple",
+        "draft-eagle3",
+        "draft-mtp",
+        "ngram-simple",
+        "ngram-map-k",
+        "ngram-map-k4v",
+        "ngram-mod",
+        "ngram-cache",
+    }
+)
+_ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset(
+    {
+        "none",
+        "mtp",
+        "ngram-cache",
+        "ngram-simple",
+        "ngram-map-k",
+        "ngram-map-k4v",
+        "ngram-mod",
+        "suffix",
+    }
+)
 
 # Per-backend subsets of spec_types that use a separate draft model + the
 # associated draft-tuning/offload knobs. Non-draft-capable spec_types
@@ -488,8 +501,7 @@ def _resolve_draft_device_value(launcher):
         draft_indices.append(idx)
     if skipped:
         print(
-            f"WARNING: spec_draft_selected_gpus contained invalid entries; "
-            f"dropping: {skipped}",
+            f"WARNING: spec_draft_selected_gpus contained invalid entries; " f"dropping: {skipped}",
             file=sys.stderr,
         )
     # Deduplicate (preserving first-occurrence order) so a stale
@@ -522,9 +534,15 @@ def _resolve_draft_device_value(launcher):
         if not override:
             return ""
         if not _re_csv_cuda.fullmatch(override):
+            # ``_re_csv_cuda`` accepts any of the backends in
+            # ``_SPEC_DRAFT_BACKEND_NAMES`` (CUDA, Vulkan, SYCL, Metal,
+            # ROCm, HIP, CPU), not just CUDA — keep the warning text in
+            # sync with that whitelist so users editing
+            # ``spec_draft_device`` by hand see the actual accepted form.
+            allowed = "/".join(_SPEC_DRAFT_BACKEND_NAMES)
             print(
                 f"WARNING: spec_draft_device override {override!r} doesn't match "
-                f"``CUDA<int>[,CUDA<int>…]`` form; dropping.",
+                f"``<{allowed}><int>[,…]`` form; dropping.",
                 file=sys.stderr,
             )
             return ""
@@ -551,9 +569,7 @@ def _resolve_draft_device_value(launcher):
         # ``CUDA_VISIBLE_DEVICES`` set — only fully non-CUDA overrides
         # (``Vulkan0`` / ``Metal0`` / ``SYCL1`` …) are safe to pass
         # through unchanged.
-        has_cuda_token = bool(
-            re.search(r"CUDA\d+", override, flags=re.IGNORECASE)
-        )
+        has_cuda_token = bool(re.search(r"CUDA\d+", override, flags=re.IGNORECASE))
         if not has_cuda_token:
             # Non-CUDA backend tokens (Vulkan0, Metal0, SYCL1, …) —
             # ``CUDA_VISIBLE_DEVICES`` doesn't touch them, so the
@@ -616,14 +632,13 @@ def emit_spec_args(launcher, backend, cmd):
         spec_enabled_var = getattr(launcher, "spec_enabled", None)
         if spec_enabled_var is not None and spec_enabled_var.get():
             spec_type_var = getattr(launcher, "spec_type", None)
-            spec_type = (spec_type_var.get().strip() if spec_type_var is not None else "")
+            spec_type = spec_type_var.get().strip() if spec_type_var is not None else ""
             # Reject unknown spec_type values before forwarding them — a
             # stale/hand-edited config can otherwise emit a garbage value
             # and crash the server at startup. Per-backend whitelists
             # match the UI dropdown choices.
             if spec_type and spec_type != "none":
-                allowed = (_ALLOWED_SPEC_TYPES_IK_LLAMA if backend == "ik_llama"
-                           else _ALLOWED_SPEC_TYPES_LLAMA_CPP)
+                allowed = _ALLOWED_SPEC_TYPES_IK_LLAMA if backend == "ik_llama" else _ALLOWED_SPEC_TYPES_LLAMA_CPP
                 if spec_type not in allowed:
                     print(
                         f"WARNING: spec_type {spec_type!r} is not valid for backend "
@@ -745,9 +760,14 @@ def emit_spec_args(launcher, backend, cmd):
                             raw = None
                         if isinstance(raw, bool):
                             if raw:
-                                print(f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                                print(
+                                    f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.",
+                                    file=sys.stderr,
+                                )
                         elif isinstance(raw, str) and raw.strip():
-                            print(f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                            print(
+                                f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr
+                            )
                 else:
                     # llama.cpp (mainline) branch.
                     cmd.extend(["--spec-type", spec_type])
@@ -897,9 +917,14 @@ def emit_spec_args(launcher, backend, cmd):
                             raw = None
                         if isinstance(raw, bool):
                             if raw:
-                                print(f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr)
+                                print(
+                                    f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.",
+                                    file=sys.stderr,
+                                )
                         elif isinstance(raw, str) and raw.strip():
-                            print(f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr)
+                            print(
+                                f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr
+                            )
     except Exception as exc:
         # Never let a UI mis-state crash the launch flow - log and continue.
         print(f"WARNING: speculative-decoding block raised: {exc}", file=sys.stderr)
@@ -921,6 +946,7 @@ def emit_reasoning_args(launcher, cmd, supports_flag=None):
     the save-script flow, where we don't want to spawn the server),
     every flag is emitted unconditionally.
     """
+
     def _ok(flag):
         if supports_flag is None:
             return True
@@ -933,8 +959,7 @@ def emit_reasoning_args(launcher, cmd, supports_flag=None):
             # missing, the help cache stat raised), the safer move is to
             # SKIP the flag, not optimistically emit it.
             print(
-                f"WARNING: failed to probe support for {flag!r}: {exc}; "
-                f"skipping for safety.",
+                f"WARNING: failed to probe support for {flag!r}: {exc}; " f"skipping for safety.",
                 file=sys.stderr,
             )
             return False
@@ -998,7 +1023,10 @@ def emit_kv_unify_args(launcher, backend, cmd):
         cis = cis_var.get().strip() if cis_var is not None else ""
         if backend == "ik_llama":
             if kvu in ("on", "off") or cis in ("on", "off"):
-                print("WARNING: --kv-unified / --cache-idle-slots are llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                print(
+                    "WARNING: --kv-unified / --cache-idle-slots are llama.cpp-only; ignoring for ik_llama backend.",
+                    file=sys.stderr,
+                )
         else:
             # --cache-idle-slots requires --kv-unified to be on (the
             # server itself warns and disables otherwise). Enforce the
@@ -1014,14 +1042,12 @@ def emit_kv_unify_args(launcher, backend, cmd):
                 cmd.append("--no-kv-unified")
                 if cis in ("on", "off"):
                     print(
-                        "WARNING: --cache-idle-slots requires --kv-unified=on; "
-                        "skipping (kv_unified_mode is 'off').",
+                        "WARNING: --cache-idle-slots requires --kv-unified=on; " "skipping (kv_unified_mode is 'off').",
                         file=sys.stderr,
                     )
             elif cis in ("on", "off"):
                 print(
-                    "WARNING: --cache-idle-slots requires --kv-unified=on; "
-                    "skipping (kv_unified_mode is unset).",
+                    "WARNING: --cache-idle-slots requires --kv-unified=on; " "skipping (kv_unified_mode is unset).",
                     file=sys.stderr,
                 )
     except Exception as exc:
@@ -1077,11 +1103,7 @@ def resolve_effective_parallel(launcher, backend):
             mtp_type_for_backend = "mtp"
         else:
             mtp_type_for_backend = "draft-mtp"
-        mtp_active = (
-            spec_enabled_var is not None
-            and spec_enabled_var.get()
-            and spec_type == mtp_type_for_backend
-        )
+        mtp_active = spec_enabled_var is not None and spec_enabled_var.get() and spec_type == mtp_type_for_backend
     except Exception:
         mtp_active = False
     if mtp_active and (parallel_val or "").strip() != "1":
