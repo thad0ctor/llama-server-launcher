@@ -935,10 +935,30 @@ class SpecTab:
         # spec_draft_device on machines/tests without detected CUDA hardware.
         if count > 0 and not manual_mode:
             self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+            # Same conditional-clear logic the fast path and the
+            # manual-mode branch below use: only overwrite
+            # ``spec_draft_device`` when the current value is empty
+            # OR equals the checkbox-derived string from the prior
+            # render. An explicit override like ``Vulkan0`` or
+            # ``CUDA2,SYCL1`` must survive a full rebuild
+            # (first lazy-tab render, GPU-shape change, manual/auto
+            # mode flip) instead of being wiped on every refresh
+            # that comes through this slow path.
+            checkbox_derived = ",".join(f"CUDA{i}" for i in valid_selected)
             try:
-                self.spec_draft_device.set(
-                    ",".join(f"CUDA{i}" for i in valid_selected)
+                current = self.spec_draft_device.get()
+                # Recompute what the checkboxes would have produced
+                # on the previous render — clamped to detected count
+                # so a stale ``CUDA99`` doesn't make the value look
+                # like a manual override when it isn't.
+                prior_derived = ",".join(
+                    f"CUDA{i}"
+                    for i in sorted(
+                        idx for idx in loaded_selected if 0 <= idx < count
+                    )
                 )
+                if current in ("", prior_derived):
+                    self.spec_draft_device.set(checkbox_derived)
             except Exception:
                 pass
         elif manual_mode:

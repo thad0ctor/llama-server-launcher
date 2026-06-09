@@ -29,7 +29,7 @@ def _bash_hold_open(command: str) -> str:
     )
 
 
-def _cmd_keep_open(command: str) -> list[str]:
+def _cmd_keep_open(command: str) -> tuple[list[str], str]:
     """Return a Windows ``cmd`` invocation that reports success/failure.
 
     Writes the user command to a temporary ``.cmd`` batch file and
@@ -74,7 +74,12 @@ def _cmd_keep_open(command: str) -> list[str]:
         # last line (the user's ``cmd /k`` shell stays open for them
         # to inspect output, but the script file itself is gone).
         fh.write('del "%~f0"\r\n')
-    return ["cmd", "/c", "start", "", "cmd", "/k", script_path]
+    # Return BOTH the argv AND the script path so the caller can
+    # clean up the temp file on ``Popen`` failure. The script
+    # normally self-deletes via ``del "%~f0"`` after running, but
+    # if the parent ``cmd`` never starts (PATH issue, AppLocker
+    # block, etc.) the file would otherwise leak in TEMP.
+    return ["cmd", "/c", "start", "", "cmd", "/k", script_path], script_path
 
 
 def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> None:
@@ -243,7 +248,20 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         return
 
     if sys.platform.startswith("win"):
-        subprocess.Popen(_cmd_keep_open(command), cwd=cwd_text)
+        argv, script_path = _cmd_keep_open(command)
+        try:
+            subprocess.Popen(argv, cwd=cwd_text)
+        except Exception:
+            # ``Popen`` blew up before the inner ``cmd /k`` had a
+            # chance to execute the script's self-delete line.
+            # Clean the temp file ourselves so we don't litter
+            # ``%TEMP%`` on repeated failures. Mirrors the
+            # macOS branch's cleanup.
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
+            raise
         return
 
     raise RuntimeError(f"Unsupported platform: {sys.platform}")

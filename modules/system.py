@@ -326,13 +326,18 @@ def get_gpu_info_from_venv(venv_path):
             python_exe = venv_path / "python"  # Some venv structures
     
     if not python_exe.exists():
+        # Full venv path stays in DEBUG-only output so support /
+        # bug reports can include it on request. The UI-facing
+        # ``message`` is intentionally generic — raw paths leak
+        # usernames / home directories into screenshots and the
+        # tab's status text.
         print(f"DEBUG: Python executable not found in venv: {venv_path}", file=sys.stderr)
         # Return an "unavailable" marker — ``get_gpu_info_with_venv`` is
         # the single owner of the in-process torch fallback. Returning a
         # second ``get_gpu_info_static()`` here would re-run the same slow
         # CUDA init the orchestrator is about to run anyway.
         return _unavailable_gpu_info(
-            f"Python executable not found in venv: {venv_path}",
+            "Python executable not found in virtual environment.",
             "torch-venv",
         )
     
