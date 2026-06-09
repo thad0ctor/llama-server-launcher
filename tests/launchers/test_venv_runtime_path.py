@@ -329,6 +329,14 @@ def test_initial_venv_bootstrap_prompt_does_not_suppress_retry_on_terminal_error
     assert stub.app_settings["venv_bootstrap_prompt_mode"] == "ask"
     assert stub._bootstrap_config_dirty is False
     error_mock.assert_called_once()
+    # The terminal-launch raised OSError before any venv was actually
+    # created, so the launcher MUST NOT have mutated the venv
+    # selection. Without these assertions, a future change that
+    # eagerly wrote ``venv_dir`` / ``last_venv_dir`` before invoking
+    # ``open_command_in_terminal`` would leave the user pointed at a
+    # venv that never came into existence.
+    assert stub.venv_dir.get() == ""
+    assert stub.app_settings["last_venv_dir"] == ""
 
 
 def test_initial_venv_bootstrap_prompt_no_keeps_prompt_enabled(

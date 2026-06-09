@@ -511,7 +511,16 @@ class ConfigManager:
         self.launcher._sync_ctx_display(ctx)  # Manually sync display
         self.launcher.seed.set(cfg.get("seed", "-1"))
         self.launcher.flash_attn.set(cfg.get("flash_attn", True))  # Default ON; see app default note
-        self.launcher.tensor_split.set(cfg.get("tensor_split", "").strip())  # Ensure strip on load too
+        # A hand-edited config could ship ``"tensor_split": 1``
+        # (int) or ``"tensor_split": [0.5, 0.5]`` (list); calling
+        # ``.strip()`` on either would crash mid-load with an
+        # opaque AttributeError. Coerce non-string values to the
+        # empty string so the field falls through to "no split"
+        # rather than partially-applying the rest of the config.
+        raw_tensor_split = cfg.get("tensor_split", "")
+        if not isinstance(raw_tensor_split, str):
+            raw_tensor_split = ""
+        self.launcher.tensor_split.set(raw_tensor_split.strip())  # Ensure strip on load too
         self.launcher.main_gpu.set(cfg.get("main_gpu", "0"))
         self.launcher.mlock.set(cfg.get("mlock", False))
         self.launcher.no_kv_offload.set(cfg.get("no_kv_offload", False))
@@ -737,6 +746,15 @@ class ConfigManager:
 
         # Load Model Path - This will trigger model selection logic and analysis
         loaded_model_path_str = cfg.get("model_path", "")
+        # A hand-edited config could ship ``"model_path": null`` /
+        # ``"model_path": 0`` / ``"model_path": []``; the
+        # ``Path(loaded_model_path_str)`` calls downstream would
+        # then crash with ``TypeError``. Coerce non-string values
+        # to the empty string so the no-model branch handles them
+        # cleanly (model_path Tk var stays empty, the rest of the
+        # load continues).
+        if not isinstance(loaded_model_path_str, str):
+            loaded_model_path_str = ""
         # Set the variable first, then attempt to select in the listbox
         self.launcher.model_path.set(loaded_model_path_str)
         self.launcher.model_listbox.selection_clear(0, "end")  # Clear previous visual selection

@@ -426,7 +426,17 @@ try:
 except ImportError:
     print(json.dumps({"available": False, "message": "PyTorch not found in venv", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 except Exception as e:
-    print(json.dumps({"available": False, "message": f"Error in venv GPU detection: {e}", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
+    # Mirror the static-path sanitization: raw exception text can leak
+    # venv paths, module internals, and home/username strings into the
+    # UI status label. Gate the full repr behind LLAMA_LAUNCHER_DEBUG_ENV
+    # and emit a generic message in the JSON payload that the parent
+    # process consumes for the UI.
+    if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+        print(
+            f"DEBUG: venv GPU detection exception: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+    print(json.dumps({"available": False, "message": "GPU detection failed in configured virtual environment.", "device_count": 0, "devices": [], "detection_source": "torch-venv"}))
 """
 
     try:

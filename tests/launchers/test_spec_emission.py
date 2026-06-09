@@ -113,6 +113,12 @@ class TestSpecMasterToggle:
                 # decoding tree-suffix path; an empty/none ``spec_type``
                 # must suppress them too.
                 or arg.startswith("--suffix-")
+                # ``--device`` can leak through the spec-draft GPU
+                # union path when ``app_settings["spec_draft_selected_gpus"]``
+                # is stale but ``spec_type`` is now empty/none. Catch
+                # it here so the suppress-on-spec_type contract
+                # covers the persisted union path too.
+                or arg == "--device"
                 or arg in cls._SPEC_LEAK_FLAGS
             )
         ]
@@ -134,6 +140,20 @@ class TestSpecMasterToggle:
         # (the field's default is empty, so no flag is emitted).
         launcher_mock.spec_suffix_pattern_len.set("4")
         launcher_mock.spec_suffix_max_depth.set("8")
+        # Also seed the PERSISTED draft-GPU union path
+        # (``app_settings["spec_draft_selected_gpus"]``). The launch
+        # path's ``get_effective_visible_gpu_indices`` unions this
+        # with the main selection and emits ``CUDA_VISIBLE_DEVICES``
+        # plus ``--device``; a regression that kept honoring the
+        # stale persisted list when spec_type is "" would have
+        # slipped past the StringVar-only seeding above.
+        launcher_mock.app_settings = {
+            "selected_gpus": [1],
+            "gpu_order": [1],
+            "spec_draft_selected_gpus": [2],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+        launcher_mock.get_ordered_selected_gpus = lambda: [1]
         cmd = manager.build_cmd()
         leaked = self._leaked_spec_args(cmd)
         assert not leaked, (
@@ -150,6 +170,15 @@ class TestSpecMasterToggle:
         # comment there for the rationale.
         launcher_mock.spec_suffix_pattern_len.set("4")
         launcher_mock.spec_suffix_max_depth.set("8")
+        # Same persisted-union seeding rationale as the empty-
+        # spec_type test above.
+        launcher_mock.app_settings = {
+            "selected_gpus": [1],
+            "gpu_order": [1],
+            "spec_draft_selected_gpus": [2],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+        launcher_mock.get_ordered_selected_gpus = lambda: [1]
         cmd = manager.build_cmd()
         leaked = self._leaked_spec_args(cmd)
         assert not leaked, (

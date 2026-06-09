@@ -183,7 +183,11 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
             _os.unlink(payload_path)
         except OSError:
             pass
-    assert "winget install --id Kitware.CMake -e" in payload_body
+    # The payload now invokes the user command via a nested
+    # ``cmd /d /c ""<command>""`` so a nested ``.bat`` / ``.cmd``
+    # without ``call`` can't transfer control away and skip the
+    # self-delete / exit-code tail.
+    assert 'cmd /d /c ""winget install --id Kitware.CMake -e""' in payload_body
     assert 'del "%~f0"' in payload_body
     assert "exit /b" in payload_body.lower()
 

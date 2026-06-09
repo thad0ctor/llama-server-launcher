@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class ManagedDependency:
     """One dependency the settings tab can inspect/install in a venv."""
+
     key: str
     label: str
     package_name: str
@@ -29,6 +31,7 @@ class ManagedDependency:
 @dataclass(frozen=True)
 class VenvTargetInfo:
     """Resolved target path + best-effort interpreter discovery."""
+
     raw_input: str
     effective_dir: Path
     uses_default: bool
@@ -90,6 +93,7 @@ class VenvTargetInfo:
 @dataclass(frozen=True)
 class DependencyStatus:
     """Installed/version state for one dependency inside a venv."""
+
     dependency: ManagedDependency
     available: bool
     version: str | None = None
@@ -167,9 +171,7 @@ def resolve_venv_dir(raw_path: str, *, repo_dir: str | Path | None = None) -> Pa
     return target.resolve()
 
 
-def venv_python_candidates(
-    venv_dir: str | Path, *, platform: str | None = None
-) -> tuple[Path, ...]:
+def venv_python_candidates(venv_dir: str | Path, *, platform: str | None = None) -> tuple[Path, ...]:
     """Return plausible Python interpreter locations inside ``venv_dir``."""
     plat = platform or sys.platform
     root = Path(venv_dir)
@@ -186,9 +188,7 @@ def venv_python_candidates(
     )
 
 
-def locate_venv_python(
-    venv_dir: str | Path, *, platform: str | None = None
-) -> Path | None:
+def locate_venv_python(venv_dir: str | Path, *, platform: str | None = None) -> Path | None:
     """Return the first existing Python interpreter inside ``venv_dir``.
 
     Mirrors the stricter check used by ``VenvTargetInfo.looks_like_venv``
@@ -317,9 +317,7 @@ def _shell_join(
     return " ".join([args[0], *(shlex.quote(a) for a in args[1:])])
 
 
-def default_venv_base_python_args(
-    *, platform: str | None = None
-) -> tuple[str, ...]:
+def default_venv_base_python_args(*, platform: str | None = None) -> tuple[str, ...]:
     """Return the preferred Python launcher for creating a new venv."""
     plat = platform or sys.platform
     exe_name = Path(sys.executable).name.lower()
@@ -369,7 +367,7 @@ def build_create_venv_command(
 def build_bootstrap_venv_command(
     venv_dir: str | Path,
     *,
-    dependencies: tuple[ManagedDependency, ...] | None = None,
+    dependencies: Sequence[ManagedDependency] | None = None,
     base_python: str | tuple[str, ...] | list[str] | None = None,
     platform: str | None = None,
 ) -> str:
@@ -384,11 +382,7 @@ def build_bootstrap_venv_command(
     # An explicit ``dependencies=()`` (or ``[]``) must be honored as "no
     # managed installs" — using ``or`` collapsed empty tuples to the
     # required-deps default and silently overrode the caller's intent.
-    install_list = (
-        required_managed_dependencies()
-        if dependencies is None
-        else dependencies
-    )
+    install_list = required_managed_dependencies() if dependencies is None else dependencies
     packages = [dep.install_name or dep.package_name for dep in install_list]
     # ``commands`` starts as just the venv create. The pip upgrade
     # and the install line only get appended when there are packages
@@ -670,7 +664,7 @@ def probe_dependencies(
 
 
 def probe_current_python_dependencies(
-    dependencies: tuple[ManagedDependency, ...] | None = None,
+    dependencies: Sequence[ManagedDependency] | None = None,
 ) -> tuple[DependencyStatus, ...]:
     """Inspect launcher-managed dependencies in the current Python process."""
     rows: list[DependencyStatus] = []

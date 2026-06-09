@@ -1064,6 +1064,26 @@ class SpecTab:
                     # ``spec_draft_device`` instead of re-emitting the
                     # checkbox-derived ``CUDA…`` list.
                     self.launcher.app_settings["spec_draft_selected_gpus"] = []
+                    # Mirror the fast-path sweep: also untick the live
+                    # checkbox vars and clear the rendered-selection
+                    # snapshot. The slow rebuild branch just created
+                    # fresh BooleanVars at lines ~969-978 with
+                    # ``value=is_selected`` (i.e. the persisted
+                    # selection), so without this sweep the UI shows
+                    # ticked checkboxes that the launch path ignores
+                    # — same silent contract mismatch as the fast
+                    # path before its sibling fix.
+                    self._suppress_spec_draft_gpu_events = True
+                    try:
+                        for var in self.spec_draft_gpu_vars:
+                            try:
+                                if var.get():
+                                    var.set(False)
+                            except Exception:
+                                pass
+                    finally:
+                        self._suppress_spec_draft_gpu_events = False
+                    self._spec_draft_last_rendered_selected = []
             except Exception:
                 pass
         elif manual_mode:

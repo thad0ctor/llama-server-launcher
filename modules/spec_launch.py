@@ -687,8 +687,15 @@ def emit_spec_args(launcher, backend, cmd):
                             if mp_var is not None:
                                 mp = mp_var.get().strip()
                                 if mp:
-                                    if Path(mp).is_file():
-                                        cmd.extend(["--model-draft", str(Path(mp).resolve())])
+                                    # ``expanduser()`` so a saved/hand-edited
+                                    # config with ``~/models/draft.gguf``
+                                    # validates against the real file
+                                    # under ``$HOME`` instead of being
+                                    # silently skipped — ``Path("~/...")``
+                                    # is literal text on POSIX.
+                                    draft_path = Path(mp).expanduser()
+                                    if draft_path.is_file():
+                                        cmd.extend(["--model-draft", str(draft_path.resolve())])
                                     else:
                                         print(
                                             f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
@@ -823,8 +830,14 @@ def emit_spec_args(launcher, backend, cmd):
                             if mp_var is not None:
                                 mp = mp_var.get().strip()
                                 if mp:
-                                    if Path(mp).is_file():
-                                        cmd.extend(["--spec-draft-model", str(Path(mp).resolve())])
+                                    # ``expanduser()`` — same rationale as
+                                    # the ik_llama branch above: ``~/foo.gguf``
+                                    # must validate against the real file
+                                    # under ``$HOME``, not the literal
+                                    # ``~``-prefixed string.
+                                    draft_path = Path(mp).expanduser()
+                                    if draft_path.is_file():
+                                        cmd.extend(["--spec-draft-model", str(draft_path.resolve())])
                                     else:
                                         print(
                                             f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",

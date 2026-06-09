@@ -75,7 +75,24 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
     try:
         with os.fdopen(payload_fd, "w", encoding="utf-8-sig", newline="") as fh:
             fh.write("@echo off\r\n")
-            fh.write(f"{command}\r\n")
+            # Wrap the user command in ``cmd /d /c "<command>"`` here
+            # too, even though the WRAPPER already wraps via
+            # ``call <payload>``. Without this inner wrap, a user
+            # command that invokes another ``.bat``/``.cmd`` without
+            # ``call`` (``vcvars*.bat``, ``conda.bat activate``,
+            # ``activate.bat && build.bat``) transfers control to
+            # THAT script under batch-chain semantics — the rest of
+            # this payload (the ``set _LLAMA_LAUNCHER_RC`` line, the
+            # self-delete, the ``exit /b``) never runs, and the
+            # wrapper's ``%ERRORLEVEL%`` reports the wrong status.
+            # The nested ``cmd /d /c`` keeps that batch-chain inside
+            # its own cmd instance so control returns here before
+            # the tail runs. Documented quoting form:
+            # https://ss64.com/nt/cmd.html — the ``""…""`` double-
+            # double survives one strip-pass for payloads with their
+            # own embedded quotes. ``/d`` skips AutoRun.
+            escaped_command = command.replace('"', '""')
+            fh.write(f'cmd /d /c ""{escaped_command}""\r\n')
             # Hand the user command's exit code back to the wrapper
             # via ``exit /b`` so ``%ERRORLEVEL%`` in the wrapper
             # reflects the payload's status rather than the
