@@ -1235,6 +1235,11 @@ class ConfigManager:
                 "hf_target_dirs": [], "hf_include_patterns": "", "hf_ignore_patterns": "",
                 "hf_force_download": False, "hf_local_files_only": False, "hf_max_workers": 4,
             }
+            # Run the spec-defaults validator so the error path produces
+            # the same ``app_settings`` shape the success path does.
+            # Without this, newer spec keys are absent from the reset
+            # subset until the user navigates to the spec tab.
+            validate_spec_app_settings(self.launcher.app_settings)
             self.launcher.saved_configs = {}
             self.launcher.custom_parameters_list = [] # Reset internal list
             self.configs_loaded_successfully = False

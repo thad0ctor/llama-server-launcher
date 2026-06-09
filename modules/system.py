@@ -259,17 +259,25 @@ def get_gpu_info_with_venv(venv_path=None):
     silently unavailable).
     """
     attempts: list[str] = []
+    # Per-backend failure DEBUG prints carry raw nvidia-smi /
+    # torch / venv exception text — gate behind the env so they
+    # don't leak into journalctl / stderr on every probe. The
+    # ``attempts`` list still feeds the user-facing combined
+    # message (which is now generic, see final fallback below).
+    _debug = os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1"
 
     smi_info = get_gpu_info_from_nvidia_smi()
     if smi_info.get("available"):
-        print(
-            f"DEBUG: nvidia-smi GPU detection successful: "
-            f"{smi_info.get('device_count', 0)} devices",
-            file=sys.stderr,
-        )
+        if _debug:
+            print(
+                f"DEBUG: nvidia-smi GPU detection successful: "
+                f"{smi_info.get('device_count', 0)} devices",
+                file=sys.stderr,
+            )
         return smi_info
     attempts.append(f"nvidia-smi: {smi_info.get('message', 'unknown error')}")
-    print(f"DEBUG: nvidia-smi GPU detection unavailable: {smi_info.get('message', 'unknown error')}", file=sys.stderr)
+    if _debug:
+        print(f"DEBUG: nvidia-smi GPU detection unavailable: {smi_info.get('message', 'unknown error')}", file=sys.stderr)
 
     # Call ``get_gpu_info_from_venv`` whenever a venv was configured, even
     # when the directory doesn't exist yet — the helper returns a
@@ -280,27 +288,31 @@ def get_gpu_info_with_venv(venv_path=None):
     if venv_path:
         venv_info = get_gpu_info_from_venv(venv_path)
         if venv_info.get("available"):
-            print(
-                f"DEBUG: venv PyTorch GPU detection successful: "
-                f"{venv_info.get('device_count', 0)} devices",
-                file=sys.stderr,
-            )
+            if _debug:
+                print(
+                    f"DEBUG: venv PyTorch GPU detection successful: "
+                    f"{venv_info.get('device_count', 0)} devices",
+                    file=sys.stderr,
+                )
             return venv_info
         attempts.append(f"venv PyTorch: {venv_info.get('message', 'unknown error')}")
-        print(f"DEBUG: venv PyTorch GPU detection unavailable: {venv_info.get('message', 'unknown error')}", file=sys.stderr)
+        if _debug:
+            print(f"DEBUG: venv PyTorch GPU detection unavailable: {venv_info.get('message', 'unknown error')}", file=sys.stderr)
 
     # Final fallback: current process. Useful when the configured venv has
     # no torch but the launcher's own interpreter does.
     static_info = get_gpu_info_static()
     if static_info.get("available"):
-        print(
-            f"DEBUG: in-process PyTorch GPU detection successful: "
-            f"{static_info.get('device_count', 0)} devices",
-            file=sys.stderr,
-        )
+        if _debug:
+            print(
+                f"DEBUG: in-process PyTorch GPU detection successful: "
+                f"{static_info.get('device_count', 0)} devices",
+                file=sys.stderr,
+            )
         return static_info
     attempts.append(f"in-process PyTorch: {static_info.get('message', 'unknown error')}")
-    print(f"DEBUG: in-process PyTorch GPU detection unavailable: {static_info.get('message', 'unknown error')}", file=sys.stderr)
+    if _debug:
+        print(f"DEBUG: in-process PyTorch GPU detection unavailable: {static_info.get('message', 'unknown error')}", file=sys.stderr)
 
     # Every detector failed. The full per-backend stderr / exception
     # text stays in DEBUG-only stderr (already printed above for each
@@ -308,7 +320,7 @@ def get_gpu_info_with_venv(venv_path=None):
     # is generic to avoid re-surfacing raw subprocess output / venv
     # paths in ``gpu_detected_status_var`` after the per-site
     # sanitization pass.
-    if attempts:
+    if attempts and _debug:
         print(
             "DEBUG: GPU detection backends failed: " + "; ".join(attempts),
             file=sys.stderr,

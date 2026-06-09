@@ -60,7 +60,12 @@ class CMakeFlag:
     choices: list[str] | None = None                 # for ENUM
     help: str = ""
     visible_when: Callable[[dict[str, Any]], bool] | None = None
-    cuda_version_min: str | None = None              # informational
+    # Enforced by ``values_to_cmake_args()`` and ``validate_values()``
+    # via ``_cuda_version_satisfies``. With no detected toolkit version
+    # the helper is fail-closed by default — flags carrying a
+    # ``cuda_version_min`` are skipped, so an unknown CUDA install
+    # can't get a 12.8+-only flag silently injected.
+    cuda_version_min: str | None = None
     # Some cmake options (e.g. CMAKE_CUDA_FLAGS) are not booleans/ints — they
     # ride along as raw strings. ``placeholder`` is the hint shown in the
     # entry widget.

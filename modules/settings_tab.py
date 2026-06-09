@@ -649,6 +649,15 @@ class SettingsTab:
         self._venv_action_status_var.set(
             f"Opened terminal to remove venv at {info.effective_dir}."
         )
+        # Bump the probe generation BEFORE clearing the table so any
+        # in-flight ``_schedule_venv_dependency_probe`` worker that
+        # completes after this point silently drops its result via
+        # the existing ``generation == self._venv_probe_generation``
+        # check (line ~472). Without this, a probe that started just
+        # before the user clicked Remove venv would land its
+        # "installed" rows BACK into the table we just cleared,
+        # making it look like the rm didn't actually run.
+        self._venv_probe_generation += 1
         # Clear the dependency table immediately so the UI doesn't keep
         # showing "installed" rows for packages whose venv is being
         # deleted in another terminal. Schedule a refresh ~2 s later so
