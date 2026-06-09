@@ -18,7 +18,10 @@ the inline blocks did before extraction.
 # Exhaustive list of boolean keys. Mirrors `_spec_bool_keys` in the
 # original `load_saved_configs` validation block.
 SPEC_BOOL_KEYS = (
-    "spec_enabled", "spec_draft_cpu_moe", "spec_autotune", "no_mmproj",
+    "spec_enabled",
+    "spec_draft_cpu_moe",
+    "spec_autotune",
+    "no_mmproj",
     "spec_use_draft_model",
 )
 
@@ -27,21 +30,43 @@ SPEC_BOOL_KEYS = (
 # keys which all default to "" so the corresponding flag is omitted.
 SPEC_STR_KEYS = (
     "spec_type",
-    "spec_draft_n_max", "spec_draft_n_min", "spec_draft_p_min", "spec_draft_p_split",
-    "spec_draft_model", "spec_draft_ngl", "spec_draft_device",
-    "spec_draft_ctk", "spec_draft_ctv", "spec_draft_n_cpu_moe",
-    "spec_ngram_simple_size_n", "spec_ngram_simple_size_m", "spec_ngram_simple_min_hits",
-    "spec_ngram_mapk_size_n", "spec_ngram_mapk_size_m", "spec_ngram_mapk_min_hits",
-    "spec_ngram_mapk4v_size_n", "spec_ngram_mapk4v_size_m", "spec_ngram_mapk4v_min_hits",
-    "spec_ngram_mod_n_min", "spec_ngram_mod_n_max", "spec_ngram_mod_n_match",
-    "spec_ngram_size_n", "spec_ngram_size_m", "spec_ngram_min_hits",
-    "spec_suffix_pattern_len", "spec_suffix_max_depth",
+    "spec_draft_n_max",
+    "spec_draft_n_min",
+    "spec_draft_p_min",
+    "spec_draft_p_split",
+    "spec_draft_model",
+    "spec_draft_ngl",
+    "spec_draft_device",
+    "spec_draft_ctk",
+    "spec_draft_ctv",
+    "spec_draft_n_cpu_moe",
+    "spec_ngram_simple_size_n",
+    "spec_ngram_simple_size_m",
+    "spec_ngram_simple_min_hits",
+    "spec_ngram_mapk_size_n",
+    "spec_ngram_mapk_size_m",
+    "spec_ngram_mapk_min_hits",
+    "spec_ngram_mapk4v_size_n",
+    "spec_ngram_mapk4v_size_m",
+    "spec_ngram_mapk4v_min_hits",
+    "spec_ngram_mod_n_min",
+    "spec_ngram_mod_n_max",
+    "spec_ngram_mod_n_match",
+    "spec_ngram_size_n",
+    "spec_ngram_size_m",
+    "spec_ngram_min_hits",
+    "spec_suffix_pattern_len",
+    "spec_suffix_max_depth",
     "spec_draft_params",
     # Reasoning / Thinking + KV Unification keys. All start as "" so
     # the corresponding flags are omitted by default.
-    "reasoning_mode", "reasoning_format", "reasoning_budget",
-    "reasoning_budget_message", "chat_template_kwargs",
-    "kv_unified_mode", "cache_idle_slots_mode",
+    "reasoning_mode",
+    "reasoning_format",
+    "reasoning_budget",
+    "reasoning_budget_message",
+    "chat_template_kwargs",
+    "kv_unified_mode",
+    "cache_idle_slots_mode",
 )
 
 
@@ -54,49 +79,49 @@ def collect_spec_into_cfg(launcher, cfg):
     ``spec_draft_selected_gpus`` mirror so the checkbox state round-trips
     in the named-config payload.
     """
-    cfg["spec_enabled"]               = launcher.spec_enabled.get()
-    cfg["spec_type"]                  = launcher.spec_type.get()
-    cfg["spec_draft_n_max"]           = launcher.spec_draft_n_max.get()
-    cfg["spec_draft_n_min"]           = launcher.spec_draft_n_min.get()
-    cfg["spec_draft_p_min"]           = launcher.spec_draft_p_min.get()
-    cfg["spec_draft_p_split"]         = launcher.spec_draft_p_split.get()
-    cfg["spec_draft_model"]           = launcher.spec_draft_model.get()
-    cfg["spec_use_draft_model"]       = launcher.spec_use_draft_model.get()
-    cfg["spec_draft_ngl"]             = launcher.spec_draft_ngl.get()
-    cfg["spec_draft_device"]          = launcher.spec_draft_device.get()
-    cfg["spec_draft_ctk"]             = launcher.spec_draft_ctk.get()
-    cfg["spec_draft_ctv"]             = launcher.spec_draft_ctv.get()
-    cfg["spec_draft_cpu_moe"]         = launcher.spec_draft_cpu_moe.get()
-    cfg["spec_draft_n_cpu_moe"]       = launcher.spec_draft_n_cpu_moe.get()
-    cfg["spec_ngram_simple_size_n"]   = launcher.spec_ngram_simple_size_n.get()
-    cfg["spec_ngram_simple_size_m"]   = launcher.spec_ngram_simple_size_m.get()
+    cfg["spec_enabled"] = launcher.spec_enabled.get()
+    cfg["spec_type"] = launcher.spec_type.get()
+    cfg["spec_draft_n_max"] = launcher.spec_draft_n_max.get()
+    cfg["spec_draft_n_min"] = launcher.spec_draft_n_min.get()
+    cfg["spec_draft_p_min"] = launcher.spec_draft_p_min.get()
+    cfg["spec_draft_p_split"] = launcher.spec_draft_p_split.get()
+    cfg["spec_draft_model"] = launcher.spec_draft_model.get()
+    cfg["spec_use_draft_model"] = launcher.spec_use_draft_model.get()
+    cfg["spec_draft_ngl"] = launcher.spec_draft_ngl.get()
+    cfg["spec_draft_device"] = launcher.spec_draft_device.get()
+    cfg["spec_draft_ctk"] = launcher.spec_draft_ctk.get()
+    cfg["spec_draft_ctv"] = launcher.spec_draft_ctv.get()
+    cfg["spec_draft_cpu_moe"] = launcher.spec_draft_cpu_moe.get()
+    cfg["spec_draft_n_cpu_moe"] = launcher.spec_draft_n_cpu_moe.get()
+    cfg["spec_ngram_simple_size_n"] = launcher.spec_ngram_simple_size_n.get()
+    cfg["spec_ngram_simple_size_m"] = launcher.spec_ngram_simple_size_m.get()
     cfg["spec_ngram_simple_min_hits"] = launcher.spec_ngram_simple_min_hits.get()
-    cfg["spec_ngram_mapk_size_n"]     = launcher.spec_ngram_mapk_size_n.get()
-    cfg["spec_ngram_mapk_size_m"]     = launcher.spec_ngram_mapk_size_m.get()
-    cfg["spec_ngram_mapk_min_hits"]   = launcher.spec_ngram_mapk_min_hits.get()
-    cfg["spec_ngram_mapk4v_size_n"]   = launcher.spec_ngram_mapk4v_size_n.get()
-    cfg["spec_ngram_mapk4v_size_m"]   = launcher.spec_ngram_mapk4v_size_m.get()
+    cfg["spec_ngram_mapk_size_n"] = launcher.spec_ngram_mapk_size_n.get()
+    cfg["spec_ngram_mapk_size_m"] = launcher.spec_ngram_mapk_size_m.get()
+    cfg["spec_ngram_mapk_min_hits"] = launcher.spec_ngram_mapk_min_hits.get()
+    cfg["spec_ngram_mapk4v_size_n"] = launcher.spec_ngram_mapk4v_size_n.get()
+    cfg["spec_ngram_mapk4v_size_m"] = launcher.spec_ngram_mapk4v_size_m.get()
     cfg["spec_ngram_mapk4v_min_hits"] = launcher.spec_ngram_mapk4v_min_hits.get()
-    cfg["spec_ngram_mod_n_min"]       = launcher.spec_ngram_mod_n_min.get()
-    cfg["spec_ngram_mod_n_max"]       = launcher.spec_ngram_mod_n_max.get()
-    cfg["spec_ngram_mod_n_match"]     = launcher.spec_ngram_mod_n_match.get()
-    cfg["spec_ngram_size_n"]          = launcher.spec_ngram_size_n.get()
-    cfg["spec_ngram_size_m"]          = launcher.spec_ngram_size_m.get()
-    cfg["spec_ngram_min_hits"]        = launcher.spec_ngram_min_hits.get()
-    cfg["spec_suffix_pattern_len"]    = launcher.spec_suffix_pattern_len.get()
-    cfg["spec_suffix_max_depth"]      = launcher.spec_suffix_max_depth.get()
-    cfg["spec_autotune"]              = launcher.spec_autotune.get()
-    cfg["spec_draft_params"]          = launcher.spec_draft_params.get()
-    cfg["no_mmproj"]                  = launcher.no_mmproj.get()
+    cfg["spec_ngram_mod_n_min"] = launcher.spec_ngram_mod_n_min.get()
+    cfg["spec_ngram_mod_n_max"] = launcher.spec_ngram_mod_n_max.get()
+    cfg["spec_ngram_mod_n_match"] = launcher.spec_ngram_mod_n_match.get()
+    cfg["spec_ngram_size_n"] = launcher.spec_ngram_size_n.get()
+    cfg["spec_ngram_size_m"] = launcher.spec_ngram_size_m.get()
+    cfg["spec_ngram_min_hits"] = launcher.spec_ngram_min_hits.get()
+    cfg["spec_suffix_pattern_len"] = launcher.spec_suffix_pattern_len.get()
+    cfg["spec_suffix_max_depth"] = launcher.spec_suffix_max_depth.get()
+    cfg["spec_autotune"] = launcher.spec_autotune.get()
+    cfg["spec_draft_params"] = launcher.spec_draft_params.get()
+    cfg["no_mmproj"] = launcher.no_mmproj.get()
     # --- Reasoning / Thinking (both backends) ---
-    cfg["reasoning_mode"]             = launcher.reasoning_mode.get()
-    cfg["reasoning_format"]           = launcher.reasoning_format.get()
-    cfg["reasoning_budget"]           = launcher.reasoning_budget.get()
-    cfg["reasoning_budget_message"]   = launcher.reasoning_budget_message.get()
-    cfg["chat_template_kwargs"]       = launcher.chat_template_kwargs.get()
+    cfg["reasoning_mode"] = launcher.reasoning_mode.get()
+    cfg["reasoning_format"] = launcher.reasoning_format.get()
+    cfg["reasoning_budget"] = launcher.reasoning_budget.get()
+    cfg["reasoning_budget_message"] = launcher.reasoning_budget_message.get()
+    cfg["chat_template_kwargs"] = launcher.chat_template_kwargs.get()
     # --- KV Unification (llama.cpp only) ---
-    cfg["kv_unified_mode"]            = launcher.kv_unified_mode.get()
-    cfg["cache_idle_slots_mode"]      = launcher.cache_idle_slots_mode.get()
+    cfg["kv_unified_mode"] = launcher.kv_unified_mode.get()
+    cfg["cache_idle_slots_mode"] = launcher.cache_idle_slots_mode.get()
 
 
 def load_spec_from_cfg(launcher, cfg):
@@ -112,6 +137,7 @@ def load_spec_from_cfg(launcher, cfg):
     checkbox grid can render it; this function performs the coercion and
     returns the cleaned list as a side effect on the cfg dict.
     """
+
     def _spec_bool(key):
         val = cfg.get(key, False)
         return bool(val) if isinstance(val, bool) else (str(val).lower() in ("1", "true", "yes"))
@@ -200,7 +226,7 @@ def validate_spec_app_settings(app_settings):
     for k in SPEC_BOOL_KEYS:
         v = app_settings.get(k, False)
         if not isinstance(v, bool):
-            app_settings[k] = (str(v).lower() in ("1", "true", "yes"))
+            app_settings[k] = str(v).lower() in ("1", "true", "yes")
     for k in SPEC_STR_KEYS:
         v = app_settings.get(k, "")
         if not isinstance(v, str):
@@ -208,6 +234,29 @@ def validate_spec_app_settings(app_settings):
     # spec_type defaults to "none" so we never emit a flag with an unknown empty value.
     if not app_settings.get("spec_type"):
         app_settings["spec_type"] = "none"
+
+    # If ``spec_draft_device`` is a NON-CUDA override (``Vulkan0``,
+    # ``Metal0``, ``SYCL1``, ``ROCm0``, ``HIP1``, ``CPU0``), the user
+    # intends a manual draft device — the CUDA checkbox-derived list
+    # in ``spec_draft_selected_gpus`` is leftover state from a prior
+    # session and the launch path would otherwise still emit it
+    # (because ``_resolve_draft_device_value`` only falls back to
+    # ``spec_draft_device`` when the persisted list is empty).
+    # ``spec_tab._update_spec_draft_gpu_checkboxes`` clears this when
+    # the user opens the Spec tab, but a launch without first
+    # opening the tab would emit the wrong device — so do the same
+    # normalization at config-load time too. CUDA-only overrides are
+    # ambiguous (could be a manual ``CUDA2`` or a leftover
+    # checkbox-derived string) so leave them alone here; the Spec
+    # tab handles that case once it loads.
+    raw_device = app_settings.get("spec_draft_device", "")
+    if isinstance(raw_device, str) and raw_device.strip():
+        device_token = raw_device.strip().upper()
+        non_cuda_markers = ("VULKAN", "METAL", "SYCL", "ROCM", "HIP", "CPU")
+        if any(marker in device_token for marker in non_cuda_markers):
+            persisted_gpus = app_settings.get("spec_draft_selected_gpus")
+            if persisted_gpus:
+                app_settings["spec_draft_selected_gpus"] = []
 
 
 def sync_spec_to_app_settings(launcher):
@@ -282,6 +331,7 @@ def resync_spec_tk_vars_from_app_settings(launcher):
     disk values. Same issue affects ``selected_mmproj_path`` and
     ``mmproj_enabled``.
     """
+
     def _resync_bool(key, var):
         raw = launcher.app_settings.get(key, None)
         if raw is None:

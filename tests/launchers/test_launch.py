@@ -1118,10 +1118,11 @@ class TestSaveShScript:
         text = self._write_and_read(manager, launcher_mock, out)
         # Comma-separated numeric strings are safe in bash without
         # quoting (no shell metacharacters), so the saved script
-        # emits the bare numeric form. ``shlex.quote("1,0")`` would
-        # technically return ``"'1,0'"``, but the launch.py emitter
-        # writes the value verbatim because it knows the contract is
-        # numeric-only.
+        # emits the bare numeric form. ``shlex.quote("1,0")`` itself
+        # also returns ``"1,0"`` unquoted (the comma isn't on
+        # shlex's "needs quoting" list); the launch.py emitter
+        # writes the value verbatim because it knows the contract
+        # is numeric-only, which lines up with shlex's behavior.
         assert "export CUDA_VISIBLE_DEVICES=1,0" in text
 
     def test_cuda_visible_devices_cleared_when_gpus_exist_none_selected(self, manager, launcher_mock, tmp_path):
