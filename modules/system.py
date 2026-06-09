@@ -182,6 +182,14 @@ def _unavailable_gpu_info(message, source):
     }
 
 
+# nvidia-smi emits the bus id as zero-padded hex
+# ``domain:bus:device.function`` (e.g. ``00000000:01:00.0``). Match
+# exactly that shape so blank / truncated / non-bus-id values don't
+# pass the validation in ``get_gpu_info_from_nvidia_smi`` and silently
+# remap launcher GPU ids during the PCI_BUS_ID sort.
+_PCI_BUS_ID_RE = re.compile(r"^[0-9A-Fa-f]{8}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-9A-Fa-f]$")
+
+
 def get_gpu_info_from_nvidia_smi(timeout=5):
     """Get GPU information via nvidia-smi without initializing CUDA."""
     cmd = [
@@ -223,6 +231,17 @@ def get_gpu_info_from_nvidia_smi(timeout=5):
                 # through to the next detector.
                 raise ValueError(f"nvidia-smi row has fewer than 5 fields (got {len(fields)}): {row!r}")
             _nvidia_idx, pci_bus_id, name, memory_total_mib, compute_cap = fields[:5]
+            # Validate ``pci_bus_id`` shape (``DDDDDDDD:BB:DD.F``,
+            # zero-padded hex domain:bus:device.function) BEFORE
+            # the rows.sort below — the launcher remaps nvidia-smi's
+            # natural order onto PCI_BUS_ID-sorted ids, and a blank
+            # or malformed bus id would sort to the front and
+            # silently shift every other device's launcher index,
+            # breaking GPU-selection correctness in a way the user
+            # would have to debug from CUDA_VISIBLE_DEVICES output.
+            # Fail closed: bubble out to the next detector cascade.
+            if not _PCI_BUS_ID_RE.fullmatch(pci_bus_id):
+                raise ValueError(f"nvidia-smi row has malformed pci.bus_id: {pci_bus_id!r}")
             try:
                 total_mib = float(memory_total_mib)
             except (TypeError, ValueError):

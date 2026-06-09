@@ -1312,7 +1312,15 @@ class SpecTab:
         # ``_run_spec_draft_gguf_analysis_loop`` doesn't need this
         # because ``__init__`` always runs before it spawns a worker.
         if not hasattr(self, "_spec_draft_analysis_generation"):
-            self._spec_draft_analysis_generation = 0
+            # Seed from the caller's ``analysis_id`` (if any) so the
+            # stale-result gate below (``analysis_id !=
+            # self._spec_draft_analysis_generation``) doesn't drop
+            # the very result this shim is about to enqueue.
+            # Defaulting to ``0`` regardless made a call like
+            # ``_run_spec_draft_gguf_analysis(path, analysis_id=42)``
+            # against a test-stubbed instance fail the gate and
+            # silently discard the parse result.
+            self._spec_draft_analysis_generation = analysis_id if analysis_id is not None else 0
         if not hasattr(self, "_spec_draft_analysis_queue"):
             self._spec_draft_analysis_queue = queue.Queue()
         try:

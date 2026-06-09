@@ -154,6 +154,15 @@ class TestSpecMasterToggle:
         }
         launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
         launcher_mock.get_ordered_selected_gpus = lambda: [1]
+        # Pin the CUDA_VISIBLE_DEVICES side-effect too: the empty
+        # spec_type must NOT widen the env var by unioning the
+        # stale draft-GPU list (``2``) into the main selection
+        # (``1``). The argv-only leak check above wouldn't catch
+        # a regression that emitted ``--device`` flags but kept
+        # silently exporting ``CUDA_VISIBLE_DEVICES=1,2``.
+        cuda_action, cuda_value = manager._resolve_cuda_visible_devices_action()
+        assert cuda_action == "export"
+        assert cuda_value == "1"
         cmd = manager.build_cmd()
         leaked = self._leaked_spec_args(cmd)
         assert not leaked, (
@@ -179,6 +188,11 @@ class TestSpecMasterToggle:
         }
         launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
         launcher_mock.get_ordered_selected_gpus = lambda: [1]
+        # Same env-side-effect pin as the empty-spec_type case — see
+        # comment in ``test_spec_enabled_with_empty_spec_type_emits_nothing``.
+        cuda_action, cuda_value = manager._resolve_cuda_visible_devices_action()
+        assert cuda_action == "export"
+        assert cuda_value == "1"
         cmd = manager.build_cmd()
         leaked = self._leaked_spec_args(cmd)
         assert not leaked, (

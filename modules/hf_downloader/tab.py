@@ -459,7 +459,6 @@ class HuggingFaceDownloaderTab:
             list(getattr(self.launcher, "model_dirs", [])),
             selected_paths=selected_paths,
         )
-        self._selected_target_vars = {}
         if not state.options:
             ttk.Label(
                 self._target_container,
@@ -471,7 +470,19 @@ class HuggingFaceDownloaderTab:
             # currently-configured model dirs (e.g. the first paint
             # before Main tab loads). The user's stored target list
             # should only change when they explicitly toggle a row.
+            #
+            # Also preserve ``_selected_target_vars``: the EMPTY
+            # branch used to reset this dict to ``{}`` before the
+            # early return, but any subsequent traced save from the
+            # repo / revision / options fields would then call
+            # ``_persist_settings`` and serialise ``hf_target_dirs=[]``
+            # against the now-empty map, wiping the saved selection
+            # exactly the same way the deleted direct
+            # ``_persist_settings()`` call would have. Skip the reset
+            # entirely on the empty-state path so the prior mapping
+            # round-trips through this render unchanged.
             return
+        self._selected_target_vars = {}
         for row, option in enumerate(state.options):
             var = tk.BooleanVar(value=option.selected)
             token = var.trace_add("write", lambda *_a: self._persist_settings())
