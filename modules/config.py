@@ -567,9 +567,15 @@ class ConfigManager:
         # independent — the launcher mutates this list in-place when
         # the user adds/removes parameters, and we don't want that to
         # silently update the saved preset without an explicit save.
-        self.launcher.custom_parameters_list = list(
-            cfg.get("custom_parameters", []) or []
-        )
+        # Type-guard against hand-edited string / scalar values: a
+        # bare ``"foo"`` would otherwise ``list(...)`` into
+        # ``["f", "o", "o"]`` (per-character split). Only accept
+        # genuine list/tuple values.
+        raw_custom_params = cfg.get("custom_parameters", [])
+        if isinstance(raw_custom_params, (list, tuple)):
+            self.launcher.custom_parameters_list = list(raw_custom_params)
+        else:
+            self.launcher.custom_parameters_list = []
         self.launcher._update_custom_parameters_listbox() # Update the GUI listbox
 
         # Load environmental variables configuration
@@ -640,12 +646,23 @@ class ConfigManager:
         # Load GPU selections - This needs to update the checkboxes
         # Check for the 'gpu_indices' key directly in the config dictionary first
         loaded_gpu_indices = cfg.get("gpu_indices", self.launcher.app_settings.get("selected_gpus", [])) # Fallback to app_settings key if old config format
+        # Defensive normalization — a hand-edited config could ship
+        # ``"gpu_indices": "0"`` (string) or ``"gpu_indices": 0``
+        # (int). The string would iterate character-by-character into
+        # ``["0"]`` (wrong on multi-digit GPU IDs), and the int would
+        # raise on the ``set()`` / ``for`` constructs below. Coerce
+        # non-list values to empty so the downstream checkbox sync
+        # treats it as "no selection".
+        if not isinstance(loaded_gpu_indices, list):
+            loaded_gpu_indices = []
         # Store loaded indices in app_settings *before* updating checkboxes
         self.launcher.app_settings["selected_gpus"] = loaded_gpu_indices
 
         # Load GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
         # If no gpu_order in config, default to the loaded indices in their natural order
         loaded_gpu_order = cfg.get("gpu_order", loaded_gpu_indices[:])
+        if not isinstance(loaded_gpu_order, list):
+            loaded_gpu_order = []
         # Ensure gpu_order only contains selected GPUs (defensive, in case of config mismatch)
         selected_set = set(loaded_gpu_indices)
         loaded_gpu_order = [g for g in loaded_gpu_order if g in selected_set]
