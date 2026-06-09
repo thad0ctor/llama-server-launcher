@@ -302,8 +302,24 @@ class BuildConfigStore:
                 f"(expected {SCHEMA_VERSION}); loading best-effort.",
                 file=sys.stderr,
             )
+        # Require the top-level ``configs`` key to be PRESENT and a
+        # dict. Without this, a JSON file that's just ``{}`` (or one
+        # where the ``configs`` key was deleted by hand) would load
+        # as "no configs" — and the next ``save()`` would then
+        # rewrite the file with a fresh empty payload, silently
+        # losing whatever was on disk before. Treat missing /
+        # ``null`` / non-dict the same as the existing schema-mismatch
+        # branch.
+        if "configs" not in raw or raw.get("configs") is None:
+            print(
+                "WARN: build_configs.json is missing the top-level "
+                "``configs`` object; refusing to load to avoid silently "
+                "overwriting the file on next save.",
+                file=sys.stderr,
+            )
+            return False
         configs = raw.get("configs")
-        if configs is not None and not isinstance(configs, dict):
+        if not isinstance(configs, dict):
             # ``"configs": [...]`` or any other non-mapping shape.
             # Refuse rather than silently discarding everything.
             print(

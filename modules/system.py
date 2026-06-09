@@ -582,10 +582,15 @@ def get_gpu_info_static():
             })
         return gpu_info
     except Exception as e:
-        # Catch potential torch errors during device query
-        print(f"Error querying CUDA devices: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        return _unavailable_gpu_info(f"Error querying CUDA devices: {e}", "torch")
+        # Raw exception text + traceback gated behind the debug env
+        # so they don't leak into normal-path stderr / journalctl on
+        # every startup against a broken torch install. The
+        # user-facing ``message`` is intentionally generic — match
+        # the rest of the sanitization pass.
+        if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+            print(f"DEBUG: Error querying CUDA devices: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        return _unavailable_gpu_info("Error querying CUDA devices", "torch")
 
 
 def format_gpu_mapping_table(gpu_info):

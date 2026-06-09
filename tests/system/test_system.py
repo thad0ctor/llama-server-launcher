@@ -167,7 +167,13 @@ def test_gpu_info_static_handles_device_query_exception(
     assert info["device_count"] == 0
     assert info["devices"] == []
     assert info["detection_source"] == "torch"
-    assert "CUDA driver exploded" in info["message"]
+    # User-facing ``message`` is intentionally generic (the raw
+    # exception text would otherwise leak driver / path /
+    # subprocess details into the UI status bar). The full
+    # ``"CUDA driver exploded"`` text is only emitted to
+    # DEBUG-only stderr when ``LLAMA_LAUNCHER_DEBUG_ENV=1``.
+    assert "Error querying CUDA devices" in info["message"]
+    assert "CUDA driver exploded" not in info["message"]
 
 
 # ---------------------------------------------------------------------------

@@ -892,7 +892,14 @@ class TestExtraAdversarialConfigs:
                 ), f"non-int / bool survived filter: {cleaned!r}"
             # ``"abc"`` and bool ``True`` must not have leaked through
             # — regression guard for the type-filter contract.
-            assert "abc" not in cleaned and True not in cleaned
+            # ``True not in cleaned`` is equality-based, so a real
+            # integer ``1`` would falsely match. Use an
+            # identity-based check so only literal ``True`` /
+            # ``False`` bool objects fail.
+            assert "abc" not in cleaned
+            assert all(x is not True and x is not False for x in cleaned), (
+                f"bool leaked into cleaned indices: {cleaned!r}"
+            )
         finally:
             root.destroy()
 

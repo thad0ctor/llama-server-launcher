@@ -974,13 +974,22 @@ class ConfigManager:
                 collides_in_batch = final_name in planned_names
                 collides_in_saved = final_name in self.launcher.saved_configs
                 if collides_in_batch or (renamed and collides_in_saved):
+                    # Once we're committed to suffixing (because the
+                    # primary slot is already taken either way), the
+                    # candidate name MUST be unique against BOTH
+                    # ``planned_names`` AND ``saved_configs`` —
+                    # regardless of ``renamed``. Without this, an
+                    # exact-name re-import that needs a suffix (e.g.
+                    # importing ``"foo"`` twice in one batch) could
+                    # land on ``"foo_2"`` and silently clobber a
+                    # pre-existing ``"foo_2"`` the user saved
+                    # separately. Exact-name OVERWRITE of the
+                    # primary slot is still allowed (that's the path
+                    # that doesn't enter this branch at all).
                     suffix = 2
                     while (
                         f"{sanitized}_{suffix}" in planned_names
-                        or (
-                            renamed
-                            and f"{sanitized}_{suffix}" in self.launcher.saved_configs
-                        )
+                        or f"{sanitized}_{suffix}" in self.launcher.saved_configs
                     ):
                         suffix += 1
                     final_name = f"{sanitized}_{suffix}"
