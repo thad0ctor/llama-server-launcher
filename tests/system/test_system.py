@@ -168,8 +168,18 @@ def test_gpu_info_static_sets_cuda_device_order_env(
     # The runtime assignment that used to live inside
     # ``get_gpu_info_static`` was a no-op (the env var was already
     # set by the module load that pulled in the function we're
-    # calling). Just assert the import-time contract holds.
+    # calling).
+    #
+    # Prove MODULE OWNERSHIP: clear the env var and force a fresh
+    # import of ``modules.system`` so its import-time logic re-runs.
+    # Without the clear + reload, this test could pass on ambient
+    # process state set by an unrelated module — making it useless
+    # if ``modules.system`` ever stops pinning the var.
+    import importlib
     import os
+
+    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    importlib.reload(sysmod)
 
     assert os.environ.get("CUDA_DEVICE_ORDER") == "PCI_BUS_ID"
 

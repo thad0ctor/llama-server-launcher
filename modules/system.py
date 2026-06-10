@@ -521,6 +521,52 @@ except Exception as e:
                         "GPU detection returned malformed output.",
                         "torch-venv",
                     )
+                # Validate the JSON payload SHAPE against the same
+                # contract ``load_cached_gpu_info`` enforces — the
+                # earlier ``isinstance(gpu_info, dict)`` guard only
+                # covered the top-level shape, but a malformed
+                # ``{"available": "false"}`` (string) or a
+                # ``{"available": True, "device_count": 0,
+                # "devices": []}`` (empty-but-claims-available)
+                # would otherwise pass straight through and make
+                # ``fetch_system_info`` short-circuit on
+                # corrupt-but-shaped-like-success data instead of
+                # falling through to the next detector. The
+                # per-device ``id`` check also catches a future
+                # script regression where the embedded probe stops
+                # mirroring the launcher's positional index
+                # contract.
+                available = gpu_info.get("available")
+                device_count = gpu_info.get("device_count")
+                devices = gpu_info.get("devices")
+                shape_ok = (
+                    isinstance(available, bool)
+                    and isinstance(device_count, int)
+                    and not isinstance(device_count, bool)
+                    and isinstance(devices, list)
+                    and device_count == len(devices)
+                    and not (available and device_count <= 0)
+                    and not ((not available) and (device_count != 0 or devices))
+                )
+                if shape_ok:
+                    for expected_id, device in enumerate(devices):
+                        if not isinstance(device, dict):
+                            shape_ok = False
+                            break
+                        device_id = device.get("id")
+                        if not isinstance(device_id, int) or isinstance(device_id, bool) or device_id != expected_id:
+                            shape_ok = False
+                            break
+                if not shape_ok:
+                    if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
+                        print(
+                            f"DEBUG: Venv GPU detection returned malformed shape: {gpu_info!r}",
+                            file=sys.stderr,
+                        )
+                    return _unavailable_gpu_info(
+                        "GPU detection returned malformed output.",
+                        "torch-venv",
+                    )
                 if os.environ.get("LLAMA_LAUNCHER_DEBUG_ENV") == "1":
                     print(
                         f"DEBUG: Venv GPU detection successful: {gpu_info.get('device_count', 0)} devices",
