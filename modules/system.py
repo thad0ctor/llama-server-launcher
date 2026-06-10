@@ -220,17 +220,21 @@ def get_gpu_info_from_nvidia_smi(timeout=5):
         reader = csv.reader(io.StringIO(result.stdout.strip()))
         for row in reader:
             fields = [part.strip() for part in row]
-            if len(fields) < 5:
-                # Fail closed on a short row rather than silently
-                # skipping it — a malformed nvidia-smi line means
-                # one or more fields couldn't be parsed, and
-                # quietly returning the rest of the rows would
-                # mask a real driver / format mismatch and let
-                # ``fetch_system_info`` short-circuit on an
-                # incomplete GPU list. Raise so the caller falls
-                # through to the next detector.
-                raise ValueError(f"nvidia-smi row has fewer than 5 fields (got {len(fields)}): {row!r}")
-            _nvidia_idx, pci_bus_id, name, memory_total_mib, compute_cap = fields[:5]
+            if len(fields) != 5:
+                # Fail closed on any column-count mismatch — a short
+                # row means one of the five queried fields couldn't
+                # be parsed, and an EXTRA column means a future
+                # nvidia-smi format added new fields and our
+                # ``fields[:5]`` would silently misassign ``name`` /
+                # memory / compute-cap. Either way, quietly accepting
+                # the row would mask the format mismatch and let
+                # ``fetch_system_info`` short-circuit on corrupted
+                # device data. Raise so the caller falls through to
+                # the next detector.
+                raise ValueError(
+                    f"nvidia-smi row has unexpected field count " f"(expected 5, got {len(fields)}): {row!r}"
+                )
+            _nvidia_idx, pci_bus_id, name, memory_total_mib, compute_cap = fields
             # Validate ``pci_bus_id`` shape (``DDDDDDDD:BB:DD.F``,
             # zero-padded hex domain:bus:device.function) BEFORE
             # the rows.sort below — the launcher remaps nvidia-smi's

@@ -869,7 +869,16 @@ class HuggingFaceDownloaderTab:
         # * the download isn't using the loaded listing (snapshot /
         #   pattern-only) — see ``using_loaded_listing`` above.
         if not using_loaded_listing:
-            effective_revision = current_revision
+            # Honor the URL-derived revision hint when the user hasn't
+            # typed an explicit revision. ``normalize_repo_input``
+            # extracts refs from ``…/tree/<branch>``, ``…/blob/<sha>``,
+            # ``…/resolve/<rev>`` URLs, so a paste like
+            # ``huggingface.co/owner/repo/tree/dev`` should download
+            # from ``dev`` even in pattern-only / snapshot flows
+            # without making the user re-type ``dev`` in the revision
+            # field. The current_revision (when non-empty) still
+            # wins so an explicit user typing overrides the hint.
+            effective_revision = current_revision or parsed.revision_hint
         elif self._pinned_revision_sha:
             effective_revision = self._pinned_revision_sha
         elif self._loaded_revision is not None:

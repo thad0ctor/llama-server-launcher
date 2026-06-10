@@ -1333,6 +1333,13 @@ class TestSpecDraftFlagsGatedByType:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("suffix")
+        # Activate the separate-draft opt-in. Without this the test
+        # passes through the default ``spec_use_draft_model=False``
+        # path which already shortcircuits draft-model emission for
+        # other reasons — so the gate-on-spec_type contract under
+        # test wouldn't actually be exercised. Setting the flag on
+        # forces emission into the path that consults spec_type.
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_model.set(str(draft))
         launcher_mock.spec_suffix_pattern_len.set("8")
         cmd = manager.build_cmd()
@@ -1350,6 +1357,10 @@ class TestSpecDraftFlagsGatedByType:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(spec_type)
+        # Activate the separate-draft opt-in for the same reason as
+        # the suffix test above — without this the suppression
+        # contract under test isn't actually exercised.
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_ngl.set("24")
         launcher_mock.spec_draft_device.set("CUDA1")
         launcher_mock.spec_draft_ctk.set("q4_0")
