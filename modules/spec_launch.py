@@ -1050,9 +1050,15 @@ def emit_reasoning_args(launcher, cmd, supports_flag=None):
             return ""
         if isinstance(raw, str):
             return raw.strip()
-        if raw is None:
-            return ""
-        return str(raw).strip()
+        # Anything else (MagicMock with a configured ``__str__``,
+        # ``True``, ``{}``, etc.) is NOT a legitimate reasoning value.
+        # The previous ``str(raw).strip()`` fallback would coerce a
+        # ``MagicMock(...)`` to its ``str()`` form (``"<MagicMock
+        # id=…>"``) and feed that as the flag value — looks like a
+        # bug in some downstream tooling and the server would reject
+        # the unknown reasoning mode. Treat as empty so the flag
+        # is dropped instead of emitting bogus content.
+        return ""
 
     rm = _safe_get_str("reasoning_mode")
     if rm in ("on", "off", "auto") and _ok("--reasoning"):

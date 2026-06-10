@@ -2682,10 +2682,10 @@ class TestMainDeviceEmittedOnDraftUnion:
         assert "--model-draft" in cmd
         # Compare resolved paths so a tmp root that's a symlink (macOS
         # /tmp → /private/tmp) or a Windows short-name path doesn't
-        # break the equality.
-        import os as _os
-
-        assert _os.path.realpath(cmd[cmd.index("--model-draft") + 1]) == _os.path.realpath(str(draft))
+        # break the equality. ``Path.resolve()`` matches the pattern
+        # used elsewhere in this file (the inline ``os.path.realpath``
+        # was an oversight).
+        assert Path(cmd[cmd.index("--model-draft") + 1]).resolve() == draft.resolve()
 
     def test_device_value_preserves_main_order(self, manager, union_launcher):
         """Main order [7, 1] (user dragged 7 first) with draft [2] → union

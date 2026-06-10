@@ -192,11 +192,16 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     call_match = re.search(r'call "([^"]+\.cmd)"', wrapper_body)
     assert call_match, f"wrapper missing call line; body={wrapper_body!r}"
     payload_path = call_match.group(1)
-    # ``%ERRORLEVEL%`` (single ``%``) is the runtime value inside
-    # a batch file — bytes used to be ``%%`` only because the
-    # string went through ``cmd /c``'s parser first.
-    assert "Command finished with exit code %ERRORLEVEL%." in wrapper_body
+    # The wrapper now SAVES ``%ERRORLEVEL%`` into a local var
+    # IMMEDIATELY after the payload ``call`` and then echoes /
+    # exits with THAT value, so the banner and the wrapper's own
+    # exit code aren't clobbered by the ``del "%~f0"`` line that
+    # follows. Without this, every "Command finished with exit
+    # code 0" banner was a lie — it was the ``del``'s exit code.
+    assert 'set "_LLAMA_LAUNCHER_RC=%ERRORLEVEL%"' in wrapper_body
+    assert "Command finished with exit code %_LLAMA_LAUNCHER_RC%." in wrapper_body
     assert 'del "%~f0"' in wrapper_body
+    assert "exit /b %_LLAMA_LAUNCHER_RC%" in wrapper_body
     # And the payload itself should contain the user command on
     # its own line + an exit-code passthrough + self-delete.
     try:

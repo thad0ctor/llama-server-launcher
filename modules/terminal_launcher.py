@@ -153,13 +153,28 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str], dict[str, str]]:
             # normally contain ``%`` but this is cheap insurance.
             payload_path_escaped = payload_path.replace("%", "%%")
             fh.write(f'call "{payload_path_escaped}"\r\n')
+            # Capture ``%ERRORLEVEL%`` into a local var IMMEDIATELY
+            # after the ``call`` returns. Without this, the
+            # ``echo Command finished with exit code %ERRORLEVEL%``
+            # banner and the ``exit /b`` would reflect the
+            # ``del "%~f0"`` exit code (always 0 on success) instead
+            # of the payload's actual exit code — the user-facing
+            # banner would always say "exit code 0" even after a
+            # failed install. The local var preserves the value
+            # past the ``del`` so the banner and the wrapper's own
+            # exit code are accurate.
+            fh.write('set "_LLAMA_LAUNCHER_RC=%ERRORLEVEL%"\r\n')
             fh.write("echo.\r\n")
-            fh.write("echo Command finished with exit code %ERRORLEVEL%.\r\n")
+            fh.write("echo Command finished with exit code %_LLAMA_LAUNCHER_RC%.\r\n")
             # Self-delete the wrapper. ``%~f0`` is the full path
             # of the running .cmd. The user's ``cmd /k`` shell
             # stays open after this so they can inspect output,
             # but the script file itself is gone.
             fh.write('del "%~f0"\r\n')
+            # Make the wrapper exit with the payload's exit code so
+            # any caller (e.g. a CI smoke test or a future scripted
+            # invocation) sees the real result, not the ``del``'s 0.
+            fh.write("exit /b %_LLAMA_LAUNCHER_RC%\r\n")
     except Exception:
         for path in (payload_path, wrapper_path):
             if path is None:
@@ -305,7 +320,20 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
             # An emulator not in our argument map (e.g. user-set $TERMINAL
             # pointing at something exotic) gets a safe default of ``-e``.
             args = emulator_args.get(terminal_key, ["-e", "bash", "-lc", term_command])
-            subprocess.Popen([str(Path(terminal_path).resolve()), *args], cwd=cwd_text)
+            # Pass ``terminal_path`` VERBATIM rather than resolving the
+            # symlink. ``x-terminal-emulator`` on Debian/Ubuntu is a
+            # ``update-alternatives`` symlink pointing at the user's
+            # configured emulator; resolving it would invoke the real
+            # emulator (e.g. ``gnome-terminal``) with the
+            # ``x-terminal-emulator`` argv we built for it. Some
+            # emulators (``konsole``, ``xfce4-terminal``) have argv
+            # forms that differ from the lowest-common-denominator
+            # ``x-terminal-emulator`` form, so the wrong flags get
+            # passed and the terminal can fail to launch / spawn an
+            # empty session. Leaving the wrapper path intact lets the
+            # wrapper translate the argv into the underlying
+            # emulator's native form.
+            subprocess.Popen([terminal_path, *args], cwd=cwd_text)
             return
         raise FileNotFoundError("No supported terminal emulator found")
 

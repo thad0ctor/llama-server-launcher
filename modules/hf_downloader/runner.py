@@ -230,14 +230,20 @@ def _normalize_path_list(value) -> list[Path]:
     Non-sequence shapes (dict, int, …) are loud failures here so the
     subprocess exits cleanly instead of silently iterating dict keys
     as paths.
+
+    ``expanduser()`` so a payload like ``"target_dirs": "~/models"``
+    resolves to ``/home/user/models`` instead of creating a literal
+    ``./~/models`` directory next to the runner cwd. The launcher
+    UI already expands its paths before posting, but a hand-edited
+    payload or CLI invocation wouldn't.
     """
     if value is None:
         return []
     if isinstance(value, (str, Path)):
-        return [Path(value)] if str(value) else []
+        return [Path(value).expanduser()] if str(value) else []
     if not isinstance(value, (list, tuple)):
         raise TypeError(f"target_dirs must be a list/tuple/str/Path; got " f"{type(value).__name__}")
-    return [Path(item) for item in value if isinstance(item, (str, Path)) and str(item)]
+    return [Path(item).expanduser() for item in value if isinstance(item, (str, Path)) and str(item)]
 
 
 def _normalize_pattern_list(value) -> list[str]:
