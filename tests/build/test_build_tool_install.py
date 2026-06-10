@@ -69,6 +69,12 @@ def test_build_tool_statuses_include_install_plan_for_missing_tools(monkeypatch)
 
 def test_terminal_launcher_uses_first_available_linux_terminal(monkeypatch):
     monkeypatch.setattr(terminal_launcher.sys, "platform", "linux")
+    # ``open_command_in_terminal`` prefers ``$TERMINAL`` if set, so
+    # a developer running ``TERMINAL=kitty pytest`` would short-
+    # circuit the preference-list probe this test is asserting
+    # against. Drop the variable so the fallback to
+    # ``shutil.which`` is the path under test on every host.
+    monkeypatch.delenv("TERMINAL", raising=False)
     monkeypatch.setattr(
         terminal_launcher.shutil,
         "which",

@@ -32,14 +32,15 @@ from pathlib import Path
 # CUDA toolkit version that first supports the architecture is shown for
 # reference (informational; not enforced here).
 
+
 @dataclass(frozen=True)
 class KnownArch:
-    cc: str               # "8.6"
-    name: str             # "RTX 30xx (Ampere)"
-    family: str           # "Ampere"
-    has_a_variant: bool   # True if sm_XXa exists in nvcc (Hopper+, Blackwell+)
-    has_f_variant: bool   # True if sm_XXf exists in nvcc (CUDA 13+, Blackwell only)
-    min_cuda: str         # earliest CUDA toolkit that supports this
+    cc: str  # "8.6"
+    name: str  # "RTX 30xx (Ampere)"
+    family: str  # "Ampere"
+    has_a_variant: bool  # True if sm_XXa exists in nvcc (Hopper+, Blackwell+)
+    has_f_variant: bool  # True if sm_XXf exists in nvcc (CUDA 13+, Blackwell only)
+    min_cuda: str  # earliest CUDA toolkit that supports this
     deprecated: bool = False  # True if dropped from current CUDA toolchains
 
 
@@ -49,39 +50,38 @@ class KnownArch:
 # Deprecated entries are gated in the UI behind "Show deprecated archs".
 KNOWN_CUDA_ARCHS: list[KnownArch] = [
     # Kepler (deprecated in CUDA 11.x; removed in CUDA 12+)
-    KnownArch("3.5", "Tesla K20/K40 / GTX Titan (Kepler)",   "Kepler",   False, False, "5.0", deprecated=True),
-    KnownArch("3.7", "Tesla K80 (Kepler datacenter)",        "Kepler",   False, False, "7.0", deprecated=True),
+    KnownArch("3.5", "Tesla K20/K40 / GTX Titan (Kepler)", "Kepler", False, False, "5.0", deprecated=True),
+    KnownArch("3.7", "Tesla K80 (Kepler datacenter)", "Kepler", False, False, "7.0", deprecated=True),
     # Maxwell (deprecated in CUDA 13.x)
-    KnownArch("5.0", "GTX 9xx / Quadro M (Maxwell 1)",       "Maxwell",  False, False, "6.0", deprecated=True),
-    KnownArch("5.2", "GTX 9xx Ti / Titan X (Maxwell 2)",     "Maxwell",  False, False, "6.0", deprecated=True),
-    KnownArch("5.3", "Tegra X1 (Maxwell mobile)",            "Maxwell",  False, False, "6.5", deprecated=True),
+    KnownArch("5.0", "GTX 9xx / Quadro M (Maxwell 1)", "Maxwell", False, False, "6.0", deprecated=True),
+    KnownArch("5.2", "GTX 9xx Ti / Titan X (Maxwell 2)", "Maxwell", False, False, "6.0", deprecated=True),
+    KnownArch("5.3", "Tegra X1 (Maxwell mobile)", "Maxwell", False, False, "6.5", deprecated=True),
     # Pascal (deprecated in CUDA 13.x)
-    KnownArch("6.0", "Tesla P100 (Pascal datacenter)",       "Pascal",   False, False, "8.0", deprecated=True),
-    KnownArch("6.1", "GTX 10xx / Titan Xp (Pascal)",         "Pascal",   False, False, "8.0", deprecated=True),
-    KnownArch("6.2", "Tegra X2 (Pascal mobile)",             "Pascal",   False, False, "8.0", deprecated=True),
+    KnownArch("6.0", "Tesla P100 (Pascal datacenter)", "Pascal", False, False, "8.0", deprecated=True),
+    KnownArch("6.1", "GTX 10xx / Titan Xp (Pascal)", "Pascal", False, False, "8.0", deprecated=True),
+    KnownArch("6.2", "Tegra X2 (Pascal mobile)", "Pascal", False, False, "8.0", deprecated=True),
     # Volta (deprecated in CUDA 13.x)
-    KnownArch("7.0", "Tesla V100 / Titan V (Volta)",         "Volta",    False, False, "9.0", deprecated=True),
-    KnownArch("7.2", "Tegra Xavier (Volta mobile)",          "Volta",    False, False, "9.2", deprecated=True),
+    KnownArch("7.0", "Tesla V100 / Titan V (Volta)", "Volta", False, False, "9.0", deprecated=True),
+    KnownArch("7.2", "Tegra Xavier (Volta mobile)", "Volta", False, False, "9.2", deprecated=True),
     # Turing
-    KnownArch("7.5", "RTX 20xx / GTX 16xx / T4 (Turing)",    "Turing",   False, False, "10.0"),
+    KnownArch("7.5", "RTX 20xx / GTX 16xx / T4 (Turing)", "Turing", False, False, "10.0"),
     # Ampere
-    KnownArch("8.0", "A100 / A30 (Ampere datacenter)",       "Ampere",   False, False, "11.0"),
-    KnownArch("8.6", "RTX 30xx / RTX A-series / A40/A10/A16/A2 (Ampere)",
-                                                                    "Ampere",   False, False, "11.1"),
-    KnownArch("8.7", "Jetson AGX Orin / Orin NX / Orin Nano","Ampere",   False, False, "11.4"),
+    KnownArch("8.0", "A100 / A30 (Ampere datacenter)", "Ampere", False, False, "11.0"),
+    KnownArch("8.6", "RTX 30xx / RTX A-series / A40/A10/A16/A2 (Ampere)", "Ampere", False, False, "11.1"),
+    KnownArch("8.7", "Jetson AGX Orin / Orin NX / Orin Nano", "Ampere", False, False, "11.4"),
     # Niche sm_88 — nvcc 13 accepts it; product confirmation pending.
-    KnownArch("8.8", "sm_88 (Ampere/Hopper variant)",        "Ampere",   False, False, "12.x"),
+    KnownArch("8.8", "sm_88 (Ampere/Hopper variant)", "Ampere", False, False, "12.x"),
     # Ada Lovelace
-    KnownArch("8.9", "RTX 40xx / L4/L40/L40S / RTX Ada",     "Ada",      False, False, "11.8"),
+    KnownArch("8.9", "RTX 40xx / L4/L40/L40S / RTX Ada", "Ada", False, False, "11.8"),
     # Hopper
-    KnownArch("9.0", "H100 / H200 / GH200 (Hopper)",         "Hopper",   True,  False, "11.8"),
+    KnownArch("9.0", "H100 / H200 / GH200 (Hopper)", "Hopper", True, False, "11.8"),
     # Blackwell datacenter (sm_100/103/110) — -a and -f both valid.
     KnownArch("10.0", "B200 / GB200 (Blackwell datacenter)", "Blackwell", True, True, "12.8"),
     KnownArch("10.3", "B300 / GB300 (Blackwell datacenter)", "Blackwell", True, True, "12.9"),
-    KnownArch("11.0", "Jetson T5000 / T4000 (Blackwell)",    "Blackwell", True, True, "13.0"),
+    KnownArch("11.0", "Jetson T5000 / T4000 (Blackwell)", "Blackwell", True, True, "13.0"),
     # Blackwell consumer (sm_120/121)
-    KnownArch("12.0", "RTX 50xx / RTX PRO Blackwell",        "Blackwell", True, True, "12.8"),
-    KnownArch("12.1", "NVIDIA GB10 / DGX Spark",             "Blackwell", True, True, "12.9"),
+    KnownArch("12.0", "RTX 50xx / RTX PRO Blackwell", "Blackwell", True, True, "12.8"),
+    KnownArch("12.1", "NVIDIA GB10 / DGX Spark", "Blackwell", True, True, "12.9"),
 ]
 
 
@@ -135,18 +135,20 @@ def arch_token_with_f(cc: str) -> str:
 # CUDA architecture detection (via torch)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class CudaArchInfo:
     """Per-GPU CUDA capability info used to assemble CMAKE_CUDA_ARCHITECTURES."""
+
     index: int
     name: str
-    compute_capability: str   # "8.6", "12.0"
-    arch_token: str           # "86-real", "120-real"
+    compute_capability: str  # "8.6", "12.0"
+    arch_token: str  # "86-real", "120-real"
     # ``-a`` token (e.g. "120a-real", "90a-real") when the compute capability
     # has an architecture-accelerated variant in nvcc. Both Hopper (sm_90a)
     # and Blackwell (sm_100a / sm_120a / sm_121a) qualify.
     a_variant_token: str | None = None
-    family: str = ""          # "Ampere" / "Hopper" / "Blackwell" / ...
+    family: str = ""  # "Ampere" / "Hopper" / "Blackwell" / ...
 
 
 def _cuda_arch_info_from_parts(index: int, name: str, cc: str) -> CudaArchInfo | None:
@@ -373,15 +375,26 @@ def all_families(*, include_deprecated: bool = True) -> list[str]:
 
 
 def family_has_only_deprecated(family: str) -> bool:
+    # Track whether ANY catalog entry matched the requested family
+    # so an unknown family doesn't get falsely flagged as
+    # "only deprecated" (the previous behavior of returning True
+    # when the loop completed without a hit). An unknown family
+    # legitimately has zero matching entries and therefore zero
+    # deprecated AND zero non-deprecated, so "only deprecated" is
+    # not a meaningful answer — return False.
+    found_match = False
     for k in KNOWN_CUDA_ARCHS:
-        if k.family.lower() == family.lower() and not k.deprecated:
-            return False
-    return True
+        if k.family.lower() == family.lower():
+            found_match = True
+            if not k.deprecated:
+                return False
+    return found_match
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Toolchain probes
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @dataclass
 class CudaInstall:
@@ -391,10 +404,11 @@ class CudaInstall:
     parent of bin/, lib/, include/). cmake derives everything else
     from this when ``CMAKE_CUDA_COMPILER`` is also set.
     """
-    version: str                  # "12.8" (parsed from nvcc --version)
-    root_dir: str                 # /usr/local/cuda-12.8
-    nvcc_path: str                # /usr/local/cuda-12.8/bin/nvcc
-    on_path: bool = False         # True if this install is the one in $PATH
+
+    version: str  # "12.8" (parsed from nvcc --version)
+    root_dir: str  # /usr/local/cuda-12.8
+    nvcc_path: str  # /usr/local/cuda-12.8/bin/nvcc
+    on_path: bool = False  # True if this install is the one in $PATH
 
     def label(self) -> str:
         """Human-readable string for combobox display."""
@@ -405,10 +419,11 @@ class CudaInstall:
 @dataclass
 class ToolchainProbe:
     """Whatever we could discover about the build toolchain on this host."""
-    cuda_version: str | None = None      # "12.8"  (selected install)
-    nvcc_path: str | None = None         # /usr/local/cuda/bin/nvcc (selected)
+
+    cuda_version: str | None = None  # "12.8"  (selected install)
+    nvcc_path: str | None = None  # /usr/local/cuda/bin/nvcc (selected)
     cuda_installs: list[CudaInstall] = field(default_factory=list)  # all detected
-    cc_candidates: list[str] = field(default_factory=list)   # ["/usr/bin/gcc-13", ...]
+    cc_candidates: list[str] = field(default_factory=list)  # ["/usr/bin/gcc-13", ...]
     cxx_candidates: list[str] = field(default_factory=list)
     cmake_path: str | None = None
     cmake_version: str | None = None
@@ -422,6 +437,7 @@ class ToolchainProbe:
 @dataclass(frozen=True)
 class ToolInstallPlan:
     """Install command for a missing tool on the current platform."""
+
     tool_key: str
     tool_label: str
     package_manager: str
@@ -431,6 +447,7 @@ class ToolInstallPlan:
 @dataclass(frozen=True)
 class BuildToolStatus:
     """UI-friendly status row for a build prerequisite."""
+
     key: str
     label: str
     path: str | None = None
@@ -450,9 +467,7 @@ def _run(cmd: list[str], timeout: float = 1.5) -> str | None:
     """Best-effort subprocess capture. Short default timeout — these probes
     run during startup and a misconfigured tool must not block the UI."""
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         if proc.returncode != 0:
             return None
         return (proc.stdout or "") + (proc.stderr or "")
@@ -606,12 +621,15 @@ def detect_cuda_installs() -> list[CudaInstall]:
                 is_on_path = os.path.samefile(nvcc, on_path_nvcc)
             except OSError:
                 is_on_path = os.path.abspath(nvcc) == os.path.abspath(on_path_nvcc)
-        out.append(CudaInstall(
-            version=version,
-            root_dir=root,
-            nvcc_path=nvcc,
-            on_path=is_on_path,
-        ))
+        out.append(
+            CudaInstall(
+                version=version,
+                root_dir=root,
+                nvcc_path=nvcc,
+                on_path=is_on_path,
+            )
+        )
+
     # Sort newest-first by *parsed* version (lexicographic order on the path
     # text mis-ranks e.g. "13.10" vs "13.9"). Installs with an unparseable
     # version sort last so PATH discovery still surfaces them but they never
@@ -621,6 +639,7 @@ def detect_cuda_installs() -> list[CudaInstall]:
         if not vm:
             return (0, 0, 0)
         return (1, int(vm.group(1)), int(vm.group(2)))
+
     out.sort(key=_ver_key, reverse=True)
     return out
 
@@ -690,8 +709,7 @@ def _detect_gcc_candidates() -> tuple[list[str], list[str]]:
 
     # Windows MSYS2/MinGW prefixes — best-effort.
     if sys.platform.startswith("win"):
-        for prefix in (r"C:\msys64\mingw64\bin", r"C:\msys64\ucrt64\bin",
-                       r"C:\mingw64\bin"):
+        for prefix in (r"C:\msys64\mingw64\bin", r"C:\msys64\ucrt64\bin", r"C:\mingw64\bin"):
             for fname in ("gcc.exe",):
                 p = os.path.join(prefix, fname)
                 if os.path.isfile(p):
@@ -715,8 +733,7 @@ def probe_toolchain() -> ToolchainProbe:
     probe.cuda_installs = detect_cuda_installs()
     if probe.cuda_installs:
         # Pick PATH install if present, else newest detected.
-        preferred = next((i for i in probe.cuda_installs if i.on_path),
-                         probe.cuda_installs[0])
+        preferred = next((i for i in probe.cuda_installs if i.on_path), probe.cuda_installs[0])
         probe.cuda_version = preferred.version if preferred.version != "?" else None
         probe.nvcc_path = preferred.nvcc_path
     probe.cc_candidates, probe.cxx_candidates = _detect_gcc_candidates()
@@ -884,13 +901,14 @@ def build_tool_statuses(probe: ToolchainProbe) -> list[BuildToolStatus]:
 # System resource recommendations
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class JobRecommendation:
-    suggested: int       # what we recommend
-    cpu_count: int       # raw nproc
+    suggested: int  # what we recommend
+    cpu_count: int  # raw nproc
     physical_cores: int | None = None
     total_ram_gb: float | None = None
-    reason: str = ""     # human-readable rationale shown in the UI
+    reason: str = ""  # human-readable rationale shown in the UI
 
 
 def recommend_jobs() -> JobRecommendation:
@@ -908,8 +926,9 @@ def recommend_jobs() -> JobRecommendation:
 
     try:
         import psutil  # type: ignore  # noqa: PLC0415
+
         physical = psutil.cpu_count(logical=False) or None
-        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        ram_gb = psutil.virtual_memory().total / (1024**3)
     except Exception:
         pass
 
@@ -939,6 +958,7 @@ def recommend_jobs() -> JobRecommendation:
 # ─────────────────────────────────────────────────────────────────────────────
 # Default backend source dirs
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def default_source_dir(backend: str, existing_dir: str) -> str:
     """Return an existing backend dir if present, else suggest a sibling

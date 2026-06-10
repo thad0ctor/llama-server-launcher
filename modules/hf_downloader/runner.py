@@ -5,14 +5,30 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import traceback
 from pathlib import Path
 
 from modules.hf_downloader.helpers import _validate_repo_id, parse_bool as _parse_bool
 
 
+# Serialize NDJSON emission across threads. ``snapshot_download`` runs
+# its file fetches via a ThreadPoolExecutor, and the ``_ProgressTqdm``
+# subclass's ``update()`` / ``close()`` hooks call ``_emit`` from those
+# worker threads. Without a lock, two threads can interleave bytes
+# from concurrent ``print()`` calls — the parent process reads the
+# stdout stream line-by-line and a torn JSON object yields
+# ``json.JSONDecodeError`` that the dispatcher silently swallows,
+# losing the progress event entirely. The lock is cheap (a single
+# ``print`` per event) and only blocks during the actual stdout
+# write, not during the work of producing the payload.
+_emit_lock = threading.Lock()
+
+
 def _emit(event: str, **payload) -> None:
-    print(json.dumps({"event": event, **payload}), flush=True)
+    line = json.dumps({"event": event, **payload})
+    with _emit_lock:
+        print(line, flush=True)
 
 
 def _load_payload(path: str) -> dict:

@@ -278,13 +278,22 @@ def test_initial_venv_bootstrap_prompt_skips_when_all_deps_exist(
     )
     prompt_mock = MagicMock(return_value="create")
     monkeypatch.setattr(entry_module.venv_manager, "probe_current_python_dependencies", lambda *_args: statuses)
-    monkeypatch.setattr(entry_module.LlamaCppLauncher, "_ask_initial_venv_bootstrap_action", prompt_mock)
+    # Attach the prompt mock DIRECTLY to the stub. Patching the
+    # class-level method via ``monkeypatch.setattr`` was a no-op
+    # for this test because the stub is a ``SimpleNamespace`` —
+    # an unbound method lookup on the namespace would
+    # ``AttributeError`` and the
+    # ``_maybe_prompt_for_initial_venv_setup`` impl catches that
+    # to fall through to its no-prompt path, silently bypassing
+    # the assert. Binding it on the stub is the only way to
+    # confirm the prompt actually didn't run.
     stub = SimpleNamespace(
         app_settings={"venv_bootstrap_prompt_mode": "ask"},
         repo_dir=tmp_path,
         venv_dir=_Var(""),
         _bootstrap_config_dirty=False,
         _effective_venv_path=lambda: "",
+        _ask_initial_venv_bootstrap_action=prompt_mock,
     )
 
     entry_module.LlamaCppLauncher._maybe_prompt_for_initial_venv_setup(stub)

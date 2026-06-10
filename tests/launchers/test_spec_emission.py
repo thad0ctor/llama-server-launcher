@@ -2348,7 +2348,12 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         union_launcher.app_settings["spec_draft_selected_gpus"] = [7]
         manager.build_cmd()
         err = capsys.readouterr().err
-        assert "INFO: GPUs" not in err
+        # The CONTRACT under test is the absence of the draft-union
+        # advisory specifically; an unrelated ``INFO: GPUs ...``
+        # log line from some other code path shouldn't fail this
+        # test. Match the same draft-specific substring the
+        # sibling regression assertion uses.
+        assert "added to CUDA_VISIBLE_DEVICES for the draft model" not in err
 
     def test_spec_disabled_no_union(self, manager, union_launcher):
         """Spec disabled → draft selection ignored entirely. Main alone
