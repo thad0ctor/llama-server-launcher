@@ -685,7 +685,15 @@ FLAGS: list[CMakeFlag] = [
         "Metal (macOS)",
         "Other GPU Backends",
         BOOL,
-        False,
+        # ``_IS_MACOS`` so the launcher tracks llama.cpp / ik_llama's
+        # upstream default (Metal is ON by default on darwin). The
+        # previous hard ``False`` meant ``values_to_cmake_args``
+        # emitted ``-DGGML_METAL=OFF`` on every macOS build, which
+        # directly contradicted the help text and silently disabled
+        # Metal support unless the user opened the Build tab to
+        # turn it back on. Non-macOS hosts still see ``False`` as
+        # before — Metal isn't even compiled on Linux/Windows.
+        _IS_MACOS,
         help="Apple Metal backend. Defaults to ON on macOS automatically.",
     ),
     CMakeFlag("GGML_SYCL", "SYCL (Intel)", "Other GPU Backends", BOOL, False),

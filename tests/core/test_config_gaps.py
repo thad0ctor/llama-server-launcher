@@ -36,6 +36,7 @@ from tests.core.conftest import FakeVar, FakeListbox  # type: ignore  # noqa: E4
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _full_cfg(**overrides):
     """Return a full-schema config dict covering all 40+ fields for loads."""
     base = {
@@ -92,9 +93,11 @@ def _full_cfg(**overrides):
 # load_configuration  (high-risk, previously untested)
 # ===========================================================================
 
+
 class TestLoadConfiguration:
     def _prepare(self, rich_launcher_factory, tmp_path, cfg, name="demo"):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.saved_configs = {name: cfg}
         launcher.config_listbox.set_items([name])
@@ -103,6 +106,7 @@ class TestLoadConfiguration:
 
     def test_no_selection_shows_error(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.config_listbox.set_selection([])
         cm = ConfigManager(launcher)
@@ -112,6 +116,7 @@ class TestLoadConfiguration:
 
     def test_missing_config_data_shows_error(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         # Listbox shows a name but saved_configs lacks it.
         launcher.config_listbox.set_items(["ghost"])
@@ -178,9 +183,7 @@ class TestLoadConfiguration:
 
     def test_missing_keys_apply_defaults(self, rich_launcher_factory, tmp_path):
         """Partial config dicts get default values on unknown fields."""
-        cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path, {"model_path": ""}
-        )
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, {"model_path": ""})
         with patch("modules.config.messagebox"):
             cm.load_configuration()
         # The launcher.physical_cores fallback kicked in for threads.
@@ -203,28 +206,28 @@ class TestLoadConfiguration:
         # Don't hard-code "ChatML" — derive from the launcher's loaded
         # template catalogue so reorders / renames in
         # ``config/chat_templates.json`` don't break this test.
-        expected_first_template = next(iter(launcher._all_templates.keys()))
+        # Use ``next(iter(..), "")`` so a stripped-down test fixture
+        # with an empty ``_all_templates`` doesn't crash with
+        # ``StopIteration``; an empty-string fallback also encodes
+        # the fallback-default contract the launcher uses when no
+        # templates are present.
+        expected_first_template = next(iter(launcher._all_templates.keys()), "")
         assert launcher.predefined_template_name.get() == expected_first_template
         assert launcher.custom_template_string.get() == ""
         assert launcher.jinja_enabled.get() is False
         assert launcher.custom_parameters_list == []
 
-    def test_non_integer_n_gpu_layers_falls_back_to_zero(
-        self, rich_launcher_factory, tmp_path
-    ):
-        cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path, _full_cfg(n_gpu_layers="abc")
-        )
+    def test_non_integer_n_gpu_layers_falls_back_to_zero(self, rich_launcher_factory, tmp_path):
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, _full_cfg(n_gpu_layers="abc"))
         with patch("modules.config.messagebox"):
             cm.load_configuration()
         assert launcher.n_gpu_layers.get() == "0"
         launcher._set_gpu_layers.assert_called_with(0)
 
-    def test_gpu_checkboxes_reconstructed_from_config(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_gpu_checkboxes_reconstructed_from_config(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             _full_cfg(gpu_indices=[0, 2], gpu_order=[2, 0]),
         )
         with patch("modules.config.messagebox"):
@@ -234,13 +237,12 @@ class TestLoadConfiguration:
         assert launcher.app_settings["gpu_order"] == [2, 0]
         launcher._update_gpu_checkboxes.assert_called()
 
-    def test_gpu_order_with_duplicates_is_cleaned(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_gpu_order_with_duplicates_is_cleaned(self, rich_launcher_factory, tmp_path):
         # Duplicates in gpu_order (e.g. produced by a buggy drag-reorder) are
         # deduplicated by the set() filter, and missing selections are appended.
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             _full_cfg(gpu_indices=[0, 1, 2], gpu_order=[1, 1, 2]),
         )
         with patch("modules.config.messagebox"):
@@ -252,11 +254,10 @@ class TestLoadConfiguration:
         assert 0 in order  # missing selected GPU appended
         assert set(order) >= {0, 1, 2}
 
-    def test_gpu_order_drops_entries_not_in_selected(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_gpu_order_drops_entries_not_in_selected(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             _full_cfg(gpu_indices=[0], gpu_order=[0, 9, 5]),
         )
         with patch("modules.config.messagebox"):
@@ -264,9 +265,7 @@ class TestLoadConfiguration:
         # 9 and 5 aren't selected, should be dropped
         assert launcher.app_settings["gpu_order"] == [0]
 
-    def test_model_not_found_warns_and_resets(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_model_not_found_warns_and_resets(self, rich_launcher_factory, tmp_path):
         cfg = _full_cfg(model_path="/models/missing.gguf")
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
         launcher.found_models = {}  # No models match
@@ -291,9 +290,7 @@ class TestLoadConfiguration:
             cm.load_configuration()
         launcher._select_model_in_listbox.assert_called_with(0)
 
-    def test_fit_ctx_synced_true_mirrors_ctx_size(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_fit_ctx_synced_true_mirrors_ctx_size(self, rich_launcher_factory, tmp_path):
         cfg = _full_cfg(ctx_size=4096, fit_ctx="9999", fit_ctx_synced=True)
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
         with patch("modules.config.messagebox"):
@@ -301,9 +298,7 @@ class TestLoadConfiguration:
         # Synced: ignore stored fit_ctx, use ctx_size.
         assert launcher.fit_ctx.get() == "4096"
 
-    def test_predefined_template_falls_back_to_first_when_missing(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_predefined_template_falls_back_to_first_when_missing(self, rich_launcher_factory, tmp_path):
         cfg = _full_cfg(predefined_template_name="unknown")
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
         # Derive the expected fallback from ``launcher._all_templates``
@@ -332,9 +327,7 @@ class TestLoadConfiguration:
             cm.load_configuration()
         assert launcher.predefined_template_name.get() == expected_fallback
 
-    def test_env_vars_and_ik_llama_delegates_called(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_env_vars_and_ik_llama_delegates_called(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, _full_cfg())
         with patch("modules.config.messagebox"):
             cm.load_configuration()
@@ -346,9 +339,11 @@ class TestLoadConfiguration:
 # delete_configuration
 # ===========================================================================
 
+
 class TestDeleteConfiguration:
     def _prepare(self, rich_launcher_factory, tmp_path, saved, selection_names):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.saved_configs = dict(saved)
         ordered_names = list(saved.keys())
@@ -359,6 +354,7 @@ class TestDeleteConfiguration:
 
     def test_no_selection_shows_error(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.config_listbox.set_selection([])
         cm = ConfigManager(launcher)
@@ -368,13 +364,14 @@ class TestDeleteConfiguration:
 
     def test_single_delete_with_confirmation(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             {"a": {"model_path": "/a"}, "b": {"model_path": "/b"}},
             ["a"],
         )
-        with patch("modules.config.messagebox.askyesno", return_value=True), \
-                patch("modules.config.messagebox.showinfo"), \
-                patch("modules.config.messagebox.showerror"):
+        with patch("modules.config.messagebox.askyesno", return_value=True), patch(
+            "modules.config.messagebox.showinfo"
+        ), patch("modules.config.messagebox.showerror"):
             cm.delete_configuration()
         assert "a" not in launcher.saved_configs
         assert "b" in launcher.saved_configs
@@ -383,61 +380,62 @@ class TestDeleteConfiguration:
 
     def test_multi_delete(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             {"a": {}, "b": {}, "c": {}},
             ["a", "c"],
         )
-        with patch("modules.config.messagebox.askyesno", return_value=True), \
-                patch("modules.config.messagebox.showinfo"), \
-                patch("modules.config.messagebox.showerror"):
+        with patch("modules.config.messagebox.askyesno", return_value=True), patch(
+            "modules.config.messagebox.showinfo"
+        ), patch("modules.config.messagebox.showerror"):
             cm.delete_configuration()
         assert list(launcher.saved_configs.keys()) == ["b"]
 
     def test_user_cancels_confirmation(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             {"a": {}, "b": {}},
             ["a"],
         )
-        with patch("modules.config.messagebox.askyesno", return_value=False), \
-                patch("modules.config.messagebox.showinfo") as info:
+        with patch("modules.config.messagebox.askyesno", return_value=False), patch(
+            "modules.config.messagebox.showinfo"
+        ) as info:
             cm.delete_configuration()
         # Nothing was deleted and _save_configs was not called.
         assert "a" in launcher.saved_configs
         launcher._save_configs.assert_not_called()
         assert not info.called
 
-    def test_name_not_in_saved_configs_is_handled(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_name_not_in_saved_configs_is_handled(self, rich_launcher_factory, tmp_path):
         """If the listbox shows a stale name no longer present in
         saved_configs, we still handle it gracefully."""
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.saved_configs = {"real": {}}
         launcher.config_listbox.set_items(["stale"])
         launcher.config_listbox.set_selection([0])
         cm = ConfigManager(launcher)
-        with patch("modules.config.messagebox.askyesno", return_value=True), \
-                patch("modules.config.messagebox.showerror") as err, \
-                patch("modules.config.messagebox.showinfo"):
+        with patch("modules.config.messagebox.askyesno", return_value=True), patch(
+            "modules.config.messagebox.showerror"
+        ) as err, patch("modules.config.messagebox.showinfo"):
             cm.delete_configuration()
         # The only entry was stale, so deleted_count stays 0 -> showerror.
         assert err.called
         launcher._save_configs.assert_not_called()
 
-    def test_file_io_error_on_save_is_surfaced(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_file_io_error_on_save_is_surfaced(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             {"a": {"model_path": "/a"}},
             ["a"],
         )
         launcher._save_configs.side_effect = OSError("disk full")
-        with patch("modules.config.messagebox.askyesno", return_value=True), \
-                patch("modules.config.messagebox.showinfo"), \
-                patch("modules.config.messagebox.showerror"):
+        with patch("modules.config.messagebox.askyesno", return_value=True), patch(
+            "modules.config.messagebox.showinfo"
+        ), patch("modules.config.messagebox.showerror"):
             with pytest.raises(OSError):
                 cm.delete_configuration()
 
@@ -446,9 +444,11 @@ class TestDeleteConfiguration:
 # Config-name path traversal (bug fix 3)
 # ===========================================================================
 
+
 class TestConfigNameSanitization:
     def test_sanitize_strips_traversal(self):
         from modules.config import ConfigManager
+
         assert ConfigManager._sanitize_config_name("../../../etc/passwd") == "passwd"
         assert ConfigManager._sanitize_config_name("/absolute/path") == "path"
         assert ConfigManager._sanitize_config_name("C:\\Windows\\System32") == "System32"
@@ -463,21 +463,25 @@ class TestConfigNameSanitization:
 
     def test_sanitize_preserves_normal_names(self):
         from modules.config import ConfigManager
+
         assert ConfigManager._sanitize_config_name("my_config") == "my_config"
         assert ConfigManager._sanitize_config_name("配置_日本語") == "配置_日本語"
 
     def test_sanitize_strips_control_chars(self):
         from modules.config import ConfigManager
+
         assert ConfigManager._sanitize_config_name("bad\x00name") == "badname"
         assert ConfigManager._sanitize_config_name("bad\nname") == "badname"
 
     def test_sanitize_accepts_non_string(self):
         from modules.config import ConfigManager
+
         # A non-string somehow reaching this boundary must not crash.
         assert ConfigManager._sanitize_config_name(42) == "42"
 
     def test_sanitize_rejects_windows_reserved_names(self):
         from modules.config import ConfigManager
+
         # Windows refuses to open files named CON/PRN/AUX/NUL/COM1-9/LPT1-9
         # (with or without an extension); reject them at the save boundary.
         for name in ("CON", "con", "PRN", "aux", "NUL", "COM1", "lpt9"):
@@ -489,10 +493,9 @@ class TestConfigNameSanitization:
         assert ConfigManager._sanitize_config_name("CONfig") == "CONfig"
         assert ConfigManager._sanitize_config_name("my_nul_backup") == "my_nul_backup"
 
-    def test_save_configuration_rejects_path_traversal(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_save_configuration_rejects_path_traversal(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.app_settings = {"selected_gpus": [], "gpu_order": []}
         # User (or script) pastes a path-traversal name into the config name.
@@ -509,10 +512,9 @@ class TestConfigNameSanitization:
         # The UI var was corrected too so the user sees what was actually saved.
         assert launcher.config_name.get() == "passwd"
 
-    def test_save_configuration_empty_after_sanitize_autogenerates(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_save_configuration_empty_after_sanitize_autogenerates(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         launcher.app_settings = {"selected_gpus": [], "gpu_order": []}
         # Pure traversal — sanitizes to empty, should autogen a default.
@@ -535,10 +537,9 @@ class TestConfigNameSanitization:
 # Unicode / BOM / large payloads in load_saved_configs
 # ===========================================================================
 
+
 class TestUnicodeAndBom:
-    def test_bom_prefixed_json_is_rejected_cleanly(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_bom_prefixed_json_is_rejected_cleanly(self, rich_launcher_factory, tmp_path):
         """``json.loads`` reads the file via ``encoding='utf-8'`` (not
         ``utf-8-sig``), so a UTF-8 BOM prefix causes ``json.JSONDecodeError``
         with ``'Unexpected UTF-8 BOM'``. The module must treat this as a
@@ -554,10 +555,9 @@ class TestUnicodeAndBom:
             baseline defaults so the UI can still render.
         """
         from modules.config import ConfigManager
+
         cfg_path = tmp_path / "cfg.json"
-        cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps(
-            {"configs": {}, "app_settings": {}}
-        ).encode("utf-8"))
+        cfg_path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"configs": {}, "app_settings": {}}).encode("utf-8"))
         launcher = rich_launcher_factory(cfg_path)
         cm = ConfigManager(launcher)
         with patch("modules.config.messagebox"):
@@ -572,21 +572,30 @@ class TestUnicodeAndBom:
         # than specific values — values are platform-dependent — which
         # still catches a regression that drops any of the defaults.
         expected_keys = {
-            "custom_parameters", "gpu_order", "host", "last_llama_cpp_dir",
-            "last_model_path", "last_venv_dir", "model_dirs",
-            "model_list_height", "port", "selected_gpus",
-            "selected_mmproj_path", "ui_font_family", "ui_font_size",
-            "ui_theme_mode", "ui_theme_name",
+            "custom_parameters",
+            "gpu_order",
+            "host",
+            "last_llama_cpp_dir",
+            "last_model_path",
+            "last_venv_dir",
+            "model_dirs",
+            "model_list_height",
+            "port",
+            "selected_gpus",
+            "selected_mmproj_path",
+            "ui_font_family",
+            "ui_font_size",
+            "ui_theme_mode",
+            "ui_theme_name",
         }
         assert expected_keys.issubset(launcher.app_settings.keys()), (
             f"Missing default app_settings keys after BOM rejection: "
             f"{expected_keys - set(launcher.app_settings.keys())}"
         )
 
-    def test_unicode_config_name_loads(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_unicode_config_name_loads(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         cfg_path = tmp_path / "cfg.json"
         cfg = {
             "configs": {
@@ -602,10 +611,9 @@ class TestUnicodeAndBom:
         assert "日本語_🔥_αβγ" in launcher.saved_configs
         assert "العربية" in launcher.saved_configs
 
-    def test_unicode_model_path_round_trip(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_unicode_model_path_round_trip(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         cfg_path = tmp_path / "cfg.json"
         payload = {
             "configs": {
@@ -617,14 +625,12 @@ class TestUnicodeAndBom:
         launcher = rich_launcher_factory(cfg_path)
         cm = ConfigManager(launcher)
         cm.load_saved_configs()
-        assert (launcher.saved_configs["cfg1"]["model_path"]
-                == "/models/日本語/🔥.gguf")
+        assert launcher.saved_configs["cfg1"]["model_path"] == "/models/日本語/🔥.gguf"
 
-    def test_large_config_payload_10mb(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_large_config_payload_10mb(self, rich_launcher_factory, tmp_path):
         """10 MB sanity test — must load without OOM / stalling."""
         from modules.config import ConfigManager
+
         cfg_path = tmp_path / "cfg.json"
         # ~10MB of padding in a custom_template_string.
         big_string = "x" * (10 * 1024 * 1024)
@@ -643,14 +649,14 @@ class TestUnicodeAndBom:
 # Symlink race in legacy->local migration
 # ===========================================================================
 
+
 class TestLegacyMigrationSymlink:
-    def test_legacy_migration_with_symlink_target_outside_repo(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_legacy_migration_with_symlink_target_outside_repo(self, rich_launcher_factory, tmp_path):
         """A legacy config that's actually a symlink should be handled safely:
         either migrated (resolving the symlink) or left alone. Either way, we
         don't crash, and we don't clobber the real target."""
         from modules.config import ConfigManager
+
         fake_repo = tmp_path / "repo"
         (fake_repo / "modules").mkdir(parents=True)
         fake_config_py = fake_repo / "modules" / "config.py"
@@ -667,8 +673,7 @@ class TestLegacyMigrationSymlink:
 
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         cm = ConfigManager(launcher)
-        with patch("modules.config.__file__", str(fake_config_py)), \
-                patch("modules.config.messagebox"):
+        with patch("modules.config.__file__", str(fake_config_py)), patch("modules.config.messagebox"):
             result = cm.get_config_path()
 
         # The local-path migration ran without error and the local file now has
@@ -681,13 +686,13 @@ class TestLegacyMigrationSymlink:
 # get_config_path error branches
 # ===========================================================================
 
+
 class TestGetConfigPathEdgeCases:
-    def test_home_raises_still_returns_null_device(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_home_raises_still_returns_null_device(self, rich_launcher_factory, tmp_path):
         """If both the local path and Path.home() are unusable we return
         the platform's null-device sentinel."""
         from modules.config import ConfigManager
+
         fake_repo = tmp_path / "repo"
         (fake_repo / "modules").mkdir(parents=True)
         fake_config_py = fake_repo / "modules" / "config.py"
@@ -701,22 +706,22 @@ class TestGetConfigPathEdgeCases:
                 return False
             return True
 
-        with patch("modules.config.__file__", str(fake_config_py)), \
-                patch("modules.config.os.access", side_effect=fake_access), \
-                patch("modules.config.sys.platform", "linux"), \
-                patch("modules.config.Path.home",
-                      side_effect=RuntimeError("no home")), \
-                patch("modules.config.messagebox"):
+        with patch("modules.config.__file__", str(fake_config_py)), patch(
+            "modules.config.os.access", side_effect=fake_access
+        ), patch("modules.config.sys.platform", "linux"), patch(
+            "modules.config.Path.home", side_effect=RuntimeError("no home")
+        ), patch(
+            "modules.config.messagebox"
+        ):
             result = cm.get_config_path()
         # Should be a dummy null device path.
         assert result.name in ("null", "NUL")
 
-    def test_parent_is_a_file_returns_fallback_or_null(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_parent_is_a_file_returns_fallback_or_null(self, rich_launcher_factory, tmp_path):
         """If the expected config dir *is* a file (not a dir) the manager
         must not crash; it falls back to the user-home directory."""
         from modules.config import ConfigManager
+
         fake_repo = tmp_path / "repo"
         (fake_repo / "modules").mkdir(parents=True)
         fake_config_py = fake_repo / "modules" / "config.py"
@@ -729,19 +734,18 @@ class TestGetConfigPathEdgeCases:
 
         launcher = rich_launcher_factory(tmp_path / "cfg.json")
         cm = ConfigManager(launcher)
-        with patch("modules.config.__file__", str(fake_config_py)), \
-                patch("modules.config.sys.platform", "linux"), \
-                patch("modules.config.Path.home", return_value=fake_home), \
-                patch("modules.config.messagebox"):
+        with patch("modules.config.__file__", str(fake_config_py)), patch(
+            "modules.config.sys.platform", "linux"
+        ), patch("modules.config.Path.home", return_value=fake_home), patch("modules.config.messagebox"):
             result = cm.get_config_path()
         # Either we got the fallback in the fake home or a null-device sentinel.
-        assert (result == fake_home / ".config" / "llama_cpp_launcher" / "configs.json"
-                or result.name in ("null", "NUL"))
+        assert result == fake_home / ".config" / "llama_cpp_launcher" / "configs.json" or result.name in ("null", "NUL")
 
 
 # ===========================================================================
 # generate_default_config_name — expanded edge cases (bug fix 1)
 # ===========================================================================
+
 
 class TestGenerateDefaultConfigName:
     def _launcher(self, rich_launcher_factory, tmp_path, **overrides):
@@ -759,8 +763,10 @@ class TestGenerateDefaultConfigName:
 
     def test_trailing_dots_stripped(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             model_path="/tmp/bad.name...gguf",
         )
         cm = ConfigManager(launcher)
@@ -769,12 +775,12 @@ class TestGenerateDefaultConfigName:
         first_part = name.split("_")[0]
         assert not first_part.endswith(".")
 
-    def test_leading_trailing_whitespace_stripped(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_leading_trailing_whitespace_stripped(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(
-            rich_launcher_factory, tmp_path,
+            rich_launcher_factory,
+            tmp_path,
             model_path="/tmp/   spaced.gguf",
         )
         # Model-listbox is empty so it falls back to the Path stem.
@@ -787,6 +793,7 @@ class TestGenerateDefaultConfigName:
 
     def test_control_chars_removed(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         # Simulate the listbox having a bad name with control chars.
@@ -796,12 +803,11 @@ class TestGenerateDefaultConfigName:
         name = cm.generate_default_config_name()
         # No control chars in the output.
         for c in name:
-            assert ord(c) >= 0x20 and ord(c) != 0x7f
+            assert ord(c) >= 0x20 and ord(c) != 0x7F
 
-    def test_unicode_model_name_preserved(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_unicode_model_name_preserved(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/日本語.gguf")
         cm = ConfigManager(launcher)
@@ -809,10 +815,9 @@ class TestGenerateDefaultConfigName:
         # Model stem is preserved (unicode is not in the illegal-char class).
         assert "日本語" in name or "model" in name
 
-    def test_very_long_model_name_is_truncated(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_very_long_model_name_is_truncated(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         long = "a" * 300 + ".gguf"
         launcher.model_path.set(f"/tmp/{long}")
@@ -821,10 +826,9 @@ class TestGenerateDefaultConfigName:
         # Overall generated name capped at 80 chars.
         assert len(name) <= 80
 
-    def test_regex_special_chars_in_model_name(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_regex_special_chars_in_model_name(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/my(model)[v1]+fast.gguf")
         cm = ConfigManager(launcher)
@@ -832,10 +836,9 @@ class TestGenerateDefaultConfigName:
         name = cm.generate_default_config_name()
         assert len(name) > 0
 
-    def test_empty_thread_count_does_not_crash(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_empty_thread_count_does_not_crash(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.threads.set("")
@@ -848,6 +851,7 @@ class TestGenerateDefaultConfigName:
 
     def test_temp_abbreviation_branch(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.temperature.set("0.2")  # Non-default
@@ -857,6 +861,7 @@ class TestGenerateDefaultConfigName:
 
     def test_batch_abbreviation_branch(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.batch_size.set("256")  # != 512
@@ -866,6 +871,7 @@ class TestGenerateDefaultConfigName:
 
     def test_seed_abbreviation_branch(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.seed.set("42")
@@ -873,13 +879,12 @@ class TestGenerateDefaultConfigName:
         name = cm.generate_default_config_name()
         assert "s=42" in name
 
-    def test_flash_attn_boolean_abbreviation_when_disabled(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_flash_attn_boolean_abbreviation_when_disabled(self, rich_launcher_factory, tmp_path):
         """flash_attn defaults to True now, so checking the box matches the
         default and is omitted from the name. Unchecking the box differs
         from the default and should appear as 'no-fa'."""
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.flash_attn.set(False)
@@ -887,12 +892,11 @@ class TestGenerateDefaultConfigName:
         name = cm.generate_default_config_name()
         assert "no-fa" in name.split("_")
 
-    def test_flash_attn_boolean_at_default_omitted(
-        self, rich_launcher_factory, tmp_path
-    ):
+    def test_flash_attn_boolean_at_default_omitted(self, rich_launcher_factory, tmp_path):
         """Conversely, leaving flash_attn at its True default must NOT add
         any token (otherwise every default config name would be polluted)."""
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.flash_attn.set(True)
@@ -903,6 +907,7 @@ class TestGenerateDefaultConfigName:
 
     def test_ctx_size_nondefault_added(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.ctx_size.set(8192)
@@ -912,6 +917,7 @@ class TestGenerateDefaultConfigName:
 
     def test_gpu_all_branch(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         launcher.n_gpu_layers_int.set(32)
@@ -922,6 +928,7 @@ class TestGenerateDefaultConfigName:
 
     def test_all_defaults_no_suffix_params(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
+
         launcher = self._launcher(rich_launcher_factory, tmp_path)
         launcher.model_path.set("/tmp/m.gguf")
         # logical_cores=8 matches default so don't add th=.
@@ -938,13 +945,13 @@ class TestGenerateDefaultConfigName:
 # GPU order edge case (LOW risk)
 # ===========================================================================
 
-def test_save_configs_preserves_gpu_order_with_duplicates(
-    rich_launcher_factory, tmp_path
-):
+
+def test_save_configs_preserves_gpu_order_with_duplicates(rich_launcher_factory, tmp_path):
     """save_configs reads gpu_order from app_settings — duplicates in the
     source list should persist verbatim so the launch order (tensor split
     pairing) is preserved."""
     from modules.config import ConfigManager
+
     cfg_path = tmp_path / "cfg.json"
     launcher = rich_launcher_factory(cfg_path)
     # Duplicates happen if the UI drag-reorder widget mis-handles rows.

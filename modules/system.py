@@ -1301,8 +1301,16 @@ def parse_gguf_header_simple(model_path_str):
             )
             return False
 
+    # When the user picks a non-first shard (e.g. ``…-00002-of-00003.gguf``)
+    # the GGUF metadata header lives in shard 1, NOT in the file the
+    # user clicked. ``calculate_total_gguf_size`` already discovered the
+    # full shard set (sorted shard-1 first), so prefer the first
+    # discovered shard for the header parse — falling back to
+    # ``model_path`` only when the discovery returned nothing (treating
+    # it as a single-file GGUF).
+    header_path = all_shards[0] if all_shards else model_path
     try:
-        with open(model_path, "rb") as f:
+        with open(header_path, "rb") as f:
             # Read GGUF magic number
             magic = f.read(4)
             if magic != b"GGUF":

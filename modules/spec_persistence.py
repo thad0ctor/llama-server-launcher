@@ -167,9 +167,16 @@ def load_spec_from_cfg(launcher, cfg):
     # list instead of falling back to the device override.
     raw_device = cfg.get("spec_draft_device", "")
     if isinstance(raw_device, str) and raw_device.strip():
-        device_token = raw_device.strip().upper()
+        # Split on commas (the device spec is a comma-separated list
+        # like ``CUDA0,Vulkan1``) and check the LEADING characters of
+        # each token against the non-CUDA prefix list. Plain substring
+        # matching would false-positive on names containing those
+        # backend strings as substrings (e.g. a hypothetical
+        # ``"OPENCLBACKEND0"`` would match ``"CL"``) — match the
+        # `<Backend><Int>` shape strictly here.
         non_cuda_markers = ("VULKAN", "METAL", "SYCL", "ROCM", "HIP", "CPU")
-        if any(marker in device_token for marker in non_cuda_markers):
+        tokens = [t.strip().upper() for t in raw_device.split(",") if t.strip()]
+        if any(t.startswith(marker) for t in tokens for marker in non_cuda_markers):
             cfg["spec_draft_selected_gpus"] = []
 
     def _spec_bool(key):
@@ -320,9 +327,13 @@ def validate_spec_app_settings(app_settings):
     # tab handles that case once it loads.
     raw_device = app_settings.get("spec_draft_device", "")
     if isinstance(raw_device, str) and raw_device.strip():
-        device_token = raw_device.strip().upper()
+        # Use the same token-prefix matching as load_spec_from_cfg
+        # (see comment there): plain substring matching would
+        # false-positive on names that contain a backend marker
+        # as a substring.
         non_cuda_markers = ("VULKAN", "METAL", "SYCL", "ROCM", "HIP", "CPU")
-        if any(marker in device_token for marker in non_cuda_markers):
+        tokens = [t.strip().upper() for t in raw_device.split(",") if t.strip()]
+        if any(t.startswith(marker) for t in tokens for marker in non_cuda_markers):
             # ``app_settings["spec_draft_selected_gpus"]`` is now
             # guaranteed to be a list (coerced unconditionally
             # above), so the dict lookup can't return ``None`` /
