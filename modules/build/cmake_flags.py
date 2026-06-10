@@ -192,19 +192,92 @@ def _validate_cuda_archs(v: str) -> str | None:
     tokens (from a trailing ``;`` or ``;;``) and unparseable
     tokens fail the validator so cmake doesn't reject the whole
     build at configure time. Mirrors the auto-detect output shape.
+
+    Beyond the regex shape, CR-4467921108 (Minor) flagged that the
+    base digits must map to a known compute capability in
+    ``modules/build/detection.KNOWN_CUDA_ARCHS``, and the ``a`` /
+    ``f`` suffixes only make sense on the architectures nvcc
+    actually supports them on (``a`` = Hopper+, ``f`` = Blackwell+).
+    Pushing those checks here surfaces typos like ``86a-real`` /
+    ``75f-real`` in the Build tab instead of waiting for cmake to
+    reject the whole list at configure time.
     """
     s = v.strip()
     if not s:
         return None
+
+    # Imported lazily so this module's import-time cost stays
+    # detection-free (used by the headless test discovery pass).
+    from modules.build.detection import KNOWN_CUDA_ARCHS
+
+    # Map ``"86"`` -> ``KnownArch`` for O(1) lookup. We rebuild
+    # each call rather than caching on a module attribute so a
+    # test that monkeypatches ``KNOWN_CUDA_ARCHS`` (or a future
+    # extension that mutates it) is picked up.
+    known_by_base: dict[str, "object"] = {}
+    for k in KNOWN_CUDA_ARCHS:
+        parts = k.cc.split(".")
+        if len(parts) == 2:
+            known_by_base[f"{parts[0]}{parts[1]}"] = k
+
     tokens = s.split(";")
     bad: list[str] = []
+    bad_reasons: dict[str, str] = {}
     for token in tokens:
         candidate = token.strip()
         if not candidate:
             return "empty entry in semicolon-separated list"
         if not _CUDA_ARCH_TOKEN_RE.match(candidate):
             bad.append(candidate)
+            continue
+        # Decompose: <digits><opt suffix>[-real|-virtual]
+        body = candidate.lower()
+        if body.endswith("-real"):
+            body = body[: -len("-real")]
+        elif body.endswith("-virtual"):
+            body = body[: -len("-virtual")]
+        suffix = ""
+        if body and body[-1] in ("a", "f"):
+            suffix = body[-1]
+            base = body[:-1]
+        else:
+            base = body
+        if not base.isdigit():
+            bad.append(candidate)
+            continue
+        known = known_by_base.get(base)
+        if known is None:
+            bad.append(candidate)
+            bad_reasons[candidate] = f"sm_{base} is not in the known CUDA arch catalog"
+            continue
+        if suffix == "a" and not getattr(known, "has_a_variant", False):
+            bad.append(candidate)
+            bad_reasons[candidate] = (
+                f"sm_{base} has no -a variant (only Hopper+ archs do; "
+                f"sm_{base} is {getattr(known, 'family', 'unknown')})"
+            )
+            continue
+        if suffix == "f" and not getattr(known, "has_f_variant", False):
+            bad.append(candidate)
+            bad_reasons[candidate] = (
+                f"sm_{base} has no -f variant (only Blackwell+ archs in CUDA 13+ do; "
+                f"sm_{base} is {getattr(known, 'family', 'unknown')})"
+            )
+            continue
     if bad:
+        if bad_reasons:
+            # Surface the family-suffix reason inline so the Build
+            # tab's per-field error tooltip explains why a regex-shaped
+            # token (like ``86a-real``) still got rejected.
+            reasons = "; ".join(f"{t}: {r}" for t, r in bad_reasons.items())
+            other = [t for t in bad if t not in bad_reasons]
+            base_msg = (
+                f"invalid CUDA arch token(s) — {reasons}"
+                + (f". Plus regex-shape failures: {other!r}" if other else "")
+                + ". Use ``<digits>[a|f][-real|-virtual]`` against the supported "
+                "family (e.g. ``86`` / ``86-real`` / ``120a-real`` / ``120f-real``)."
+            )
+            return base_msg
         return (
             f"invalid CUDA arch token(s): {bad!r}. "
             "Use ``<digits>[a|f][-real|-virtual]`` (e.g. ``86`` / "

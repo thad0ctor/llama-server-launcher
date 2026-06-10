@@ -152,6 +152,17 @@ class HuggingFaceDownloaderTab:
         self._dep_watch_after_id: str | None = None
         self._dep_watch_deadline: float = 0.0
         self._dep_watch_venv: str | None = None
+        # Pre-launch dependency state captured the moment
+        # ``_start_dependency_watch`` is called. The watch finishes
+        # only when the CURRENT probe result differs from this
+        # baseline (initially-absent → present, or
+        # initial-version != current-version after an upgrade).
+        # Without this, an "Install / update" click on an
+        # already-installed dep would clear the watch on the first
+        # ``available=True`` probe — before ``pip install -U …``
+        # had finished mutating the venv. CR-4467921108 (Major).
+        self._dep_watch_initial_available: bool = False
+        self._dep_watch_initial_version: str = ""
         # Generation token bumped on every _start_runner / _cancel_operation.
         # Worker-thread events carry the op_id captured at launch; events with
         # a stale op_id are dropped by _handle_event. Closes the race where
@@ -166,30 +177,100 @@ class HuggingFaceDownloaderTab:
         self._process_lock = threading.Lock()
         self._op_id: int = 0
         self._cancelled_ops: set[int] = set()
+        # ``_trace_tokens`` is the legacy flat-token list kept for backwards
+        # compatibility with any external code reading it; ``_owner_trace_tokens``
+        # is the (var, token) pair list ``teardown()`` consults to issue
+        # ``trace_remove`` calls. Without the per-var ownership info, you
+        # can't actually remove a Tk trace at teardown time, and the
+        # lazy-tab reload path leaks every prior tab's callback (each
+        # subsequent ``venv_var.set(...)`` write fires every dead tab's
+        # ``_refresh_runtime_state`` against destroyed widgets). CR-4467921108
+        # (Major heavy lift).
+        self._owner_trace_tokens: list[tuple[tk.Variable, str]] = []
+
+        def _trace(var: tk.Variable, callback) -> str:
+            token = var.trace_add("write", callback)
+            self._owner_trace_tokens.append((var, token))
+            return token
+
         self._trace_tokens = [
-            self.repo_input_var.trace_add("write", lambda *_a: self._persist_settings()),
-            self.revision_var.trace_add("write", lambda *_a: self._persist_settings()),
+            _trace(self.repo_input_var, lambda *_a: self._persist_settings()),
+            _trace(self.revision_var, lambda *_a: self._persist_settings()),
             # ``download_mode_var`` and ``include_patterns_var`` also
             # gate the Download button: snapshot mode and any non-empty
             # include pattern allow downloading without a loaded
             # listing. Refresh runtime state so the button enables
             # immediately when the user switches mode / types a pattern.
-            self.download_mode_var.trace_add(
-                "write", lambda *_a: (self._persist_settings(), self._refresh_runtime_state())
+            _trace(
+                self.download_mode_var,
+                lambda *_a: (self._persist_settings(), self._refresh_runtime_state()),
             ),
-            self.include_patterns_var.trace_add(
-                "write", lambda *_a: (self._persist_settings(), self._refresh_runtime_state())
+            _trace(
+                self.include_patterns_var,
+                lambda *_a: (self._persist_settings(), self._refresh_runtime_state()),
             ),
-            self.ignore_patterns_var.trace_add("write", lambda *_a: self._persist_settings()),
-            self.force_download_var.trace_add("write", lambda *_a: self._persist_settings()),
-            self.local_files_only_var.trace_add("write", lambda *_a: self._persist_settings()),
+            _trace(self.ignore_patterns_var, lambda *_a: self._persist_settings()),
+            _trace(self.force_download_var, lambda *_a: self._persist_settings()),
+            _trace(self.local_files_only_var, lambda *_a: self._persist_settings()),
             # Validate-and-clamp on every keystroke so a bad value can't be
             # persisted to settings (and so the next launch doesn't load
             # a malformed string). Then persist the (normalized) value.
-            self.max_workers_var.trace_add("write", lambda *_a: self._validate_max_workers()),
-            self.max_workers_var.trace_add("write", lambda *_a: self._persist_settings()),
-            self.venv_var.trace_add("write", lambda *_a: self._refresh_runtime_state()),
+            _trace(self.max_workers_var, lambda *_a: self._validate_max_workers()),
+            _trace(self.max_workers_var, lambda *_a: self._persist_settings()),
+            _trace(self.venv_var, lambda *_a: self._refresh_runtime_state()),
         ]
+
+    def teardown(self) -> None:
+        """Release every Tk trace + scheduled ``after()`` this tab holds.
+
+        Without this, the lazy-tab setup in the broader app can leave
+        an old tab instance reachable through the launcher's
+        ``venv_dir`` StringVar — every subsequent ``venv_dir.set(...)``
+        then fires the dead tab's ``_refresh_runtime_state`` against
+        destroyed widgets, and stale ``after()`` callbacks reach for
+        widgets that were destroyed with the previous tab. CR-4467921108
+        (Major heavy lift). Safe to call multiple times.
+        """
+        # 1. Owner-tracked write-traces on launcher-owned vars
+        #    (``venv_var``, etc.) and tab-owned vars.
+        for var, token in self._owner_trace_tokens:
+            try:
+                var.trace_remove("write", token)
+            except Exception:
+                # Tk may already have destroyed the var. Tear down
+                # the entire list anyway; partial cleanup still
+                # avoids the worst leaks.
+                pass
+        self._owner_trace_tokens = []
+        self._trace_tokens = []
+        # 2. Per-row target traces — these are recreated on every
+        #    listing reload, so the live list is small but each
+        #    pointed at a launcher-owned BooleanVar that outlives
+        #    the row.
+        for var, token in self._selected_target_trace_tokens:
+            try:
+                var.trace_remove("write", token)
+            except Exception:
+                pass
+        self._selected_target_trace_tokens = []
+        self._selected_target_vars = {}
+        # 3. Scheduled ``after()`` callbacks. ``_queue_after_id`` is
+        #    the queue-drain poll; ``_dep_watch_after_id`` is the
+        #    huggingface_hub install/update watch.
+        for attr in ("_queue_after_id", "_dep_watch_after_id"):
+            after_id = getattr(self, attr, None)
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        # 4. Clear the dep-watch state so a teardown mid-watch
+        #    can't leak a stale ``_dep_watch_venv`` into a fresh
+        #    tab instance reading the same launcher object.
+        self._dep_watch_venv = None
+        self._dep_watch_initial_available = False
+        self._dep_watch_initial_version = ""
 
     def setup_tab(self, parent):
         parent.columnconfigure(0, weight=1)
@@ -612,6 +693,25 @@ class HuggingFaceDownloaderTab:
         self._cancel_dependency_watch()
         self._dep_watch_venv = venv_path
         self._dep_watch_deadline = time.monotonic() + self.DEP_WATCH_TIMEOUT_S
+        # Capture baseline state BEFORE the install terminal can
+        # change it. ``_on_dependency_probe_result`` uses this to
+        # tell the difference between "already installed (the user
+        # ran update) — wait for the version to change" and
+        # "not installed — wait for it to appear". Without this
+        # baseline the watch finishes on the first available=True,
+        # which on an update is the pre-update state.
+        dep = self._huggingface_dependency()
+        try:
+            initial = venv_manager.probe_dependency_status(venv_path, dep, platform=sys.platform)
+            self._dep_watch_initial_available = bool(initial.available)
+            initial_version = getattr(initial, "version", "") or ""
+            self._dep_watch_initial_version = initial_version if isinstance(initial_version, str) else ""
+        except Exception:
+            # Treat any failure to read the baseline as "not
+            # installed" — the conservative default that still
+            # behaves correctly for the fresh-install path.
+            self._dep_watch_initial_available = False
+            self._dep_watch_initial_version = ""
         try:
             self._dep_watch_after_id = self.root.after(self.DEP_WATCH_INTERVAL_MS, self._fire_dependency_probe)
         except tk.TclError:
@@ -635,6 +735,11 @@ class HuggingFaceDownloaderTab:
                 pass
             self._dep_watch_after_id = None
         self._dep_watch_venv = None
+        # Reset the baseline so a future watch starts clean.
+        # Leaving stale values here would leak the prior watch's
+        # baseline into the next install/update click.
+        self._dep_watch_initial_available = False
+        self._dep_watch_initial_version = ""
 
     def _fire_dependency_probe(self):
         self._dep_watch_after_id = None
@@ -658,13 +763,16 @@ class HuggingFaceDownloaderTab:
         dep = self._huggingface_dependency()
 
         def worker():
+            version = ""
             try:
                 status = venv_manager.probe_dependency_status(venv_path, dep, platform=sys.platform)
                 available = bool(status.available)
+                raw_version = getattr(status, "version", "") or ""
+                version = raw_version if isinstance(raw_version, str) else ""
             except Exception:
                 available = False
             try:
-                self.root.after(0, self._on_dependency_probe_result, venv_path, available)
+                self.root.after(0, self._on_dependency_probe_result, venv_path, available, version)
             except (tk.TclError, RuntimeError):
                 # Tk root destroyed while probe was in flight — drop the
                 # result silently; the watch is over.
@@ -672,21 +780,45 @@ class HuggingFaceDownloaderTab:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_dependency_probe_result(self, venv_path: str, available: bool):
+    def _on_dependency_probe_result(self, venv_path: str, available: bool, version: str = ""):
         if venv_path != self._dep_watch_venv:
             return
         if venv_path != self._current_active_venv_path():
             self._dep_watch_venv = None
             return
         if available:
-            # Close out the install-watch with a visible status. Otherwise
-            # the status panel stays stuck on the earlier "Waiting for it
-            # to appear in the venv…" message even though buttons have
-            # already re-enabled — confusing.
-            self.status_var.set("huggingface_hub is now available in the active venv.")
-            self._dep_watch_venv = None
-            self._refresh_runtime_state()
-            return
+            # Baseline-aware completion gate (CR-4467921108):
+            # finish the watch only when the state actually CHANGED
+            # from what we recorded at ``_start_dependency_watch``
+            # time. Two flavours of "changed":
+            #   (a) Fresh install — baseline ``not initial_available``
+            #       and now we see ``available=True``.
+            #   (b) Update — baseline ``initial_available`` and the
+            #       reported version differs from the baseline
+            #       version (pip finished swapping the installed
+            #       distribution).
+            # If neither holds, keep polling: the external
+            # ``pip install -U …`` is still mutating the venv
+            # (or hasn't started writing yet) and the visible
+            # state is still the pre-click value. The deadline
+            # check below remains the safety net.
+            state_changed = (not self._dep_watch_initial_available) or (
+                bool(version) and version != self._dep_watch_initial_version
+            )
+            if state_changed:
+                # Close out the install-watch with a visible status. Otherwise
+                # the status panel stays stuck on the earlier "Waiting for it
+                # to appear in the venv…" message even though buttons have
+                # already re-enabled — confusing.
+                self.status_var.set("huggingface_hub is now available in the active venv.")
+                self._dep_watch_venv = None
+                self._dep_watch_initial_available = False
+                self._dep_watch_initial_version = ""
+                self._refresh_runtime_state()
+                return
+            # Otherwise fall through to the "schedule next probe"
+            # branch at the bottom of this method — the pip
+            # process is still working.
         if time.monotonic() > self._dep_watch_deadline:
             # Same visibility issue on the timeout branch — the watch
             # used to exit silently, leaving the user with no signal that

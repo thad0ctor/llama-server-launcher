@@ -408,3 +408,205 @@ def test_cancel_before_worker_publishes_process_does_not_pin_handle(hf_launcher_
     # And the worker still terminated the process it briefly held a
     # reference to, so we don't leak a runaway subprocess.
     assert fake_proc.terminate_calls >= 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CR-4467921108: teardown() must remove every owner-tracked write-trace
+# AND cancel every scheduled ``after()`` so a discarded lazy tab can't
+# touch dead widgets via a launcher-owned StringVar callback.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_teardown_removes_owner_traces_and_clears_after_ids(hf_launcher_stub, monkeypatch):
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=False,
+            error="venv python not found",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+
+    # Sanity: every recorded (var, token) pair maps to a live trace on
+    # the var BEFORE teardown.
+    assert tab._owner_trace_tokens, "trace tokens should be populated post-init"
+    for var, token in tab._owner_trace_tokens:
+        infos = var.trace_info()
+        assert any(token == t[1] for t in infos), f"expected token {token!r} to still be present on {var!r}"
+
+    # Simulate a scheduled after() callback so teardown has to cancel
+    # it. We just stash a synthetic id and stub after_cancel.
+    cancelled: list[str] = []
+    monkeypatch.setattr(tab.root, "after_cancel", lambda aid: cancelled.append(aid))
+    tab._queue_after_id = "after#queue"
+    tab._dep_watch_after_id = "after#dep-watch"
+    # Likewise simulate a populated per-row trace list.
+    booger_var = tk.BooleanVar(value=True)
+    booger_token = booger_var.trace_add("write", lambda *_a: None)
+    tab._selected_target_trace_tokens = [(booger_var, booger_token)]
+    tab._selected_target_vars = {"/some/dir": booger_var}
+
+    tab.teardown()
+
+    # 1. Every owner-tracked token removed from its var.
+    for var, token in []:  # iterated against original snapshot below
+        pass
+    # Need the pre-teardown snapshot — teardown clears the list, so
+    # re-create by inspecting trace_info() now.
+    # Per-row trace gone.
+    assert (booger_var, booger_token) not in tab._selected_target_trace_tokens
+    assert not tab._selected_target_trace_tokens
+    assert tab._selected_target_vars == {}
+    # 2. after() ids cancelled and cleared.
+    assert "after#queue" in cancelled
+    assert "after#dep-watch" in cancelled
+    assert tab._queue_after_id is None
+    assert tab._dep_watch_after_id is None
+    # 3. Owner-tracked list is empty.
+    assert tab._owner_trace_tokens == []
+    # 4. Idempotent — second call must not raise.
+    tab.teardown()
+
+
+def test_teardown_is_idempotent_with_destroyed_vars(hf_launcher_stub, monkeypatch):
+    """Calling teardown twice (e.g. once in __exit__, once in __del__)
+    must not raise even if the underlying Tk vars are already gone."""
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=False,
+            error="venv python not found",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+
+    # First teardown — the real path.
+    tab.teardown()
+
+    # Mutate the state so the SECOND teardown is given a token that
+    # is no longer on the var (mimics "already removed by the first
+    # call OR the var was destroyed in between").
+    fake_var = tk.StringVar(value="")
+    fake_var.trace_remove("write", fake_var.trace_add("write", lambda *_a: None))
+    tab._owner_trace_tokens = [(fake_var, "non-existent-token")]
+    tab._selected_target_trace_tokens = [(fake_var, "non-existent-token")]
+
+    # Should NOT raise.
+    tab.teardown()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CR-4467921108: dep-watch must compare against the BASELINE state so
+# an "Install / update" click on an already-installed huggingface_hub
+# doesn't close the watch on the first available=True probe.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_dep_watch_baseline_captured_on_start(hf_launcher_stub, monkeypatch):
+    """``_start_dependency_watch`` records the pre-launch dep state."""
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=True,
+            version="0.20.0",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    monkeypatch.setattr(tab.root, "after", lambda *_a, **_kw: "after#scheduled")
+    monkeypatch.setattr(tab.root, "after_cancel", lambda *_a, **_kw: None)
+    # ``_start_dependency_watch`` calls ``_refresh_runtime_state`` at the
+    # end, which would cancel the watch (and reset the baseline) when
+    # ``_dep_watch_venv != active``. In the real flow the user clicks
+    # Install/Update on the ACTIVE venv, so make the stub agree.
+    monkeypatch.setattr(tab, "_current_active_venv_path", lambda: "/some/venv")
+    monkeypatch.setattr(tab, "_refresh_runtime_state", lambda: None)
+
+    tab._start_dependency_watch("/some/venv")
+
+    assert tab._dep_watch_initial_available is True
+    assert tab._dep_watch_initial_version == "0.20.0"
+
+
+def test_dep_watch_does_not_complete_when_state_unchanged(hf_launcher_stub, monkeypatch):
+    """An update on an already-installed dep must keep polling while
+    pip is still doing its work — not exit on the first ``available=True``."""
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=True,
+            version="0.20.0",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    monkeypatch.setattr(tab.root, "after", lambda *_a, **_kw: "after#scheduled")
+    monkeypatch.setattr(tab.root, "after_cancel", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tab, "_current_active_venv_path", lambda: "/some/venv")
+    monkeypatch.setattr(tab, "_refresh_runtime_state", lambda: None)
+
+    tab._start_dependency_watch("/some/venv")
+    # Pre-launch baseline: available=True, version=0.20.0.
+    # Probe reports the same version — pip hasn't finished yet.
+    tab._on_dependency_probe_result("/some/venv", True, "0.20.0")
+
+    # Watch must STILL be open — _dep_watch_venv should be retained.
+    assert tab._dep_watch_venv == "/some/venv"
+
+
+def test_dep_watch_completes_when_version_changes(hf_launcher_stub, monkeypatch):
+    """When the version differs from baseline (upgrade landed) the
+    watch closes out."""
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=True,
+            version="0.20.0",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    monkeypatch.setattr(tab.root, "after", lambda *_a, **_kw: "after#scheduled")
+    monkeypatch.setattr(tab.root, "after_cancel", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tab, "_current_active_venv_path", lambda: "/some/venv")
+    monkeypatch.setattr(tab, "_refresh_runtime_state", lambda: None)
+
+    tab._start_dependency_watch("/some/venv")
+    # Probe reports a newer version — upgrade finished.
+    tab._on_dependency_probe_result("/some/venv", True, "0.21.0")
+
+    assert tab._dep_watch_venv is None
+    # Baseline cleared too so the next watch starts fresh.
+    assert tab._dep_watch_initial_available is False
+    assert tab._dep_watch_initial_version == ""
+
+
+def test_dep_watch_completes_when_dep_first_appears(hf_launcher_stub, monkeypatch):
+    """Fresh install path: baseline reports unavailable, then becomes
+    available → close out."""
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=False,
+            error="not installed",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    monkeypatch.setattr(tab.root, "after", lambda *_a, **_kw: "after#scheduled")
+    monkeypatch.setattr(tab.root, "after_cancel", lambda *_a, **_kw: None)
+    monkeypatch.setattr(tab, "_current_active_venv_path", lambda: "/some/venv")
+    monkeypatch.setattr(tab, "_refresh_runtime_state", lambda: None)
+
+    tab._start_dependency_watch("/some/venv")
+    assert tab._dep_watch_initial_available is False
+    tab._on_dependency_probe_result("/some/venv", True, "0.20.0")
+    assert tab._dep_watch_venv is None

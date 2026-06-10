@@ -153,6 +153,89 @@ def _resolve_safe_build_paths(source_dir: str, build_dir: str) -> tuple[Path, Pa
     return src_resolved, build_resolved
 
 
+# Marker file dropped into every directory the launcher creates as a build
+# output. Subsequent ``clean_build=True`` runs detect this and treat the
+# directory as launcher-owned for the purpose of recurse-delete. Without
+# it, a user who configures an absolute ``build_dir`` at a location that
+# also happens to contain real data (e.g. ``$HOME/projects`` typed by
+# mistake) would hit ``shutil.rmtree`` on a directory the launcher never
+# created.
+_BUILD_DIR_MARKER = ".llama-launcher-build"
+
+# Filenames that unambiguously identify a directory as a real build output
+# tree (not, say, ``$HOME`` or a sibling project the user pointed at by
+# mistake). If any of these are present, ``rm -rf`` is safe.
+_BUILD_OUTPUT_MARKERS = (
+    "CMakeCache.txt",
+    "build.ninja",
+    "Makefile",
+    _BUILD_DIR_MARKER,
+)
+
+
+def _assert_safe_to_purge(build_resolved: Path) -> None:
+    """Raise ``ValueError`` if ``rm -rf <build_resolved>`` would be unsafe.
+
+    The launcher will recurse-delete the build directory whenever
+    ``clean_build=True``. CR-4467921108 (Critical) flagged that an
+    absolute ``build_dir`` of ``$HOME/work`` or ``/tmp/foo`` was
+    previously trusted unconditionally — a single typo became data
+    loss instead of a failed build.
+
+    We allow the recurse-delete iff one of:
+      - The path doesn't exist yet (we'll create it ourselves).
+      - The path is an empty directory.
+      - The directory contains a known build-output marker
+        (``CMakeCache.txt`` / ``build.ninja`` / ``Makefile`` / our
+        own ``.llama-launcher-build`` sentinel from a prior run).
+
+    Anything else — a populated directory that doesn't look like
+    a build output — is rejected so the user has to (a) clear the
+    directory themselves, or (b) point ``build_dir`` somewhere
+    actually empty. ``_run()`` and ``plan_to_shell_script()``
+    both call this before any recurse-delete.
+    """
+    if not build_resolved.exists():
+        return
+    if not build_resolved.is_dir():
+        # Caller already covers the "exists but is a file" case;
+        # this branch is defensive against a race where a regular
+        # file appears between the upstream check and ``rmtree``.
+        raise ValueError(f"Refusing to purge build_dir {build_resolved!s}: path is not a directory.")
+    try:
+        entries = list(build_resolved.iterdir())
+    except OSError as exc:
+        raise ValueError(f"Refusing to purge build_dir {build_resolved!s}: cannot inspect ({exc}).") from exc
+    if not entries:
+        return
+    entry_names = {p.name for p in entries}
+    if any(marker in entry_names for marker in _BUILD_OUTPUT_MARKERS):
+        return
+    raise ValueError(
+        f"Refusing to purge build_dir {build_resolved!s}: the directory is "
+        f"non-empty and does not look like a CMake/Ninja/Make build output "
+        f"(no {' / '.join(_BUILD_OUTPUT_MARKERS[:-1])} present, no "
+        f"{_BUILD_DIR_MARKER} marker from a prior launcher run). Clear it "
+        f"manually or pick an empty directory."
+    )
+
+
+def _stamp_build_marker(build_resolved: Path) -> None:
+    """Drop the launcher's ``.llama-launcher-build`` sentinel after we've
+    created or claimed a build directory. Best-effort: a failure to write
+    the marker doesn't fail the build, just means the NEXT clean run will
+    fall back to the CMakeCache / build.ninja / Makefile checks instead
+    of recognising the dir by our marker.
+    """
+    try:
+        marker = build_resolved / _BUILD_DIR_MARKER
+        # ``exist_ok=True`` semantics via touch — second clean run finds
+        # an existing marker and does nothing.
+        marker.touch(exist_ok=True)
+    except OSError:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Upstream-state probe (used by the update banner)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -590,6 +673,20 @@ class BuildRunner:
             if plan.clean_build and build.exists():
                 if _bail_if_cancelled():
                     return
+                # Gate the recurse-delete on a marker-based safety
+                # check. CR-4467921108 (Critical) flagged that
+                # ``shutil.rmtree(build)`` against an absolute
+                # build_dir was previously unconditional — a typo
+                # like ``$HOME`` would become data loss. The
+                # ``_assert_safe_to_purge`` helper rejects any
+                # non-empty directory that lacks a CMake/Ninja/Make/
+                # launcher marker. Surface its ValueError as a
+                # normal EVENT_ERROR rather than a crash.
+                try:
+                    _assert_safe_to_purge(build)
+                except ValueError as exc:
+                    self._emit_event(EVENT_ERROR, str(exc))
+                    return
                 self._emit_stage(f"rm -rf {build}")
                 try:
                     shutil.rmtree(build)
@@ -600,6 +697,10 @@ class BuildRunner:
             if _bail_if_cancelled():
                 return
             build.mkdir(parents=True, exist_ok=True)
+            # Drop the launcher's ``.llama-launcher-build`` marker so a
+            # later ``clean_build=True`` run recognises the directory as
+            # ours and the purge gate above accepts it.
+            _stamp_build_marker(build)
 
             # Stage: configure
             if _bail_if_cancelled():
@@ -896,9 +997,35 @@ def plan_to_shell_script(plan: BuildPlan, *, header: str = "") -> str:
         lines.append('git -C "$SRC_DIR" submodule update --init --recursive')
 
     if plan.clean_build:
-        lines.append('rm -rf "$BUILD_DIR"')
+        # Mirror ``_assert_safe_to_purge`` in shell. CR-4467921108
+        # (Critical) flagged that an absolute build_dir was being
+        # recurse-deleted unconditionally — a typed-by-mistake path
+        # becomes data loss when this exported script runs later.
+        # Allow ``rm -rf`` only when the directory either does not
+        # yet exist, is empty, or contains a recognised build-output
+        # marker. Refuse otherwise with a clear stderr message.
+        lines.append('if [ -d "$BUILD_DIR" ]; then')
+        lines.append('  if [ -z "$(ls -A "$BUILD_DIR" 2>/dev/null)" ]; then')
+        lines.append("    :  # empty dir, safe to purge")
+        lines.append(
+            '  elif [ -f "$BUILD_DIR/CMakeCache.txt" ] || [ -f "$BUILD_DIR/build.ninja" ] '
+            '|| [ -f "$BUILD_DIR/Makefile" ] || [ -f "$BUILD_DIR/' + _BUILD_DIR_MARKER + '" ]; then'
+        )
+        lines.append("    :  # recognised build-output marker, safe to purge")
+        lines.append("  else")
+        lines.append(
+            '    echo "ERROR: refusing to rm -rf $BUILD_DIR — non-empty and no '
+            "CMakeCache.txt / build.ninja / Makefile / " + _BUILD_DIR_MARKER + ' present." >&2'
+        )
+        lines.append("    exit 1")
+        lines.append("  fi")
+        lines.append('  rm -rf "$BUILD_DIR"')
+        lines.append("fi")
 
     lines.append('mkdir -p "$BUILD_DIR"')
+    # Drop the launcher marker so a future clean run via the same
+    # exported script recognises the directory as ours.
+    lines.append('touch "$BUILD_DIR/' + _BUILD_DIR_MARKER + '" 2>/dev/null || true')
     lines.append("")
 
     env_prefix = ""

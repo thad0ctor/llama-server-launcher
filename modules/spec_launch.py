@@ -88,6 +88,49 @@ _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eag
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA: frozenset[str] = frozenset()  # mtp uses main GPUs
 
 
+def _safe_var_str(launcher, name: str, *, context: str = "spec") -> str:
+    """Read ``launcher.<name>.get()`` and return a stripped string, defensively.
+
+    Module-level so ``emit_spec_args`` and ``emit_reasoning_args``
+    can share one implementation. CR-4467921108 flagged the
+    remaining direct ``var.get().strip()`` sites in
+    ``emit_spec_args``: a non-string persisted value (MagicMock,
+    bool, dict, etc.) raises ``AttributeError`` on ``.strip()`` and
+    aborts the outer try in ``emit_spec_args`` — dropping the rest
+    of the spec args instead of just skipping the bad field.
+
+    Returns:
+        Empty string when the var is missing, can't be read, or
+        holds a non-string value. The caller treats empty the
+        same as "skip this flag", so a corrupt field becomes a
+        silent skip instead of taking down the entire emission
+        block.
+
+    Args:
+        context: short noun used in the WARNING line ("spec",
+            "reasoning", etc.) so callers from different blocks
+            produce identifiable log output.
+    """
+    var = getattr(launcher, name, None)
+    if var is None:
+        return ""
+    try:
+        raw = var.get()
+    except Exception as exc:
+        print(
+            f"WARNING: {context} var {name!r} failed to read ({exc}); skipping.",
+            file=sys.stderr,
+        )
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    # Anything else (MagicMock with a configured ``__str__``, ``True``,
+    # ``{}``, etc.) is NOT a legitimate value. ``str(raw).strip()``
+    # would coerce a MagicMock to its ``str()`` form and feed garbage
+    # to the server. Treat as empty so the flag is dropped.
+    return ""
+
+
 def _coerce_strict_gpu_index(raw):
     """Return ``raw`` as an int if it's a clean integer index, else ``None``.
 
@@ -681,11 +724,9 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_draft_n_min", "--draft-min"),
                             ("spec_draft_p_min", "--draft-p-min"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                         # ik_llama+mtp opt-in for a SEPARATE draft model: when the
                         # user hasn't checked "Use a separate draft model", suppress
                         # --model-draft AND the per-draft offload flags. Embedded
@@ -697,40 +738,38 @@ def emit_spec_args(launcher, backend, cmd):
                             # hold a stale path to a moved/deleted draft GGUF; mirror
                             # the main -m behaviour of resolving + skipping with a
                             # stderr warning.
-                            mp_var = getattr(launcher, "spec_draft_model", None)
-                            if mp_var is not None:
-                                mp = mp_var.get().strip()
-                                if mp:
-                                    # ``expanduser()`` so a saved/hand-edited
-                                    # config with ``~/models/draft.gguf``
-                                    # validates against the real file
-                                    # under ``$HOME`` instead of being
-                                    # silently skipped — ``Path("~/...")``
-                                    # is literal text on POSIX. Wrap in
-                                    # try/except: ``Path("~unknown_user/foo")``
-                                    # raises ``RuntimeError`` because the
-                                    # named user can't be resolved, and we
-                                    # don't want one malformed path to
-                                    # abort the entire arg-emission loop.
-                                    try:
-                                        draft_path = Path(mp).expanduser()
-                                        is_valid_file = draft_path.is_file()
-                                    except Exception as exc:
-                                        print(
-                                            f"WARNING: draft model path '{mp}' failed to resolve "
-                                            f"({type(exc).__name__}: {exc}); skipping "
-                                            f"--model-draft emission.",
-                                            file=sys.stderr,
-                                        )
-                                        is_valid_file = False
-                                        draft_path = None
-                                    if is_valid_file and draft_path is not None:
-                                        cmd.extend(["--model-draft", str(draft_path.resolve())])
-                                    elif draft_path is not None:
-                                        print(
-                                            f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
-                                            file=sys.stderr,
-                                        )
+                            mp = _safe_var_str(launcher, "spec_draft_model")
+                            if mp:
+                                # ``expanduser()`` so a saved/hand-edited
+                                # config with ``~/models/draft.gguf``
+                                # validates against the real file
+                                # under ``$HOME`` instead of being
+                                # silently skipped — ``Path("~/...")``
+                                # is literal text on POSIX. Wrap in
+                                # try/except: ``Path("~unknown_user/foo")``
+                                # raises ``RuntimeError`` because the
+                                # named user can't be resolved, and we
+                                # don't want one malformed path to
+                                # abort the entire arg-emission loop.
+                                try:
+                                    draft_path = Path(mp).expanduser()
+                                    is_valid_file = draft_path.is_file()
+                                except Exception as exc:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' failed to resolve "
+                                        f"({type(exc).__name__}: {exc}); skipping "
+                                        f"--model-draft emission.",
+                                        file=sys.stderr,
+                                    )
+                                    is_valid_file = False
+                                    draft_path = None
+                                if is_valid_file and draft_path is not None:
+                                    cmd.extend(["--model-draft", str(draft_path.resolve())])
+                                elif draft_path is not None:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
+                                        file=sys.stderr,
+                                    )
                             # ik_llama uses the same short-form draft offload flags.
                             # ``spec_draft_device`` is resolved through the
                             # CUDA_VISIBLE_DEVICES remap helper rather than read
@@ -742,11 +781,9 @@ def emit_spec_args(launcher, backend, cmd):
                                 ("spec_draft_ctk", "-ctkd"),
                                 ("spec_draft_ctv", "-ctvd"),
                             ]:
-                                var = getattr(launcher, var_name, None)
-                                if var is not None:
-                                    v = var.get().strip()
-                                    if v:
-                                        cmd.extend([flag, v])
+                                v = _safe_var_str(launcher, var_name)
+                                if v:
+                                    cmd.extend([flag, v])
                             devd_val = _resolve_draft_device_value(launcher)
                             if devd_val:
                                 cmd.extend(["-devd", devd_val])
@@ -757,31 +794,25 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_ngram_size_m", "--spec-ngram-size-m"),
                             ("spec_ngram_min_hits", "--spec-ngram-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     # suffix
                     if spec_type == "suffix":
                         for var_name, flag in [
                             ("spec_suffix_pattern_len", "--suffix-pattern-len"),
                             ("spec_suffix_max_depth", "--suffix-max-depth"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     # ik_llama extras.
                     autotune_var = getattr(launcher, "spec_autotune", None)
                     if autotune_var is not None and autotune_var.get():
                         cmd.append("--spec-autotune")
-                    dp_var = getattr(launcher, "spec_draft_params", None)
-                    if dp_var is not None:
-                        dp = dp_var.get().strip()
-                        if dp:
-                            cmd.extend(["-draft", dp])
+                    dp = _safe_var_str(launcher, "spec_draft_params")
+                    if dp:
+                        cmd.extend(["-draft", dp])
                     # Warn (don't crash) if the user set llama.cpp-only knobs while ik_llama is active.
                     for var_name, label in [
                         ("spec_draft_p_split", "--spec-draft-p-split"),
@@ -823,11 +854,9 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_draft_p_min", "--spec-draft-p-min"),
                             ("spec_draft_p_split", "--spec-draft-p-split"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                         # llama.cpp mainline's ``--spec-type draft-mtp`` uses
                         # an MTP head embedded INSIDE the main GGUF (the model
                         # file is the MTP-converted variant); there is NO
@@ -840,51 +869,47 @@ def emit_spec_args(launcher, backend, cmd):
                         # preserving the "flip back" UX), so suppress the
                         # emission here with a one-line advisory.
                         if spec_type == "draft-mtp":
-                            mp_var = getattr(launcher, "spec_draft_model", None)
-                            if mp_var is not None:
-                                mp = mp_var.get().strip()
-                                if mp:
-                                    print(
-                                        f"INFO: spec_type=draft-mtp uses the MTP head embedded in the main GGUF;\n"
-                                        f"     ignoring spec_draft_model='{mp}'. Switch to draft-simple/draft-eagle3\n"
-                                        f"     to use a separate draft model.",
-                                        file=sys.stderr,
-                                    )
+                            mp = _safe_var_str(launcher, "spec_draft_model")
+                            if mp:
+                                print(
+                                    f"INFO: spec_type=draft-mtp uses the MTP head embedded in the main GGUF;\n"
+                                    f"     ignoring spec_draft_model='{mp}'. Switch to draft-simple/draft-eagle3\n"
+                                    f"     to use a separate draft model.",
+                                    file=sys.stderr,
+                                )
                         else:
                             # Validate the draft model path before emitting —
                             # a saved config can hold a stale path to a
                             # moved/deleted draft GGUF; mirror the main -m
                             # behaviour of resolving + skipping with a
                             # stderr warning.
-                            mp_var = getattr(launcher, "spec_draft_model", None)
-                            if mp_var is not None:
-                                mp = mp_var.get().strip()
-                                if mp:
-                                    # ``expanduser()`` — same rationale as
-                                    # the ik_llama branch above. Wrap in
-                                    # try/except for the same reason too:
-                                    # ``Path("~unknown/foo")`` raises
-                                    # ``RuntimeError`` and would otherwise
-                                    # abort the rest of arg emission.
-                                    try:
-                                        draft_path = Path(mp).expanduser()
-                                        is_valid_file = draft_path.is_file()
-                                    except Exception as exc:
-                                        print(
-                                            f"WARNING: draft model path '{mp}' failed to resolve "
-                                            f"({type(exc).__name__}: {exc}); skipping "
-                                            f"--spec-draft-model emission.",
-                                            file=sys.stderr,
-                                        )
-                                        is_valid_file = False
-                                        draft_path = None
-                                    if is_valid_file and draft_path is not None:
-                                        cmd.extend(["--spec-draft-model", str(draft_path.resolve())])
-                                    elif draft_path is not None:
-                                        print(
-                                            f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
-                                            file=sys.stderr,
-                                        )
+                            mp = _safe_var_str(launcher, "spec_draft_model")
+                            if mp:
+                                # ``expanduser()`` — same rationale as
+                                # the ik_llama branch above. Wrap in
+                                # try/except for the same reason too:
+                                # ``Path("~unknown/foo")`` raises
+                                # ``RuntimeError`` and would otherwise
+                                # abort the rest of arg emission.
+                                try:
+                                    draft_path = Path(mp).expanduser()
+                                    is_valid_file = draft_path.is_file()
+                                except Exception as exc:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' failed to resolve "
+                                        f"({type(exc).__name__}: {exc}); skipping "
+                                        f"--spec-draft-model emission.",
+                                        file=sys.stderr,
+                                    )
+                                    is_valid_file = False
+                                    draft_path = None
+                                if is_valid_file and draft_path is not None:
+                                    cmd.extend(["--spec-draft-model", str(draft_path.resolve())])
+                                elif draft_path is not None:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
+                                        file=sys.stderr,
+                                    )
                         # ``spec_draft_device`` is resolved through the
                         # CUDA_VISIBLE_DEVICES remap helper (see ik_llama branch
                         # comment) so the value emitted matches what the binary
@@ -894,22 +919,18 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_draft_ctk", "--spec-draft-type-k"),
                             ("spec_draft_ctv", "--spec-draft-type-v"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                         devd_val = _resolve_draft_device_value(launcher)
                         if devd_val:
                             cmd.extend(["--spec-draft-device", devd_val])
                         cpu_moe_var = getattr(launcher, "spec_draft_cpu_moe", None)
                         if cpu_moe_var is not None and cpu_moe_var.get():
                             cmd.append("--spec-draft-cpu-moe")
-                        ncm_var = getattr(launcher, "spec_draft_n_cpu_moe", None)
-                        if ncm_var is not None:
-                            ncm = ncm_var.get().strip()
-                            if ncm:
-                                cmd.extend(["--spec-draft-n-cpu-moe", ncm])
+                        ncm = _safe_var_str(launcher, "spec_draft_n_cpu_moe")
+                        if ncm:
+                            cmd.extend(["--spec-draft-n-cpu-moe", ncm])
                     # llama.cpp has per-ngram-variant size knobs.
                     if spec_type == "ngram-simple":
                         for var_name, flag in [
@@ -917,44 +938,36 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_ngram_simple_size_m", "--spec-ngram-simple-size-m"),
                             ("spec_ngram_simple_min_hits", "--spec-ngram-simple-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     elif spec_type == "ngram-map-k":
                         for var_name, flag in [
                             ("spec_ngram_mapk_size_n", "--spec-ngram-map-k-size-n"),
                             ("spec_ngram_mapk_size_m", "--spec-ngram-map-k-size-m"),
                             ("spec_ngram_mapk_min_hits", "--spec-ngram-map-k-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     elif spec_type == "ngram-map-k4v":
                         for var_name, flag in [
                             ("spec_ngram_mapk4v_size_n", "--spec-ngram-map-k4v-size-n"),
                             ("spec_ngram_mapk4v_size_m", "--spec-ngram-map-k4v-size-m"),
                             ("spec_ngram_mapk4v_min_hits", "--spec-ngram-map-k4v-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     elif spec_type == "ngram-mod":
                         for var_name, flag in [
                             ("spec_ngram_mod_n_min", "--spec-ngram-mod-n-min"),
                             ("spec_ngram_mod_n_max", "--spec-ngram-mod-n-max"),
                             ("spec_ngram_mod_n_match", "--spec-ngram-mod-n-match"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     # ngram-cache has no extra knobs.
                     # Warn (don't crash) if ik_llama-only knobs are set while llama.cpp is active.
                     for var_name, label in [
@@ -1027,38 +1040,13 @@ def emit_reasoning_args(launcher, cmd, supports_flag=None):
         return ok
 
     def _safe_get_str(name: str) -> str:
-        """Read ``launcher.<name>.get()`` and return a stripped string.
-
-        A mocked launcher / freshly-rebuilt SpecTab caught between
-        resync and the user's first edit could return non-string
-        values (``None`` from an unconfigured MagicMock, etc.);
-        calling ``.strip()`` on that would raise and abort the
-        REST of the reasoning block under the previous outer
-        ``try``. Coerce defensively so each field's failure is
-        isolated to that field.
+        """Closure-friendly wrapper around the module-level
+        ``_safe_var_str``. Kept as a thin shim so the rest of this
+        function reads naturally without threading ``launcher``
+        through every call site. See ``_safe_var_str`` for the
+        defensive-coercion rationale.
         """
-        var = getattr(launcher, name, None)
-        if var is None:
-            return ""
-        try:
-            raw = var.get()
-        except Exception as exc:
-            print(
-                f"WARNING: reasoning var {name!r} failed to read ({exc}); skipping.",
-                file=sys.stderr,
-            )
-            return ""
-        if isinstance(raw, str):
-            return raw.strip()
-        # Anything else (MagicMock with a configured ``__str__``,
-        # ``True``, ``{}``, etc.) is NOT a legitimate reasoning value.
-        # The previous ``str(raw).strip()`` fallback would coerce a
-        # ``MagicMock(...)`` to its ``str()`` form (``"<MagicMock
-        # id=…>"``) and feed that as the flag value — looks like a
-        # bug in some downstream tooling and the server would reject
-        # the unknown reasoning mode. Treat as empty so the flag
-        # is dropped instead of emitting bogus content.
-        return ""
+        return _safe_var_str(launcher, name, context="reasoning")
 
     rm = _safe_get_str("reasoning_mode")
     if rm in ("on", "off", "auto") and _ok("--reasoning"):

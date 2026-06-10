@@ -45,10 +45,7 @@ def test_build_runner_reports_dropped_output_after_queue_catches_up():
     while not runner.events.empty():
         queued.append(runner.events.get_nowait())
 
-    assert any(
-        kind == EVENT_LINE and "skipped 1 build output line" in str(payload)
-        for kind, payload in queued
-    )
+    assert any(kind == EVENT_LINE and "skipped 1 build output line" in str(payload) for kind, payload in queued)
 
 
 def test_build_runner_shutdown_escalates_and_clears_proc(monkeypatch):
@@ -192,7 +189,7 @@ def test_build_runner_cancel_not_blocked_by_stdout_read(monkeypatch):
 def test_recommend_jobs_does_not_default_to_all_logical_cpus(monkeypatch):
     fake_psutil = types.SimpleNamespace(
         cpu_count=lambda logical=False: 24 if logical is False else 48,
-        virtual_memory=lambda: types.SimpleNamespace(total=377 * (1024 ** 3)),
+        virtual_memory=lambda: types.SimpleNamespace(total=377 * (1024**3)),
     )
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     monkeypatch.setattr(detection.os, "cpu_count", lambda: 48)
@@ -207,7 +204,7 @@ def test_recommend_jobs_does_not_default_to_all_logical_cpus(monkeypatch):
 def test_recommend_jobs_caps_low_ram_hosts(monkeypatch):
     fake_psutil = types.SimpleNamespace(
         cpu_count=lambda logical=False: 4 if logical is False else 8,
-        virtual_memory=lambda: types.SimpleNamespace(total=12 * (1024 ** 3)),
+        virtual_memory=lambda: types.SimpleNamespace(total=12 * (1024**3)),
     )
     monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
     monkeypatch.setattr(detection.os, "cpu_count", lambda: 8)
@@ -242,3 +239,75 @@ def test_saved_build_script_refuses_source_ancestor_as_build_dir(tmp_path):
 
     with pytest.raises(ValueError, match="Refusing unsafe build dir"):
         plan_to_shell_script(plan)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CR-4467921108 (Critical): ``clean_build=True`` recurse-delete must
+# refuse non-empty directories that don't look like a build output.
+# Guards against ``build_dir = "$HOME"`` typos becoming data loss.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_assert_safe_to_purge_allows_missing_directory(tmp_path):
+    target = tmp_path / "build-not-yet"
+    # No exception — the launcher will create it.
+    build_runner._assert_safe_to_purge(target)
+
+
+def test_assert_safe_to_purge_allows_empty_directory(tmp_path):
+    target = tmp_path / "build-empty"
+    target.mkdir()
+    build_runner._assert_safe_to_purge(target)
+
+
+def test_assert_safe_to_purge_allows_cmake_cache(tmp_path):
+    target = tmp_path / "build-with-cache"
+    target.mkdir()
+    (target / "CMakeCache.txt").write_text("# cmake stamp")
+    (target / "random-output.o").write_bytes(b"object")
+    build_runner._assert_safe_to_purge(target)
+
+
+def test_assert_safe_to_purge_allows_launcher_marker(tmp_path):
+    target = tmp_path / "build-with-marker"
+    target.mkdir()
+    (target / build_runner._BUILD_DIR_MARKER).touch()
+    (target / "random-output.o").write_bytes(b"object")
+    build_runner._assert_safe_to_purge(target)
+
+
+def test_assert_safe_to_purge_rejects_non_empty_no_marker(tmp_path):
+    target = tmp_path / "user-home-like"
+    target.mkdir()
+    (target / "important-thing.txt").write_text("hello")
+    with pytest.raises(ValueError, match="does not look like a CMake/Ninja/Make build output"):
+        build_runner._assert_safe_to_purge(target)
+
+
+def test_plan_to_shell_script_embeds_purge_safety_gate(tmp_path):
+    """``rm -rf $BUILD_DIR`` must be wrapped in the marker-check guard."""
+    src = tmp_path / "checkout"
+    src.mkdir()
+    build_dir = tmp_path / "build"
+    plan = BuildPlan(
+        backend="llama.cpp",
+        source_dir=str(src),
+        build_dir=str(build_dir),
+        cmake_args=[],
+        clean_build=True,
+    )
+    script = plan_to_shell_script(plan)
+    # The literal recurse-delete must NOT appear without the
+    # surrounding guard. Pin both the guard and the conditional
+    # ``rm -rf`` invocation.
+    assert "CMakeCache.txt" in script
+    assert build_runner._BUILD_DIR_MARKER in script
+    assert "refusing to rm -rf" in script
+    # The unconditional pre-CR line should be gone.
+    lines = [line.strip() for line in script.splitlines()]
+    assert 'rm -rf "$BUILD_DIR"' in lines  # appears inside the guard
+    # The guard wraps the rm -rf inside an ``if [ -d "$BUILD_DIR" ]; then``
+    # block, so the rm line must appear AFTER the existence check.
+    rm_idx = lines.index('rm -rf "$BUILD_DIR"')
+    guard_idx = lines.index('if [ -d "$BUILD_DIR" ]; then')
+    assert guard_idx < rm_idx, "rm -rf must live inside the existence/marker guard"
