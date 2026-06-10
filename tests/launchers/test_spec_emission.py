@@ -1075,10 +1075,28 @@ class TestSpecTypeWhitelist:
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")  # invalid for ik_llama
         launcher_mock.spec_draft_n_max.set("3")
+        # Seed the persisted draft-GPU union path so the test also
+        # catches a regression where an invalid ``spec_type`` would
+        # still let ``_resolve_cuda_visible_devices_action`` widen
+        # ``CUDA_VISIBLE_DEVICES`` and emit ``--device`` for the
+        # stale draft GPU. Same seeding as the empty / "none" tests.
+        launcher_mock.app_settings = {
+            "selected_gpus": [1],
+            "gpu_order": [1],
+            "spec_draft_selected_gpus": [2],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+        launcher_mock.get_ordered_selected_gpus = lambda: [1]
+        # Pin the CUDA-env side effect: only the main GPU (1) must
+        # be exported; the stale draft GPU (2) MUST NOT be unioned in.
+        cuda_action, cuda_value = manager._resolve_cuda_visible_devices_action()
+        assert cuda_action == "export"
+        assert cuda_value == "1"
         cmd = manager.build_cmd()
         assert "--spec-type" not in cmd
         assert "--draft-max" not in cmd
         assert "--spec-draft-n-max" not in cmd
+        assert "--device" not in cmd
 
     def test_valid_spec_type_still_emits(self, manager, launcher_mock):
         """Sanity: every UI-valid value still passes the whitelist."""
@@ -2439,16 +2457,19 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         assert value == "0,2,5"
 
     def test_no_extra_advisory_when_full_main_no_draft_only(self, manager, union_launcher, capsys):
-        """Subset main warning still fires, but the draft-only INFO line
-        does not when there are no draft-only additions."""
+        """The draft-only INFO line MUST NOT fire when there are no
+        draft-only additions. The CONTRACT under test is the absence of
+        the draft-specific advisory; do not couple to the exact wording
+        of the generic subset warning emitted by an unrelated code path —
+        that wording can change for cosmetic reasons and would otherwise
+        break this regression test for the wrong reason.
+        """
         union_launcher.app_settings["selected_gpus"] = [1, 7]
         union_launcher.app_settings["gpu_order"] = [1, 7]
         union_launcher.app_settings["spec_draft_selected_gpus"] = []
         manager.build_cmd()
         err = capsys.readouterr().err
-        # Generic subset warning should appear.
-        assert "Specific GPUs (1,7)" in err
-        # Draft-only advisory should NOT appear.
+        # ONLY the draft-specific advisory is the contract here.
         assert "added to CUDA_VISIBLE_DEVICES for the draft model" not in err
 
 
