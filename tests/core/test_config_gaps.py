@@ -305,8 +305,11 @@ class TestLoadConfiguration:
         # so the test doesn't go stale the next time the first entry in
         # ``chat_templates.json`` is renamed/reordered. The behaviour
         # under audit is "remap to whatever the first available template
-        # is" — not the literal name "ChatML".
-        expected_fallback = next(iter(launcher._all_templates.keys()))
+        # is" — not the literal name "ChatML". Use the empty-string
+        # default so a stripped fixture with no templates loaded
+        # doesn't crash with ``StopIteration`` (the launcher itself
+        # falls back to ``""`` in that case).
+        expected_fallback = next(iter(launcher._all_templates.keys()), "")
         # Saved name no longer exists in chat_templates.json (legacy
         # alias was cleaned up). _apply_loaded_configuration must
         # remap to the first available key so .set() doesn't leave
