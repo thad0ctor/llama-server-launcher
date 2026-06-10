@@ -206,8 +206,19 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str], dict[str, str]]:
     # to ``Popen`` so the variable is available.
     env = os.environ.copy()
     env["LLAMA_LAUNCHER_WRAPPER_PATH"] = wrapper_path
+    # ``/d`` on BOTH cmd invocations disables the
+    # ``HKLM\Software\Microsoft\Command Processor\AutoRun`` (and HKCU)
+    # hook so a user-set or admin-set AutoRun batch script doesn't
+    # execute before our ``call "%LLAMA_LAUNCHER_WRAPPER_PATH%"`` line.
+    # Without ``/d``, an AutoRun line like ``@echo off`` or
+    # ``cls`` would be benign, but an aggressive one (changing
+    # current directory, setting env vars, running activate scripts)
+    # could interfere with the wrapper's exit-code echo / self-delete
+    # invariants. ``/d`` is the documented opt-out for this exact
+    # use case. Same flag on both the outer (``cmd /c start``) and
+    # inner (``cmd /k``) shells.
     return (
-        ["cmd", "/c", "start", "", "cmd", "/k", 'call "%LLAMA_LAUNCHER_WRAPPER_PATH%"'],
+        ["cmd", "/d", "/c", "start", "", "cmd", "/d", "/k", 'call "%LLAMA_LAUNCHER_WRAPPER_PATH%"'],
         [wrapper_path, payload_path],
         env,
     )

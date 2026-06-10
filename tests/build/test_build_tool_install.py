@@ -149,12 +149,18 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     # in the /k argument from mangling temp paths that legitimately
     # contain ``%`` (e.g. under a ``%-prefixed username); the env
     # var carries the path as an opaque single-string lookup.
+    # ``/d`` on both cmd invocations disables ``Command
+    # Processor\AutoRun`` so user/admin AutoRun batch scripts can't
+    # run before the wrapper. Documented opt-out for this exact
+    # use case.
     assert argv == [
         "cmd",
+        "/d",
         "/c",
         "start",
         "",
         "cmd",
+        "/d",
         "/k",
         'call "%LLAMA_LAUNCHER_WRAPPER_PATH%"',
     ]
