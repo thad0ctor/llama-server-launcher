@@ -415,7 +415,31 @@ def default_selected_repo_paths(paths: list[str]) -> tuple[str, ...]:
             for path in paths
             if Path(path).parent == primary_path.parent and Path(path).name.lower() == index_lookup
         ]
-        return tuple(dict.fromkeys([*primary_weight_shards, *index_files]))
+        # Same-directory model metadata (config.json, tokenizer.json,
+        # tokenizer_config.json, vocab.*, special_tokens_map.json,
+        # generation_config.json, etc.) is required to actually load
+        # the checkpoint — a transformers / safetensors loader fails
+        # without ``config.json`` even if the weight shards downloaded
+        # cleanly. CR-4467748557 flagged that the previous default
+        # selection only grabbed weights + index, forcing the user
+        # to manually check every metadata file. Auto-include any
+        # non-weight, non-index file that lives in the same folder
+        # as the primary weight. ``classify_repo_file`` returns
+        # ``"weights"`` / ``"gguf"`` / ``"mmproj"`` for the things
+        # we explicitly track; anything else in the same dir is
+        # auxiliary metadata and belongs in the default bundle.
+        primary_shards_set = set(primary_weight_shards)
+        index_files_set = set(index_files)
+        metadata_files = [
+            path
+            for path in paths
+            if Path(path).parent == primary_path.parent
+            and classify_repo_file(path) != "weights"
+            and Path(path).name.lower() != index_lookup
+            and path not in primary_shards_set
+            and path not in index_files_set
+        ]
+        return tuple(dict.fromkeys([*primary_weight_shards, *index_files, *metadata_files]))
     return tuple(paths[:1])
 
 

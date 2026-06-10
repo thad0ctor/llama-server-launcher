@@ -76,7 +76,15 @@ class SettingsTab:
         # Font size: convert the persisted integer to our two-part state
         # (radio choice + custom Entry). If the stored size matches a preset,
         # select that preset; otherwise select "custom" and seed the entry.
-        stored_size = int(s.get("ui_font_size", 0) or 0)
+        # ``int(...)`` raises ValueError/TypeError on a corrupt entry
+        # (e.g. ``"large"`` from a hand-edited config, or a list/dict left
+        # behind by a botched migration). Treat any non-coercible value
+        # the same as "0" so a single bad field doesn't prevent the
+        # Settings tab from ever loading.
+        try:
+            stored_size = int(s.get("ui_font_size", 0) or 0)
+        except (TypeError, ValueError):
+            stored_size = 0
         preset_values = {int(v) for _, v in self.FONT_SIZE_PRESETS}
         if stored_size in preset_values:
             self.font_size_choice_var = tk.StringVar(value=str(stored_size))

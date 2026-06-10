@@ -28,7 +28,13 @@ try:
     import requests as _requests  # noqa: F401 — probed at import time
 
     _HAS_REQUESTS = True
-except ImportError:  # pragma: no cover - exercised in stripped-down envs
+except Exception:  # pragma: no cover - exercised in stripped-down envs
+    # Catch ``Exception``, not just ``ImportError``: ``requests`` itself
+    # can raise things like ``OSError`` (corrupt cert bundle), AttributeError
+    # (broken transitive dep), or a SSLError at import time. Without the
+    # broader catch, pytest can't even *collect* this module in those
+    # environments, which is exactly the case the probe is supposed to
+    # guard against.
     _HAS_REQUESTS = False
 
 from modules.about_tab import (

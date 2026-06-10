@@ -237,9 +237,16 @@ class TestLoadConfiguration:
         assert launcher.app_settings["gpu_order"] == [2, 0]
         launcher._update_gpu_checkboxes.assert_called()
 
-    def test_gpu_order_with_duplicates_is_cleaned(self, rich_launcher_factory, tmp_path):
-        # Duplicates in gpu_order (e.g. produced by a buggy drag-reorder) are
-        # deduplicated by the set() filter, and missing selections are appended.
+    def test_gpu_order_preserves_duplicates_and_appends_missing(self, rich_launcher_factory, tmp_path):
+        # Document the *actual* filter behaviour: the membership check
+        # is set-based (``g in selected_set``), so duplicates in
+        # ``gpu_order`` are NOT deduplicated — they survive as long as
+        # every entry references a currently-selected GPU. Missing
+        # selections are then appended to the end. CR-4467748557
+        # flagged the previous test name/comment as ambiguous; pin
+        # down the contract with an explicit count assertion so a
+        # future refactor that silently switches to dedup-by-set
+        # trips this test.
         cm, launcher = self._prepare(
             rich_launcher_factory,
             tmp_path,
@@ -247,12 +254,15 @@ class TestLoadConfiguration:
         )
         with patch("modules.config.messagebox"):
             cm.load_configuration()
-        # The filter is set-based so duplicates survive if they're in
-        # selected_set — document that behaviour and also verify the missing
-        # selection is appended.
         order = launcher.app_settings["gpu_order"]
-        assert 0 in order  # missing selected GPU appended
-        assert set(order) >= {0, 1, 2}
+        # Duplicate ``1`` is preserved (not deduplicated).
+        assert order.count(1) == 2
+        # ``2`` from the input survives once; ``0`` (missing from
+        # the input) is appended at the end.
+        assert order.count(2) == 1
+        assert order.count(0) == 1
+        assert order[-1] == 0
+        assert set(order) == {0, 1, 2}
 
     def test_gpu_order_drops_entries_not_in_selected(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(
