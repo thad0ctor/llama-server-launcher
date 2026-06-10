@@ -1026,42 +1026,65 @@ def emit_reasoning_args(launcher, cmd, supports_flag=None):
             )
         return ok
 
-    try:
-        rm_var = getattr(launcher, "reasoning_mode", None)
-        if rm_var is not None:
-            rm = rm_var.get().strip()
-            if rm and rm in ("on", "off", "auto") and _ok("--reasoning"):
-                cmd.extend(["--reasoning", rm])
-        rf_var = getattr(launcher, "reasoning_format", None)
-        if rf_var is not None:
-            rf = rf_var.get().strip()
-            if rf and _ok("--reasoning-format"):
-                cmd.extend(["--reasoning-format", rf])
-        rb_var = getattr(launcher, "reasoning_budget", None)
-        if rb_var is not None:
-            rb = rb_var.get().strip()
-            if rb:
-                # Defend against a stale non-integer value persisted from a
-                # pre-validation config. The Entry validator blocks new
-                # bad input; this catches anything that slipped through.
-                try:
-                    int(rb)
-                    if _ok("--reasoning-budget"):
-                        cmd.extend(["--reasoning-budget", rb])
-                except ValueError:
-                    print(f"WARNING: --reasoning-budget value {rb!r} is not an integer; skipping.", file=sys.stderr)
-        rbm_var = getattr(launcher, "reasoning_budget_message", None)
-        if rbm_var is not None:
-            rbm = rbm_var.get().strip()
-            if rbm and _ok("--reasoning-budget-message"):
-                cmd.extend(["--reasoning-budget-message", rbm])
-        ctk_var = getattr(launcher, "chat_template_kwargs", None)
-        if ctk_var is not None:
-            ctk = ctk_var.get().strip()
-            if ctk and _ok("--chat-template-kwargs"):
-                cmd.extend(["--chat-template-kwargs", ctk])
-    except Exception as exc:
-        print(f"WARNING: reasoning/chat-template emission raised: {exc}", file=sys.stderr)
+    def _safe_get_str(name: str) -> str:
+        """Read ``launcher.<name>.get()`` and return a stripped string.
+
+        A mocked launcher / freshly-rebuilt SpecTab caught between
+        resync and the user's first edit could return non-string
+        values (``None`` from an unconfigured MagicMock, etc.);
+        calling ``.strip()`` on that would raise and abort the
+        REST of the reasoning block under the previous outer
+        ``try``. Coerce defensively so each field's failure is
+        isolated to that field.
+        """
+        var = getattr(launcher, name, None)
+        if var is None:
+            return ""
+        try:
+            raw = var.get()
+        except Exception as exc:
+            print(
+                f"WARNING: reasoning var {name!r} failed to read ({exc}); skipping.",
+                file=sys.stderr,
+            )
+            return ""
+        if isinstance(raw, str):
+            return raw.strip()
+        if raw is None:
+            return ""
+        return str(raw).strip()
+
+    rm = _safe_get_str("reasoning_mode")
+    if rm in ("on", "off", "auto") and _ok("--reasoning"):
+        cmd.extend(["--reasoning", rm])
+
+    rf = _safe_get_str("reasoning_format")
+    if rf and _ok("--reasoning-format"):
+        cmd.extend(["--reasoning-format", rf])
+
+    rb = _safe_get_str("reasoning_budget")
+    if rb:
+        # Defend against a stale non-integer value persisted from a
+        # pre-validation config. The Entry validator blocks new
+        # bad input; this catches anything that slipped through.
+        try:
+            int(rb)
+        except ValueError:
+            print(
+                f"WARNING: --reasoning-budget value {rb!r} is not an integer; skipping.",
+                file=sys.stderr,
+            )
+        else:
+            if _ok("--reasoning-budget"):
+                cmd.extend(["--reasoning-budget", rb])
+
+    rbm = _safe_get_str("reasoning_budget_message")
+    if rbm and _ok("--reasoning-budget-message"):
+        cmd.extend(["--reasoning-budget-message", rbm])
+
+    ctk = _safe_get_str("chat_template_kwargs")
+    if ctk and _ok("--chat-template-kwargs"):
+        cmd.extend(["--chat-template-kwargs", ctk])
 
 
 def emit_kv_unify_args(launcher, backend, cmd):

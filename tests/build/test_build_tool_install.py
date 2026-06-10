@@ -136,17 +136,26 @@ def test_terminal_launcher_uses_cmd_start_on_windows(monkeypatch):
     argv = popen.call_args.args[0]
     # ``_cmd_keep_open`` writes the user command to a temp PAYLOAD
     # .cmd script and a separate WRAPPER .cmd that ``call``s into
-    # it. ``cmd /k`` points at a ``call "<wrapper>"`` token. The
-    # explicit quoting around the path is what protects against
-    # paths containing ``&`` / ``|`` / ``^`` (e.g. usernames like
-    # ``AT&T``) — without it, cmd would chain on the metacharacter
-    # and the wrapper would never run.
-    assert argv[:6] == ["cmd", "/c", "start", "", "cmd", "/k"]
-    import re as _re
-
-    call_token_match = _re.fullmatch(r'call "(.+\.cmd)"', argv[6])
-    assert call_token_match, f'expected /k arg to be ``call "<wrapper>"``, got {argv[6]!r}'
-    wrapper_path = call_token_match.group(1)
+    # it. ``cmd /k`` points at a ``call "%LLAMA_LAUNCHER_WRAPPER_PATH%"``
+    # token — the wrapper path is propagated via an environment
+    # variable (``Popen(env=...)``) instead of embedded in the
+    # /k argument string. This avoids cmd's ``%FOO%`` expansion
+    # in the /k argument from mangling temp paths that legitimately
+    # contain ``%`` (e.g. under a ``%-prefixed username); the env
+    # var carries the path as an opaque single-string lookup.
+    assert argv == [
+        "cmd",
+        "/c",
+        "start",
+        "",
+        "cmd",
+        "/k",
+        'call "%LLAMA_LAUNCHER_WRAPPER_PATH%"',
+    ]
+    # The actual wrapper path lives in the env kwarg passed to Popen.
+    env_kwarg = popen.call_args.kwargs["env"]
+    wrapper_path = env_kwarg["LLAMA_LAUNCHER_WRAPPER_PATH"]
+    assert wrapper_path.endswith(".cmd"), f"expected .cmd wrapper path, got {wrapper_path!r}"
     # Inspect the generated wrapper to verify the contract: it
     # prints the running banner, ``call``s the payload, echoes the
     # exit code, and self-deletes.

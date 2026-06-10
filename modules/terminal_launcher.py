@@ -29,7 +29,7 @@ def _bash_hold_open(command: str) -> str:
     )
 
 
-def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
+def _cmd_keep_open(command: str) -> tuple[list[str], list[str], dict[str, str]]:
     """Return a Windows ``cmd`` invocation that reports success/failure.
 
     Writes the user command to a SEPARATE payload ``.cmd`` file and a
@@ -184,19 +184,32 @@ def _cmd_keep_open(command: str) -> tuple[list[str], list[str]]:
     # sees a broken terminal. ``subprocess.list2cmdline`` (used by
     # ``Popen`` on Windows when argv is a list) quotes args containing
     # whitespace or quote chars but does NOT escape ``&`` / ``|`` /
-    # ``^``, so we have to wrap the path ourselves. Also escape
-    # literal ``%`` in the wrapper path because cmd parses the
-    # ``/k`` argument string and would otherwise expand any
-    # ``%FOO%`` substring as an env-var reference at launch time.
-    # The ``%=%`` dummy-expansion trick: inserting ``%=%``
-    # between two ``%`` characters breaks cmd's variable-
-    # reference matching because ``=`` is not valid in a name.
-    # ``tempfile.mkstemp`` paths don't normally contain ``%`` but
-    # an exotic ``%TMP%`` value would expose the gap.
-    wrapper_path_escaped = wrapper_path.replace("%", "%=%")
+    # ``^``, so we have to wrap the path ourselves.
+    #
+    # Percent signs in ``wrapper_path`` ALSO need handling because
+    # cmd expands ``%FOO%`` in the ``/k`` argument string at launch
+    # time. The previous ``%=%`` "dummy-expansion" trick was wrong:
+    # cmd expands the inner ``%=%`` to an empty string FIRST and the
+    # surrounding ``%`` halves still chain together as a real
+    # variable reference, so a path under ``C:\tmp\%foo%\…``
+    # ended up looking up ``%foo%`` and dropping the literal
+    # percent characters. ``%%`` only works inside batch FILES, not
+    # in a command-line argument.
+    #
+    # Reliable fix: pass the path through an env var the new cmd
+    # inherits. ``cmd /k "call %LLAMA_LAUNCHER_WRAPPER_PATH%"``
+    # expands the var inside the NEW cmd process, and ``Popen``
+    # propagates our ``env=`` mapping into it. The wrapper-path
+    # value itself is opaque to cmd — even if it contains ``%``
+    # or ``&`` or ``|``, the env-var expansion treats it as a
+    # single literal string. Caller passes the returned ``env``
+    # to ``Popen`` so the variable is available.
+    env = os.environ.copy()
+    env["LLAMA_LAUNCHER_WRAPPER_PATH"] = wrapper_path
     return (
-        ["cmd", "/c", "start", "", "cmd", "/k", f'call "{wrapper_path_escaped}"'],
+        ["cmd", "/c", "start", "", "cmd", "/k", 'call "%LLAMA_LAUNCHER_WRAPPER_PATH%"'],
         [wrapper_path, payload_path],
+        env,
     )
 
 
@@ -360,9 +373,15 @@ def open_command_in_terminal(command: str, *, cwd: str | Path | None = None) -> 
         return
 
     if sys.platform.startswith("win"):
-        argv, script_paths = _cmd_keep_open(command)
+        argv, script_paths, env = _cmd_keep_open(command)
         try:
-            subprocess.Popen(argv, cwd=cwd_text)
+            # ``env=`` propagates ``LLAMA_LAUNCHER_WRAPPER_PATH`` to
+            # the new cmd process so the ``%LLAMA_LAUNCHER_WRAPPER_PATH%``
+            # reference inside the ``/k`` argument string expands
+            # to the wrapper-script path opaquely. Without this,
+            # ``cmd`` would see the unset variable and the ``call``
+            # would fall through to literal ``call ""``.
+            subprocess.Popen(argv, cwd=cwd_text, env=env)
         except Exception:
             # ``Popen`` blew up before the inner ``cmd /k`` had a
             # chance to execute the scripts' self-delete lines.

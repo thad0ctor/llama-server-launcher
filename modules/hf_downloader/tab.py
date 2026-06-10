@@ -755,6 +755,27 @@ class HuggingFaceDownloaderTab:
         self._start_runner("list", payload)
 
     def _on_download(self):
+        # Guard against acting on selections that the UI isn't
+        # currently rendering. ``_selected_target_vars`` is
+        # PRESERVED across transient empty-state renders (first
+        # paint before Main tab populates ``model_dirs``, user
+        # temporarily clearing all model dirs in Settings) so the
+        # user's prior selection survives the empty tick. But if
+        # the user clicks Download in THAT moment, they'd be
+        # downloading to a directory the UI says is "no model
+        # directories configured" — confusing and almost
+        # certainly not what they want. Refuse the download with
+        # an actionable message instead of silently fetching to
+        # an invisible target. The check uses the launcher's
+        # live ``model_dirs`` list — the same source
+        # ``_refresh_target_rows`` reads.
+        live_model_dirs = list(getattr(self.launcher, "model_dirs", []) or [])
+        if not live_model_dirs:
+            messagebox.showerror(
+                "No model directories configured",
+                "Add at least one model directory on the Main tab before downloading.",
+            )
+            return
         selected_targets = [path for path, var in self._selected_target_vars.items() if bool(var.get())]
         if not selected_targets:
             messagebox.showerror("No target directory", "Select at least one model directory target.")
