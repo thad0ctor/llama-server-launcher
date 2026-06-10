@@ -235,17 +235,39 @@ def coerce_spec_draft_selected_gpus(raw_value):
     if not isinstance(raw_value, list):
         return []
     cleaned = []
+    # Mirror ``spec_launch._coerce_strict_gpu_index`` exactly so the
+    # persistence layer can't silently admit values the launch path
+    # would reject. Without this, ``int(entry)`` would coerce
+    # ``1.9`` / ``"1.0"`` / ``" 1"`` to GPU 1 here, persist into
+    # ``app_settings``, and the strict launch-time coercion in
+    # ``_resolve_draft_device_value`` would either drop or warn —
+    # but the wrong UI state would already be on disk.
+    import re as _re
+
     for entry in raw_value:
         if isinstance(entry, bool):
             # bool is a subclass of int but doesn't make sense as a GPU id
             continue
         if isinstance(entry, int):
-            cleaned.append(entry)
-        else:
-            try:
-                cleaned.append(int(entry))
-            except (TypeError, ValueError):
-                continue
+            # Reject negative indices: CUDA device ids are always
+            # non-negative. A persisted ``-1`` from a bug elsewhere
+            # would emit ``CUDA-1`` and fail at runtime.
+            if entry >= 0:
+                cleaned.append(entry)
+            continue
+        if isinstance(entry, str):
+            # Strict ``[+-]?\d+`` form ONLY — reject ``"1.0"`` / ``"1e0"`` /
+            # ``"0x1"`` / ``" 1"`` (trailing whitespace, hex, exponential,
+            # decimal). ``int(...)`` would happily eat the first two.
+            if _re.fullmatch(r"[+-]?\d+", entry):
+                try:
+                    value = int(entry)
+                except ValueError:
+                    continue
+                if value >= 0:
+                    cleaned.append(value)
+        # Floats / complex / objects: drop silently. ``int(1.9) == 1``
+        # would corrupt the GPU id.
     return cleaned
 
 

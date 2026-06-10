@@ -24,6 +24,17 @@ try:
 except ImportError:
     requests = None
     REQUESTS_AVAILABLE = False
+except Exception as exc:
+    # A binary-incompatible or partially installed ``requests``
+    # (e.g. a broken ``urllib3`` extension after a Python upgrade)
+    # can raise non-ImportError exceptions at import time.
+    # ``requests`` is OPTIONAL — it's only used for the version-check
+    # / auto-update flows — so we want the rest of the About tab to
+    # still load. Mirror the ``modules.system`` pattern (which does
+    # the same for its ``requests`` / ``psutil`` imports).
+    requests = None
+    REQUESTS_AVAILABLE = False
+    print(f"Warning: requests import failed: {exc}", file=sys.stderr)
 
 VERSION_CHECK_POLL_MS = 100
 _VERSION_CHECK_COMPLETE = object()
