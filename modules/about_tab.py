@@ -233,6 +233,28 @@ for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
                 echo "Preserving $dirname"
                 ;;
             *)
+                # ALSO preserve any user-owned gitignored directory —
+                # the backup loop above already skipped these via
+                # ``git check-ignore``, so deleting them here would
+                # destroy user data that was never backed up. Common
+                # examples on a real install: ``models/``,
+                # ``.cache/``, ``build-cuda/``, anything the user
+                # added to ``.gitignore`` for the project's runtime
+                # layout. Same ``git check-ignore`` → ``.gitignore``
+                # fallback as the backup loop.
+                ignored=0
+                if command -v git >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} rev-parse --is-inside-work-tree >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} check-ignore -q -- "$dirname" 2>/dev/null; then
+                    ignored=1
+                elif [ -f {q_current_dir}/.gitignore ] \\
+                     && printf '%s\\n%s\\n%s\\n%s\\n' "$dirname" "$dirname/" "/$dirname" "/$dirname/" | grep -Fxqf - {q_current_dir}/.gitignore 2>/dev/null; then
+                    ignored=1
+                fi
+                if [ "$ignored" = "1" ]; then
+                    echo "Preserving $dirname (gitignored)"
+                    continue
+                fi
                 echo "Removing directory: $dirname"
                 rm -rf "$dir"
                 ;;
