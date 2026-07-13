@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from dataclasses import dataclass, field
 
 
@@ -192,10 +193,16 @@ def collect_columns(rows: list[ResultRow]) -> list[str]:
 # apostrophe to neutralise formula injection (CWE-1236).
 _CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
 
+# A cell that is nothing but a signed integer/float is never a formula, so it
+# must NOT be apostrophe-prefixed — otherwise legitimate negative values like
+# ``-1`` (``-ngl -1`` = "all layers") or ``main_gpu`` columns would be turned
+# into the text string ``'-1`` for spreadsheet consumers.
+_NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
 
 def _csv_safe(value: str) -> str:
     text = "" if value is None else str(value)
-    if text[:1] in _CSV_FORMULA_PREFIXES:
+    if text[:1] in _CSV_FORMULA_PREFIXES and not _NUMERIC_RE.fullmatch(text):
         return "'" + text
     return text
 

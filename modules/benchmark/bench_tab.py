@@ -707,7 +707,7 @@ class BenchmarkTab:
                     self._handle_event(kind, payload)
                 except tk.TclError:
                     # A widget was torn down under us; stop polling cleanly.
-                    self._poll_after_id = None
+                    self._stop_polling_on_teardown()
                     return
                 except Exception:
                     print(f"BenchmarkTab: error handling event {kind!r}:", file=sys.stderr)
@@ -720,6 +720,20 @@ class BenchmarkTab:
             pass
         except tk.TclError:
             # Root/widgets destroyed while draining; stop rescheduling.
+            self._stop_polling_on_teardown()
+            return
+        # Liveness fallback: the worker can drop its terminal event under queue
+        # saturation + cancel (bench_runner._emit_event drops on a full queue
+        # once cancelled). Without this, the worker would exit but the UI would
+        # never leave the "running" state (Start stuck disabled, Cancel a
+        # no-op). Once the thread is dead AND the queue is fully drained, no
+        # terminal event is still coming, so finalise here.
+        if not self.runner.is_running and self.runner.events.empty():
+            self._set_running(False)
+            if self.status_var.get().strip() in ("", "Running…", "Cancelling…") or self.status_var.get().startswith(
+                "Running "
+            ):
+                self.status_var.set("Stopped.")
             self._poll_after_id = None
             return
         delay = RUNNER_CATCHUP_POLL_MS if (had_events and drained >= RUNNER_MAX_EVENTS_PER_POLL) else RUNNER_POLL_MS
@@ -727,7 +741,23 @@ class BenchmarkTab:
             self._poll_after_id = self.root.after(delay, self._poll_runner)
         except tk.TclError:
             # Root is gone; nothing left to poll.
-            self._poll_after_id = None
+            self._stop_polling_on_teardown()
+
+    def _stop_polling_on_teardown(self) -> None:
+        """Stop the poll loop and make sure the worker can't park undrained.
+
+        Called when Tk raises ``TclError`` (a widget/root was destroyed under
+        us). If we simply stop polling while the runner is still alive, nothing
+        will drain its event queue and the worker can eventually block on a full
+        queue. Cancelling it (signal-only, non-blocking) prevents that. Safe if
+        the run already finished — ``cancel`` is idempotent.
+        """
+        self._poll_after_id = None
+        try:
+            if self.runner.is_running:
+                self.runner.cancel()
+        except Exception:
+            pass
 
     def _handle_event(self, kind: str, payload) -> None:
         if kind == EVENT_LINE:

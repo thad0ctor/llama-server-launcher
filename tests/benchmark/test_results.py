@@ -9,6 +9,20 @@ import json
 from modules.benchmark import results
 
 
+def test_csv_does_not_escape_negative_or_plain_numbers():
+    # Regression: formula-injection escaping must not corrupt legitimate
+    # signed numbers like -1 (``-ngl -1`` = "all layers") or main_gpu columns.
+    rows = [results.ResultRow(columns={"[n_gpu_layers]": "-1", "t/s": "-5", "x": "3.14", "y": "+2"})]
+    parsed = list(csv.reader(io.StringIO(results.to_csv(rows))))
+    assert parsed[1] == ["-1", "-5", "3.14", "+2"]
+
+
+def test_csv_still_escapes_formulas_and_nonnumeric_dash():
+    rows = [results.ResultRow(columns={"a": "=CMD()", "b": "-cmd", "c": "@x", "d": "+SUM(1)"})]
+    parsed = list(csv.reader(io.StringIO(results.to_csv(rows))))
+    assert parsed[1] == ["'=CMD()", "'-cmd", "'@x", "'+SUM(1)"]
+
+
 def test_parse_llama_bench_json_basic():
     stdout = json.dumps(
         [
@@ -81,15 +95,17 @@ def test_export_json_and_markdown():
 
 
 def test_csv_neutralises_formula_injection():
-    rows = [results.ResultRow(columns={"model": "=CMD()", "note": "+1", "x": "@SUM", "y": "-2"})]
+    # Non-numeric formula-led cells must be apostrophe-prefixed. Bare signed
+    # numbers (e.g. "-2", "+1") are covered separately and must NOT be escaped.
+    rows = [results.ResultRow(columns={"model": "=CMD()", "note": "+SUM(A1)", "x": "@SUM", "y": "-2+3"})]
     text = results.export(rows, "csv")
     parsed = list(csv.reader(io.StringIO(text)))
     # csv.reader strips the field back to the stored text, so the apostrophe
     # prefix is preserved verbatim in the parsed cell.
     assert parsed[1][0] == "'=CMD()"
-    assert parsed[1][1] == "'+1"
+    assert parsed[1][1] == "'+SUM(A1)"
     assert parsed[1][2] == "'@SUM"
-    assert parsed[1][3] == "'-2"
+    assert parsed[1][3] == "'-2+3"
 
 
 def test_csv_escapes_dangerous_header():
