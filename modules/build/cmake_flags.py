@@ -214,7 +214,7 @@ def _validate_cuda_archs(v: str) -> str | None:
     # each call rather than caching on a module attribute so a
     # test that monkeypatches ``KNOWN_CUDA_ARCHS`` (or a future
     # extension that mutates it) is picked up.
-    known_by_base: dict[str, "object"] = {}
+    known_by_base: dict[str, object] = {}
     for k in KNOWN_CUDA_ARCHS:
         parts = k.cc.split(".")
         if len(parts) == 2:
