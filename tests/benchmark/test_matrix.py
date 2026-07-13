@@ -35,6 +35,16 @@ def test_parse_list_bad_int_raises():
         parse_list("abc", "int")
 
 
+def test_parse_list_int_rejects_float():
+    # A non-integer token must not be coerced to float (FIX 2).
+    with pytest.raises(SweepError):
+        parse_list("0.5,2", "int")
+
+
+def test_parse_list_int_allows_negative():
+    assert parse_list("-1, 0, 8", "int") == ["-1", "0", "8"]
+
+
 def test_expand_range_inclusive():
     assert expand_range(0, 33, 11, "int") == ["0", "11", "22", "33"]
 
@@ -47,6 +57,16 @@ def test_expand_range_zero_step_raises():
 def test_expand_range_runaway_guard():
     with pytest.raises(SweepError):
         expand_range(0, 100000, 1, "int")
+
+
+def test_expand_range_contradictory_step_raises():
+    # Step sign disagrees with min→max direction (FIX 3).
+    with pytest.raises(SweepError):
+        expand_range(0, 10, -2, "int")
+
+
+def test_expand_range_positive_step_still_works():
+    assert expand_range(0, 10, 2, "int") == ["0", "2", "4", "6", "8", "10"]
 
 
 def test_llama_bench_single_command_with_lists():
@@ -96,6 +116,47 @@ def test_sweep_bench_flash_attn_bare_flag():
     on_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "on")
     off_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "off")
     assert "-fa" in on_cmd
+    assert "-fa" not in off_cmd
+
+
+def _fa_arg(cmd):
+    """Return the value rendered after the ``-fa`` flag in a llama-bench cmd."""
+    idx = cmd.index("-fa")
+    return cmd[idx + 1]
+
+
+def test_llama_bench_fa_default_backend_literal():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    assert _fa_arg(cmd) == "on,off"
+
+
+def test_llama_bench_fa_llama_cpp_backend_literal():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="llama.cpp")
+    assert _fa_arg(cmd) == "on,off"
+
+
+def test_llama_bench_fa_ik_llama_backend_numeric():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert _fa_arg(cmd) == "1,0"
+
+
+def test_build_commands_forwards_backend_to_fa_rendering():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    assert _fa_arg(pairs[0][0]) == "1,0"
+
+
+def test_sweep_bench_fa_still_bare_flag_regardless_of_backend():
+    # sweep-bench renders FA as a bare flag; no backend parameter involved.
+    axes = [Axis("flash_attn", ["on", "off"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    on_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "on")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "off")
+    assert "-fa" in on_cmd and "1" not in on_cmd
     assert "-fa" not in off_cmd
 
 

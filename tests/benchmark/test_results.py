@@ -78,3 +78,39 @@ def test_export_json_and_markdown():
     md = results.export(rows, "markdown")
     assert "| model | t/s |" in md
     assert "| Q | 10.0 |" in md
+
+
+def test_csv_neutralises_formula_injection():
+    rows = [results.ResultRow(columns={"model": "=CMD()", "note": "+1", "x": "@SUM", "y": "-2"})]
+    text = results.export(rows, "csv")
+    parsed = list(csv.reader(io.StringIO(text)))
+    # csv.reader strips the field back to the stored text, so the apostrophe
+    # prefix is preserved verbatim in the parsed cell.
+    assert parsed[1][0] == "'=CMD()"
+    assert parsed[1][1] == "'+1"
+    assert parsed[1][2] == "'@SUM"
+    assert parsed[1][3] == "'-2"
+
+
+def test_csv_escapes_dangerous_header():
+    rows = [results.ResultRow(columns={"=evil": "1"})]
+    text = results.export(rows, "csv")
+    parsed = list(csv.reader(io.StringIO(text)))
+    assert parsed[0][0] == "'=evil"
+
+
+def test_markdown_escapes_pipe_and_newline():
+    rows = [results.ResultRow(columns={"model": "a|b", "note": "line1\nline2"})]
+    md = results.export(rows, "markdown")
+    # The stray pipe is escaped and the newline folded to a space, so the row
+    # stays a single physical line with the right column count.
+    assert "a\\|b" in md
+    assert "line1 line2" in md
+    body = [ln for ln in md.splitlines() if ln.startswith("| a")]
+    assert len(body) == 1
+
+
+def test_markdown_escapes_pipe_in_header():
+    rows = [results.ResultRow(columns={"a|b": "1"})]
+    md = results.export(rows, "markdown")
+    assert "| a\\|b |" in md

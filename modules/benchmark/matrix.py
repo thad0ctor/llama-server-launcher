@@ -143,14 +143,12 @@ def parse_list(raw: str, kind: str = KIND_STR) -> list[str]:
 
 def _normalise_token(tok: str, kind: str) -> str:
     if kind == KIND_INT:
+        # int() accepts leading "-"/"+" so negatives like "-1" pass; anything
+        # non-integer (e.g. "0.5") is rejected rather than coerced to float.
         try:
             return str(int(tok, 10))
-        except ValueError:
-            # Allow "-1" style already handled by int(); anything else is bad.
-            try:
-                return _fmt_number(float(tok))
-            except ValueError as exc:
-                raise SweepError(f"{tok!r} is not a valid integer") from exc
+        except ValueError as exc:
+            raise SweepError(f"{tok!r} is not a valid integer") from exc
     if kind == KIND_FA:
         low = tok.strip().lower()
         if low in ("1", "true", "yes", "on"):
@@ -171,8 +169,11 @@ def expand_range(vmin: float, vmax: float, vstep: float, kind: str = KIND_INT) -
     if vstep == 0:
         raise SweepError("increment must not be zero")
     if (vmax - vmin) * vstep < 0:
-        # Direction of step disagrees with min→max direction; just the start.
-        return [_fmt_number(vmin)]
+        # Step sign disagrees with the min→max direction, so the range can
+        # never reach vmax — this is a contradictory spec, not an empty walk.
+        raise SweepError(
+            f"increment {_fmt_number(vstep)} moves away from {_fmt_number(vmax)} " f"starting at {_fmt_number(vmin)}"
+        )
     count = int(abs((vmax - vmin) / vstep)) + 1
     if count > 4096:
         raise SweepError(f"range expands to {count} values (max 4096)")
@@ -256,11 +257,25 @@ def _extra_tokens(extra_args: str | list[str] | None) -> list[str]:
     return [str(a) for a in extra_args]
 
 
+def _render_fa_values(values: list[str], backend: str) -> list[str]:
+    """Map canonical ``on``/``off`` flash-attn values for a llama-bench backend.
+
+    Upstream llama.cpp accepts the literal ``on``/``off`` tokens; ik_llama's
+    fork (and older builds) expect numeric ``1``/``0``. Any non-canonical
+    token is passed through untouched.
+    """
+    if backend != "ik_llama":
+        return list(values)
+    mapping = {"on": "1", "off": "0"}
+    return [mapping.get(v, v) for v in values]
+
+
 def llama_bench_command(
     exe: str,
     model: str,
     axes: list[Axis],
     *,
+    backend: str = "llama.cpp",
     output_format: str = "json",
     repetitions: int | None = None,
     extra_args: str | list[str] | None = None,
@@ -270,6 +285,9 @@ def llama_bench_command(
     Swept levers become comma-joined list arguments; llama-bench expands
     them internally. Levers that don't apply to llama-bench are silently
     skipped (use :func:`split_axes_for_tool` to surface them in the UI).
+
+    ``backend`` selects flash-attn rendering: ``"ik_llama"`` emits numeric
+    ``-fa 1,0``; any other value keeps the upstream ``-fa on,off`` tokens.
     """
     if not exe:
         raise SweepError("no llama-bench executable")
@@ -279,8 +297,11 @@ def llama_bench_command(
     applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH)
     for axis in applicable:
         lever = axis.lever
-        # flash-attn list values (on/off) are passed through as-is.
-        cmd += [lever.flag, ",".join(axis.values)]
+        if lever.kind == KIND_FA:
+            values = _render_fa_values(axis.values, backend)
+        else:
+            values = axis.values
+        cmd += [lever.flag, ",".join(values)]
     if repetitions and repetitions > 0:
         cmd += ["-r", str(repetitions)]
     if output_format:
@@ -340,6 +361,7 @@ def build_commands(
     model: str,
     axes: list[Axis],
     *,
+    backend: str = "llama.cpp",
     output_format: str = "json",
     repetitions: int | None = None,
     extra_args: str | list[str] | None = None,
@@ -347,13 +369,15 @@ def build_commands(
     """Uniform entry point returning ``(command, combo)`` pairs for ``tool``.
 
     llama-bench yields a single pair with an empty combo (it emits the whole
-    matrix itself); sweep-bench yields one pair per combination.
+    matrix itself); sweep-bench yields one pair per combination. ``backend``
+    is forwarded to :func:`llama_bench_command` for flash-attn rendering.
     """
     if tool == TOOL_LLAMA_BENCH:
         cmd = llama_bench_command(
             exe,
             model,
             axes,
+            backend=backend,
             output_format=output_format,
             repetitions=repetitions,
             extra_args=extra_args,

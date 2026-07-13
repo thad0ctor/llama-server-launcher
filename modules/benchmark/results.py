@@ -187,13 +187,26 @@ def collect_columns(rows: list[ResultRow]) -> list[str]:
     return seen
 
 
+# Excel/Sheets treat a cell beginning with one of these as a formula, so a
+# value like ``=CMD()`` can execute on open. Prefix such cells with an
+# apostrophe to neutralise formula injection (CWE-1236).
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value: str) -> str:
+    text = "" if value is None else str(value)
+    if text[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + text
+    return text
+
+
 def to_csv(rows: list[ResultRow]) -> str:
     cols = collect_columns(rows)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(cols)
+    writer.writerow([_csv_safe(c) for c in cols])
     for row in rows:
-        writer.writerow([row.get(c) for c in cols])
+        writer.writerow([_csv_safe(row.get(c)) for c in cols])
     return buf.getvalue()
 
 
@@ -201,13 +214,24 @@ def to_json(rows: list[ResultRow]) -> str:
     return json.dumps([row.columns for row in rows], indent=2, ensure_ascii=False)
 
 
+def _md_safe(value: str) -> str:
+    """Neutralise a value for a Markdown table cell.
+
+    Escapes ``|`` (which would otherwise start a new column) and folds
+    newlines to spaces (which would otherwise break the row).
+    """
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+
 def to_markdown(rows: list[ResultRow]) -> str:
     cols = collect_columns(rows)
     if not cols:
         return "_(no results)_\n"
-    lines = ["| " + " | ".join(cols) + " |", "| " + " | ".join("---" for _ in cols) + " |"]
+    header = [_md_safe(c) for c in cols]
+    lines = ["| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in cols) + " |"]
     for row in rows:
-        lines.append("| " + " | ".join(row.get(c) for c in cols) + " |")
+        lines.append("| " + " | ".join(_md_safe(row.get(c)) for c in cols) + " |")
     return "\n".join(lines) + "\n"
 
 

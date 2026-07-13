@@ -36,6 +36,7 @@ _SEARCH_PATHS_REL = (
     Path("build/bin"),
     Path("build"),
     Path("bin"),
+    Path("server"),
 )
 
 

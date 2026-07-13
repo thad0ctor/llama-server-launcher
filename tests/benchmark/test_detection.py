@@ -33,6 +33,14 @@ def test_find_bench_executable_in_build_bin(tmp_path):
     assert found == exe.resolve()
 
 
+def test_find_bench_executable_in_server_dir(tmp_path):
+    # `server/` must be searched for parity with LaunchManager (FIX 5).
+    exe = tmp_path / "server" / _exe_name(TOOL_LLAMA_BENCH)
+    _make_exe(exe)
+    found = find_bench_executable(tmp_path, TOOL_LLAMA_BENCH)
+    assert found == exe.resolve()
+
+
 def test_find_bench_executable_missing_returns_none(tmp_path):
     assert find_bench_executable(tmp_path, TOOL_SWEEP_BENCH) is None
 

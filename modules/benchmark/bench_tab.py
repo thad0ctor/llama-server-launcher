@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shlex
 import sys
+import traceback
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -251,11 +252,15 @@ class BenchmarkTab:
         sec = self._section(parent, "Options")
         row = ttk.Frame(sec)
         row.pack(fill="x", padx=6, pady=3)
-        ttk.Label(row, text="llama-bench output:", width=18).pack(side="left")
-        ttk.Combobox(
-            row, textvariable=self.output_format_var, state="readonly", values=["json", "csv", "markdown"], width=10
-        ).pack(side="left")
-        ttk.Label(row, text="  (json/csv are parsed into the results grid)", foreground="#666").pack(side="left")
+        ttk.Label(row, text="Run output format:", width=18).pack(side="left")
+        # The run always parses JSON into the results grid; only JSON is offered
+        # here to avoid an empty grid. CSV/JSON/Markdown are still available via
+        # the Results section's Export buttons.
+        self.output_format_var.set("json")
+        ttk.Combobox(row, textvariable=self.output_format_var, state="readonly", values=["json"], width=10).pack(
+            side="left"
+        )
+        ttk.Label(row, text="  (results are exported as CSV/JSON/Markdown below)", foreground="#666").pack(side="left")
 
         row2 = ttk.Frame(sec)
         row2.pack(fill="x", padx=6, pady=3)
@@ -453,6 +458,12 @@ class BenchmarkTab:
             return None
         return build.tool_path(self.tool_var.get())
 
+    def _current_backend(self) -> str:
+        """Backend of the selected build (drives flash-attn handling in the
+        matrix), defaulting to ``llama.cpp`` when no build is selected."""
+        build = self._selected_build()
+        return getattr(build, "backend", "llama.cpp") if build is not None else "llama.cpp"
+
     def _repetitions(self) -> int | None:
         raw = self.repetitions_var.get().strip()
         if not raw:
@@ -475,6 +486,7 @@ class BenchmarkTab:
             exe,
             model,
             axes,
+            backend=self._current_backend(),
             output_format=self.output_format_var.get(),
             repetitions=self._repetitions(),
             extra_args=self.extra_args_var.get(),
@@ -505,6 +517,7 @@ class BenchmarkTab:
                 exe,
                 model,
                 axes,
+                backend=self._current_backend(),
                 output_format=self.output_format_var.get(),
                 repetitions=self._repetitions(),
                 extra_args=self.extra_args_var.get(),
@@ -560,7 +573,10 @@ class BenchmarkTab:
                     self.build_var.set(b.label)
                     self._on_build_changed()
                     break
-        # Seed each lever's list value from the launcher's live setting.
+        # Seed each lever's list value from the launcher's live setting. Any
+        # lever that receives a non-empty value is also *ticked* (include=True)
+        # so the seeded baseline actually runs on Start; the user can untick.
+        seeded = 0
         for lever in LEVERS:
             if not lever.seed_attr:
                 continue
@@ -580,9 +596,14 @@ class BenchmarkTab:
                     continue
                 v["values"].set(text)
             v["mode"].set("list")
+            v["include"].set(True)
+            seeded += 1
             self._apply_mode_state(lever.key)
         self.refresh_preview()
-        self.status_var.set("Seeded parameters from the current configuration.")
+        if seeded:
+            self.status_var.set(f"Seeded {seeded} parameter(s) from the current configuration (ticked to run).")
+        else:
+            self.status_var.set("Seeded parameters from the current configuration.")
 
     def _browse_model(self) -> None:
         initial = ""
@@ -631,6 +652,7 @@ class BenchmarkTab:
                 exe,
                 model,
                 axes,
+                backend=self._current_backend(),
                 output_format=self.output_format_var.get(),
                 repetitions=self._repetitions(),
                 extra_args=self.extra_args_var.get(),
@@ -676,15 +698,36 @@ class BenchmarkTab:
                 kind, payload = self.runner.events.get_nowait()
                 drained += 1
                 had_events = True
-                self._handle_event(kind, payload)
+                # One misbehaving handler (e.g. a Treeview/Tk error while
+                # rebuilding the results grid) must never escape the ``after``
+                # callback: if it did, polling would stop, the worker's blocking
+                # queue would fill and park, and ``is_running`` would stay True
+                # forever (Start stuck disabled, Cancel a no-op). Swallow and log.
+                try:
+                    self._handle_event(kind, payload)
+                except tk.TclError:
+                    # A widget was torn down under us; stop polling cleanly.
+                    self._poll_after_id = None
+                    return
+                except Exception:
+                    print(f"BenchmarkTab: error handling event {kind!r}:", file=sys.stderr)
+                    traceback.print_exc()
                 if kind in (EVENT_DONE, EVENT_CANCELLED, EVENT_ERROR):
                     self._set_running(False)
                     self._poll_after_id = None
                     return
         except _queue.Empty:
             pass
+        except tk.TclError:
+            # Root/widgets destroyed while draining; stop rescheduling.
+            self._poll_after_id = None
+            return
         delay = RUNNER_CATCHUP_POLL_MS if (had_events and drained >= RUNNER_MAX_EVENTS_PER_POLL) else RUNNER_POLL_MS
-        self._poll_after_id = self.root.after(delay, self._poll_runner)
+        try:
+            self._poll_after_id = self.root.after(delay, self._poll_runner)
+        except tk.TclError:
+            # Root is gone; nothing left to poll.
+            self._poll_after_id = None
 
     def _handle_event(self, kind: str, payload) -> None:
         if kind == EVENT_LINE:
@@ -896,18 +939,46 @@ class BenchmarkTab:
         if cfg is None:
             messagebox.showerror("Load config", f"No sweep config named '{name}'.")
             return
-        self.tool_var.set(cfg.tool)
+        saved_tool = cfg.tool
+
+        def _root_matches(b) -> bool:
+            if not cfg.build_root:
+                return False
+            try:
+                return str(Path(b.root_dir)) == str(Path(cfg.build_root)) or b.root_dir == cfg.build_root
+            except Exception:
+                return b.root_dir == cfg.build_root
+
+        def _offers_tool(b) -> bool:
+            try:
+                return saved_tool in b.available_tools()
+            except Exception:
+                return False
+
+        # Pick a build that actually offers the saved tool so the trailing
+        # _on_build_changed() doesn't silently revert the tool. Prefer the
+        # config's own build_root; otherwise any build providing the tool.
+        target = next((b for b in self._builds if _root_matches(b) and _offers_tool(b)), None)
+        if target is None:
+            target = next((b for b in self._builds if _offers_tool(b)), None)
+        if target is not None:
+            self.build_var.set(target.label)
+        elif self._builds:
+            # No detected build ships this tool — warn instead of silently
+            # switching the tool out from under the user on _on_build_changed().
+            messagebox.showwarning(
+                "Load config",
+                f"The tool '{_TOOL_LABELS.get(saved_tool, saved_tool)}' from config "
+                f"'{name}' isn't available in any detected build. The tool selection "
+                "may change to one this build provides.",
+            )
+        self.tool_var.set(saved_tool)
         if self._tool_combo is not None:
-            self._tool_combo.set(_TOOL_LABELS.get(cfg.tool, cfg.tool))
+            self._tool_combo.set(_TOOL_LABELS.get(saved_tool, saved_tool))
         if cfg.model_path:
             self.model_var.set(cfg.model_path)
-        # Re-select the build by matching root, else leave current.
-        if cfg.build_root:
-            for b in self._builds:
-                if str(Path(b.root_dir)) == str(Path(cfg.build_root)) or b.root_dir == cfg.build_root:
-                    self.build_var.set(b.label)
-                    break
-        self.output_format_var.set(cfg.output_format or "json")
+        # Run output is JSON-only (see Options); ignore any legacy csv/markdown.
+        self.output_format_var.set("json")
         self.repetitions_var.set(str(cfg.repetitions) if cfg.repetitions else "")
         self.extra_args_var.set(cfg.extra_args)
         # Reset all levers, then apply saved axes.

@@ -164,7 +164,25 @@ class BenchRunner:
             pass
 
     def _emit_event(self, kind: str, payload: object) -> None:
-        self.events.put((kind, payload))
+        """Enqueue an event without blocking forever.
+
+        A plain blocking ``self.events.put(...)`` can park the worker thread
+        indefinitely if the UI consumer has stopped draining and the queue is
+        full — and ``cancel()`` would never release it. Instead we retry with a
+        short timeout, re-checking the cancel flag between attempts so a cancel
+        promptly unblocks the worker (dropping the pending event). Terminal
+        events (done/cancelled/error) make a best effort to be delivered but
+        must never block across a cancel.
+        """
+        while True:
+            try:
+                self.events.put((kind, payload), timeout=0.2)
+                return
+            except queue.Full:
+                if self._cancel.is_set():
+                    # Consumer is gone / cancelling; drop this event rather
+                    # than wedge the worker thread forever.
+                    return
 
     # ---------------------------------------------------------------- driver
     def start(self, plan: BenchPlan) -> bool:

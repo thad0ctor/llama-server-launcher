@@ -5088,6 +5088,16 @@ class LlamaCppLauncher:
         # need the flag, but a worker that wakes up during the save+destroy
         # window would otherwise race into a half-torn-down interpreter.
         self._mark_tk_dead()
+        # Cancel a running benchmark so its detached process group (spawned with
+        # start_new_session=True) doesn't outlive the app and keep pegging the
+        # GPU/CPU after the window closes.
+        try:
+            bench_tab = getattr(self, "benchmark_tab", None)
+            runner = getattr(bench_tab, "runner", None) if bench_tab is not None else None
+            if runner is not None and getattr(runner, "is_running", False):
+                runner.cancel()
+        except Exception as e:
+            print(f"on_exit: benchmark cancel failed: {e}", file=sys.stderr)
         try:
             self._save_configs()
         except Exception as e:
