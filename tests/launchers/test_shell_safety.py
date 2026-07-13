@@ -35,18 +35,14 @@ import pytest
 
 
 def _save_sh_and_read(manager, launcher_mock, out_path):
-    with patch("modules.launch.filedialog") as fd, patch(
-        "modules.launch.messagebox"
-    ):
+    with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
         fd.asksaveasfilename.return_value = str(out_path)
         manager.save_sh_script()
     return out_path.read_text()
 
 
 def _save_ps1_and_read(manager, launcher_mock, out_path):
-    with patch("modules.launch.filedialog") as fd, patch(
-        "modules.launch.messagebox"
-    ):
+    with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
         fd.asksaveasfilename.return_value = str(out_path)
         manager.save_ps1_script()
     return out_path.read_text(encoding="utf-8")
@@ -78,9 +74,7 @@ class TestShellInjectionBash:
             "space  inside",
         ],
     )
-    def test_model_path_with_evil_chars_is_quoted(
-        self, manager, launcher_mock, tmp_path, evil
-    ):
+    def test_model_path_with_evil_chars_is_quoted(self, manager, launcher_mock, tmp_path, evil):
         spaced = tmp_path / f"models_{abs(hash(evil)) % 100000}"
         bin_dir = spaced / "build" / "bin"
         bin_dir.mkdir(parents=True)
@@ -110,14 +104,11 @@ class TestShellInjectionBash:
         # verify the path token is shlex-quoted (starts with ' or " when
         # containing special chars).
         import shlex as _shlex
-        expected_quoted = _shlex.quote(str(model.resolve()))
-        assert expected_quoted in text, (
-            f"Expected shlex-quoted model path in script, got:\n{text}"
-        )
 
-    def test_venv_path_with_space_is_quoted(
-        self, manager, launcher_mock, tmp_path
-    ):
+        expected_quoted = _shlex.quote(str(model.resolve()))
+        assert expected_quoted in text, f"Expected shlex-quoted model path in script, got:\n{text}"
+
+    def test_venv_path_with_space_is_quoted(self, manager, launcher_mock, tmp_path):
         venv = tmp_path / "my venv with spaces"
         (venv / "bin").mkdir(parents=True)
         (venv / "bin" / "activate").write_text("# mock\n")
@@ -125,8 +116,16 @@ class TestShellInjectionBash:
 
         out = tmp_path / "l.sh"
         text = _save_sh_and_read(manager, launcher_mock, out)
-        # source "<venv>/bin/activate" - double quotes preserve spaces.
-        assert f'source "{venv / "bin" / "activate"}"' in text
+        # The script uses ``shlex.quote`` to render the activator path —
+        # for a path containing spaces that produces single-quoted POSIX
+        # form (which also disables ``$``/``$(...)`` expansion). The
+        # invariant under test is that the path appears verbatim after
+        # ``source`` in whichever shell-safe form shlex picks, not that
+        # double quotes specifically were used.
+        import shlex
+
+        quoted = shlex.quote(str(venv / "bin" / "activate"))
+        assert f"source {quoted}" in text, f"Expected shlex-quoted activate path in script, got:\n{text}"
 
     @pytest.mark.skipif(
         sys.platform == "win32",
@@ -137,9 +136,7 @@ class TestShellInjectionBash:
             "so we exercise it on POSIX only."
         ),
     )
-    def test_unicode_and_emoji_in_paths(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_unicode_and_emoji_in_paths(self, manager, launcher_mock, tmp_path):
         # ggUF that's had a wide time
         spaced = tmp_path / "unicode_dir_\u4e2d\u6587_\U0001f680"
         bin_dir = spaced / "build" / "bin"
@@ -164,9 +161,7 @@ class TestShellInjectionPowerShell:
     internal ``"`` is doubled ("") and that backticks aren't double-
     escaped (regression for the fixed bug)."""
 
-    def test_model_path_with_embedded_double_quote(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_model_path_with_embedded_double_quote(self, manager, launcher_mock, tmp_path):
         # Filesystem may refuse " on some FS types; simulate by setting
         # the model_path var to a path-shaped string. build_cmd validates
         # is_file(), so point at a real file and mock model_path post-hoc.
@@ -183,19 +178,25 @@ class TestShellInjectionPowerShell:
         # The evil token must appear either with "" (for ") and `` (for `)
         # escaping, and the tri-sequence ```" must not appear.
         assert "a" in text and "b" in text and "c" in text
-        assert '```"' not in text, (
-            "Regression of backtick double-escape bug: found ```\""
-        )
+        assert '```"' not in text, 'Regression of backtick double-escape bug: found ```"'
 
-    def test_custom_param_with_backtick_escaped_only_once(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_custom_param_with_backtick_passes_through_single_quoted(self, manager, launcher_mock, tmp_path):
+        """Custom args containing backticks now ride inside SINGLE-quoted
+        PS literals (per ``_ps_quote_arg`` rewrite). PowerShell treats
+        backticks as ordinary characters inside ``'...'``, so the value
+        round-trips verbatim — no escaping doubles, no risk of the
+        backtick-double-escape regression the old form had.
+        """
         launcher_mock.custom_parameters_list = ["--weird val`ue"]
         out = tmp_path / "b.ps1"
         text = _save_ps1_and_read(manager, launcher_mock, out)
-        # Exactly one doubled backtick (``) per original `, never triple.
-        assert "val``ue" in text
-        assert "val```ue" not in text
+        # shlex.split splits ``--weird val`ue`` into two tokens. Each
+        # rides inside its own single-quoted PS literal verbatim — no
+        # backtick doubling.
+        assert "'--weird'" in text
+        assert "'val`ue'" in text
+        # No PowerShell expansion sequence introduced by escaping mishaps.
+        assert "val``ue" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -215,13 +216,11 @@ class TestCustomParameters:
         assert "--foo" not in cmd
         assert "unclosed" not in cmd
 
-    def test_command_substitution_syntax_passed_through_unexecuted(
-        self, manager, launcher_mock
-    ):
+    def test_command_substitution_syntax_passed_through_unexecuted(self, manager, launcher_mock):
         # shlex.split parses $() as a normal argument; no shell evaluation
         # takes place at build_cmd time (and the shell layer later uses
         # shlex.quote, so it stays literal).
-        launcher_mock.custom_parameters_list = ['--arg $(whoami)']
+        launcher_mock.custom_parameters_list = ["--arg $(whoami)"]
         cmd = manager.build_cmd()
         assert "--arg" in cmd
         assert "$(whoami)" in cmd
@@ -237,13 +236,11 @@ class TestCustomParameters:
         for i in range(120):
             assert f"--f{i}" in cmd
 
-    def test_multiple_param_strings_all_split_independently(
-        self, manager, launcher_mock
-    ):
+    def test_multiple_param_strings_all_split_independently(self, manager, launcher_mock):
         launcher_mock.custom_parameters_list = [
-            '--alpha 1',
+            "--alpha 1",
             '--beta "two words"',
-            '--gamma 3',
+            "--gamma 3",
         ]
         cmd = manager.build_cmd()
         assert "--alpha" in cmd and "1" in cmd
@@ -270,9 +267,7 @@ class TestChatTemplateContent:
             "written file gets transcoded and the emoji codepoint is lost."
         ),
     )
-    def test_unicode_emoji_template_passes_through(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_unicode_emoji_template_passes_through(self, manager, launcher_mock, tmp_path):
         template = "\u4f60\u597d {{msg}} \U0001f600"
         launcher_mock.template_source.set("custom")
         launcher_mock.current_template_display.set(template)
@@ -283,9 +278,7 @@ class TestChatTemplateContent:
         text = _save_sh_and_read(manager, launcher_mock, out)
         assert "\U0001f600" in text
 
-    def test_newline_in_template_preserved_in_sh(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_newline_in_template_preserved_in_sh(self, manager, launcher_mock, tmp_path):
         template = "line1\nline2\nline3"
         launcher_mock.template_source.set("custom")
         launcher_mock.current_template_display.set(template)
@@ -315,7 +308,7 @@ class TestChatTemplateContent:
 
     def test_apostrophes_doubled_in_ps1(self, manager, launcher_mock, tmp_path):
         launcher_mock.template_source.set("custom")
-        launcher_mock.current_template_display.set("it's \"awesome\"")
+        launcher_mock.current_template_display.set('it\'s "awesome"')
         out = tmp_path / "a.ps1"
         text = _save_ps1_and_read(manager, launcher_mock, out)
         # Single-quote escaping doubles ' to ''.
@@ -329,10 +322,7 @@ class TestChatTemplateContent:
 
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason=(
-        "bash -n is not available on a bare Windows runner; the escape "
-        "logic is POSIX-specific anyway."
-    ),
+    reason=("bash -n is not available on a bare Windows runner; the escape " "logic is POSIX-specific anyway."),
 )
 class TestEnvVarExportEscaping:
     """The bash generator escapes ``\\``, ``\"``, ``$``, ``\\``` inside the
@@ -346,9 +336,7 @@ class TestEnvVarExportEscaping:
         out = tmp_path / "e.sh"
         return _save_sh_and_read(manager, launcher_mock, out), out
 
-    def test_multiline_value_produces_valid_bash(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_multiline_value_produces_valid_bash(self, manager, launcher_mock, tmp_path):
         """Regression against a proposed ``.replace('\\n', '\\\\n')`` fix
         that would have corrupted multi-line values. The newline stays
         literal, the quoted string spans lines, bash parses it fine."""
@@ -356,7 +344,9 @@ class TestEnvVarExportEscaping:
         import subprocess
 
         text, out = self._run_with_env(
-            manager, launcher_mock, tmp_path,
+            manager,
+            launcher_mock,
+            tmp_path,
             {"MULTI": "line1\nline2\nline3"},
         )
 
@@ -368,23 +358,19 @@ class TestEnvVarExportEscaping:
         bash = shutil.which("bash")
         if bash is None:
             pytest.skip("bash not installed on this runner")
-        result = subprocess.run(
-            [bash, "-n", str(out)], capture_output=True, text=True
-        )
-        assert result.returncode == 0, (
-            f"bash -n rejected multi-line export: {result.stderr}"
-        )
+        result = subprocess.run([bash, "-n", str(out)], capture_output=True, text=True)
+        assert result.returncode == 0, f"bash -n rejected multi-line export: {result.stderr}"
 
-    def test_multiline_value_round_trips_via_bash(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_multiline_value_round_trips_via_bash(self, manager, launcher_mock, tmp_path):
         """Strongest form of the guarantee: run the export through bash and
         read the variable back. The literal newline must survive."""
         import shutil
         import subprocess
 
         text, _ = self._run_with_env(
-            manager, launcher_mock, tmp_path,
+            manager,
+            launcher_mock,
+            tmp_path,
             {"MULTI": "line1\nline2\nline3"},
         )
         bash = shutil.which("bash")
@@ -394,23 +380,16 @@ class TestEnvVarExportEscaping:
         # Grep just the export line + echo it back via bash -c to avoid
         # running the whole launcher script (which would try to start a
         # real server).
-        export_line = next(
-            line for line in text.splitlines()
-            if line.startswith("export MULTI=")
-        )
-        snippet = (
-            f"{export_line}\n" if export_line.endswith('"') else ""
-        )
+        export_line = next(line for line in text.splitlines() if line.startswith("export MULTI="))
+        snippet = f"{export_line}\n" if export_line.endswith('"') else ""
         # The export assignment is already correctly multi-line in the
         # script, so we reconstruct it by searching for the opening
         # ``export MULTI="`` and the next unescaped closing ``"``.
         start = text.index('export MULTI="')
         end = text.index('"\n', start + len('export MULTI="'))
-        snippet = text[start:end + 1] + "\n"
+        snippet = text[start : end + 1] + "\n"
         snippet += 'printf "%s" "$MULTI"'
-        result = subprocess.run(
-            [bash, "-c", snippet], capture_output=True, text=True
-        )
+        result = subprocess.run([bash, "-c", snippet], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert result.stdout == "line1\nline2\nline3"
 
@@ -420,18 +399,16 @@ class TestEnvVarExportEscaping:
             # double quote
             ('has "quotes"', 'has "quotes"'),
             # literal $ should not expand — export preserves it
-            ('pre$HOME post', 'pre$HOME post'),
+            ("pre$HOME post", "pre$HOME post"),
             # literal backtick should not execute as command substitution
-            ('in `date` text', 'in `date` text'),
+            ("in `date` text", "in `date` text"),
             # literal backslash stays a single backslash after bash parsing
-            ('a\\b', 'a\\b'),
+            ("a\\b", "a\\b"),
             # combo
             ('q"e $V `c` \\z', 'q"e $V `c` \\z'),
         ],
     )
-    def test_metachars_are_preserved_literally(
-        self, manager, launcher_mock, tmp_path, raw, expect_in_value
-    ):
+    def test_metachars_are_preserved_literally(self, manager, launcher_mock, tmp_path, raw, expect_in_value):
         """Every char bash would interpret inside ``""`` must reach the
         variable value intact — no command substitution, no expansion,
         no backslash loss."""
@@ -439,7 +416,10 @@ class TestEnvVarExportEscaping:
         import subprocess
 
         self._run_with_env(
-            manager, launcher_mock, tmp_path, {"V": raw},
+            manager,
+            launcher_mock,
+            tmp_path,
+            {"V": raw},
         )
         text = (tmp_path / "e.sh").read_text()
         bash = shutil.which("bash")
@@ -448,10 +428,8 @@ class TestEnvVarExportEscaping:
 
         start = text.index('export V="')
         end = text.index('"\n', start + len('export V="'))
-        snippet = text[start:end + 1] + '\nprintf "%s" "$V"'
-        result = subprocess.run(
-            [bash, "-c", snippet], capture_output=True, text=True
-        )
+        snippet = text[start : end + 1] + '\nprintf "%s" "$V"'
+        result = subprocess.run([bash, "-c", snippet], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         assert result.stdout == expect_in_value
 
@@ -462,9 +440,7 @@ class TestEnvVarExportEscaping:
 
 
 class TestGpuIndexEdgeCases:
-    def test_32_plus_gpus_emits_all_indices(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_32_plus_gpus_emits_all_indices(self, manager, launcher_mock, tmp_path):
         indices = list(range(40))
         launcher_mock.get_ordered_selected_gpus.return_value = indices
         launcher_mock.gpu_info = {"device_count": 40}
@@ -472,11 +448,17 @@ class TestGpuIndexEdgeCases:
         out = tmp_path / "g.sh"
         text = _save_sh_and_read(manager, launcher_mock, out)
         joined = ",".join(map(str, indices))
-        assert f'export CUDA_VISIBLE_DEVICES="{joined}"' in text
+        # Comma-separated numeric strings contain no shell
+        # metacharacters, so they're safe in bash without quoting.
+        # The launch.py emitter writes ``joined`` verbatim.
+        # This also matches ``shlex.quote`` for numeric comma-only
+        # input — ``shlex.quote("1,2,3") == "1,2,3"`` (the comma
+        # isn't on shlex's "needs quoting" list), so the bare form
+        # is both the emitter's contract AND what shlex would
+        # produce.
+        assert f"export CUDA_VISIBLE_DEVICES={joined}" in text
 
-    def test_negative_index_emitted_verbatim_not_stripped(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_negative_index_emitted_verbatim_not_stripped(self, manager, launcher_mock, tmp_path):
         # The launcher doesn't validate GPU indices; it faithfully emits
         # whatever it was handed. Ensure nothing explodes.
         launcher_mock.get_ordered_selected_gpus.return_value = [-1, 0]
@@ -484,11 +466,9 @@ class TestGpuIndexEdgeCases:
 
         out = tmp_path / "n.sh"
         text = _save_sh_and_read(manager, launcher_mock, out)
-        assert '-1,0' in text
+        assert "-1,0" in text
 
-    def test_gpu_list_with_100_entries_ps1(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_gpu_list_with_100_entries_ps1(self, manager, launcher_mock, tmp_path):
         indices = list(range(100))
         launcher_mock.get_ordered_selected_gpus.return_value = indices
         launcher_mock.gpu_info = {"device_count": 100}
@@ -496,7 +476,10 @@ class TestGpuIndexEdgeCases:
         out = tmp_path / "g.ps1"
         text = _save_ps1_and_read(manager, launcher_mock, out)
         joined = ",".join(map(str, indices))
-        assert f'$env:CUDA_VISIBLE_DEVICES="{joined}"' in text
+        # ``_ps_escape_single_quoted("0,1,...")`` round-trips unchanged
+        # (no embedded single quotes), so the saved script now emits the
+        # value as a PS single-quoted literal.
+        assert f"$env:CUDA_VISIBLE_DEVICES='{joined}'" in text
 
 
 # ---------------------------------------------------------------------------
@@ -505,9 +488,7 @@ class TestGpuIndexEdgeCases:
 
 
 class TestMmprojEdgeCases:
-    def test_mmproj_symlink_is_followed(
-        self, manager, launcher_mock, built_tree
-    ):
+    def test_mmproj_symlink_is_followed(self, manager, launcher_mock, built_tree):
         model_dir = built_tree["model"].parent
         real = model_dir / "mmproj-real.gguf"
         real.write_bytes(b"GGUF")
@@ -526,9 +507,7 @@ class TestMmprojEdgeCases:
         # Either the link or its resolved real target - both are "mmproj"-named.
         assert "mmproj" in Path(mmproj_arg).name.lower()
 
-    def test_multi_model_dir_collision_prefers_matching_stem(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_multi_model_dir_collision_prefers_matching_stem(self, manager, launcher_mock, tmp_path):
         # Two mmproj files in the model directory, only one of which shares
         # the model's stem. Fallback auto-detection should prefer it.
         # Use a name distinct from ``built_tree``'s llama_cpp_root.
@@ -557,9 +536,7 @@ class TestMmprojEdgeCases:
         cmd = manager.build_cmd()
         assert "--mmproj" in cmd
         picked = Path(cmd[cmd.index("--mmproj") + 1]).name
-        assert picked == "qwen2-vl-7b-mmproj.gguf", (
-            f"Expected stem-matching mmproj, got {picked!r}"
-        )
+        assert picked == "qwen2-vl-7b-mmproj.gguf", f"Expected stem-matching mmproj, got {picked!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -568,9 +545,7 @@ class TestMmprojEdgeCases:
 
 
 class TestVenvAlternatePaths:
-    def test_save_sh_finds_scripts_activate_fallback(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_save_sh_finds_scripts_activate_fallback(self, manager, launcher_mock, tmp_path):
         # bin/activate missing, Scripts/activate present (Cygwin/WSL case).
         venv = tmp_path / "wsl_venv"
         (venv / "Scripts").mkdir(parents=True)
@@ -581,9 +556,7 @@ class TestVenvAlternatePaths:
         text = _save_sh_and_read(manager, launcher_mock, out)
         assert "Scripts" in text and "activate" in text
 
-    def test_save_ps1_finds_bin_activate_ps1(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_save_ps1_finds_bin_activate_ps1(self, manager, launcher_mock, tmp_path):
         # PowerShell Core on Linux/macOS: Activate.ps1 lives in bin/.
         venv = tmp_path / "pwsh_venv"
         (venv / "bin").mkdir(parents=True)
@@ -594,9 +567,7 @@ class TestVenvAlternatePaths:
         text = _save_ps1_and_read(manager, launcher_mock, out)
         assert "Activate.ps1" in text
 
-    def test_save_ps1_missing_all_activation_scripts_writes_warning(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_save_ps1_missing_all_activation_scripts_writes_warning(self, manager, launcher_mock, tmp_path):
         venv = tmp_path / "empty_venv"
         venv.mkdir()  # no Scripts/ or bin/ at all
         launcher_mock.venv_dir.set(str(venv))
@@ -606,9 +577,7 @@ class TestVenvAlternatePaths:
         assert "Write-Warning" in text
         assert "activation script" in text.lower()
 
-    def test_save_sh_missing_activation_script_writes_warning(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_save_sh_missing_activation_script_writes_warning(self, manager, launcher_mock, tmp_path):
         venv = tmp_path / "empty_venv2"
         venv.mkdir()
         launcher_mock.venv_dir.set(str(venv))
@@ -624,9 +593,7 @@ class TestVenvAlternatePaths:
 
 
 class TestLongCommandLines:
-    def test_10k_custom_args_does_not_crash_build_cmd(
-        self, manager, launcher_mock
-    ):
+    def test_10k_custom_args_does_not_crash_build_cmd(self, manager, launcher_mock):
         # Stress test: build_cmd must handle a very large argv without
         # raising.
         many = " ".join(f"--f{i} v{i}" for i in range(5000))  # 10000 tokens

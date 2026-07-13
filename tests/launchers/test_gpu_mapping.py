@@ -334,7 +334,12 @@ class TestCudaVisibleDevicesInShScript:
         launcher_mock.get_ordered_selected_gpus.return_value = [2, 0, 1]
         launcher_mock.gpu_info = {"device_count": 3}
         text = self._write_and_read(manager, launcher_mock, tmp_path / "launch.sh")
-        assert 'export CUDA_VISIBLE_DEVICES="2,0,1"' in text, (
+        # Saved bash script uses ``shlex.quote`` for the value, but
+        # comma-separated numeric strings have no shell metacharacters
+        # so ``shlex.quote`` returns them UNQUOTED. The exported line
+        # is therefore the bare ``export CUDA_VISIBLE_DEVICES=2,0,1``
+        # — see the hardening in ``modules/launch.py``.
+        assert "export CUDA_VISIBLE_DEVICES=2,0,1" in text, (
             "User reorder must be preserved verbatim in CUDA_VISIBLE_DEVICES — "
             "llama.cpp then sees logical GPU 0 = physical 2, logical 1 = physical 0, "
             "logical 2 = physical 1."
@@ -344,13 +349,13 @@ class TestCudaVisibleDevicesInShScript:
         launcher_mock.get_ordered_selected_gpus.return_value = [1, 3]
         launcher_mock.gpu_info = {"device_count": 4}
         text = self._write_and_read(manager, launcher_mock, tmp_path / "launch.sh")
-        assert 'export CUDA_VISIBLE_DEVICES="1,3"' in text
+        assert "export CUDA_VISIBLE_DEVICES=1,3" in text
 
     def test_single_gpu_selected(self, manager, launcher_mock, tmp_path):
         launcher_mock.get_ordered_selected_gpus.return_value = [1]
         launcher_mock.gpu_info = {"device_count": 4}
         text = self._write_and_read(manager, launcher_mock, tmp_path / "launch.sh")
-        assert 'export CUDA_VISIBLE_DEVICES="1"' in text
+        assert "export CUDA_VISIBLE_DEVICES=1" in text
 
 
 def _capture_live_launch_script(manager):
@@ -407,7 +412,12 @@ class TestCudaVisibleDevicesLiveVsScript:
             fd.asksaveasfilename.return_value = str(tmp_path / "launch.sh")
             manager.save_sh_script()
         saved_text = (tmp_path / "launch.sh").read_text()
-        assert 'export CUDA_VISIBLE_DEVICES="1,0"' in saved_text
+        # Comma-separated numeric strings have no shell metacharacters,
+        # so they're safe in bash without quoting; ``shlex.quote("1,0")``
+        # also returns the bare value (it only adds quotes when the
+        # input contains shell-special chars). The launch.py emitter
+        # writes the value verbatim.
+        assert "export CUDA_VISIBLE_DEVICES=1,0" in saved_text
 
         # Live-launch script: accept either quoted or unquoted form. Both
         # are semantically equivalent in bash, and the style is an
@@ -415,6 +425,7 @@ class TestCudaVisibleDevicesLiveVsScript:
         live_text = _capture_live_launch_script(manager)
         assert (
             "CUDA_VISIBLE_DEVICES=1,0" in live_text
+            or "CUDA_VISIBLE_DEVICES='1,0'" in live_text
             or 'CUDA_VISIBLE_DEVICES="1,0"' in live_text
         )
 
@@ -482,9 +493,13 @@ class TestCudaVisibleDevicesLiveLaunchBash:
         launcher_mock.gpu_info = {"device_count": 3}
 
         script_text = _capture_live_launch_script(manager)
-        # The user reorder "[2, 0]" must flow through verbatim.
-        assert "CUDA_VISIBLE_DEVICES=2,0" in script_text or \
-               'CUDA_VISIBLE_DEVICES="2,0"' in script_text
+        # The user reorder "[2, 0]" must flow through verbatim. Accept
+        # any safe-quoting form (bare / single-quoted / double-quoted).
+        assert (
+            "CUDA_VISIBLE_DEVICES=2,0" in script_text
+            or "CUDA_VISIBLE_DEVICES='2,0'" in script_text
+            or 'CUDA_VISIBLE_DEVICES="2,0"' in script_text
+        )
 
 
 # ---------------------------------------------------------------------------

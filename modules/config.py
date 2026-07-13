@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from tkinter import messagebox, filedialog
 from datetime import datetime
+from typing import Any
 
 from modules.spec_persistence import (
     collect_spec_into_cfg,
@@ -41,7 +42,7 @@ class ConfigManager:
                 # otherwise fall back to the path stem.
                 selected_name = ""
                 try:
-                    if hasattr(self.launcher, 'model_listbox'):
+                    if hasattr(self.launcher, "model_listbox"):
                         sel = self.launcher.model_listbox.curselection()
                         if sel:
                             selected_name = self.launcher.model_listbox.get(sel[0])
@@ -51,27 +52,25 @@ class ConfigManager:
                 if selected_name:
                     raw_name = selected_name
                 else:
-                     raw_name = Path(model_path_str).stem # Get filename without extension
-
+                    raw_name = Path(model_path_str).stem  # Get filename without extension
 
                 # Sanitize the raw name for filename use.
                 # Strip leading/trailing whitespace first, then replace illegal
                 # filename chars (Windows + POSIX), ASCII control chars (\x00-\x1f)
                 # and DEL (\x7f) with underscores.
                 safe_name = raw_name.strip()
-                safe_name = re.sub(r'[\\/*?:"<>| \x00-\x1f\x7f]', '_', safe_name)
+                safe_name = re.sub(r'[\\/*?:"<>| \x00-\x1f\x7f]', "_", safe_name)
                 # Windows disallows trailing dots/spaces in filenames; strip them too.
-                safe_name = safe_name.rstrip('. ')
-                safe_name = safe_name[:40].strip('_. ')  # Truncate and clean
+                safe_name = safe_name.rstrip(". ")
+                safe_name = safe_name[:40].strip("_. ")  # Truncate and clean
                 if safe_name:
                     parts.append(safe_name)
                 else:
-                     parts.append("model") # Fallback if sanitization results in empty string
+                    parts.append("model")  # Fallback if sanitization results in empty string
             except Exception:
-                 parts.append("model") # Fallback on path error
+                parts.append("model")  # Fallback on path error
         else:
-            parts.append("default") # No model selected
-
+            parts.append("default")  # No model selected
 
         # 2. Key Parameters (add if NOT default)
         # Define defaults, ensuring threads match detected, and excluding chat template params
@@ -80,134 +79,131 @@ class ConfigManager:
         # We compare against values that represent the *absence* of the arg in the command line.
         default_params_for_name = {
             # Values that are omitted by _add_arg if they match these
-            "cache_type_k":  "f16",
-            "cache_type_v":  "f16", # Defaults to same as K cache type
-            "threads":       str(self.launcher.logical_cores), # Llama.cpp default for threads is logical cores
-            "threads_batch": "4", # Llama.cpp default for threads-batch is 4
-            "batch_size":    "512", # Llama.cpp default
-            "ubatch_size":   "512", # Llama.cpp default
-            "ctx_size":      2048,  # Llama.cpp default
-            "seed":          "-1",  # Llama.cpp default
-            "temperature":   "0.8", # Llama.cpp default
-            "min_p":         "0.05",# Llama.cpp default
-            "n_gpu_layers":  "0", # Llama.cpp default for n-gpu-layers
-            "tensor_split":  "", # Omitted if empty string
-            "main_gpu":      "0", # Llama.cpp default
-            "prio":          "0", # Llama.cpp default
-            "n_predict":     "-1", # Llama.cpp default
+            "cache_type_k": "f16",
+            "cache_type_v": "f16",  # Defaults to same as K cache type
+            "threads": str(self.launcher.logical_cores),  # Llama.cpp default for threads is logical cores
+            "threads_batch": "4",  # Llama.cpp default for threads-batch is 4
+            "batch_size": "512",  # Llama.cpp default
+            "ubatch_size": "512",  # Llama.cpp default
+            "ctx_size": 2048,  # Llama.cpp default
+            "seed": "-1",  # Llama.cpp default
+            "temperature": "0.8",  # Llama.cpp default
+            "min_p": "0.05",  # Llama.cpp default
+            "n_gpu_layers": "0",  # Llama.cpp default for n-gpu-layers
+            "tensor_split": "",  # Omitted if empty string
+            "main_gpu": "0",  # Llama.cpp default
+            "prio": "0",  # Llama.cpp default
+            "n_predict": "-1",  # Llama.cpp default
             # Booleans that are flags (present if True, absent if False)
-            "ignore_eos":    False, # Default for --ignore-eos flag
-            "flash_attn":    True,  # Default ON: ik_llama defaults to on, llama.cpp benefits on most GPUs
-            "no_mmap":       False, # Default for --no-mmap flag
-            "mlock":         False, # Default for --mlock flag
-            "no_kv_offload": False, # Default for --no-kv-offload flag
-            "cpu_moe":       False, # Default for --cpu-moe flag
-            "n_cpu_moe":     "",    # Default for --n-cpu-moe (empty)
-            "mmproj_enabled": False, # Default for mmproj detection
-            "jinja_enabled": False, # Default for --jinja flag
-
+            "ignore_eos": False,  # Default for --ignore-eos flag
+            "flash_attn": True,  # Default ON: ik_llama defaults to on, llama.cpp benefits on most GPUs
+            "no_mmap": False,  # Default for --no-mmap flag
+            "mlock": False,  # Default for --mlock flag
+            "no_kv_offload": False,  # Default for --no-kv-offload flag
+            "cpu_moe": False,  # Default for --cpu-moe flag
+            "n_cpu_moe": "",  # Default for --n-cpu-moe (empty)
+            "mmproj_enabled": False,  # Default for mmproj detection
+            "jinja_enabled": False,  # Default for --jinja flag
             # Chat template parameters and custom parameters are deliberately excluded from default name generation
         }
 
         current_params = {
-            "cache_type_k":  self.launcher.cache_type_k.get().strip(),
-            "cache_type_v":  self.launcher.cache_type_v.get().strip(),
-            "threads":       self.launcher.threads.get().strip(),
+            "cache_type_k": self.launcher.cache_type_k.get().strip(),
+            "cache_type_v": self.launcher.cache_type_v.get().strip(),
+            "threads": self.launcher.threads.get().strip(),
             "threads_batch": self.launcher.threads_batch.get().strip(),
-            "batch_size":    self.launcher.batch_size.get().strip(),
-            "ubatch_size":   self.launcher.ubatch_size.get().strip(),
-            "ctx_size":      self.launcher.ctx_size.get(), # int
-            "seed":          self.launcher.seed.get().strip(),
-            "temperature":   self.launcher.temperature.get().strip(),
-            "min_p":         self.launcher.min_p.get().strip(),
-            "n_gpu_layers":  self.launcher.n_gpu_layers.get().strip(), # String value from entry
-            "tensor_split":  self.launcher.tensor_split.get().strip(),
-            "main_gpu":      self.launcher.main_gpu.get().strip(),
-            "prio":          self.launcher.prio.get().strip(),
-            "ignore_eos":    self.launcher.ignore_eos.get(), # bool
-            "n_predict":     self.launcher.n_predict.get().strip(),
-            "flash_attn":    self.launcher.flash_attn.get(), # bool
-            "no_mmap":       self.launcher.no_mmap.get(),   # bool
-            "mlock":         self.launcher.mlock.get(),    # bool
-            "no_kv_offload": self.launcher.no_kv_offload.get(), # bool
-            "cpu_moe":       self.launcher.cpu_moe.get(),  # bool
-            "n_cpu_moe":     self.launcher.n_cpu_moe.get().strip(),
-            "mmproj_enabled": self.launcher.mmproj_enabled.get(), # bool
-            "jinja_enabled": self.launcher.jinja_enabled.get(), # bool
-
+            "batch_size": self.launcher.batch_size.get().strip(),
+            "ubatch_size": self.launcher.ubatch_size.get().strip(),
+            "ctx_size": self.launcher.ctx_size.get(),  # int
+            "seed": self.launcher.seed.get().strip(),
+            "temperature": self.launcher.temperature.get().strip(),
+            "min_p": self.launcher.min_p.get().strip(),
+            "n_gpu_layers": self.launcher.n_gpu_layers.get().strip(),  # String value from entry
+            "tensor_split": self.launcher.tensor_split.get().strip(),
+            "main_gpu": self.launcher.main_gpu.get().strip(),
+            "prio": self.launcher.prio.get().strip(),
+            "ignore_eos": self.launcher.ignore_eos.get(),  # bool
+            "n_predict": self.launcher.n_predict.get().strip(),
+            "flash_attn": self.launcher.flash_attn.get(),  # bool
+            "no_mmap": self.launcher.no_mmap.get(),  # bool
+            "mlock": self.launcher.mlock.get(),  # bool
+            "no_kv_offload": self.launcher.no_kv_offload.get(),  # bool
+            "cpu_moe": self.launcher.cpu_moe.get(),  # bool
+            "n_cpu_moe": self.launcher.n_cpu_moe.get().strip(),
+            "mmproj_enabled": self.launcher.mmproj_enabled.get(),  # bool
+            "jinja_enabled": self.launcher.jinja_enabled.get(),  # bool
         }
 
         # Add non-default parameters to name parts
         for key, current_val in current_params.items():
-            default_val = default_params_for_name.get(key) # Get the default value used for name generation
+            default_val = default_params_for_name.get(key)  # Get the default value used for name generation
 
             # Special handling for GPU Layers: use the internal integer value for comparison effect
             if key == "n_gpu_layers":
-                 # Use the integer value after clamping, not the raw entry string
-                 gpu_layers_int = self.launcher.n_gpu_layers_int.get()
-                 max_layers = self.launcher.max_gpu_layers.get()
-                 # Compare the *effect* of the setting to the default (0 layers offloaded)
-                 # If the internal clamped value is > 0, consider it non-default
-                 if gpu_layers_int > 0:
-                      if max_layers > 0 and gpu_layers_int == max_layers:
-                           parts.append("gpu-all")
-                      else:
-                           parts.append(f"gpu={gpu_layers_int}")
-                 # Note: If input was -1 and max_layers is 0, gpu_layers_int is 0, which is correctly treated as default
+                # Use the integer value after clamping, not the raw entry string
+                gpu_layers_int = self.launcher.n_gpu_layers_int.get()
+                max_layers = self.launcher.max_gpu_layers.get()
+                # Compare the *effect* of the setting to the default (0 layers offloaded)
+                # If the internal clamped value is > 0, consider it non-default
+                if gpu_layers_int > 0:
+                    if max_layers > 0 and gpu_layers_int == max_layers:
+                        parts.append("gpu-all")
+                    else:
+                        parts.append(f"gpu={gpu_layers_int}")
+                # Note: If input was -1 and max_layers is 0, gpu_layers_int is 0, which is correctly treated as default
             # Special handling for Context Size: compare the integer value
             elif key == "ctx_size":
-                 if current_val != default_val:
-                      parts.append(f"ctx={current_val}")
+                if current_val != default_val:
+                    parts.append(f"ctx={current_val}")
             # Special handling for Boolean flags (add a token whenever the
             # user's value differs from the default, in either direction).
             elif isinstance(current_val, bool):
-                 if current_val != default_val:
-                      flag_name_map = {
-                         "flash_attn": "fa",
-                         "no_mmap": "no-mmap",
-                         "mlock": "mlock",
-                         "no_kv_offload": "no-kv-offload",
-
-                         "ignore_eos": "no-eos",
-                         "cpu_moe": "cpu-moe",
-                         "mmproj_enabled": "mmproj",
-                         "jinja_enabled": "jinja",
-                      }
-                      base = flag_name_map.get(key, key.replace('_', '-'))
-                      # Prefix "no-" when turning a True-by-default flag off.
-                      token = base if current_val else f"no-{base}"
-                      parts.append(token)
+                if current_val != default_val:
+                    flag_name_map = {
+                        "flash_attn": "fa",
+                        "no_mmap": "no-mmap",
+                        "mlock": "mlock",
+                        "no_kv_offload": "no-kv-offload",
+                        "ignore_eos": "no-eos",
+                        "cpu_moe": "cpu-moe",
+                        "mmproj_enabled": "mmproj",
+                        "jinja_enabled": "jinja",
+                    }
+                    base = flag_name_map.get(key, key.replace("_", "-"))
+                    # Prefix "no-" when turning a True-by-default flag off.
+                    token = base if current_val else f"no-{base}"
+                    parts.append(token)
             # Handle other string parameters
             elif isinstance(current_val, str):
-                 # Compare stripped strings. Handle empty string vs None default.
-                 # Only add if the current value is non-empty AND it's different from the default
-                 if current_val and (default_val is None or current_val != default_val):
-                      # Use abbreviations for common parameters
-                      abbr_map = {
-                          "cache_type_k": "kv",
-                          "cache_type_v": "vv",
-                          "threads": "th",
-                          "threads_batch": "tb",
-                          "batch_size": "b",
-                          "ubatch_size": "ub",
-                          "seed": "s",
-                          "temperature": "temp",
-                          "min_p": "minp",
-                          "tensor_split": "split",
-                          "main_gpu": "main-gpu",
-                          "prio": "prio",
-                          "n_predict": "pred",
-                      }
-                      abbr = abbr_map.get(key, key.replace('_', '-')) # Use mapped name or just key
-                      parts.append(f"{abbr}={current_val}")
+                # Compare stripped strings. Handle empty string vs None default.
+                # Only add if the current value is non-empty AND it's different from the default
+                if current_val and (default_val is None or current_val != default_val):
+                    # Use abbreviations for common parameters
+                    abbr_map = {
+                        "cache_type_k": "kv",
+                        "cache_type_v": "vv",
+                        "threads": "th",
+                        "threads_batch": "tb",
+                        "batch_size": "b",
+                        "ubatch_size": "ub",
+                        "seed": "s",
+                        "temperature": "temp",
+                        "min_p": "minp",
+                        "tensor_split": "split",
+                        "main_gpu": "main-gpu",
+                        "prio": "prio",
+                        "n_predict": "pred",
+                    }
+                    abbr = abbr_map.get(key, key.replace("_", "-"))  # Use mapped name or just key
+                    parts.append(f"{abbr}={current_val}")
 
         # 3. Assemble the name
         # Join parts with underscores, ensure total length isn't excessive
         generated_name = "_".join(parts)
 
         # Avoid leading/trailing underscores or multiple consecutive underscores
-        generated_name = re.sub(r'_{2,}', '_', generated_name)
-        generated_name = generated_name.strip('_')
+        generated_name = re.sub(r"_{2,}", "_", generated_name)
+        generated_name = generated_name.strip("_")
 
         # Ensure it's not empty
         if not generated_name:
@@ -215,7 +211,7 @@ class ConfigManager:
 
         # Limit total length (e.g., 80 characters)
         if len(generated_name) > 80:
-             generated_name = generated_name[:80].rstrip('_') # Truncate and remove trailing underscore if any
+            generated_name = generated_name[:80].rstrip("_")  # Truncate and remove trailing underscore if any
 
         print(f"DEBUG: Generated config name: {generated_name}", file=sys.stderr)
 
@@ -232,12 +228,28 @@ class ConfigManager:
         # - Doesn't contain any auto-gen patterns like _gpu=, _ctx=, _th=, etc.
         # - Doesn't start with any model name patterns
         # - Must be at least 3 characters and contain letters (to avoid preserving junk)
-        if (current_config_name and
-            len(current_config_name) >= 3 and
-            any(c.isalpha() for c in current_config_name) and
-            current_config_name not in ["default_config", "default", "model"] and
-            not any(pattern in current_config_name for pattern in ["_gpu=", "_ctx=", "_temp=", "_batch=", "_threads=", "_th=", "_tb=", "_min_p=", "_seed=", "_n_predict="]) and
-            not current_config_name.startswith(("default", "model", parts[0] if parts else ""))):
+        if (
+            current_config_name
+            and len(current_config_name) >= 3
+            and any(c.isalpha() for c in current_config_name)
+            and current_config_name not in ["default_config", "default", "model"]
+            and not any(
+                pattern in current_config_name
+                for pattern in [
+                    "_gpu=",
+                    "_ctx=",
+                    "_temp=",
+                    "_batch=",
+                    "_threads=",
+                    "_th=",
+                    "_tb=",
+                    "_min_p=",
+                    "_seed=",
+                    "_n_predict=",
+                ]
+            )
+            and not current_config_name.startswith(("default", "model", parts[0] if parts else ""))
+        ):
             should_update = False
             print(f"DEBUG: Detected truly custom name '{current_config_name}', will preserve", file=sys.stderr)
 
@@ -245,25 +257,50 @@ class ConfigManager:
             self.launcher.config_name.set(generated_name)
             print("DEBUG: Updated config_name variable in real-time.", file=sys.stderr)
         elif not should_update:
-             print("DEBUG: Preserved custom config name.", file=sys.stderr)
+            print("DEBUG: Preserved custom config name.", file=sys.stderr)
         else:
-             print("DEBUG: Generated name same as current, no update needed.", file=sys.stderr)
+            print("DEBUG: Generated name same as current, no update needed.", file=sys.stderr)
 
         return generated_name
 
-
     def update_default_config_name_if_needed(self, *args):
-        """Traced callback for variables that influence the default config name."""
-        # This trace function is bound to variables that influence the generated config name.
-        # It's called whenever those variables change.
-        # We only want to regenerate and update the config name if the user hasn't
-        # already manually set a custom name.
-        # The generate_default_config_name function already contains the logic
-        # to decide whether to overwrite the current self.launcher.config_name value.
-        # So we just call it here.
-        # Use after(1) to prevent recursive trace calls on config_name update
-        self.launcher.root.after(1, self.generate_default_config_name)
+        """Traced callback for variables that influence the default config name.
 
+        Debounced: ~20 traced vars get .set() in quick succession during
+        ``load_configuration`` (and a similar burst happens during
+        ``_update_ui_after_analysis``). Without coalescing each one
+        scheduled its own ``root.after(1, generate_default_config_name)``,
+        producing N independent regenerations that ran back-to-back on
+        the Tk thread. Now a pending callback is reused — the trailing
+        regen sees the final value of every var.
+        """
+        # Cancel an outstanding pending regen so we only ever have one
+        # in flight at a time. ``after_cancel`` is a no-op on an unknown
+        # id, but we set the attr to None first so a re-entrancy through
+        # ``generate_default_config_name`` (which itself sets vars) can't
+        # cancel the callback that's about to run.
+        pending = getattr(self, "_default_name_regen_after_id", None)
+        if pending is not None:
+            try:
+                self.launcher.root.after_cancel(pending)
+            except Exception:
+                pass
+        # Guard the schedule too — a trace firing during launcher
+        # teardown (config-load cascade hitting destroyed widgets) can
+        # raise ``tk.TclError`` from ``after()``. Clear the handle on
+        # failure so the next call retries instead of leaving a stale
+        # id around.
+        try:
+            self._default_name_regen_after_id = self.launcher.root.after(10, self._fire_default_name_regen)
+        except Exception:
+            self._default_name_regen_after_id = None
+
+    def _fire_default_name_regen(self):
+        """Trailing callback for the debounced regen. Clears the pending
+        handle BEFORE running so a new ``.set()`` arriving mid-regen
+        correctly queues another trailing call."""
+        self._default_name_regen_after_id = None
+        self.generate_default_config_name()
 
     def current_cfg(self):
         """Get current configuration as dictionary."""
@@ -274,41 +311,40 @@ class ConfigManager:
         # Construct the configuration dictionary
         cfg = {
             "llama_cpp_dir": self.launcher.llama_cpp_dir.get(),
-            "ik_llama_dir":  self.launcher.ik_llama_dir.get(),
-            "venv_dir":      self.launcher.venv_dir.get(),
-            "model_path":    self.launcher.model_path.get(),
+            "ik_llama_dir": self.launcher.ik_llama_dir.get(),
+            "venv_dir": self.launcher.venv_dir.get(),
+            "model_path": self.launcher.model_path.get(),
             "selected_mmproj_path": self.launcher.selected_mmproj_path.get(),
-            "cache_type_k":  self.launcher.cache_type_k.get(),
-            "cache_type_v":  self.launcher.cache_type_v.get(),
-            "threads":       self.launcher.threads.get(), # Save the user-set value
-            "threads_batch": self.launcher.threads_batch.get(), # Save the user-set value
-            "batch_size":    self.launcher.batch_size.get(), # Save the user-set value
-            "ubatch_size":   self.launcher.ubatch_size.get(), # Save the user-set value
-            "n_gpu_layers":  gpu_layers_to_save, # Save the string value (can be -1)
-            "no_mmap":       self.launcher.no_mmap.get(),
-
-            "prio":          self.launcher.prio.get(),
-            "temperature":   self.launcher.temperature.get(),
-            "min_p":         self.launcher.min_p.get(),
-            "ctx_size":      self.launcher.ctx_size.get(),
-            "seed":          self.launcher.seed.get(),
-            "flash_attn":    self.launcher.flash_attn.get(),
-            "tensor_split":  self.launcher.tensor_split.get().strip(),
-            "main_gpu":      self.launcher.main_gpu.get(),
-            "mlock":         self.launcher.mlock.get(),
+            "cache_type_k": self.launcher.cache_type_k.get(),
+            "cache_type_v": self.launcher.cache_type_v.get(),
+            "threads": self.launcher.threads.get(),  # Save the user-set value
+            "threads_batch": self.launcher.threads_batch.get(),  # Save the user-set value
+            "batch_size": self.launcher.batch_size.get(),  # Save the user-set value
+            "ubatch_size": self.launcher.ubatch_size.get(),  # Save the user-set value
+            "n_gpu_layers": gpu_layers_to_save,  # Save the string value (can be -1)
+            "no_mmap": self.launcher.no_mmap.get(),
+            "prio": self.launcher.prio.get(),
+            "temperature": self.launcher.temperature.get(),
+            "min_p": self.launcher.min_p.get(),
+            "ctx_size": self.launcher.ctx_size.get(),
+            "seed": self.launcher.seed.get(),
+            "flash_attn": self.launcher.flash_attn.get(),
+            "tensor_split": self.launcher.tensor_split.get().strip(),
+            "main_gpu": self.launcher.main_gpu.get(),
+            "mlock": self.launcher.mlock.get(),
             "no_kv_offload": self.launcher.no_kv_offload.get(),
-            "host":          self.launcher.host.get(),
-            "port":          self.launcher.port.get(),
+            "host": self.launcher.host.get(),
+            "port": self.launcher.port.get(),
             # --- Backend Selection ---
             "backend_selection": self.launcher.backend_selection.get(),
             # --- NEW: Add new parameters to config ---
-            "ignore_eos":    self.launcher.ignore_eos.get(),
-            "n_predict":     self.launcher.n_predict.get(),
+            "ignore_eos": self.launcher.ignore_eos.get(),
+            "n_predict": self.launcher.n_predict.get(),
             # --- MoE CPU parameters ---
-            "cpu_moe":       self.launcher.cpu_moe.get(),
-            "n_cpu_moe":     self.launcher.n_cpu_moe.get(),
+            "cpu_moe": self.launcher.cpu_moe.get(),
+            "n_cpu_moe": self.launcher.n_cpu_moe.get(),
             # --- Parallel sequences ---
-            "parallel":      self.launcher.parallel.get(),
+            "parallel": self.launcher.parallel.get(),
             # --- Multi-modal Projection ---
             "mmproj_enabled": self.launcher.mmproj_enabled.get(),
             # --- MTP / Speculative Decoding + Reasoning + KV Unification ---
@@ -327,7 +363,10 @@ class ConfigManager:
             # Toggle for --jinja (independent of template source)
             "jinja_enabled": self.launcher.jinja_enabled.get(),
             # --- NEW: Save Custom Parameters ---
-            "custom_parameters": self.launcher.custom_parameters_list, # Save the list of strings
+            # Copy so subsequent UI edits don't silently mutate the
+            # stored preset — without this, the live list and the
+            # saved-config dict alias the same Python object.
+            "custom_parameters": list(self.launcher.custom_parameters_list),  # Save the list of strings
         }
 
         # Mirror every spec/reasoning/kvu Tk var into the cfg dict. Lives in
@@ -337,17 +376,18 @@ class ConfigManager:
 
         # Include selected_gpus directly in the config dictionary for easier loading from config tab
         # This is redundant with app_settings, but keeps config self-contained for this tab.
-        cfg["gpu_indices"] = self.launcher.app_settings.get("selected_gpus", [])
+        # Copy so subsequent GPU-checkbox / drag-reorder edits don't
+        # silently mutate the stored preset (same rationale as the
+        # ``custom_parameters`` copy above).
+        cfg["gpu_indices"] = list(self.launcher.app_settings.get("selected_gpus", []) or [])
         # Save GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
-        cfg["gpu_order"] = self.launcher.app_settings.get("gpu_order", [])
+        cfg["gpu_order"] = list(self.launcher.app_settings.get("gpu_order", []) or [])
         # Mirror the draft-GPU checkbox indices into the per-config dict so
         # named-config save/load reinstates the visual checkbox state, not
         # just the comma-joined ``spec_draft_device`` string. Same pattern as
         # ``gpu_indices`` above — redundant with app_settings but keeps the
         # named-config self-contained.
-        cfg["spec_draft_selected_gpus"] = list(
-            self.launcher.app_settings.get("spec_draft_selected_gpus", []) or []
-        )
+        cfg["spec_draft_selected_gpus"] = list(self.launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
 
         # Add environmental variables configuration
         cfg.update(self.launcher.env_vars_manager.save_to_config())
@@ -360,50 +400,165 @@ class ConfigManager:
     def load_configuration(self):
         """Load selected configuration from the listbox."""
         if not self.launcher.config_listbox.curselection():
-            return messagebox.showerror("Error","Select a configuration from the list to load.")
+            return messagebox.showerror("Error", "Select a configuration from the list to load.")
         name = self.launcher.config_listbox.get(self.launcher.config_listbox.curselection())
-        cfg  = self.launcher.saved_configs.get(name)
-        if not cfg:
-             messagebox.showerror("Error", f"Configuration '{name}' data not found.")
-             return
+        cfg = self.launcher.saved_configs.get(name)
+        # ``if not cfg`` conflates a missing entry with a valid-but-
+        # empty dict. The apply path supplies defaults for sparse
+        # configs (see ``_apply_loaded_configuration``), and the
+        # shape guard below already rejects non-dict values, so only
+        # genuinely-missing (``None``) entries should fail fast here.
+        if cfg is None:
+            messagebox.showerror("Error", f"Configuration '{name}' data not found.")
+            return
+        # A hand-edited ``saved_configs`` JSON could land a non-dict
+        # value (list, scalar, …) under a name. Refuse it cleanly —
+        # the apply path below assumes ``cfg`` is a dict (``cfg.get``,
+        # ``deepcopy`` is fine for both but ``_apply_loaded_configuration``
+        # would crash on a list as it iterates string keys).
+        if not isinstance(cfg, dict):
+            messagebox.showerror(
+                "Error",
+                f"Configuration '{name}' has an invalid shape "
+                f"(expected an object, got {type(cfg).__name__}). "
+                f"This entry is unusable until you re-save it.",
+            )
+            return
 
+        # Snapshot the predefined-template name BEFORE
+        # ``_apply_loaded_configuration`` runs — that method may remap
+        # a stale value (legacy template removed from
+        # chat_templates.json) and write the corrected one back into
+        # ``cfg`` so the next save persists it. If the save below
+        # fails, we want the in-memory ``saved_configs`` to roll back
+        # rather than be left in an inconsistent state where the
+        # disk version still holds the OLD template name but memory
+        # holds the NEW one.
+        # Deep-copy the WHOLE pre-apply cfg dict so a failed save
+        # below can restore everything ``_apply_loaded_configuration``
+        # may have mutated — not just ``predefined_template_name``.
+        # The apply path also normalizes ``backend_selection``
+        # (``"ik_llama.cpp"`` → ``"ik_llama"``), and future
+        # legacy-name remaps in this method should automatically
+        # benefit from the rollback without each having to remember
+        # to update this snapshot.
+        from copy import deepcopy as _deepcopy
+
+        prior_cfg_snapshot = _deepcopy(cfg) if isinstance(cfg, dict) else None
+        # Silence per-var save traces for the duration of the ~50 .set()
+        # calls below. Without this, each .set() that hits a traced var
+        # (port, host, ik_llama_*, env vars, spec) fires _save_configs +
+        # the model_dirs stat sweep, and the UI freezes while the disk
+        # gets pummeled. We re-enable autosave and write once at the end.
+        prior_suppress = getattr(self.launcher, "_suppress_autosave", False)
+        self.launcher._suppress_autosave = True
+        try:
+            self._apply_loaded_configuration(name, cfg)
+        finally:
+            self.launcher._suppress_autosave = prior_suppress
+        # Single explicit save now that every traced var is settled.
+        # Only confirm the load when the save actually reached disk —
+        # without this gate the "Loaded" toast could fire on top of a
+        # "Config Save Error" dialog produced by the save itself.
+        saved = self.launcher._save_configs()
+        if saved:
+            messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
+        else:
+            # Wholesale restore of the in-memory cfg so memory
+            # matches what's still on disk. Covers
+            # ``predefined_template_name`` (legacy alias remap),
+            # ``backend_selection`` (``"ik_llama.cpp"`` rename), and
+            # any future load-time normalization the
+            # ``_apply_loaded_configuration`` path adds. ``cfg.clear()``
+            # + ``update`` keeps the same dict identity so the
+            # ``saved_configs`` mapping still points at the right
+            # object.
+            if isinstance(cfg, dict) and prior_cfg_snapshot is not None:
+                cfg.clear()
+                cfg.update(prior_cfg_snapshot)
+
+    def _apply_loaded_configuration(self, name, cfg):
+        """Mutates launcher state from a named-config dict.
+
+        Split out of ``load_configuration`` so callers can wrap the whole
+        cascade with ``_suppress_autosave``. Does not write to disk and
+        does not show the "Loaded" toast — the caller handles both.
+        """
         # Load simple variables first
-        self.launcher.llama_cpp_dir.set(cfg.get("llama_cpp_dir",""))
-        self.launcher.ik_llama_dir.set(cfg.get("ik_llama_dir",""))
-        self.launcher.venv_dir.set(cfg.get("venv_dir","")) # Setting this triggers the venv trace -> flash attn check
-        self.launcher.cache_type_k.set(cfg.get("cache_type_k","f16"))
-        self.launcher.cache_type_v.set(cfg.get("cache_type_v","f16"))
+        self.launcher.llama_cpp_dir.set(cfg.get("llama_cpp_dir", ""))
+        self.launcher.ik_llama_dir.set(cfg.get("ik_llama_dir", ""))
+        self.launcher.venv_dir.set(cfg.get("venv_dir", ""))  # Setting this triggers the venv trace -> flash attn check
+        self.launcher.cache_type_k.set(cfg.get("cache_type_k", "f16"))
+        self.launcher.cache_type_v.set(cfg.get("cache_type_v", "f16"))
         # Load parameters, providing defaults for backward compatibility with older configs
         # Default to the *current* detected cores if not in the config for threads
-        self.launcher.threads.set(cfg.get("threads", str(self.launcher.physical_cores))) # Default to detected physical cores
-        self.launcher.threads_batch.set(cfg.get("threads_batch", str(self.launcher.logical_cores))) # Default to detected logical cores
-        self.launcher.batch_size.set(cfg.get("batch_size", "512")) # Default to llama.cpp 512
-        self.launcher.ubatch_size.set(cfg.get("ubatch_size", "512")) # Default to llama.cpp 512
+        self.launcher.threads.set(
+            cfg.get("threads", str(self.launcher.physical_cores))
+        )  # Default to detected physical cores
+        self.launcher.threads_batch.set(
+            cfg.get("threads_batch", str(self.launcher.logical_cores))
+        )  # Default to detected logical cores
+        self.launcher.batch_size.set(cfg.get("batch_size", "512"))  # Default to llama.cpp 512
+        self.launcher.ubatch_size.set(cfg.get("ubatch_size", "512"))  # Default to llama.cpp 512
 
-        self.launcher.no_mmap.set(cfg.get("no_mmap",False))
+        self.launcher.no_mmap.set(cfg.get("no_mmap", False))
 
-        self.launcher.prio.set(cfg.get("prio","0"))
-        self.launcher.temperature.set(cfg.get("temperature","0.8"))
-        self.launcher.min_p.set(cfg.get("min_p","0.05"))
-        ctx = cfg.get("ctx_size", 2048)
+        self.launcher.prio.set(cfg.get("prio", "0"))
+        self.launcher.temperature.set(cfg.get("temperature", "0.8"))
+        self.launcher.min_p.set(cfg.get("min_p", "0.05"))
+        # A hand-edited config could ship ``"ctx_size": "foo"`` or
+        # ``"ctx_size": []`` — both would raise inside ``IntVar.set()``
+        # / ``_sync_ctx_display()`` AFTER earlier fields have already
+        # been applied, leaving the load half-done. Coerce to int up
+        # front with the same 2048 default the ``get`` falls back to.
+        try:
+            ctx = int(cfg.get("ctx_size", 2048))
+        except (TypeError, ValueError):
+            ctx = 2048
         self.launcher.ctx_size.set(ctx)
-        self.launcher._sync_ctx_display(ctx) # Manually sync display
-        self.launcher.seed.set(cfg.get("seed","-1"))
+        self.launcher._sync_ctx_display(ctx)  # Manually sync display
+        self.launcher.seed.set(cfg.get("seed", "-1"))
         self.launcher.flash_attn.set(cfg.get("flash_attn", True))  # Default ON; see app default note
-        self.launcher.tensor_split.set(cfg.get("tensor_split","").strip()) # Ensure strip on load too
-        self.launcher.main_gpu.set(cfg.get("main_gpu","0"))
-        self.launcher.mlock.set(cfg.get("mlock",False))
-        self.launcher.no_kv_offload.set(cfg.get("no_kv_offload",False))
-        self.launcher.host.set(cfg.get("host", self.launcher.app_settings.get("host", "127.0.0.1"))) # --host
-        self.launcher.port.set(cfg.get("port", self.launcher.app_settings.get("port", "8080"))) # --port
-        self.launcher.config_name.set(name) # Set the config name entry
+        # A hand-edited config could ship ``"tensor_split": 1``
+        # (int) or ``"tensor_split": [0.5, 0.5]`` (list); calling
+        # ``.strip()`` on either would crash mid-load with an
+        # opaque AttributeError. Coerce non-string values to the
+        # empty string so the field falls through to "no split"
+        # rather than partially-applying the rest of the config.
+        raw_tensor_split = cfg.get("tensor_split", "")
+        if not isinstance(raw_tensor_split, str):
+            raw_tensor_split = ""
+        self.launcher.tensor_split.set(raw_tensor_split.strip())  # Ensure strip on load too
+        self.launcher.main_gpu.set(cfg.get("main_gpu", "0"))
+        self.launcher.mlock.set(cfg.get("mlock", False))
+        self.launcher.no_kv_offload.set(cfg.get("no_kv_offload", False))
+        self.launcher.host.set(cfg.get("host", self.launcher.app_settings.get("host", "127.0.0.1")))  # --host
+        self.launcher.port.set(cfg.get("port", self.launcher.app_settings.get("port", "8080")))  # --port
+        self.launcher.config_name.set(name)  # Set the config name entry
 
         # --- Backend Selection ---
-        self.launcher.backend_selection.set(cfg.get("backend_selection", "llama.cpp"))
+        # Normalize legacy backend names before setting the Tk var.
+        # The build-tab flow keys off ``"llama.cpp"`` / ``"ik_llama"``;
+        # an older saved config with ``"ik_llama.cpp"`` (the pre-rename
+        # value) used to leave the app in a third state the
+        # backend-sync paths didn't recognise until the user toggled
+        # it manually. Unknown values fall back to ``"llama.cpp"``.
+        raw_backend = cfg.get("backend_selection", "llama.cpp")
+        if raw_backend == "ik_llama.cpp":
+            backend = "ik_llama"
+        elif raw_backend in ("llama.cpp", "ik_llama"):
+            backend = raw_backend
+        else:
+            backend = "llama.cpp"
+        self.launcher.backend_selection.set(backend)
+        if isinstance(cfg, dict) and cfg.get("backend_selection") != backend:
+            # Persist the normalized value so the next save writes the
+            # canonical name and the warning won't re-fire.
+            cfg["backend_selection"] = backend
 
         # --- NEW: Load new parameters ---
         self.launcher.ignore_eos.set(cfg.get("ignore_eos", False))
-        self.launcher.n_predict.set(cfg.get("n_predict", "-1")) # Default -1 for backward compatibility
+        self.launcher.n_predict.set(cfg.get("n_predict", "-1"))  # Default -1 for backward compatibility
         # --- MoE CPU parameters ---
         self.launcher.cpu_moe.set(cfg.get("cpu_moe", False))
         self.launcher.n_cpu_moe.set(cfg.get("n_cpu_moe", ""))
@@ -428,8 +583,20 @@ class ConfigManager:
         self.launcher._update_fit_fields_state()
         # --- NEW: Load Custom Parameters ---
         # Default to empty list [] for backward compatibility with older configs
-        self.launcher.custom_parameters_list = cfg.get("custom_parameters", [])
-        self.launcher._update_custom_parameters_listbox() # Update the GUI listbox
+        # Copy so the live UI list and the stored preset dict are
+        # independent — the launcher mutates this list in-place when
+        # the user adds/removes parameters, and we don't want that to
+        # silently update the saved preset without an explicit save.
+        # Type-guard against hand-edited string / scalar values: a
+        # bare ``"foo"`` would otherwise ``list(...)`` into
+        # ``["f", "o", "o"]`` (per-character split). Only accept
+        # genuine list/tuple values.
+        raw_custom_params = cfg.get("custom_parameters", [])
+        if isinstance(raw_custom_params, (list, tuple)):
+            self.launcher.custom_parameters_list = list(raw_custom_params)
+        else:
+            self.launcher.custom_parameters_list = []
+        self.launcher._update_custom_parameters_listbox()  # Update the GUI listbox
 
         # Load environmental variables configuration
         self.launcher.env_vars_manager.load_from_config(cfg)
@@ -446,7 +613,41 @@ class ConfigManager:
         # Default the predefined name to the *first* key in _all_templates if not found
         # This handles cases where the saved name might no longer exist in _all_templates
         default_predefined_key = list(self.launcher._all_templates.keys())[0] if self.launcher._all_templates else ""
-        self.launcher.predefined_template_name.set(cfg.get("predefined_template_name", default_predefined_key))
+        # Saved predefined_template_name MIGHT reference a label that was
+        # removed from chat_templates.json (legacy alias cleanup). Remap
+        # to the default so ``_update_effective_template_display`` doesn't
+        # silently emit an empty ``--chat-template`` and ``current_cfg``
+        # round-trips a valid name back to disk.
+        raw_saved_predefined = cfg.get("predefined_template_name", default_predefined_key)
+        # Coerce non-string / blank values to the default. Empty
+        # strings and whitespace-only values are functionally
+        # invalid — ``_update_effective_template_display`` would
+        # emit a blank ``--chat-template`` and the listbox would
+        # show no selection. ``null`` / ``false`` / numeric values
+        # would also break the downstream ``StringVar.set`` /
+        # template-key lookup. Treat all of them the same: fall
+        # back to the default and persist the correction below.
+        if isinstance(raw_saved_predefined, str) and raw_saved_predefined.strip():
+            saved_predefined = raw_saved_predefined
+        else:
+            saved_predefined = default_predefined_key
+        if saved_predefined and saved_predefined not in self.launcher._all_templates and default_predefined_key:
+            print(
+                f"WARNING: saved predefined_template_name {saved_predefined!r} "
+                f"is no longer in chat_templates.json; remapping to "
+                f"{default_predefined_key!r}.",
+                file=sys.stderr,
+            )
+            saved_predefined = default_predefined_key
+        # Persist BOTH the legacy-alias remap AND the non-string
+        # coercion back into the in-memory config so the next
+        # ``_save_configs`` writes the corrected key. Without this,
+        # a JSON-edited ``"predefined_template_name": null`` would
+        # be silently fixed on every load but never actually
+        # written back to disk.
+        if isinstance(cfg, dict) and raw_saved_predefined != saved_predefined:
+            cfg["predefined_template_name"] = saved_predefined
+        self.launcher.predefined_template_name.set(saved_predefined)
 
         self.launcher.custom_template_string.set(cfg.get("custom_template_string", ""))
         self.launcher.jinja_enabled.set(cfg.get("jinja_enabled", False))
@@ -457,13 +658,63 @@ class ConfigManager:
 
         # Load GPU selections - This needs to update the checkboxes
         # Check for the 'gpu_indices' key directly in the config dictionary first
-        loaded_gpu_indices = cfg.get("gpu_indices", self.launcher.app_settings.get("selected_gpus", [])) # Fallback to app_settings key if old config format
+        loaded_gpu_indices = cfg.get(
+            "gpu_indices", self.launcher.app_settings.get("selected_gpus", [])
+        )  # Fallback to app_settings key if old config format
+        # Defensive normalization — a hand-edited config could ship
+        # ``"gpu_indices": "0"`` (string) or ``"gpu_indices": 0``
+        # (int). The string would iterate character-by-character into
+        # ``["0"]`` (wrong on multi-digit GPU IDs), and the int would
+        # raise on the ``set()`` / ``for`` constructs below. Coerce
+        # non-list values to empty so the downstream checkbox sync
+        # treats it as "no selection".
+        if not isinstance(loaded_gpu_indices, list):
+            loaded_gpu_indices = []
+        # Element-level coercion: accept ints and digit-only strings
+        # (numeric coercion to int), drop everything else. Without
+        # this, a hand-edited config like ``"gpu_indices": ["0", 1, "two"]``
+        # would mix int/str types in ``selected_gpus`` and the
+        # downstream checkbox-sync ``in selected_set`` membership
+        # check would silently fail to match a detected GPU index
+        # against its string counterpart.
+        cleaned_indices: list[int] = []
+        for raw in loaded_gpu_indices:
+            if isinstance(raw, bool):
+                # ``isinstance(True, int)`` is True — exclude bool
+                # explicitly so ``True``/``False`` don't sneak in as
+                # GPU 1 / GPU 0.
+                continue
+            if isinstance(raw, int):
+                cleaned_indices.append(raw)
+            elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+                try:
+                    cleaned_indices.append(int(raw.strip()))
+                except ValueError:
+                    continue
+        loaded_gpu_indices = cleaned_indices
         # Store loaded indices in app_settings *before* updating checkboxes
         self.launcher.app_settings["selected_gpus"] = loaded_gpu_indices
 
         # Load GPU order (determines CUDA_VISIBLE_DEVICES order and tensor split assignment)
         # If no gpu_order in config, default to the loaded indices in their natural order
         loaded_gpu_order = cfg.get("gpu_order", loaded_gpu_indices[:])
+        if not isinstance(loaded_gpu_order, list):
+            loaded_gpu_order = []
+        # Mirror the per-element coercion for ``gpu_order`` — same
+        # rationale as above (drop bools, accept ints or digit
+        # strings, preserve order).
+        cleaned_order: list[int] = []
+        for raw in loaded_gpu_order:
+            if isinstance(raw, bool):
+                continue
+            if isinstance(raw, int):
+                cleaned_order.append(raw)
+            elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+                try:
+                    cleaned_order.append(int(raw.strip()))
+                except ValueError:
+                    continue
+        loaded_gpu_order = cleaned_order
         # Ensure gpu_order only contains selected GPUs (defensive, in case of config mismatch)
         selected_set = set(loaded_gpu_indices)
         loaded_gpu_order = [g for g in loaded_gpu_order if g in selected_set]
@@ -482,38 +733,44 @@ class ConfigManager:
             self.launcher.app_settings.get("spec_draft_selected_gpus", []),
         )
         # Coerce defensively — same shape as the load_saved_configs validation.
-        self.launcher.app_settings["spec_draft_selected_gpus"] = (
-            coerce_spec_draft_selected_gpus(loaded_draft_gpus)
-        )
+        self.launcher.app_settings["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(loaded_draft_gpus)
 
-        self.launcher._update_gpu_checkboxes() # This will set the checkboxes according to self.launcher.app_settings["selected_gpus"]
+        self.launcher._update_gpu_checkboxes()  # This will set the checkboxes according to self.launcher.app_settings["selected_gpus"]
         # _update_gpu_checkboxes also triggers _update_recommendations and updates the GPU order listbox
         # _update_gpu_checkboxes already cascades to
         # _update_spec_draft_gpu_checkboxes at its tail, so the draft checkbox
         # grid will be refreshed with the loaded indices. No second call needed.
 
-
         # Load n_gpu_layers - This interacts with model analysis results
-        loaded_gpu_layers_str = cfg.get("n_gpu_layers","0")
+        loaded_gpu_layers_str = cfg.get("n_gpu_layers", "0")
         self.launcher.n_gpu_layers.set(loaded_gpu_layers_str)
         try:
-             val = int(loaded_gpu_layers_str)
-             # Use _set_gpu_layers to set the int var (no clamping for manual entry values)
-             self.launcher._set_gpu_layers(val)
+            val = int(loaded_gpu_layers_str)
+            # Use _set_gpu_layers to set the int var (no clamping for manual entry values)
+            self.launcher._set_gpu_layers(val)
         except ValueError:
-             self.launcher.n_gpu_layers.set("0")
-             self.launcher._set_gpu_layers(0)
+            self.launcher.n_gpu_layers.set("0")
+            self.launcher._set_gpu_layers(0)
 
         # Load Model Path - This will trigger model selection logic and analysis
         loaded_model_path_str = cfg.get("model_path", "")
+        # A hand-edited config could ship ``"model_path": null`` /
+        # ``"model_path": 0`` / ``"model_path": []``; the
+        # ``Path(loaded_model_path_str)`` calls downstream would
+        # then crash with ``TypeError``. Coerce non-string values
+        # to the empty string so the no-model branch handles them
+        # cleanly (model_path Tk var stays empty, the rest of the
+        # load continues).
+        if not isinstance(loaded_model_path_str, str):
+            loaded_model_path_str = ""
         # Set the variable first, then attempt to select in the listbox
         self.launcher.model_path.set(loaded_model_path_str)
-        self.launcher.model_listbox.selection_clear(0, "end") # Clear previous visual selection
+        self.launcher.model_listbox.selection_clear(0, "end")  # Clear previous visual selection
 
         selected_idx = -1
         if loaded_model_path_str:
             try:
-                loaded_model_path_obj = Path(loaded_model_path_str).resolve() # Resolve the saved path before lookup
+                loaded_model_path_obj = Path(loaded_model_path_str).resolve()  # Resolve the saved path before lookup
                 found_display_name = None
                 # Find the display name associated with the saved path in the *currently found* models (which are resolved)
                 for display_name, full_path in self.launcher.found_models.items():
@@ -522,34 +779,36 @@ class ConfigManager:
                         break
                 # If found, get its index in the current listbox (which is sorted by display name)
                 listbox_items = self.launcher.model_listbox.get(0, "end")
-                if found_display_name and found_display_name in listbox_items: # Check if the display name exists in the current listbox items
+                if (
+                    found_display_name and found_display_name in listbox_items
+                ):  # Check if the display name exists in the current listbox items
                     selected_idx = listbox_items.index(found_display_name)
             except (ValueError, OSError, IndexError):
-                 pass # Handle potential errors with old paths or listbox state
+                pass  # Handle potential errors with old paths or listbox state
 
         if selected_idx != -1:
-             # Select it visually and trigger the selection handler (_on_model_selected)
-             # Using after(10, ...) gives the UI a moment to update before selection
-             self.launcher.root.after(10, self.launcher._select_model_in_listbox, selected_idx)
+            # Select it visually and trigger the selection handler (_on_model_selected)
+            # Using after(10, ...) gives the UI a moment to update before selection
+            self.launcher.root.after(10, self.launcher._select_model_in_listbox, selected_idx)
         else:
-             # If the model was not found in the current scan results
-             self.launcher.model_path.set("") # Clear model path variable
-             self.launcher._reset_model_info_display()
-             self.launcher._reset_gpu_layer_controls(keep_entry_enabled=True) # Keep entry enabled if model not found
-             self.launcher.current_model_analysis = {} # Clear analysis data
-             self.launcher._update_recommendations() # Update recommendations based on no model
-             self.generate_default_config_name() # Generate default name for no model state
-             if loaded_model_path_str:
-                  messagebox.showwarning("Model Not Found", f"The model from the config ('{Path(loaded_model_path_str).name if loaded_model_path_str else 'N/A'}') was not found in the current list.\nPlease ensure its directory is added and scanned, then select a model manually.")
-
-
-        messagebox.showinfo("Loaded", f"Configuration '{name}' applied.")
+            # If the model was not found in the current scan results
+            self.launcher.model_path.set("")  # Clear model path variable
+            self.launcher._reset_model_info_display()
+            self.launcher._reset_gpu_layer_controls(keep_entry_enabled=True)  # Keep entry enabled if model not found
+            self.launcher.current_model_analysis = {}  # Clear analysis data
+            self.launcher._update_recommendations()  # Update recommendations based on no model
+            self.generate_default_config_name()  # Generate default name for no model state
+            if loaded_model_path_str:
+                messagebox.showwarning(
+                    "Model Not Found",
+                    f"The model from the config ('{Path(loaded_model_path_str).name if loaded_model_path_str else 'N/A'}') was not found in the current list.\nPlease ensure its directory is added and scanned, then select a model manually.",
+                )
 
     def delete_configuration(self):
         """Delete selected configuration(s) from the listbox."""
         selected_indices = self.launcher.config_listbox.curselection()
         if not selected_indices:
-            return messagebox.showerror("Error","Select one or more configurations to delete.")
+            return messagebox.showerror("Error", "Select one or more configurations to delete.")
 
         # Get the names of selected configurations
         selected_names = []
@@ -571,7 +830,12 @@ class ConfigManager:
 
         # Ask for confirmation
         if messagebox.askyesno("Confirm Deletion", confirm_msg):
-            # Delete the configurations
+            # Snapshot pre-delete state so we can roll back if the save
+            # to disk fails. Without this, a write failure would leave
+            # ``saved_configs`` showing fewer entries than what's on
+            # disk; restarting would resurrect the "deleted" configs.
+            prior_configs = dict(self.launcher.saved_configs)
+
             deleted_count = 0
             for name in selected_names:
                 if name in self.launcher.saved_configs:
@@ -579,9 +843,15 @@ class ConfigManager:
                     deleted_count += 1
 
             if deleted_count > 0:
-                self.launcher._save_configs()
-                self.launcher._update_config_listbox()
-                messagebox.showinfo("Deleted", result_msg)
+                saved = self.launcher._save_configs()
+                if saved:
+                    self.launcher._update_config_listbox()
+                    messagebox.showinfo("Deleted", result_msg)
+                else:
+                    # Roll back the in-memory delete so the session view
+                    # matches what's actually on disk.
+                    self.launcher.saved_configs = prior_configs
+                    self.launcher._update_config_listbox()
             else:
                 messagebox.showerror("Error", "No configurations were found to delete.")
 
@@ -613,11 +883,12 @@ class ConfigManager:
             self.launcher.config_listbox.insert("end", cfg_name)
         if selected_name in sorted_names:
             try:
-                 new_index = sorted_names.index(selected_name)
-                 self.launcher.config_listbox.selection_set(new_index)
-                 self.launcher.config_listbox.activate(new_index)
-                 self.launcher.config_listbox.see(new_index)
-            except ValueError: pass
+                new_index = sorted_names.index(selected_name)
+                self.launcher.config_listbox.selection_set(new_index)
+                self.launcher.config_listbox.activate(new_index)
+                self.launcher.config_listbox.see(new_index)
+            except ValueError:
+                pass
 
     def export_configurations(self):
         """Export selected configurations to a JSON file."""
@@ -645,7 +916,7 @@ class ConfigManager:
             title="Export Configurations",
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            initialfile=default_filename
+            initialfile=default_filename,
         )
 
         if not export_path:
@@ -658,17 +929,19 @@ class ConfigManager:
                     "exported_at": datetime.now().isoformat(),
                     "source": "LLaMa.cpp Server Launcher",
                     "version": "1.0",
-                    "config_count": len(selected_configs)
+                    "config_count": len(selected_configs),
                 },
-                "configs": selected_configs
+                "configs": selected_configs,
             }
 
             # Write to file
-            with open(export_path, 'w', encoding='utf-8') as f:
+            with open(export_path, "w", encoding="utf-8") as f:
                 json.dump(export_data, f, indent=2, ensure_ascii=False)
 
-            messagebox.showinfo("Export Successful",
-                              f"Successfully exported {len(selected_configs)} configuration(s) to:\n{export_path}")
+            messagebox.showinfo(
+                "Export Successful",
+                f"Successfully exported {len(selected_configs)} configuration(s) to:\n{export_path}",
+            )
 
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export configurations:\n{str(e)}")
@@ -678,8 +951,7 @@ class ConfigManager:
 
         # Ask user for import file
         import_path = filedialog.askopenfilename(
-            title="Import Configurations",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            title="Import Configurations", filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
 
         if not import_path:
@@ -687,7 +959,7 @@ class ConfigManager:
 
         try:
             # Read and parse the JSON file
-            with open(import_path, 'r', encoding='utf-8') as f:
+            with open(import_path, "r", encoding="utf-8") as f:
                 import_data = json.load(f)
 
             # Handle different import formats
@@ -715,31 +987,107 @@ class ConfigManager:
                     # Validate that values look like config objects
                     valid_configs = {}
                     for key, value in import_data.items():
-                        if isinstance(value, dict) and any(setting in value for setting in
-                                                         ["model_path", "llama_cpp_dir", "n_gpu_layers", "ctx_size"]):
+                        if isinstance(value, dict) and any(
+                            setting in value for setting in ["model_path", "llama_cpp_dir", "n_gpu_layers", "ctx_size"]
+                        ):
                             valid_configs[key] = value
 
                     if valid_configs:
                         configs_to_import = valid_configs
 
             if not configs_to_import:
-                messagebox.showerror("Import Error",
-                                   "No valid configurations found in the selected file.\n\n"
-                                   "Expected format: JSON file with configuration objects.")
+                messagebox.showerror(
+                    "Import Error",
+                    "No valid configurations found in the selected file.\n\n"
+                    "Expected format: JSON file with configuration objects.",
+                )
                 return
 
-            # Check for conflicts and get user preferences
-            conflicts = []
-            new_configs = []
+            # Compute the sanitized, disambiguated final name for every
+            # importable entry up-front so the preview dialog shows what
+            # the user will ACTUALLY get on disk — not the raw JSON
+            # keys that the previous implementation displayed and then
+            # silently rewrote during the write loop.
+            #
+            # Each item is ``(raw_name, final_name, config_data)``;
+            # ``final_name is None`` means the entry will be skipped
+            # (invalid name or invalid payload shape).
+            import_plan: list[tuple[str, str | None, Any]] = []
+            planned_names: set[str] = set()
+            for raw_name, config_data in configs_to_import.items():
+                sanitized = self._sanitize_config_name(raw_name)
+                if not sanitized:
+                    import_plan.append((raw_name, None, config_data))
+                    continue
+                if not isinstance(config_data, dict):
+                    import_plan.append((raw_name, None, config_data))
+                    continue
+                # Overwrite semantics:
+                # * ``raw_name == sanitized`` (no rename happened):
+                #   the user explicitly named a config; if it
+                #   collides with an existing ``saved_configs``
+                #   entry, that's a legitimate replace (the preview
+                #   labels these as "overwritten"). Within-batch
+                #   collisions still suffix so two imports for the
+                #   same name don't fight.
+                # * ``raw_name != sanitized`` (sanitizer renamed the
+                #   key, e.g. ``"./foo"`` → ``"foo"``): the import
+                #   was already implicitly renamed, so it CANNOT
+                #   silently clobber an unrelated existing ``"foo"``
+                #   the user saved separately. Suffix until unique
+                #   against both ``planned_names`` AND
+                #   ``saved_configs``.
+                final_name = sanitized
+                renamed = raw_name != sanitized
+                collides_in_batch = final_name in planned_names
+                collides_in_saved = final_name in self.launcher.saved_configs
+                if collides_in_batch or (renamed and collides_in_saved):
+                    # Once we're committed to suffixing (because the
+                    # primary slot is already taken either way), the
+                    # candidate name MUST be unique against BOTH
+                    # ``planned_names`` AND ``saved_configs`` —
+                    # regardless of ``renamed``. Without this, an
+                    # exact-name re-import that needs a suffix (e.g.
+                    # importing ``"foo"`` twice in one batch) could
+                    # land on ``"foo_2"`` and silently clobber a
+                    # pre-existing ``"foo_2"`` the user saved
+                    # separately. Exact-name OVERWRITE of the
+                    # primary slot is still allowed (that's the path
+                    # that doesn't enter this branch at all).
+                    suffix = 2
+                    while (
+                        f"{sanitized}_{suffix}" in planned_names
+                        or f"{sanitized}_{suffix}" in self.launcher.saved_configs
+                    ):
+                        suffix += 1
+                    final_name = f"{sanitized}_{suffix}"
+                planned_names.add(final_name)
+                import_plan.append((raw_name, final_name, config_data))
 
-            for config_name in configs_to_import.keys():
-                if config_name in self.launcher.saved_configs:
-                    conflicts.append(config_name)
+            # Bucket finals for the preview. ``"renamed"`` covers
+            # entries whose sanitized form differs from the raw key.
+            # ``"skipped"`` is for entries we'll drop entirely (invalid).
+            new_configs: list[str] = []
+            conflicts: list[str] = []
+            renamed: list[tuple[str, str]] = []
+            skipped: list[str] = []
+            for raw_name, final_name, _data in import_plan:
+                if final_name is None:
+                    skipped.append(raw_name)
+                    continue
+                if final_name != raw_name:
+                    renamed.append((raw_name, final_name))
+                if final_name in self.launcher.saved_configs:
+                    conflicts.append(final_name)
                 else:
-                    new_configs.append(config_name)
+                    new_configs.append(final_name)
 
             # Show preview dialog
-            import_summary = f"Found {len(configs_to_import)} configuration(s) to import:\n\n"
+            importable_count = sum(1 for _, fn, _ in import_plan if fn is not None)
+            import_summary = (
+                f"Found {len(configs_to_import)} configuration(s) to import "
+                f"({importable_count} after sanitization):\n\n"
+            )
 
             if new_configs:
                 import_summary += f"New configurations ({len(new_configs)}):\n"
@@ -757,35 +1105,67 @@ class ConfigManager:
                     import_summary += f"  ... and {len(conflicts) - 5} more\n"
                 import_summary += "\n"
 
+            if renamed:
+                import_summary += f"Renamed during sanitization ({len(renamed)}):\n"
+                for raw_name, final_name in renamed[:5]:
+                    import_summary += f"  • {raw_name!r} → {final_name!r}\n"
+                if len(renamed) > 5:
+                    import_summary += f"  ... and {len(renamed) - 5} more\n"
+                import_summary += "\n"
+
+            if skipped:
+                import_summary += f"Skipped (invalid name or payload, {len(skipped)}):\n"
+                for raw_name in skipped[:5]:
+                    import_summary += f"  • {raw_name!r}\n"
+                if len(skipped) > 5:
+                    import_summary += f"  ... and {len(skipped) - 5} more\n"
+                import_summary += "\n"
+
             import_summary += "Do you want to proceed with the import?"
 
             if not messagebox.askyesno("Confirm Import", import_summary):
                 return
 
-            # Perform the import
+            # Snapshot pre-import state so a save failure can roll back
+            # the new entries — otherwise the session view shows imports
+            # that vanish on restart.
+            prior_configs = dict(self.launcher.saved_configs)
+
             imported_count = 0
-            for config_name, config_data in configs_to_import.items():
+            for raw_name, final_name, config_data in import_plan:
+                if final_name is None:
+                    if isinstance(config_data, dict):
+                        print(
+                            f"WARNING: Skipping import of invalid config name " f"{raw_name!r}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"WARNING: Skipping invalid config '{raw_name}' - " f"not a dictionary",
+                            file=sys.stderr,
+                        )
+                    continue
                 try:
-                    # Basic validation of config data
-                    if not isinstance(config_data, dict):
-                        print(f"WARNING: Skipping invalid config '{config_name}' - not a dictionary", file=sys.stderr)
-                        continue
-
-                    # Import the configuration
-                    self.launcher.saved_configs[config_name] = config_data
+                    self.launcher.saved_configs[final_name] = config_data
                     imported_count += 1
-
                 except Exception as e:
-                    print(f"WARNING: Failed to import config '{config_name}': {e}", file=sys.stderr)
+                    print(
+                        f"WARNING: Failed to import config '{raw_name}' " f"as '{final_name}': {e}",
+                        file=sys.stderr,
+                    )
 
             if imported_count > 0:
-                # Save the updated configurations
-                self.launcher._save_configs()
-                # Update the listbox
-                self.update_config_listbox()
-
-                messagebox.showinfo("Import Successful",
-                                  f"Successfully imported {imported_count} configuration(s).")
+                saved = self.launcher._save_configs()
+                if saved:
+                    self.update_config_listbox()
+                    messagebox.showinfo(
+                        "Import Successful",
+                        f"Successfully imported {imported_count} configuration(s).",
+                    )
+                else:
+                    # Save failed — roll back the in-memory imports.
+                    self.launcher.saved_configs = prior_configs
+                    self.update_config_listbox()
             else:
                 messagebox.showerror("Import Error", "No configurations were successfully imported.")
 
@@ -799,7 +1179,9 @@ class ConfigManager:
     def get_config_path(self):
         """Get the configuration file path, with fallback handling."""
         repo_root = Path(__file__).parent.parent
-        local_path = repo_root / "config" / "llama_cpp_launcher_configs.json" # Renamed slightly to avoid potential clashes
+        local_path = (
+            repo_root / "config" / "llama_cpp_launcher_configs.json"
+        )  # Renamed slightly to avoid potential clashes
         legacy_path = repo_root / "llama_cpp_launcher_configs.json"
         # Migrate pre-reorg config from repo root into config/ on first run after upgrade.
         if legacy_path.exists() and legacy_path.is_file() and legacy_path.stat().st_size > 0:
@@ -813,7 +1195,10 @@ class ConfigManager:
                         shutil.copy2(legacy_path, migration_backup)
                         print(f"INFO: Migration backup saved to {migration_backup}", file=sys.stderr)
                     except OSError as backup_err:
-                        print(f"WARNING: Could not create migration backup at {migration_backup}: {backup_err}", file=sys.stderr)
+                        print(
+                            f"WARNING: Could not create migration backup at {migration_backup}: {backup_err}",
+                            file=sys.stderr,
+                        )
                     legacy_path.replace(local_path)
                     print(f"INFO: Migrated config from {legacy_path} to {local_path}", file=sys.stderr)
                 except OSError as e:
@@ -827,16 +1212,17 @@ class ConfigManager:
             # Check if a config file exists and is empty (possibly from a failed previous run)
             # If empty, we can safely delete it and use the local path.
             if local_path.exists() and local_path.stat().st_size == 0:
-                 try: local_path.unlink()
-                 except OSError: pass # Ignore if delete fails
+                try:
+                    local_path.unlink()
+                except OSError:
+                    pass  # Ignore if delete fails
 
             # Check write permissions AFTER cleanup attempt
             if os.access(local_dir, os.W_OK):
-                 print(f"DEBUG: Using local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
-                 return local_path
+                print(f"DEBUG: Using local config path FULL PATH: {local_path.resolve()}", file=sys.stderr)
+                return local_path
             else:
-                 raise PermissionError(f"No write access to config directory: {local_dir}") # Force fallback
-
+                raise PermissionError(f"No write access to config directory: {local_dir}")  # Force fallback
 
         except (OSError, PermissionError, IOError) as e:
             print(f"Warning: Could not use local config path due to permissions/IO issue: {e}", file=sys.stderr)
@@ -848,30 +1234,49 @@ class ConfigManager:
             try:
                 if sys.platform == "win32":
                     appdata = os.getenv("APPDATA")
-                    fallback_dir = Path(appdata) / "LlamaCppLauncher" if appdata else Path.home() / ".llama_cpp_launcher"
+                    fallback_dir = (
+                        Path(appdata) / "LlamaCppLauncher" if appdata else Path.home() / ".llama_cpp_launcher"
+                    )
                 else:  # Linux, macOS, etc.
                     fallback_dir = Path.home() / ".config" / "llama_cpp_launcher"
                 fallback_dir.mkdir(parents=True, exist_ok=True)
                 fallback_path = fallback_dir / "configs.json"
                 # Check if fallback path exists and is empty, clean it up if so
                 if fallback_path.exists() and fallback_path.stat().st_size == 0:
-                     try: fallback_path.unlink()
-                     except OSError: pass
+                    try:
+                        fallback_path.unlink()
+                    except OSError:
+                        pass
                 print(f"DEBUG: Using fallback config path FULL PATH: {fallback_path.resolve()}", file=sys.stderr)
                 return fallback_path
             except Exception as e_fallback:
-                 print(f"CRITICAL ERROR: Could not use local config path or fallback config path {fallback_dir}. Configuration saving/loading is disabled. Error: {e_fallback}", file=sys.stderr)
-                 messagebox.showerror("Config Error", f"Failed to set up configuration directory.\nSaving/loading configurations is disabled.\nError: {e_fallback}")
-                 # Return a dummy non-existent path to prevent errors later
-                 return Path("/dev/null") if sys.platform != "win32" else Path("NUL") # Use platform-appropriate null device
+                print(
+                    f"CRITICAL ERROR: Could not use local config path or fallback config path {fallback_dir}. Configuration saving/loading is disabled. Error: {e_fallback}",
+                    file=sys.stderr,
+                )
+                messagebox.showerror(
+                    "Config Error",
+                    f"Failed to set up configuration directory.\nSaving/loading configurations is disabled.\nError: {e_fallback}",
+                )
+                # Return a dummy non-existent path to prevent errors later
+                return (
+                    Path("/dev/null") if sys.platform != "win32" else Path("NUL")
+                )  # Use platform-appropriate null device
 
     def load_saved_configs(self):
         """Load saved configurations from file."""
-        if not self.launcher.config_path.exists() or not self.launcher.config_path.is_file() or self.launcher.config_path.name in ("null", "NUL"):
-             print(f"DEBUG: No config file found at: {self.launcher.config_path.resolve()} or config saving is disabled. Using default settings.", file=sys.stderr)
-             # No file = fresh install; an empty in-memory state is legitimate.
-             self.configs_loaded_successfully = True
-             return
+        if (
+            not self.launcher.config_path.exists()
+            or not self.launcher.config_path.is_file()
+            or self.launcher.config_path.name in ("null", "NUL")
+        ):
+            print(
+                f"DEBUG: No config file found at: {self.launcher.config_path.resolve()} or config saving is disabled. Using default settings.",
+                file=sys.stderr,
+            )
+            # No file = fresh install; an empty in-memory state is legitimate.
+            self.configs_loaded_successfully = True
+            return
 
         print(f"DEBUG: Loading config from FULL PATH: {self.launcher.config_path.resolve()}", file=sys.stderr)
         exception = None
@@ -881,31 +1286,62 @@ class ConfigManager:
             raw_configs = data.get("configs", {})
             self.launcher.saved_configs = {k: v for k, v in raw_configs.items() if k is not None}
             loaded_app_settings = data.get("app_settings", {})
-            print(f"DEBUG: Found {len(self.launcher.saved_configs)} saved configurations in config file", file=sys.stderr)
+            print(
+                f"DEBUG: Found {len(self.launcher.saved_configs)} saved configurations in config file", file=sys.stderr
+            )
             print(f"DEBUG: Loaded saved config names: {list(self.launcher.saved_configs.keys())}", file=sys.stderr)
-            print(f"DEBUG: Loading app settings from {self.launcher.config_path.resolve()}: {loaded_app_settings}", file=sys.stderr)
+            print(
+                f"DEBUG: Loading app settings from {self.launcher.config_path.resolve()}: {loaded_app_settings}",
+                file=sys.stderr,
+            )
             self.launcher.app_settings.update(loaded_app_settings)
             # Ensure model_list_height is a valid int
             if not isinstance(self.launcher.app_settings.get("model_list_height"), int):
                 self.launcher.app_settings["model_list_height"] = 8
-            # Ensure selected_gpus is a list
-            if not isinstance(self.launcher.app_settings.get("selected_gpus"), list):
-                 self.launcher.app_settings["selected_gpus"] = []
+
+            # Coerce ``selected_gpus`` / ``gpu_order`` to lists of clean
+            # integer device IDs. Mirrors the per-element normalization
+            # ``_apply_loaded_configuration`` applies when LOADING a
+            # named config — without this, the STARTUP path only
+            # checks the outer container shape, so a hand-edited
+            # ``settings.json`` could ship
+            # ``{"selected_gpus": [true, "0", 1.5]}`` and have those
+            # values survive into ``valid_gpu_indices`` filtering
+            # below. ``bool`` subclasses ``int`` so ``True`` would
+            # become a phantom GPU 1, and ``"0"`` would fail the
+            # ``idx in valid_gpu_indices`` set check because the set
+            # holds ints.
+            def _coerce_gpu_id_list(raw_list):
+                if not isinstance(raw_list, list):
+                    return []
+                cleaned: list[int] = []
+                for raw in raw_list:
+                    if isinstance(raw, bool):
+                        continue
+                    if isinstance(raw, int):
+                        cleaned.append(raw)
+                    elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+                        try:
+                            cleaned.append(int(raw.strip()))
+                        except ValueError:
+                            continue
+                return cleaned
+
+            self.launcher.app_settings["selected_gpus"] = _coerce_gpu_id_list(
+                self.launcher.app_settings.get("selected_gpus")
+            )
             # Validate spec_draft_selected_gpus: must be a list of ints; coerce
             # anything else to [] so legacy/garbage configs can't corrupt the
             # checkbox grid.
-            self.launcher.app_settings["spec_draft_selected_gpus"] = (
-                coerce_spec_draft_selected_gpus(
-                    self.launcher.app_settings.get("spec_draft_selected_gpus", [])
-                )
+            self.launcher.app_settings["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(
+                self.launcher.app_settings.get("spec_draft_selected_gpus", [])
             )
             # Ensure custom_parameters is a list
             if not isinstance(self.launcher.app_settings.get("custom_parameters"), list):
-                 self.launcher.app_settings["custom_parameters"] = []
+                self.launcher.app_settings["custom_parameters"] = []
             if not isinstance(self.launcher.app_settings.get("selected_mmproj_path"), str):
-                 self.launcher.app_settings["selected_mmproj_path"] = ""
-            if not isinstance(self.launcher.app_settings.get("gpu_order"), list):
-                 self.launcher.app_settings["gpu_order"] = []
+                self.launcher.app_settings["selected_mmproj_path"] = ""
+            self.launcher.app_settings["gpu_order"] = _coerce_gpu_id_list(self.launcher.app_settings.get("gpu_order"))
 
             # UI appearance settings — coerce to expected types so stray edits don't crash startup
             if self.launcher.app_settings.get("ui_theme_mode") not in ("auto", "light", "dark", "specific"):
@@ -931,11 +1367,14 @@ class ConfigManager:
             validate_spec_app_settings(self.launcher.app_settings)
 
             # Filter selected_gpus to only include indices of currently detected GPUs
-            valid_gpu_indices = {gpu['id'] for gpu in self.launcher.detected_gpu_devices}
-            self.launcher.app_settings["selected_gpus"] = [idx for idx in self.launcher.app_settings["selected_gpus"] if idx in valid_gpu_indices]
+            valid_gpu_indices = {gpu["id"] for gpu in self.launcher.detected_gpu_devices}
+            self.launcher.app_settings["selected_gpus"] = [
+                idx for idx in self.launcher.app_settings["selected_gpus"] if idx in valid_gpu_indices
+            ]
             # Same filter for the draft GPU selection.
             self.launcher.app_settings["spec_draft_selected_gpus"] = [
-                idx for idx in self.launcher.app_settings.get("spec_draft_selected_gpus", [])
+                idx
+                for idx in self.launcher.app_settings.get("spec_draft_selected_gpus", [])
                 if idx in valid_gpu_indices
             ]
             # Filter gpu_order the same way and append any newly-selected GPUs that were missing
@@ -963,40 +1402,91 @@ class ConfigManager:
 
             # Ensure port and host are set from app_settings
             if "port" in self.launcher.app_settings:
-                print(f"DEBUG: Setting port from app_settings: {self.launcher.app_settings['port']}") # Add debug print
+                print(f"DEBUG: Setting port from app_settings: {self.launcher.app_settings['port']}")  # Add debug print
                 self.launcher.port.set(self.launcher.app_settings["port"])
             if "host" in self.launcher.app_settings:
-                print(f"DEBUG: Setting host from app_settings: {self.launcher.app_settings['host']}") # Add debug print
+                print(f"DEBUG: Setting host from app_settings: {self.launcher.app_settings['host']}")  # Add debug print
                 self.launcher.host.set(self.launcher.app_settings["host"])
 
         except json.JSONDecodeError as e:
-             print(f"Config Load Error: Failed to parse JSON from {self.launcher.config_path}\nError: {e}", file=sys.stderr)
-             exception = e
+            print(
+                f"Config Load Error: Failed to parse JSON from {self.launcher.config_path}\nError: {e}", file=sys.stderr
+            )
+            exception = e
         except Exception as e:
-            print(f"Config Load Error: Could not load config from {self.launcher.config_path}\nError: {e}", file=sys.stderr)
+            print(
+                f"Config Load Error: Could not load config from {self.launcher.config_path}\nError: {e}",
+                file=sys.stderr,
+            )
             exception = e
         if exception:
-            messagebox.showerror("Config Load Error", f"Could not load config from:\n{self.launcher.config_path}\n\nError: {exception}\n\nUsing default settings.")
+            messagebox.showerror(
+                "Config Load Error",
+                f"Could not load config from:\n{self.launcher.config_path}\n\nError: {exception}\n\nUsing default settings.",
+            )
             # Reset to defaults on other load errors
             self.launcher.app_settings = {
-                "last_llama_cpp_dir": "", "last_venv_dir": "", "last_model_path": "",
+                "last_llama_cpp_dir": "",
+                "last_venv_dir": "",
+                "venv_bootstrap_prompt_mode": "ask",
+                "last_model_path": "",
                 "selected_mmproj_path": "",
-                "model_dirs": [], "model_list_height": 8, "selected_gpus": [], "gpu_order": [], "custom_parameters": [],
-                "host": "127.0.0.1", "port": "8080",  # Add default network settings
-                "ui_theme_mode": "auto", "ui_theme_name": "",
-                "ui_font_family": "", "ui_font_size": 0,
+                "model_dirs": [],
+                "model_list_height": 8,
+                "selected_gpus": [],
+                "gpu_order": [],
+                "custom_parameters": [],
+                "host": "127.0.0.1",
+                "port": "8080",  # Add default network settings
+                "ui_theme_mode": "auto",
+                "ui_theme_name": "",
+                "ui_font_family": "",
+                "ui_font_size": 0,
+                "hf_repo_input": "",
+                "hf_repo_revision": "",
+                "hf_download_mode": "selected",
+                "hf_target_dirs": [],
+                "hf_include_patterns": "",
+                "hf_ignore_patterns": "",
+                "hf_force_download": False,
+                "hf_local_files_only": False,
+                "hf_max_workers": 4,
             }
+            # Run the spec-defaults validator so the error path produces
+            # the same ``app_settings`` shape the success path does.
+            # Without this, newer spec keys are absent from the reset
+            # subset until the user navigates to the spec tab.
+            validate_spec_app_settings(self.launcher.app_settings)
             self.launcher.saved_configs = {}
-            self.launcher.custom_parameters_list = [] # Reset internal list
+            self.launcher.custom_parameters_list = []  # Reset internal list
             self.configs_loaded_successfully = False
         else:
             self.configs_loaded_successfully = True
 
-    def save_configs(self):
-        """Saves the app settings and configurations to file."""
+    def save_configs(self) -> bool:
+        """Saves the app settings and configurations to file.
+
+        Returns ``True`` when the on-disk state was actually updated,
+        ``False`` when the call was a no-op (disabled / suppressed) or
+        when every write attempt failed. Callers (load_configuration's
+        "Loaded" toast, manual Save buttons) check this to avoid
+        confirming a save that never reached disk.
+        """
         if self.launcher.config_path.name in ("null", "NUL"):
-             print("Config saving is disabled.", file=sys.stderr)
-             return
+            print("Config saving is disabled.", file=sys.stderr)
+            return False
+
+        if getattr(self.launcher, "_suppress_autosave", False) is True:
+            # The launcher temporarily silences autosaves during startup
+            # load_from_config() cascades (see launcher __init__). Without
+            # this gate, the per-var traces wired in IkLlamaTab /
+            # EnvironmentalVariablesManager / spec would each trigger a
+            # full JSON write + model_dirs stat sweep on startup. The
+            # ``is True`` check is deliberate: tests use ``MagicMock``
+            # launchers, which auto-vivify attribute access into Mock
+            # objects (truthy), and ``is True`` distinguishes a real
+            # boolean from that case so test runs still hit the write path.
+            return False
 
         # Validate and clean up model_dirs paths before saving
         valid_model_dirs = []
@@ -1007,7 +1497,10 @@ class ConfigManager:
                     valid_model_dirs.append(resolved_path)
                     print(f"DEBUG: Saving valid model directory: {resolved_path}", file=sys.stderr)
                 else:
-                    print(f"WARNING: Skipping invalid model directory during save: {p} (resolved to {resolved_path})", file=sys.stderr)
+                    print(
+                        f"WARNING: Skipping invalid model directory during save: {p} (resolved to {resolved_path})",
+                        file=sys.stderr,
+                    )
             except Exception as e:
                 print(f"ERROR: Failed to process model directory during save '{p}': {e}", file=sys.stderr)
 
@@ -1029,7 +1522,7 @@ class ConfigManager:
         # Save network settings - ensure these are saved
         self.launcher.app_settings["host"] = self.launcher.host.get()
         self.launcher.app_settings["port"] = self.launcher.port.get()
-        print(f"DEBUG: Saving port as {self.launcher.port.get()}") # Add debug print
+        print(f"DEBUG: Saving port as {self.launcher.port.get()}")  # Add debug print
 
         # Save backend selection
         self.launcher.app_settings["backend_selection"] = self.launcher.backend_selection.get()
@@ -1056,7 +1549,7 @@ class ConfigManager:
         self.launcher.app_settings.update(ik_llama_settings)
 
         payload = {
-            "configs":      self.launcher.saved_configs,
+            "configs": self.launcher.saved_configs,
             "app_settings": self.launcher.app_settings,
         }
 
@@ -1067,12 +1560,39 @@ class ConfigManager:
         # etc.) would otherwise wipe the file. A user who intentionally deletes
         # every config after a successful load is NOT blocked — the flag is True
         # in that case.
-        if (not self.configs_loaded_successfully
-                and not self.launcher.saved_configs
-                and self.launcher.config_path.exists()):
+        # The ``not self.launcher.saved_configs`` bypass used to let the
+        # save proceed after a partial recovery — e.g. the user imported
+        # one config or saved a new one after the startup load failed.
+        # That partial save would then overwrite the unreadable-but-
+        # recoverable original file with only the new entry. The
+        # ``configs_loaded_successfully`` flag is the single source of
+        # truth for "this disk file is still in a load-failed state";
+        # while it's False, any in-place write to ``config_path`` risks
+        # destroying recoverable data. Drop the bypass so any save
+        # attempt against an unsafe disk file gets refused until the
+        # user resolves the original file (rename/restore/delete) and
+        # the next successful load flips the flag back to True.
+        if not self.configs_loaded_successfully and self.launcher.config_path.exists():
             try:
                 existing_data = json.loads(self.launcher.config_path.read_text(encoding="utf-8"))
-                if existing_data.get("configs"):
+                # Three "don't overwrite" cases:
+                # * Non-dict top-level (``[...]``, ``"broken"`` …) —
+                #   the file isn't ours but it isn't empty either, so
+                #   we can't safely replace it.
+                # * Populated ``configs`` dict — the previous behaviour.
+                # * MALFORMED ``configs`` shape (``[]`` / ``""`` /
+                #   ``null`` …). The naive truthy check let an empty
+                #   list slip through; an attacker / disk-corruption
+                #   event could replace a populated file with
+                #   ``{"configs": []}`` and our save would happily
+                #   overwrite it. ``isinstance(..., dict)`` is the
+                #   only valid shape for ``configs``; anything else
+                #   blocks the save.
+                configs_value = existing_data.get("configs") if isinstance(existing_data, dict) else None
+                shape_is_safe_empty_dict = (
+                    isinstance(existing_data, dict) and isinstance(configs_value, dict) and not configs_value
+                )
+                if not shape_is_safe_empty_dict:
                     print(
                         f"WARNING: Refusing to overwrite populated config at "
                         f"{self.launcher.config_path} with an empty configs dict "
@@ -1084,39 +1604,85 @@ class ConfigManager:
                         f"Refused to overwrite your saved configurations.\n\n"
                         f"Configs failed to load at startup and the in-memory list is "
                         f"empty. To prevent data loss, the existing file was not modified.\n\n"
-                        f"File preserved at:\n{self.launcher.config_path}"
+                        f"File preserved at:\n{self.launcher.config_path}",
                     )
-                    return
-            except (OSError, json.JSONDecodeError):
-                pass  # If we can't read/parse the existing file, let the save proceed.
+                    return False
+            except (OSError, json.JSONDecodeError) as exc:
+                # The existing file is unreadable or malformed AND in-memory
+                # state is empty after a failed load. Letting the save
+                # proceed would overwrite a possibly-recoverable file with
+                # an empty configs dict — exactly the data-loss path the
+                # outer guard is designed to prevent. Refuse instead.
+                print(
+                    f"WARNING: Refusing to overwrite unreadable config at "
+                    f"{self.launcher.config_path} after a failed load: {exc}",
+                    file=sys.stderr,
+                )
+                messagebox.showwarning(
+                    "Config Save Blocked",
+                    f"Refused to overwrite your saved configurations.\n\n"
+                    f"The existing config file could not be read after the "
+                    f"startup load failed, so this save was blocked to "
+                    f"avoid destroying a recoverable file.\n\n"
+                    f"File preserved at:\n{self.launcher.config_path}",
+                )
+                return False
 
         try:
             self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            print(f"DEBUG: Successfully saved config to FULL PATH: {self.launcher.config_path.resolve()}") # Add debug print
+            print(
+                f"DEBUG: Successfully saved config to FULL PATH: {self.launcher.config_path.resolve()}"
+            )  # Add debug print
             # A successful save means the on-disk state is now authoritative, so
             # clear the load-failure flag and trust in-memory state from here on.
             self.configs_loaded_successfully = True
+            return True
         except Exception as exc:
-            print(f"Config Save Error: Failed to save settings to {self.launcher.config_path}\nError: {exc}", file=sys.stderr)
+            print(
+                f"Config Save Error: Failed to save settings to {self.launcher.config_path}\nError: {exc}",
+                file=sys.stderr,
+            )
             # Attempt fallback only if the initial path wasn't already a fallback
             if not any(s in str(self.launcher.config_path).lower() for s in ["appdata", ".config"]):
-                 original_path = self.launcher.config_path
-                 # Re-call get_config_path to get the fallback path
-                 self.launcher.config_path = self.get_config_path()
-                 # Check if get_config_path actually provided a different, writable path
-                 if self.launcher.config_path != original_path and self.launcher.config_path.name not in ("null", "NUL"):
-                      try:
-                         self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-                         messagebox.showwarning("Config Save Info", f"Could not write to original location.\nSettings stored in:\n{self.launcher.config_path}")
-                      except Exception as final_exc:
-                          print(f"Config Save Error: Failed to save settings to fallback {self.launcher.config_path}\nError: {final_exc}", file=sys.stderr)
-                          messagebox.showerror("Config Save Error", f"Failed to save settings to fallback location:\n{self.launcher.config_path}\n\nError: {final_exc}")
-                 else:
-                      # If fallback path was the same or invalid, show error for original path
-                      messagebox.showerror("Config Save Error", f"Failed to save settings to:\n{original_path}\n\nError: {exc}")
+                original_path = self.launcher.config_path
+                # Re-call get_config_path to get the fallback path
+                self.launcher.config_path = self.get_config_path()
+                # Check if get_config_path actually provided a different, writable path
+                if self.launcher.config_path != original_path and self.launcher.config_path.name not in ("null", "NUL"):
+                    try:
+                        self.launcher.config_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                        # Mirror the latch flip from the primary-path
+                        # success branch: a successful fallback write
+                        # IS authoritative, so subsequent saves should
+                        # trust in-memory state going forward.
+                        self.configs_loaded_successfully = True
+                        messagebox.showwarning(
+                            "Config Save Info",
+                            f"Could not write to original location.\nSettings stored in:\n{self.launcher.config_path}",
+                        )
+                        return True
+                    except Exception as final_exc:
+                        print(
+                            f"Config Save Error: Failed to save settings to fallback {self.launcher.config_path}\nError: {final_exc}",
+                            file=sys.stderr,
+                        )
+                        messagebox.showerror(
+                            "Config Save Error",
+                            f"Failed to save settings to fallback location:\n{self.launcher.config_path}\n\nError: {final_exc}",
+                        )
+                        return False
+                else:
+                    # If fallback path was the same or invalid, show error for original path
+                    messagebox.showerror(
+                        "Config Save Error", f"Failed to save settings to:\n{original_path}\n\nError: {exc}"
+                    )
+                    return False
             else:
-                 # If the original path was already a fallback, just report the error
-                 messagebox.showerror("Config Save Error", f"Failed to save settings to:\n{self.launcher.config_path}\n\nError: {exc}")
+                # If the original path was already a fallback, just report the error
+                messagebox.showerror(
+                    "Config Save Error", f"Failed to save settings to:\n{self.launcher.config_path}\n\nError: {exc}"
+                )
+                return False
 
     @staticmethod
     def _sanitize_config_name(name):
@@ -1154,9 +1720,9 @@ class ConfigManager:
         # CON/PRN/AUX/NUL or COM1-9/LPT1-9 (with or without an extension), so
         # sanitizing them here keeps configs portable across platforms.
         stem = cleaned.split(".", 1)[0].upper()
-        _WIN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
-            f"COM{i}" for i in range(1, 10)
-        } | {f"LPT{i}" for i in range(1, 10)}
+        _WIN_RESERVED = (
+            {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {f"LPT{i}" for i in range(1, 10)}
+        )
         if stem in _WIN_RESERVED:
             return ""
         return cleaned.strip()
@@ -1187,7 +1753,22 @@ class ConfigManager:
             self.launcher.config_name.set(name)
 
         current_cfg = self.current_cfg()
+        # Snapshot pre-save state so a write failure can roll back the
+        # in-memory mutation. ``save_configs`` shows its own error
+        # dialog; we just need to make sure ``saved_configs`` doesn't
+        # diverge from disk after a failure.
+        name_existed = name in self.launcher.saved_configs
+        prior_entry = self.launcher.saved_configs.get(name)
         self.launcher.saved_configs[name] = current_cfg
-        self.save_configs()
-        self.update_config_listbox()
-        messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")
+        saved = self.save_configs()
+        if saved:
+            self.update_config_listbox()
+            messagebox.showinfo("Saved", f"Current settings saved as '{name}'.")
+        else:
+            # Roll back. If the entry didn't exist before, remove it;
+            # otherwise restore the prior value verbatim.
+            if name_existed:
+                self.launcher.saved_configs[name] = prior_entry
+            else:
+                self.launcher.saved_configs.pop(name, None)
+            self.update_config_listbox()

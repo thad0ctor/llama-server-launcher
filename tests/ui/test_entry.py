@@ -13,8 +13,10 @@ rather than a normal import statement.
 from __future__ import annotations
 
 import importlib.util
+import queue
 import sys
 import time
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,6 +45,7 @@ def entry_module():
 # ---------------------------------------------------------------------------
 # parse_cli_args
 # ---------------------------------------------------------------------------
+
 
 class TestParseCliArgs:
     """Validate that --help / --version exit cleanly instead of opening GUI."""
@@ -96,8 +99,77 @@ class TestParseCliArgs:
 
 
 # ---------------------------------------------------------------------------
+# LlamaCppLauncher lazy/system-info helpers
+# ---------------------------------------------------------------------------
+
+
+class TestLauncherHelpers:
+    def test_lazy_tab_initialized_only_after_success(self, entry_module):
+        parent = types.SimpleNamespace(winfo_children=lambda: [])
+        entry = {
+            "parent": parent,
+            "label": "Build",
+            "initialized": False,
+        }
+        selected_tab = "tab-id"
+        launcher = types.SimpleNamespace(
+            notebook=types.SimpleNamespace(select=lambda: selected_tab),
+            _lazy_tab_registry={selected_tab: entry},
+        )
+        attempts = []
+
+        def builder(_parent):
+            attempts.append(_parent)
+            if len(attempts) == 1:
+                raise RuntimeError("first build failed")
+
+        entry["builder"] = builder
+
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+        assert entry["initialized"] is False
+
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+        assert entry["initialized"] is True
+        assert attempts == [parent, parent]
+
+    def test_system_info_drain_discards_stale_generation(self, entry_module):
+        class Alive:
+            def is_set(self):
+                return True
+
+        q = queue.Queue()
+        q.put((1, {"gpu_info": {"available": True}}, None))
+        applied = []
+        scheduled = []
+        launcher = types.SimpleNamespace(
+            _tk_alive=Alive(),
+            _system_info_after_id=None,
+            _system_info_queue=q,
+            _system_info_active_generations={1},
+            _system_info_generation=2,
+            _detection_in_progress=True,
+            _schedule_system_info_drain=lambda: scheduled.append(True),
+            _on_system_info_detection_complete=lambda **kwargs: applied.append(kwargs),
+        )
+
+        entry_module.LlamaCppLauncher._drain_system_info_queue(launcher)
+
+        assert applied == []
+        assert scheduled == []
+        assert launcher._detection_in_progress is False
+        # The stale item MUST have been consumed off the queue — if the
+        # drain merely skipped it without ``get_nowait()``-ing it, a
+        # subsequent drain after the same generation got re-armed
+        # would re-process the same stale tuple and end up applying
+        # it. Asserting the queue is empty locks in the "consumed
+        # and discarded" contract.
+        assert q.empty()
+
+
+# ---------------------------------------------------------------------------
 # _read_version_string
 # ---------------------------------------------------------------------------
+
 
 class TestReadVersionString:
     def test_reads_shipped_version(self, entry_module):
@@ -108,8 +180,7 @@ class TestReadVersionString:
         assert isinstance(result, str)
         assert result  # non-empty
 
-    def test_returns_unknown_on_missing_file(self, entry_module, monkeypatch,
-                                             tmp_path):
+    def test_returns_unknown_on_missing_file(self, entry_module, monkeypatch, tmp_path):
         """Simulate a partial install (no ``config/version``) by repointing
         ``__file__`` at a tmp dir. Must degrade gracefully, not raise."""
         # The helper uses Path(__file__).resolve().parent / "config" / "version".
@@ -121,8 +192,7 @@ class TestReadVersionString:
         result = entry_module._read_version_string()
         assert result == "unknown"
 
-    def test_handles_empty_version_file(self, entry_module, monkeypatch,
-                                        tmp_path):
+    def test_handles_empty_version_file(self, entry_module, monkeypatch, tmp_path):
         """Empty file is treated the same as missing — 'unknown'."""
         fake_module_path = tmp_path / "launcher.py"
         fake_module_path.write_text("")
@@ -143,9 +213,7 @@ class TestReadVersionString:
 
         assert entry_module._read_version_string() == "2024-01-01-1"
 
-    def test_non_utf8_bytes_fall_back_to_unknown(
-        self, entry_module, monkeypatch, tmp_path
-    ):
+    def test_non_utf8_bytes_fall_back_to_unknown(self, entry_module, monkeypatch, tmp_path):
         """A malformed version file (non-UTF-8 bytes) must not crash
         ``--version``. ``Path.read_text(encoding='utf-8')`` raises
         ``UnicodeDecodeError`` which is NOT an ``OSError``; if the helper
@@ -164,6 +232,7 @@ class TestReadVersionString:
 # ---------------------------------------------------------------------------
 # LlamaCppLauncher.cleanup
 # ---------------------------------------------------------------------------
+
 
 class TestCleanup:
     """Static helper that deletes a temp file after a short delay.

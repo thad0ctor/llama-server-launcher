@@ -34,9 +34,7 @@ from modules import system as sysmod  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def test_venv_windows_scripts_python_preferred(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_venv_windows_scripts_python_preferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """On Windows, Scripts/python.exe is the canonical venv layout; the
     function must prefer it when present."""
     monkeypatch.setattr(sys, "platform", "win32")
@@ -53,7 +51,8 @@ def test_venv_windows_scripts_python_preferred(
     def fake_run(args, **kwargs):
         captured["exe"] = args[0]
         return subprocess.CompletedProcess(
-            args=args, returncode=0,
+            args=args,
+            returncode=0,
             stdout=json.dumps({"available": True, "device_count": 0, "devices": []}),
             stderr="",
         )
@@ -65,9 +64,7 @@ def test_venv_windows_scripts_python_preferred(
     assert captured["exe"] == str(canonical)
 
 
-def test_venv_windows_top_level_python_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_venv_windows_top_level_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """If Scripts/python.exe is missing, the top-level python.exe fallback
     must be picked up (the 'Some venv structures' branch)."""
     monkeypatch.setattr(sys, "platform", "win32")
@@ -81,7 +78,8 @@ def test_venv_windows_top_level_python_fallback(
     def fake_run(args, **kwargs):
         captured["exe"] = args[0]
         return subprocess.CompletedProcess(
-            args=args, returncode=0,
+            args=args,
+            returncode=0,
             stdout=json.dumps({"available": False, "device_count": 0, "devices": []}),
             stderr="",
         )
@@ -93,9 +91,7 @@ def test_venv_windows_top_level_python_fallback(
     assert captured["exe"] == str(fallback)
 
 
-def test_venv_linux_top_level_python_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_venv_linux_top_level_python_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """On Linux, if bin/python is missing, top-level ./python is tried."""
     monkeypatch.setattr(sys, "platform", "linux")
 
@@ -108,7 +104,8 @@ def test_venv_linux_top_level_python_fallback(
     def fake_run(args, **kwargs):
         captured["exe"] = args[0]
         return subprocess.CompletedProcess(
-            args=args, returncode=0,
+            args=args,
+            returncode=0,
             stdout=json.dumps({"available": False, "device_count": 0, "devices": []}),
             stderr="",
         )
@@ -162,9 +159,7 @@ def test_windows_ram_via_ctypes_success(monkeypatch: pytest.MonkeyPatch) -> None
         # MEMORYSTATUSEX below. This function just reports success.
         return 1
 
-    fake_kernel32 = types.SimpleNamespace(
-        GlobalMemoryStatusEx=fake_global_memory_status_ex
-    )
+    fake_kernel32 = types.SimpleNamespace(GlobalMemoryStatusEx=fake_global_memory_status_ex)
     fake_windll = types.SimpleNamespace(kernel32=fake_kernel32)
 
     # ctypes.windll doesn't exist on Linux; patch it on the module's ctypes.
@@ -262,21 +257,26 @@ def test_gpu_info_static_zero_devices_with_torch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Torch is installed, cuda.is_available() returns True, but the system
-    reports 0 devices. The function should report available=True but an
-    empty devices list (this is what torch actually does on some cloud VMs)."""
+    reports 0 devices (cloud VM with the CUDA-built torch but no visible
+    devices, MIG mode, ``CUDA_VISIBLE_DEVICES=""``).
+
+    The function MUST report ``available=False`` here — not
+    ``available=True`` with an empty devices list. The old shape
+    violated the cache contract that ``load_cached_gpu_info``
+    enforces and caused ``fetch_system_info`` to short-circuit
+    instead of falling through to the next backend.
+    """
     fake_cuda = types.SimpleNamespace(
         is_available=lambda: True,
         device_count=lambda: 0,
-        get_device_properties=lambda i: (_ for _ in ()).throw(
-            AssertionError("should not be called for zero devices")
-        ),
+        get_device_properties=lambda i: (_ for _ in ()).throw(AssertionError("should not be called for zero devices")),
     )
     monkeypatch.setattr(sysmod, "torch", types.SimpleNamespace(cuda=fake_cuda))
     monkeypatch.setattr(sysmod, "TORCH_AVAILABLE", True)
 
     info = sysmod.get_gpu_info_static()
 
-    assert info["available"] is True
+    assert info["available"] is False
     assert info["device_count"] == 0
     assert info["devices"] == []
 

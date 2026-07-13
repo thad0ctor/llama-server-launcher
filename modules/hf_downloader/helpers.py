@@ -1,0 +1,603 @@
+"""Pure helpers for the Hugging Face downloader UI."""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlparse
+
+
+_LIKELY_MODEL_SUFFIXES = (
+    ".gguf",
+    ".safetensors",
+    ".bin",
+    ".pt",
+    ".pth",
+)
+_RELATED_SUFFIXES = (
+    ".json",
+    ".model",
+    ".txt",
+)
+_DEFAULT_METADATA_BASENAMES = {
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "preprocessor_config.json",
+}
+_PREFERRED_GGUF_TOKENS = (
+    "q4_k_m",
+    "q4_k_s",
+    "q5_k_m",
+    "q5_k_s",
+    "q6_k",
+    "q8_0",
+    "f16",
+    "bf16",
+)
+
+
+@dataclass(frozen=True)
+class ParsedRepoInput:
+    """Normalized repo identifier and optional revision hint."""
+
+    repo_id: str
+    revision_hint: str = ""
+
+
+@dataclass(frozen=True)
+class HfRepoRef:
+    """One branch or tag exposed by the Hub."""
+
+    name: str
+    kind: str
+    target_commit: str = ""
+
+    @property
+    def display_name(self) -> str:
+        prefix = "branch" if self.kind == "branch" else self.kind
+        return f"{self.name} ({prefix})"
+
+
+@dataclass(frozen=True)
+class HfRepoFile:
+    """One file available in a Hub repo revision."""
+
+    path: str
+    size_bytes: int | None = None
+    kind: str = "other"
+    selected_by_default: bool = False
+
+    @property
+    def display_name(self) -> str:
+        suffix = format_bytes(self.size_bytes) if self.size_bytes is not None else "size unknown"
+        label = self.kind
+        return f"{self.path} [{label}; {suffix}]"
+
+
+@dataclass(frozen=True)
+class TargetDirectoryOption:
+    """One local destination directory the user can toggle."""
+
+    path: Path
+    free_bytes: int | None
+    exists: bool
+    selected: bool
+
+    @property
+    def label(self) -> str:
+        free_text = format_bytes(self.free_bytes) if self.free_bytes is not None else "unknown"
+        missing = "" if self.exists else " [missing]"
+        return f"{self.path} ({free_text} free){missing}"
+
+
+@dataclass(frozen=True)
+class DownloadTargetsState:
+    """Resolved target directories and persisted checkbox choices."""
+
+    options: tuple[TargetDirectoryOption, ...]
+    selected_paths: tuple[str, ...]
+
+
+def format_bytes(size_bytes: int | None) -> str:
+    """Format a byte count for compact UI display."""
+    if size_bytes is None:
+        return "unknown"
+    if size_bytes < 0:
+        return "unknown"
+    units = ("B", "KB", "MB", "GB", "TB", "PB")
+    value = float(size_bytes)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{size_bytes} B"
+
+
+def parse_bool(value) -> bool:
+    """Coerce an arbitrary persisted value to a strict ``bool``.
+
+    ``bool("false")`` and ``bool("0")`` are both ``True`` in Python because
+    they're non-empty strings, so a JSON-edited settings file with
+    ``"hf_force_download": "false"`` would silently flip the flag on.
+    This helper accepts the strings a human would write (``"true"``,
+    ``"1"``, ``"yes"``, ``"on"`` …) and treats anything else as ``False``.
+    Shared with ``hf_downloader.runner`` so the UI checkbox seeding and
+    the subprocess parsing agree on what a stored value means.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        # Accept ONLY the canonical 0/1 ints. Treating ``42`` as
+        # ``True`` (via ``bool(value)``) would silently enable a
+        # destructive flag like ``force_download`` if a hand-edited
+        # settings file shipped an accidental count.
+        return value == 1
+    if isinstance(value, float):
+        # ``1.0`` only — same rationale. NaN / inf / 0.5 / 42.0 are
+        # "not actually a boolean", so reject.
+        return value == 1.0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    return False
+
+
+def parse_pattern_lines(raw: str) -> tuple[str, ...]:
+    """Parse newline/comma-separated Hub patterns."""
+    rows: list[str] = []
+    for line in (raw or "").replace(",", "\n").splitlines():
+        item = line.strip()
+        if item:
+            rows.append(item)
+    return tuple(rows)
+
+
+def _validate_repo_id(repo_id: str) -> None:
+    """Reject repo ids that would either break the ``target_dir / repo_id``
+    materialization on Windows or escape the target directory via path
+    traversal.
+
+    Called from every ``normalize_repo_input`` branch so all input shapes
+    (``hf://``, bare, ``https://``) reject the same set consistently.
+    """
+    if any(ch in repo_id for ch in '<>:"|?*'):
+        raise ValueError(
+            f"Repo ID {repo_id!r} contains characters that are not legal on "
+            "Windows filesystems; check the URL for stray text."
+        )
+    # ``snapshot_download`` materializes the repo under
+    # ``<target_dir>/<repo_id>``. A repo id containing ``..`` segments,
+    # backslashes (Windows path separator), or URL-encoded escapes
+    # could redirect the materialization outside ``target_dir`` —
+    # forensic example: ``owner/../../../etc/passwd/repo``.
+    parts = repo_id.split("/")
+    if any(seg in {"", ".", ".."} for seg in parts):
+        raise ValueError(f"Repo ID {repo_id!r} contains a path-traversal segment " f"(``.``/``..``/empty); refusing.")
+    if "\\" in repo_id or "\x00" in repo_id or "%" in repo_id:
+        # Backslash is the Windows separator; NUL terminates C strings;
+        # ``%`` could be the leading byte of a URL-encoded ``..``.
+        raise ValueError(
+            f"Repo ID {repo_id!r} contains backslash, NUL, or ``%`` — "
+            f"refusing as a potential path-traversal vector."
+        )
+
+
+def normalize_repo_input(raw: str) -> ParsedRepoInput:
+    """Normalize a model repo input field into repo id + revision hint."""
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("Enter a Hugging Face repo ID or URL.")
+
+    if text.startswith("hf://"):
+        path = text[5:]
+        # Accept both ``hf://model/<owner>/<repo>`` and the plural
+        # ``hf://models/<owner>/<repo>`` form — the HTTP branch
+        # below already strips both, so the hf:// branch matching
+        # only the singular previously left a leading ``models``
+        # segment that survived into ``repo_id = "models/<owner>"``
+        # and failed the ``repo_type="model"`` lookup at the runner.
+        for prefix in ("models/", "model/"):
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
+                break
+        parts = [part for part in path.split("/") if part]
+        # Mirror the same dataset/space rejection the https:// branch does
+        # below. Without this, ``hf://datasets/<owner>/<repo>`` is silently
+        # rewritten to the bogus model id ``datasets/<owner>`` and fails
+        # confusingly later when the runner uses ``repo_type="model"``.
+        if parts and parts[0] in {"datasets", "spaces"}:
+            kind = parts[0]
+            raise ValueError(
+                f"This is a HuggingFace {kind} URL; this tab only downloads "
+                "model repos. Use a model owner/repo (or ``hf://model/<owner>/<repo>``)."
+            )
+        if len(parts) < 2:
+            raise ValueError("Repo input must include both owner and repo name.")
+        repo_id = "/".join(parts[:2])
+        _validate_repo_id(repo_id)
+        return ParsedRepoInput(repo_id=repo_id)
+
+    if "://" not in text:
+        # A schemeless ``huggingface.co/<owner>/<repo>`` / ``huggingface.co/tree/...``
+        # is conceptually a URL, not a bare repo id. Without this guard the
+        # leading ``huggingface.co`` is silently treated as ``<owner>``,
+        # producing the bogus repo id ``huggingface.co/<owner>``. Promote
+        # to the URL-handling branch so the same ``tree``/``blob``
+        # revision-hint extraction, dataset/space rejection, and netloc
+        # validation apply.
+        leading = text.split("/", 1)[0].lower()
+        if leading in {"huggingface.co", "www.huggingface.co"}:
+            text = "https://" + text
+        else:
+            parts = [part for part in text.split("/") if part]
+            # Same dataset/space rejection the ``hf://`` and ``https://``
+            # branches do — otherwise bare ``datasets/<owner>/<repo>`` would
+            # silently truncate to the bogus model id ``datasets/<owner>``
+            # and fail much later in the runner.
+            if parts and parts[0] in {"datasets", "spaces"}:
+                kind = parts[0]
+                raise ValueError(f"This is a HuggingFace {kind} URL; this tab only downloads " "model repos.")
+            if len(parts) < 2:
+                raise ValueError("Repo input must include both owner and repo name.")
+            repo_id = "/".join(parts[:2])
+            _validate_repo_id(repo_id)
+            return ParsedRepoInput(repo_id=repo_id)
+
+    parsed = urlparse(text)
+    # ``urlparse`` preserves the case of the netloc, so a URL like
+    # ``https://HuggingFace.co/owner/repo`` (perfectly legal — hostnames
+    # are case-insensitive) used to fall through the set check and be
+    # rejected. ``parsed.hostname`` is RFC-3986-lowercased, with port
+    # stripped; fall back to the original netloc lowered if hostname is
+    # ``None`` (e.g. malformed input).
+    host = (parsed.hostname or parsed.netloc or "").lower()
+    if host not in {"huggingface.co", "www.huggingface.co"}:
+        raise ValueError("Only huggingface.co repo URLs are supported.")
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        raise ValueError("Repo URL did not contain a repository path.")
+    # ``huggingface.co/datasets/<owner>/<repo>`` and
+    # ``huggingface.co/spaces/<owner>/<repo>`` look superficially valid
+    # but the downloader runner uses ``repo_type="model"``, so silently
+    # treating them as a model called ``datasets/<owner>`` (or
+    # ``spaces/<owner>``) would produce baffling errors halfway through.
+    # Reject them up front with an actionable message.
+    if parts[0] in {"datasets", "spaces"}:
+        kind = parts[0]
+        raise ValueError(
+            f"This is a HuggingFace {kind} URL; this tab only downloads "
+            "model repos. Paste a ``huggingface.co/<owner>/<repo>`` URL."
+        )
+    if parts[0] in {"models", "model"}:
+        parts = parts[1:]
+        # After stripping the optional ``model``/``models`` prefix the
+        # NEW first segment must also be re-validated — otherwise a URL
+        # like ``huggingface.co/model/datasets/<owner>/<repo>`` would
+        # slip past the earlier check (whose ``parts[0]`` was
+        # ``"model"``) and end up being treated as a model repo, which
+        # the downstream ``repo_type="model"`` would then fail on with
+        # a baffling 404.
+        if parts and parts[0] in {"datasets", "spaces"}:
+            kind = parts[0]
+            raise ValueError(
+                f"This is a HuggingFace {kind} URL; this tab only downloads "
+                "model repos. Paste a ``huggingface.co/<owner>/<repo>`` URL."
+            )
+    if len(parts) < 2:
+        raise ValueError("Repo URL must include both owner and repo name.")
+    repo_id = "/".join(parts[:2])
+    _validate_repo_id(repo_id)
+    revision_hint = ""
+    # ``resolve`` is the third valid URL form Hugging Face uses for
+    # revision-scoped file/tree URLs (``/owner/repo/resolve/<branch>/path``),
+    # alongside ``tree`` (branch browser) and ``blob`` (file view). Without
+    # it, a ``…/resolve/dev/…`` URL would silently drop the revision hint.
+    if len(parts) >= 4 and parts[2] in {"tree", "blob", "resolve"}:
+        remainder = parts[3:]
+        if remainder:
+            if remainder[0] == "refs" and len(remainder) >= 3:
+                revision_hint = "/".join(remainder[:3])
+            else:
+                revision_hint = remainder[0]
+    return ParsedRepoInput(repo_id=repo_id, revision_hint=revision_hint)
+
+
+def classify_repo_file(path: str) -> str:
+    """Return a lightweight category used for filtering/default selection."""
+    path_l = path.lower()
+    name = Path(path_l).name
+    if "mmproj" in name:
+        return "mmproj"
+    if path_l.endswith(".gguf"):
+        return "gguf"
+    if path_l.endswith(_LIKELY_MODEL_SUFFIXES):
+        return "weights"
+    if name in _DEFAULT_METADATA_BASENAMES or path_l.endswith(_RELATED_SUFFIXES):
+        return "metadata"
+    return "other"
+
+
+_SHARD_SUFFIX_RE = re.compile(r"-(\d+)-of-(\d+)$", re.IGNORECASE)
+
+
+def _shard_siblings(primary: str, candidates: list[str]) -> list[str]:
+    """Return every shard that belongs to the same sharded weight as
+    ``primary``, in the listing's original order.
+
+    A sharded GGUF / safetensors set is named like
+    ``model.Q4_K_M-00001-of-00003.gguf``. Picking a default by
+    ``min(_gguf_sort_key)`` selects ONE shard; without the rest the
+    download is unusable (the binary fails to load with "missing
+    tensor"). We extract the shard stem (everything before
+    ``-NNNNN-of-NNNNN``) plus the suffix, then yield every candidate
+    whose stem + suffix matches and whose ``-of-NNNNN`` total agrees.
+    Non-sharded primaries fall through to a single-element list.
+    """
+    primary_path = Path(primary)
+    suffix = primary_path.suffix.lower()
+    stem = primary_path.stem
+    match = _SHARD_SUFFIX_RE.search(stem)
+    if not match:
+        return [primary]
+    total = match.group(2)
+    base_stem = stem[: match.start()]
+    parent_str = str(primary_path.parent).replace("\\", "/")
+    siblings: list[str] = []
+    for path in candidates:
+        cand = Path(path)
+        if cand.suffix.lower() != suffix:
+            continue
+        # Keep shards within the same logical directory only —
+        # otherwise an unrelated ``vocab-00001-of-00003.gguf`` in a
+        # subfolder would join the set.
+        if str(cand.parent).replace("\\", "/") != parent_str:
+            continue
+        cand_stem = cand.stem
+        cand_match = _SHARD_SUFFIX_RE.search(cand_stem)
+        if not cand_match:
+            continue
+        if cand_match.group(2) != total:
+            continue
+        if cand_stem[: cand_match.start()] != base_stem:
+            continue
+        siblings.append(path)
+    return siblings or [primary]
+
+
+def default_selected_repo_paths(paths: list[str]) -> tuple[str, ...]:
+    """Choose safe default file selections from a repo listing."""
+    ggufs = [path for path in paths if classify_repo_file(path) == "gguf"]
+    mmproj = [path for path in paths if classify_repo_file(path) == "mmproj"]
+    if ggufs:
+        primary = min(ggufs, key=_gguf_sort_key)
+        # Expand to all shard siblings so sharded GGUFs download as a
+        # complete set (the loader fails with "missing tensor"
+        # otherwise).
+        primary_with_shards = _shard_siblings(primary, ggufs)
+        return tuple(dict.fromkeys([*primary_with_shards, *mmproj]))
+    weights = [path for path in paths if classify_repo_file(path) == "weights"]
+    if weights:
+        # Rank weight candidates with ``_weight_sort_key``, NOT
+        # ``_gguf_sort_key`` directly. The two differ in their
+        # primary discriminator: weights ranking pushes adapter /
+        # LoRA / optimizer files to the back so a repo containing
+        # ``adapter_model.safetensors`` alongside ``model.safetensors``
+        # doesn't tie-break to the adapter by alphabetical sort —
+        # adapters are NOT a usable primary weight, the base model
+        # is. ``_gguf_sort_key`` falls through unchanged for GGUFs
+        # because their classifier filters out adapters via the
+        # ``.gguf`` extension.
+        primary_weight = min(weights, key=_weight_sort_key)
+        # Same shard-set expansion for safetensors / *.bin.
+        primary_weight_shards = _shard_siblings(primary_weight, weights)
+        # Multi-shard safetensors repos ship a sibling
+        # ``<name>.safetensors.index.json`` that maps tensor → shard.
+        # Without it the loader fails ("missing tensor"), so the
+        # default selection must include it whenever a shard pattern
+        # is detected. The match must be exact (case-insensitive
+        # name + same directory) — a wildcard could pull in unrelated
+        # index files from a multi-checkpoint repo.
+        primary_path = Path(primary_weight)
+        shard_match = _SHARD_SUFFIX_RE.search(primary_path.stem)
+        base_stem = primary_path.stem[: shard_match.start()] if shard_match else primary_path.stem
+        index_name = f"{base_stem}{primary_path.suffix}.index.json"
+        index_lookup = index_name.lower()
+        index_files = [
+            path
+            for path in paths
+            if Path(path).parent == primary_path.parent and Path(path).name.lower() == index_lookup
+        ]
+        # Same-directory model metadata (config.json, tokenizer.json,
+        # tokenizer_config.json, vocab.*, special_tokens_map.json,
+        # generation_config.json, etc.) is required to actually load
+        # the checkpoint — a transformers / safetensors loader fails
+        # without ``config.json`` even if the weight shards downloaded
+        # cleanly. CR-4467748557 flagged that the previous default
+        # selection only grabbed weights + index, forcing the user
+        # to manually check every metadata file. Auto-include any
+        # non-weight, non-index file that lives in the same folder
+        # as the primary weight. ``classify_repo_file`` returns
+        # ``"weights"`` / ``"gguf"`` / ``"mmproj"`` for the things
+        # we explicitly track; anything else in the same dir is
+        # auxiliary metadata and belongs in the default bundle.
+        primary_shards_set = set(primary_weight_shards)
+        index_files_set = set(index_files)
+        metadata_files = [
+            path
+            for path in paths
+            if Path(path).parent == primary_path.parent
+            and classify_repo_file(path) != "weights"
+            and Path(path).name.lower() != index_lookup
+            and path not in primary_shards_set
+            and path not in index_files_set
+        ]
+        return tuple(dict.fromkeys([*primary_weight_shards, *index_files, *metadata_files]))
+    return tuple(paths[:1])
+
+
+# Filename tokens that mark a weights file as NOT the primary
+# (adapters / LoRA / optimizer state). These coexist with the real
+# base-model weights in many repos, and an alphabetical tie-break
+# on ``model.safetensors`` vs ``adapter_model.safetensors`` would
+# silently pick the adapter — useless without the base model.
+_NON_PRIMARY_WEIGHT_TOKENS = (
+    "adapter",
+    "lora",
+    "lo_ra",
+    "optimizer",
+    "optim_",
+    "optim.",
+    "_optim",
+)
+
+
+def _weight_sort_key(path: str) -> tuple[int, int, str, int, str]:
+    """Rank non-GGUF weight candidates with adapter/LoRA files demoted.
+
+    Returns a tuple starting with a 0/1 ``primary_class`` discriminator
+    (0 = real weight, 1 = adapter/LoRA/optimizer), then the same
+    ``_gguf_sort_key`` tuple appended after — so ``min(..., key=_weight_sort_key)``
+    picks a real weight over an adapter, and falls back to the
+    existing preferred-token / alphabetical / length / path
+    tiebreaks within each class.
+    """
+    name = Path(path).name.lower()
+    primary_class = 1 if any(token in name for token in _NON_PRIMARY_WEIGHT_TOKENS) else 0
+    token_rank, name_key, length, path_key = _gguf_sort_key(path)
+    return (primary_class, token_rank, name_key, length, path_key)
+
+
+def _gguf_sort_key(path: str) -> tuple[int, str, int, str]:
+    """Rank GGUF files so the default is one likely-usable quant, not all of them."""
+    name = Path(path).name.lower()
+    token_rank = len(_PREFERRED_GGUF_TOKENS)
+    for index, token in enumerate(_PREFERRED_GGUF_TOKENS):
+        if token in name:
+            token_rank = index
+            break
+    return (token_rank, name, len(path), path.lower())
+
+
+def summarize_repo_listing(
+    refs_payload: list[dict],
+    files_payload: list[dict],
+) -> tuple[tuple[HfRepoRef, ...], tuple[HfRepoFile, ...]]:
+    """Convert raw runner payloads into typed rows for the UI."""
+    refs = tuple(
+        HfRepoRef(
+            name=str(item.get("name", "")),
+            kind=str(item.get("kind", "branch")),
+            target_commit=str(item.get("target_commit", "")),
+        )
+        for item in refs_payload
+        if item.get("name")
+    )
+    default_paths = set(
+        default_selected_repo_paths([str(item.get("path", "")) for item in files_payload if item.get("path")])
+    )
+    files = tuple(
+        HfRepoFile(
+            path=str(item.get("path", "")),
+            size_bytes=item.get("size_bytes"),
+            kind=str(item.get("kind") or classify_repo_file(str(item.get("path", "")))),
+            selected_by_default=str(item.get("path", "")) in default_paths,
+        )
+        for item in files_payload
+        if item.get("path")
+    )
+    return refs, files
+
+
+def collect_target_directory_options(
+    model_dirs: list[Path],
+    *,
+    selected_paths: tuple[str, ...] = (),
+) -> DownloadTargetsState:
+    """Build checkbox rows for active model directories with free-space info."""
+    # ``Path(path).expanduser().resolve()`` can raise on malformed entries
+    # (a Windows path containing NUL, an empty-after-strip surrogate, etc).
+    # The previous set-comprehension would surface that as a hard error and
+    # block the entire Download tab from rendering. Skip individual bad
+    # entries so the "select the first live option" fallback still works.
+    normalized_selected: set[str] = set()
+    for selected_path_str in selected_paths:
+        if not selected_path_str:
+            continue
+        try:
+            normalized_selected.add(str(Path(selected_path_str).expanduser().resolve()))
+        except (OSError, ValueError, TypeError, RuntimeError):
+            continue
+    options: list[TargetDirectoryOption] = []
+    rendered_index = 0
+    for raw_path in model_dirs:
+        # Same protection as ``normalized_selected``: a malformed entry
+        # in ``launcher.model_dirs`` (NUL byte, bad surrogate, etc) used
+        # to abort the entire Download tab build. Skip it and keep
+        # going so the other model dirs still render.
+        try:
+            path = Path(raw_path).expanduser().resolve()
+        except (OSError, ValueError, TypeError, RuntimeError):
+            continue
+        exists = path.exists() and path.is_dir()
+        free_bytes: int | None = None
+        try:
+            usage = shutil.disk_usage(path if exists else path.parent)
+            free_bytes = int(usage.free)
+        except Exception:
+            free_bytes = None
+        if normalized_selected:
+            is_selected = str(path) in normalized_selected
+        else:
+            is_selected = rendered_index == 0
+        options.append(
+            TargetDirectoryOption(
+                path=path,
+                free_bytes=free_bytes,
+                exists=exists,
+                selected=is_selected,
+            )
+        )
+        rendered_index += 1
+    # If a persisted selection was supplied but didn't match any current
+    # model_dirs (user removed the directory from Settings, or moved
+    # disks), fall back to checking the first option so the download UI
+    # always has a destination. Without this the Download button would
+    # be blocked with "no target dirs selected" until the user clicked.
+    if normalized_selected and options and not any(o.selected for o in options):
+        head = options[0]
+        options[0] = TargetDirectoryOption(
+            path=head.path,
+            free_bytes=head.free_bytes,
+            exists=head.exists,
+            selected=True,
+        )
+    selected_paths_tuple = tuple(str(option.path) for option in options if option.selected)
+    return DownloadTargetsState(options=tuple(options), selected_paths=selected_paths_tuple)
+
+
+def build_runner_command(
+    python_path: str | Path,
+    action: str,
+    payload_path: str | Path,
+) -> list[str]:
+    """Return the subprocess argv for the venv-backed runner."""
+    return [
+        str(Path(python_path)),
+        "-m",
+        "modules.hf_downloader.runner",
+        action,
+        str(Path(payload_path)),
+    ]
+
+
+def payload_bytes(payload: dict) -> bytes:
+    """Stable JSON serialization for subprocess payload handoff."""
+    return json.dumps(payload, sort_keys=True).encode("utf-8")

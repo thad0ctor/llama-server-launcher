@@ -130,10 +130,12 @@ def build_gguf_blob(
 
 
 def test_parse_valid_minimal_header(tmp_path: Path) -> None:
-    blob = build_gguf_blob([
-        ("general.architecture", _T_STRING, "llama"),
-        ("llama.block_count", _T_UINT32, 32),
-    ])
+    blob = build_gguf_blob(
+        [
+            ("general.architecture", _T_STRING, "llama"),
+            ("llama.block_count", _T_UINT32, 32),
+        ]
+    )
     path = tmp_path / "tiny.gguf"
     path.write_bytes(blob)
 
@@ -174,11 +176,20 @@ def test_parse_truncated_file_does_not_raise(tmp_path: Path) -> None:
 
 
 def test_parse_nonexistent_file_reports_error(tmp_path: Path) -> None:
-    # Multi-part regex requires "-00001-of-00003.gguf"; this plain name hits
-    # the single-file path and .stat() raises. Expect a clear error, not crash.
+    # Multi-part regex requires "-00001-of-00003.gguf"; this plain name
+    # hits the single-file path. The parser now catches the underlying
+    # ``OSError`` / ``FileNotFoundError`` from the shard-discovery
+    # call and surfaces it via the function's error-return contract
+    # rather than letting the exception escape — so callers get a
+    # ``result["error"]`` they can display in the UI instead of an
+    # uncaught exception interrupting whatever workflow asked for
+    # the analysis.
     missing = tmp_path / "does_not_exist.gguf"
-    with pytest.raises((FileNotFoundError, OSError)):
-        parse_gguf_header_simple(str(missing))
+    result = parse_gguf_header_simple(str(missing))
+    assert result["error"] is not None
+    assert "Failed to inspect GGUF file" in result["error"]
+    assert result["file_size_bytes"] == 0
+    assert result["shard_count"] == 0
 
 
 def test_parse_various_metadata_types(tmp_path: Path) -> None:
@@ -442,10 +453,12 @@ def test_parse_multi_part_aggregates_sizes(tmp_path: Path) -> None:
     all shards, and the first shard must contain a valid header.
     """
     # Shard 1 is the only one with header content; others are opaque bytes.
-    header_blob = build_gguf_blob([
-        ("general.architecture", _T_STRING, "llama"),
-        ("llama.block_count", _T_UINT32, 80),
-    ])
+    header_blob = build_gguf_blob(
+        [
+            ("general.architecture", _T_STRING, "llama"),
+            ("llama.block_count", _T_UINT32, 80),
+        ]
+    )
     shard1 = tmp_path / "mpmodel-00001-of-00002.gguf"
     shard2 = tmp_path / "mpmodel-00002-of-00002.gguf"
     shard1.write_bytes(header_blob)

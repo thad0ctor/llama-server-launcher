@@ -33,7 +33,6 @@ from pathlib import Path
 
 import pytest
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -84,25 +83,122 @@ class TestSpecMasterToggle:
         assert "--spec-draft-n-max" not in cmd
         assert "--spec-draft-model" not in cmd
 
-    def test_spec_enabled_with_empty_spec_type_emits_nothing(
-        self, manager, launcher_mock
-    ):
+    # Backend-specific short flags used by ik_llama's draft path
+    # (``-devd``, ``-ngld``, ``-ctkd``, ``-ctvd``) and the
+    # ``--model-draft`` alias aren't caught by a ``--spec-*`` /
+    # ``--draft-*`` prefix sweep. Test the full set so a regression
+    # that leaks any of them on an empty/none spec_type fails loudly.
+    _SPEC_LEAK_FLAGS = frozenset(
+        {
+            "-devd",
+            "-ngld",
+            "-ctkd",
+            "-ctvd",
+            "-draft",
+            "--model-draft",
+        }
+    )
+
+    @classmethod
+    def _leaked_spec_args(cls, cmd):
+        return [
+            arg
+            for arg in cmd
+            if isinstance(arg, str)
+            and (
+                arg.startswith("--spec-")
+                or arg.startswith("--draft-")
+                # ``--suffix-*`` flags (e.g. ``--suffix-pattern-len``,
+                # ``--suffix-max-depth``) are part of the speculative
+                # decoding tree-suffix path; an empty/none ``spec_type``
+                # must suppress them too.
+                or arg.startswith("--suffix-")
+                # ``--device`` can leak through the spec-draft GPU
+                # union path when ``app_settings["spec_draft_selected_gpus"]``
+                # is stale but ``spec_type`` is now empty/none. Catch
+                # it here so the suppress-on-spec_type contract
+                # covers the persisted union path too.
+                or arg == "--device"
+                or arg in cls._SPEC_LEAK_FLAGS
+            )
+        ]
+
+    def test_spec_enabled_with_empty_spec_type_emits_nothing(self, manager, launcher_mock):
+        # Seed multiple persisted spec fields, not just n_max — the
+        # bug being pinned is "stale config emits flags even when
+        # spec_type is empty", so the test needs to cover the FULL
+        # spec/draft surface, not a single representative knob.
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("")
         launcher_mock.spec_draft_n_max.set("3")
+        launcher_mock.spec_draft_model.set("/tmp/draft.gguf")
+        launcher_mock.spec_draft_device.set("CUDA0")
+        # ``_leaked_spec_args`` also flags ``--suffix-*`` flags, but
+        # without seeding the underlying vars a regression that leaks
+        # ``--suffix-pattern-len`` / ``--suffix-max-depth`` from a stale
+        # config when spec_type is "" would have passed by accident
+        # (the field's default is empty, so no flag is emitted).
+        launcher_mock.spec_suffix_pattern_len.set("4")
+        launcher_mock.spec_suffix_max_depth.set("8")
+        # Also seed the PERSISTED draft-GPU union path
+        # (``app_settings["spec_draft_selected_gpus"]``). The launch
+        # path's ``get_effective_visible_gpu_indices`` unions this
+        # with the main selection and emits ``CUDA_VISIBLE_DEVICES``
+        # plus ``--device``; a regression that kept honoring the
+        # stale persisted list when spec_type is "" would have
+        # slipped past the StringVar-only seeding above.
+        launcher_mock.app_settings = {
+            "selected_gpus": [1],
+            "gpu_order": [1],
+            "spec_draft_selected_gpus": [2],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+        launcher_mock.get_ordered_selected_gpus = lambda: [1]
+        # Pin the CUDA_VISIBLE_DEVICES side-effect too: the empty
+        # spec_type must NOT widen the env var by unioning the
+        # stale draft-GPU list (``2``) into the main selection
+        # (``1``). The argv-only leak check above wouldn't catch
+        # a regression that emitted ``--device`` flags but kept
+        # silently exporting ``CUDA_VISIBLE_DEVICES=1,2``.
+        cuda_action, cuda_value = manager._resolve_cuda_visible_devices_action()
+        assert cuda_action == "export"
+        assert cuda_value == "1"
         cmd = manager.build_cmd()
-        assert "--spec-type" not in cmd
-        assert "--spec-draft-n-max" not in cmd
+        leaked = self._leaked_spec_args(cmd)
+        assert not leaked, (
+            f"spec_type='' must suppress every spec/draft flag (long + short); " f"got leaked={leaked!r} cmd={cmd!r}"
+        )
 
-    def test_spec_enabled_with_none_spec_type_emits_nothing(
-        self, manager, launcher_mock
-    ):
+    def test_spec_enabled_with_none_spec_type_emits_nothing(self, manager, launcher_mock):
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("none")
         launcher_mock.spec_draft_n_max.set("3")
+        launcher_mock.spec_draft_model.set("/tmp/draft.gguf")
+        launcher_mock.spec_draft_device.set("CUDA0")
+        # Same suffix-vars seeding as the empty-spec_type test — see
+        # comment there for the rationale.
+        launcher_mock.spec_suffix_pattern_len.set("4")
+        launcher_mock.spec_suffix_max_depth.set("8")
+        # Same persisted-union seeding rationale as the empty-
+        # spec_type test above.
+        launcher_mock.app_settings = {
+            "selected_gpus": [1],
+            "gpu_order": [1],
+            "spec_draft_selected_gpus": [2],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+        launcher_mock.get_ordered_selected_gpus = lambda: [1]
+        # Same env-side-effect pin as the empty-spec_type case — see
+        # comment in ``test_spec_enabled_with_empty_spec_type_emits_nothing``.
+        cuda_action, cuda_value = manager._resolve_cuda_visible_devices_action()
+        assert cuda_action == "export"
+        assert cuda_value == "1"
         cmd = manager.build_cmd()
-        assert "--spec-type" not in cmd
-        assert "--spec-draft-n-max" not in cmd
+        leaked = self._leaked_spec_args(cmd)
+        assert not leaked, (
+            f"spec_type='none' must suppress every spec/draft flag (long + short); "
+            f"got leaked={leaked!r} cmd={cmd!r}"
+        )
 
     def test_default_state_emits_no_spec_flags(self, manager, launcher_mock):
         """Zero-noise default: untouched fixture must not emit any spec or
@@ -146,9 +242,7 @@ class TestSpecEmissionLlamaCpp:
     """Happy-path emission under the mainline llama.cpp backend."""
 
     @pytest.mark.parametrize("spec_type", LLAMACPP_SPEC_TYPES)
-    def test_spec_type_flag_emits_for_each_valid_value(
-        self, manager, launcher_mock, spec_type
-    ):
+    def test_spec_type_flag_emits_for_each_valid_value(self, manager, launcher_mock, spec_type):
         """Every supported llama.cpp spec_type lands ``--spec-type <value>``
         verbatim."""
         launcher_mock.backend_selection.set("llama.cpp")
@@ -510,9 +604,7 @@ class TestSpecCrossBackendWarningsLlamaCpp:
         assert "draft" in captured.err.lower()
         assert "ik_llama" in captured.err.lower()
 
-    def test_spec_suffix_pattern_len_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_spec_suffix_pattern_len_warns_and_skips(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")
@@ -523,9 +615,7 @@ class TestSpecCrossBackendWarningsLlamaCpp:
         assert "suffix" in captured.err.lower()
         assert "ik_llama" in captured.err.lower()
 
-    def test_spec_suffix_max_depth_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_spec_suffix_max_depth_warns_and_skips(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")
@@ -548,9 +638,7 @@ class TestSpecEmissionIkLlama:
     ``--model-draft`` not ``--spec-draft-model``, short-form offload flags."""
 
     @pytest.mark.parametrize("spec_type", IK_LLAMA_SPEC_TYPES)
-    def test_spec_type_flag_emits_for_each_valid_value(
-        self, manager, launcher_mock, spec_type
-    ):
+    def test_spec_type_flag_emits_for_each_valid_value(self, manager, launcher_mock, spec_type):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(spec_type)
@@ -721,9 +809,7 @@ class TestSpecNgramKnobsIkLlama:
         "spec_type",
         ["ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache"],
     )
-    def test_shared_ngram_set_emits_for_every_ngram_variant(
-        self, manager, launcher_mock, spec_type
-    ):
+    def test_shared_ngram_set_emits_for_every_ngram_variant(self, manager, launcher_mock, spec_type):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(spec_type)
@@ -735,9 +821,7 @@ class TestSpecNgramKnobsIkLlama:
         assert cmd[cmd.index("--spec-ngram-size-m") + 1] == "5"
         assert cmd[cmd.index("--spec-ngram-min-hits") + 1] == "2"
 
-    def test_ngram_shared_set_does_not_emit_for_non_ngram_spec_type(
-        self, manager, launcher_mock
-    ):
+    def test_ngram_shared_set_does_not_emit_for_non_ngram_spec_type(self, manager, launcher_mock):
         """Outside an ``ngram-*`` spec_type, the shared set must stay
         silent even when populated."""
         launcher_mock.backend_selection.set("ik_llama")
@@ -754,9 +838,7 @@ class TestSpecNgramKnobsIkLlama:
         ):
             assert absent not in cmd
 
-    def test_llamacpp_per_variant_ngram_knobs_ignored_under_ik_llama(
-        self, manager, launcher_mock
-    ):
+    def test_llamacpp_per_variant_ngram_knobs_ignored_under_ik_llama(self, manager, launcher_mock):
         """Populate every llama.cpp-specific per-variant knob; under
         ik_llama none of them should land on the command."""
         launcher_mock.backend_selection.set("ik_llama")
@@ -789,9 +871,7 @@ class TestSpecSuffixIkLlama:
     """``--suffix-pattern-len`` / ``--suffix-max-depth`` emit ONLY when
     ``spec_type == "suffix"`` under ik_llama."""
 
-    def test_suffix_flags_emit_when_spec_type_is_suffix(
-        self, manager, launcher_mock
-    ):
+    def test_suffix_flags_emit_when_spec_type_is_suffix(self, manager, launcher_mock):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("suffix")
@@ -801,9 +881,7 @@ class TestSpecSuffixIkLlama:
         assert cmd[cmd.index("--suffix-pattern-len") + 1] == "4"
         assert cmd[cmd.index("--suffix-max-depth") + 1] == "12"
 
-    def test_suffix_flags_omitted_for_non_suffix_spec_type(
-        self, manager, launcher_mock
-    ):
+    def test_suffix_flags_omitted_for_non_suffix_spec_type(self, manager, launcher_mock):
         """Populate suffix vars but pick spec_type=mtp; nothing emits."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
@@ -856,9 +934,7 @@ class TestSpecCrossBackendWarningsIkLlama:
     """Mirror image of TestSpecCrossBackendWarningsLlamaCpp: under
     ik_llama, llama.cpp-only knobs must warn-and-skip."""
 
-    def test_spec_draft_p_split_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_spec_draft_p_split_warns_and_skips(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
@@ -869,9 +945,7 @@ class TestSpecCrossBackendWarningsIkLlama:
         assert "p-split" in captured.err.lower()
         assert "llama.cpp" in captured.err.lower()
 
-    def test_spec_draft_cpu_moe_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_spec_draft_cpu_moe_warns_and_skips(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
@@ -882,9 +956,7 @@ class TestSpecCrossBackendWarningsIkLlama:
         assert "cpu-moe" in captured.err.lower()
         assert "llama.cpp" in captured.err.lower()
 
-    def test_spec_draft_n_cpu_moe_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_spec_draft_n_cpu_moe_warns_and_skips(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
@@ -912,9 +984,7 @@ class TestNoMmprojEmission:
         cmd = manager.build_cmd()
         assert "--no-mmproj" in cmd
 
-    def test_no_mmproj_true_ik_llama_warns_and_skips(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_no_mmproj_true_ik_llama_warns_and_skips(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.no_mmproj.set(True)
         cmd = manager.build_cmd()
@@ -936,9 +1006,7 @@ class TestNoMmprojEmission:
         cmd = manager.build_cmd()
         assert "--no-mmproj" not in cmd
 
-    def test_no_mmproj_independent_of_spec_enabled(
-        self, manager, launcher_mock
-    ):
+    def test_no_mmproj_independent_of_spec_enabled(self, manager, launcher_mock):
         """``--no-mmproj`` is its own block; ``spec_enabled=False`` doesn't
         suppress it."""
         launcher_mock.backend_selection.set("llama.cpp")
@@ -960,16 +1028,17 @@ class TestSpecTypeWhitelist:
     """Reject unknown / cross-backend spec_type values before they reach
     the server. Mirrors the per-backend dropdown choices in the UI."""
 
-    @pytest.mark.parametrize("bad_value", [
-        "draft-mtp",  # mainline-only, invalid for ik_llama
-        "draft-simple",  # mainline-only
-        "draft-eagle3",  # mainline-only
-        "garbage",  # nonsense
-        "DRAFT-MTP",  # case-sensitive
-    ])
-    def test_invalid_spec_type_under_ik_llama_skips_and_warns(
-        self, manager, launcher_mock, capsys, bad_value
-    ):
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "draft-mtp",  # mainline-only, invalid for ik_llama
+            "draft-simple",  # mainline-only
+            "draft-eagle3",  # mainline-only
+            "garbage",  # nonsense
+            "DRAFT-MTP",  # case-sensitive
+        ],
+    )
+    def test_invalid_spec_type_under_ik_llama_skips_and_warns(self, manager, launcher_mock, capsys, bad_value):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(bad_value)
@@ -979,15 +1048,16 @@ class TestSpecTypeWhitelist:
         assert "spec_type" in captured.err.lower()
         assert bad_value in captured.err
 
-    @pytest.mark.parametrize("bad_value", [
-        "mtp",  # ik_llama-only (mainline uses 'draft-mtp'), invalid for llama.cpp
-        "suffix",  # ik_llama-only
-        "garbage",
-        "MTP",  # case-sensitive
-    ])
-    def test_invalid_spec_type_under_llama_cpp_skips_and_warns(
-        self, manager, launcher_mock, capsys, bad_value
-    ):
+    @pytest.mark.parametrize(
+        "bad_value",
+        [
+            "mtp",  # ik_llama-only (mainline uses 'draft-mtp'), invalid for llama.cpp
+            "suffix",  # ik_llama-only
+            "garbage",
+            "MTP",  # case-sensitive
+        ],
+    )
+    def test_invalid_spec_type_under_llama_cpp_skips_and_warns(self, manager, launcher_mock, capsys, bad_value):
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(bad_value)
@@ -997,9 +1067,7 @@ class TestSpecTypeWhitelist:
         assert "spec_type" in captured.err.lower()
         assert bad_value in captured.err
 
-    def test_invalid_spec_type_also_suppresses_dependent_flags(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_invalid_spec_type_also_suppresses_dependent_flags(self, manager, launcher_mock, capsys):
         """If spec_type is rejected, downstream draft tuning flags must
         also be suppressed — they only make sense in the context of a
         valid spec_type."""
@@ -1007,10 +1075,28 @@ class TestSpecTypeWhitelist:
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")  # invalid for ik_llama
         launcher_mock.spec_draft_n_max.set("3")
+        # Seed the persisted draft-GPU union path so the test also
+        # catches a regression where an invalid ``spec_type`` would
+        # still let ``_resolve_cuda_visible_devices_action`` widen
+        # ``CUDA_VISIBLE_DEVICES`` and emit ``--device`` for the
+        # stale draft GPU. Same seeding as the empty / "none" tests.
+        launcher_mock.app_settings = {
+            "selected_gpus": [1],
+            "gpu_order": [1],
+            "spec_draft_selected_gpus": [2],
+        }
+        launcher_mock.gpu_info = {"device_count": 4, "available": True, "devices": []}
+        launcher_mock.get_ordered_selected_gpus = lambda: [1]
+        # Pin the CUDA-env side effect: only the main GPU (1) must
+        # be exported; the stale draft GPU (2) MUST NOT be unioned in.
+        cuda_action, cuda_value = manager._resolve_cuda_visible_devices_action()
+        assert cuda_action == "export"
+        assert cuda_value == "1"
         cmd = manager.build_cmd()
         assert "--spec-type" not in cmd
         assert "--draft-max" not in cmd
         assert "--spec-draft-n-max" not in cmd
+        assert "--device" not in cmd
 
     def test_valid_spec_type_still_emits(self, manager, launcher_mock):
         """Sanity: every UI-valid value still passes the whitelist."""
@@ -1069,9 +1155,7 @@ class TestSpecDraftDeviceEmission:
         assert "--spec-draft-device" in cmd
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA0,CUDA1"
 
-    def test_multi_cuda_device_csv_ik_llama_mtp_suppresses_devd(
-        self, manager, launcher_mock
-    ):
+    def test_multi_cuda_device_csv_ik_llama_mtp_suppresses_devd(self, manager, launcher_mock):
         """ik_llama's only draft-capable type is ``mtp``, and MTP shares
         the main GGUF's GPUs — so ``-devd`` is NEVER emitted for ik_llama.
         Even a free-text ``spec_draft_device`` value is suppressed."""
@@ -1102,17 +1186,29 @@ class TestSpecDraftCacheTypeComboboxValues:
     drifting.
     """
 
-    _EXPECTED_VALUES = ("", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k")
+    _EXPECTED_VALUES = (
+        "",
+        "f16",
+        "f32",
+        "q8_0",
+        "q4_0",
+        "q4_1",
+        "q5_0",
+        "q5_1",
+        "q6_k",
+    )
 
     def test_module_level_constant_matches_expected_set(self):
         """The constant the UI consumes is what we expect."""
         from modules.spec_tab import SPEC_DRAFT_CACHE_TYPE_VALUES
+
         assert SPEC_DRAFT_CACHE_TYPE_VALUES == self._EXPECTED_VALUES
 
     def test_constant_includes_blank_first_entry(self):
         """The "" entry is what makes the draft combos different from the
         main combos — guarantee that contract."""
         from modules.spec_tab import SPEC_DRAFT_CACHE_TYPE_VALUES
+
         assert SPEC_DRAFT_CACHE_TYPE_VALUES[0] == ""
         assert "f16" in SPEC_DRAFT_CACHE_TYPE_VALUES
 
@@ -1182,9 +1278,7 @@ class TestSpecDraftFlagsGatedByType:
     """
 
     @pytest.mark.parametrize("spec_type", LLAMACPP_NON_DRAFT_SPEC_TYPES)
-    def test_llamacpp_ngram_drops_spec_draft_n_max(
-        self, manager, launcher_mock, tmp_path, spec_type
-    ):
+    def test_llamacpp_ngram_drops_spec_draft_n_max(self, manager, launcher_mock, tmp_path, spec_type):
         """llama.cpp ngram-*/cache: stale draft tuning vars must be dropped."""
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
@@ -1210,14 +1304,10 @@ class TestSpecDraftFlagsGatedByType:
             "--spec-draft-cpu-moe",
             "--spec-draft-n-cpu-moe",
         ):
-            assert absent not in cmd, (
-                f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
-            )
+            assert absent not in cmd, f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
 
     @pytest.mark.parametrize("spec_type", LLAMACPP_NON_DRAFT_SPEC_TYPES)
-    def test_llamacpp_ngram_drops_all_draft_offload_and_moe(
-        self, manager, launcher_mock, spec_type
-    ):
+    def test_llamacpp_ngram_drops_all_draft_offload_and_moe(self, manager, launcher_mock, spec_type):
         """Same gate applies to the ngl/device/ctk/ctv + cpu_moe family."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
@@ -1237,14 +1327,10 @@ class TestSpecDraftFlagsGatedByType:
             "--spec-draft-cpu-moe",
             "--spec-draft-n-cpu-moe",
         ):
-            assert absent not in cmd, (
-                f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
-            )
+            assert absent not in cmd, f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
 
     @pytest.mark.parametrize("spec_type", IK_LLAMA_NON_DRAFT_SPEC_TYPES)
-    def test_ik_llama_non_draft_drops_draft_max(
-        self, manager, launcher_mock, spec_type
-    ):
+    def test_ik_llama_non_draft_drops_draft_max(self, manager, launcher_mock, spec_type):
         """ik_llama ngram-*/suffix: ``--draft-max`` etc. must NOT emit."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
@@ -1257,9 +1343,7 @@ class TestSpecDraftFlagsGatedByType:
         assert "--draft-min" not in cmd
         assert "--draft-p-min" not in cmd
 
-    def test_ik_llama_suffix_drops_model_draft(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_ik_llama_suffix_drops_model_draft(self, manager, launcher_mock, tmp_path):
         """ik_llama suffix mode: ``--model-draft`` must NOT emit even when
         the path is valid; suffix doesn't use a separate draft model."""
         draft = tmp_path / "draft.gguf"
@@ -1267,6 +1351,13 @@ class TestSpecDraftFlagsGatedByType:
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("suffix")
+        # Activate the separate-draft opt-in. Without this the test
+        # passes through the default ``spec_use_draft_model=False``
+        # path which already shortcircuits draft-model emission for
+        # other reasons — so the gate-on-spec_type contract under
+        # test wouldn't actually be exercised. Setting the flag on
+        # forces emission into the path that consults spec_type.
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_model.set(str(draft))
         launcher_mock.spec_suffix_pattern_len.set("8")
         cmd = manager.build_cmd()
@@ -1278,27 +1369,25 @@ class TestSpecDraftFlagsGatedByType:
         assert "--model-draft" not in cmd
 
     @pytest.mark.parametrize("spec_type", IK_LLAMA_NON_DRAFT_SPEC_TYPES)
-    def test_ik_llama_non_draft_drops_all_short_offload(
-        self, manager, launcher_mock, spec_type
-    ):
+    def test_ik_llama_non_draft_drops_all_short_offload(self, manager, launcher_mock, spec_type):
         """The short ``-ngld``/``-devd``/``-ctkd``/``-ctvd`` family is gated
         too."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(spec_type)
+        # Activate the separate-draft opt-in for the same reason as
+        # the suffix test above — without this the suppression
+        # contract under test isn't actually exercised.
+        launcher_mock.spec_use_draft_model.set(True)
         launcher_mock.spec_draft_ngl.set("24")
         launcher_mock.spec_draft_device.set("CUDA1")
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
         for absent in ("-ngld", "-devd", "-ctkd", "-ctvd"):
-            assert absent not in cmd, (
-                f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
-            )
+            assert absent not in cmd, f"{absent} leaked into cmd for non-draft spec_type {spec_type!r}"
 
-    def test_llamacpp_draft_mtp_still_emits_n_max(
-        self, manager, launcher_mock
-    ):
+    def test_llamacpp_draft_mtp_still_emits_n_max(self, manager, launcher_mock):
         """Regression: a draft-capable spec_type still forwards the draft
         tuning knobs (this test guards against an over-zealous gate)."""
         launcher_mock.backend_selection.set("llama.cpp")
@@ -1309,9 +1398,7 @@ class TestSpecDraftFlagsGatedByType:
         assert "--spec-draft-n-max" in cmd
         assert cmd[cmd.index("--spec-draft-n-max") + 1] == "3"
 
-    def test_ik_llama_mtp_still_emits_draft_max(
-        self, manager, launcher_mock
-    ):
+    def test_ik_llama_mtp_still_emits_draft_max(self, manager, launcher_mock):
         """Regression: ik_llama's only draft-capable spec_type (``mtp``)
         still forwards ``--draft-max``."""
         launcher_mock.backend_selection.set("ik_llama")
@@ -1322,9 +1409,7 @@ class TestSpecDraftFlagsGatedByType:
         assert "--draft-max" in cmd
         assert cmd[cmd.index("--draft-max") + 1] == "7"
 
-    def test_llamacpp_switch_from_draft_mtp_to_ngram_drops_all_draft(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_llamacpp_switch_from_draft_mtp_to_ngram_drops_all_draft(self, manager, launcher_mock, tmp_path):
         """The exact scenario from the CR prompt: a user who set up
         draft-mtp with every draft knob filled in, then switched to
         ngram-simple, must NOT see any draft flag leak through. Only
@@ -1367,9 +1452,7 @@ class TestSpecDraftFlagsGatedByType:
             "--spec-draft-cpu-moe",
             "--spec-draft-n-cpu-moe",
         ):
-            assert absent not in cmd, (
-                f"{absent} leaked after switching from draft-mtp to ngram-simple"
-            )
+            assert absent not in cmd, f"{absent} leaked after switching from draft-mtp to ngram-simple"
 
 
 # ============================================================================
@@ -1387,9 +1470,7 @@ class TestSpecDraftModelPathValidation:
     ``Path(value).is_file()``. Misses log a stderr warning and skip the
     flag instead of forwarding garbage."""
 
-    def test_llamacpp_existing_file_emits_resolved_absolute_path(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_llamacpp_existing_file_emits_resolved_absolute_path(self, manager, launcher_mock, tmp_path):
         """Valid path: the flag emits, value is the resolved absolute path.
 
         Uses ``draft-simple`` — draft-mtp on llama.cpp suppresses
@@ -1409,9 +1490,7 @@ class TestSpecDraftModelPathValidation:
         assert emitted == str(draft.resolve())
         assert Path(emitted).is_absolute()
 
-    def test_llamacpp_nonexistent_path_skips_flag_with_warning(
-        self, manager, launcher_mock, tmp_path, capsys
-    ):
+    def test_llamacpp_nonexistent_path_skips_flag_with_warning(self, manager, launcher_mock, tmp_path, capsys):
         """Nonexistent path: flag is NOT emitted, stderr warning fires."""
         bogus = tmp_path / "does_not_exist.gguf"
         # Intentionally do NOT create the file.
@@ -1427,9 +1506,7 @@ class TestSpecDraftModelPathValidation:
         assert "--spec-draft-model" in captured.err
         assert "not a file" in captured.err
 
-    def test_llamacpp_directory_path_skips_flag_with_warning(
-        self, manager, launcher_mock, tmp_path, capsys
-    ):
+    def test_llamacpp_directory_path_skips_flag_with_warning(self, manager, launcher_mock, tmp_path, capsys):
         """Directory path (not a file) is rejected even though it exists."""
         dir_path = tmp_path / "models_dir"
         dir_path.mkdir()
@@ -1443,9 +1520,7 @@ class TestSpecDraftModelPathValidation:
         assert "not a file" in captured.err
         assert str(dir_path) in captured.err
 
-    def test_ik_llama_existing_file_emits_resolved_absolute_path(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_ik_llama_existing_file_emits_resolved_absolute_path(self, manager, launcher_mock, tmp_path):
         """Same contract under ik_llama: resolved absolute path emitted."""
         draft = tmp_path / "draft.gguf"
         draft.write_bytes(b"GGUF\x00")
@@ -1460,9 +1535,7 @@ class TestSpecDraftModelPathValidation:
         assert emitted == str(draft.resolve())
         assert Path(emitted).is_absolute()
 
-    def test_ik_llama_nonexistent_path_skips_flag_with_warning(
-        self, manager, launcher_mock, tmp_path, capsys
-    ):
+    def test_ik_llama_nonexistent_path_skips_flag_with_warning(self, manager, launcher_mock, tmp_path, capsys):
         """ik_llama miss: warning must reference ``--model-draft`` (NOT
         the llama.cpp flag name)."""
         bogus = tmp_path / "missing-draft.gguf"
@@ -1525,9 +1598,7 @@ class TestDraftMtpSuppressesSeparateModel:
         assert str(draft) in captured.err
         assert "embedded" in captured.err
 
-    def test_llamacpp_draft_mtp_empty_draft_model_no_advisory(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_llamacpp_draft_mtp_empty_draft_model_no_advisory(self, manager, launcher_mock, capsys):
         """draft-mtp with a blank spec_draft_model: no flag emits and no
         spurious advisory is printed (silent happy path)."""
         launcher_mock.backend_selection.set("llama.cpp")
@@ -1543,9 +1614,7 @@ class TestDraftMtpSuppressesSeparateModel:
         assert "ignoring spec_draft_model" not in captured.err
         assert "embedded in the main GGUF" not in captured.err
 
-    def test_llamacpp_draft_simple_still_emits_draft_model(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_llamacpp_draft_simple_still_emits_draft_model(self, manager, launcher_mock, tmp_path):
         """Regression: draft-simple keeps emitting ``--spec-draft-model``
         with a resolved absolute path."""
         draft = tmp_path / "draft.gguf"
@@ -1558,9 +1627,7 @@ class TestDraftMtpSuppressesSeparateModel:
         assert "--spec-draft-model" in cmd
         assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
 
-    def test_llamacpp_draft_eagle3_still_emits_draft_model(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_llamacpp_draft_eagle3_still_emits_draft_model(self, manager, launcher_mock, tmp_path):
         """Regression: draft-eagle3 keeps emitting ``--spec-draft-model``
         (it really does load a separate eagle3 draft GGUF)."""
         draft = tmp_path / "eagle3.gguf"
@@ -1573,9 +1640,7 @@ class TestDraftMtpSuppressesSeparateModel:
         assert "--spec-draft-model" in cmd
         assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
 
-    def test_ik_llama_mtp_still_emits_model_draft(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_ik_llama_mtp_still_emits_model_draft(self, manager, launcher_mock, tmp_path):
         """Regression: ik_llama + mtp still emits ``--model-draft`` because
         ik_llama supports the legacy separate-draft fallback (don't undo
         the earlier CR fix that wired this path through the UI)."""
@@ -1760,9 +1825,7 @@ class TestSetSpecDraftGpuLayers:
         expected_int,
     ):
         draft_layers_stub.max_spec_draft_gpu_layers.set(max_layers)
-        entry_module.SpecTab._set_spec_draft_gpu_layers(
-            draft_layers_stub, input_value, from_slider=from_slider
-        )
+        entry_module.SpecTab._set_spec_draft_gpu_layers(draft_layers_stub, input_value, from_slider=from_slider)
         assert draft_layers_stub.spec_draft_ngl_int.get() == expected_int
 
 
@@ -1771,15 +1834,11 @@ class TestValidateSpecDraftGpuLayersEntry:
 
     @pytest.mark.parametrize("value", ["", "-", "0", "1", "100", "-1", "999"])
     def test_accepts_valid(self, draft_layers_stub, entry_module, value):
-        assert entry_module.SpecTab._validate_spec_draft_gpu_layers_entry(
-            draft_layers_stub, value
-        ) is True
+        assert entry_module.SpecTab._validate_spec_draft_gpu_layers_entry(draft_layers_stub, value) is True
 
     @pytest.mark.parametrize("value", ["abc", "1.5", "-2", "1e3", "0x10", "--1"])
     def test_rejects_invalid(self, draft_layers_stub, entry_module, value):
-        assert entry_module.SpecTab._validate_spec_draft_gpu_layers_entry(
-            draft_layers_stub, value
-        ) is False
+        assert entry_module.SpecTab._validate_spec_draft_gpu_layers_entry(draft_layers_stub, value) is False
 
 
 # ============================================================================
@@ -1856,9 +1915,7 @@ class TestMtpParallelEmissionOverride:
     any future UI surface setting --parallel without coordinating with the
     MTP/Spec tab."""
 
-    def test_mtp_active_with_parallel_8_overrides_to_1_and_warns(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_mtp_active_with_parallel_8_overrides_to_1_and_warns(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")
@@ -1872,9 +1929,7 @@ class TestMtpParallelEmissionOverride:
         assert "MTP requires --parallel 1" in captured.err
         assert "'8'" in captured.err
 
-    def test_mtp_active_with_parallel_1_emits_nothing_no_warning(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_mtp_active_with_parallel_1_emits_nothing_no_warning(self, manager, launcher_mock, capsys):
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("draft-mtp")
@@ -1884,9 +1939,7 @@ class TestMtpParallelEmissionOverride:
         captured = capsys.readouterr()
         assert "MTP requires --parallel" not in captured.err
 
-    def test_mtp_inactive_with_parallel_8_emits_normally(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_mtp_inactive_with_parallel_8_emits_normally(self, manager, launcher_mock, capsys):
         """When MTP is NOT active, the multi-slot value passes through."""
         launcher_mock.backend_selection.set("llama.cpp")
         launcher_mock.spec_enabled.set(False)
@@ -1909,9 +1962,7 @@ class TestMtpParallelEmissionOverride:
         captured = capsys.readouterr()
         assert "MTP requires --parallel" not in captured.err
 
-    def test_ik_llama_mtp_with_parallel_4_also_overrides(
-        self, manager, launcher_mock, capsys
-    ):
+    def test_ik_llama_mtp_with_parallel_4_also_overrides(self, manager, launcher_mock, capsys):
         """ik_llama's 'mtp' spec_type triggers the same override."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
@@ -1980,13 +2031,20 @@ class TestResetSpecDefaults:
         assert reset_stub.spec_draft_p_min.get() == "0.75"
         assert reset_stub.spec_draft_p_split.get() == "0.10"
 
-    @pytest.mark.parametrize("spec_type", [
-        "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache",
-        "suffix", "none", "",
-    ])
-    def test_no_recommended_defaults_clears_all_fields(
-        self, reset_stub, entry_module, spec_type
-    ):
+    @pytest.mark.parametrize(
+        "spec_type",
+        [
+            "ngram-simple",
+            "ngram-map-k",
+            "ngram-map-k4v",
+            "ngram-mod",
+            "ngram-cache",
+            "suffix",
+            "none",
+            "",
+        ],
+    )
+    def test_no_recommended_defaults_clears_all_fields(self, reset_stub, entry_module, spec_type):
         """For spec_types without recommended defaults, reset clears the
         fields to blank (= use binary defaults)."""
         reset_stub.spec_draft_n_max.set("999")
@@ -2004,11 +2062,19 @@ class TestResetSpecDefaults:
         """Calling reset twice produces the same result as calling it once."""
         reset_stub.spec_type.set("draft-mtp")
         entry_module.SpecTab._reset_spec_defaults(reset_stub)
-        first = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
-                 reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
+        first = (
+            reset_stub.spec_draft_n_max.get(),
+            reset_stub.spec_draft_n_min.get(),
+            reset_stub.spec_draft_p_min.get(),
+            reset_stub.spec_draft_p_split.get(),
+        )
         entry_module.SpecTab._reset_spec_defaults(reset_stub)
-        second = (reset_stub.spec_draft_n_max.get(), reset_stub.spec_draft_n_min.get(),
-                  reset_stub.spec_draft_p_min.get(), reset_stub.spec_draft_p_split.get())
+        second = (
+            reset_stub.spec_draft_n_max.get(),
+            reset_stub.spec_draft_n_min.get(),
+            reset_stub.spec_draft_p_min.get(),
+            reset_stub.spec_draft_p_split.get(),
+        )
         assert first == second
 
 
@@ -2086,9 +2152,7 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA1"
 
-    def test_main_subset_2_5_draft_on_4_unions_into_visible_set(
-        self, manager, remap_launcher, capsys
-    ):
+    def test_main_subset_2_5_draft_on_4_unions_into_visible_set(self, manager, remap_launcher, capsys):
         """Option C contract: draft on a GPU NOT in the main selection is
         unioned into the effective CUDA_VISIBLE_DEVICES list (rather than
         skipped with a warning, the pre-Option-C behaviour). With
@@ -2116,9 +2180,7 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         assert "[4]" in captured.err
         assert "--tensor-split" in captured.err
 
-    def test_main_subset_5_2_reverse_order_remaps_correctly(
-        self, manager, remap_launcher
-    ):
+    def test_main_subset_5_2_reverse_order_remaps_correctly(self, manager, remap_launcher):
         """Order matters for CUDA_VISIBLE_DEVICES: =5,2 makes physical 5
         be CUDA0 and physical 2 be CUDA1. Draft on physical 2 → CUDA1."""
         remap_launcher.app_settings["selected_gpus"] = [5, 2]
@@ -2155,9 +2217,7 @@ class TestSpecDraftDeviceCudaVisibleRemap:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA4"
 
-    def test_free_text_override_used_when_no_checkbox_selection(
-        self, manager, remap_launcher
-    ):
+    def test_free_text_override_used_when_no_checkbox_selection(self, manager, remap_launcher):
         """``spec_draft_device`` as a free-text string is honored only
         when ``spec_draft_selected_gpus`` is empty (power-user override
         path for non-CUDA backends)."""
@@ -2244,9 +2304,7 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         launcher_mock.get_ordered_selected_gpus = _ordered
         return launcher_mock
 
-    def test_user_reported_main_1_7_draft_2_5_unions_and_remaps(
-        self, manager, union_launcher
-    ):
+    def test_user_reported_main_1_7_draft_2_5_unions_and_remaps(self, manager, union_launcher):
         """The exact failure case from the bug report.
 
         Main=[1,7], draft=[2,5] → effective=[1,7,2,5] →
@@ -2258,9 +2316,7 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         # Verify CUDA_VISIBLE_DEVICES action reflects the union.
         action, value = manager._resolve_cuda_visible_devices_action()
         assert action == "export"
-        assert value == "1,7,2,5", (
-            f"expected union 1,7,2,5; got {value!r}"
-        )
+        assert value == "1,7,2,5", f"expected union 1,7,2,5; got {value!r}"
         # Verify --spec-draft-device emits the post-filter positions.
         # Effective=[1,7,2,5] → CUDA0=1, CUDA1=7, CUDA2=2, CUDA3=5.
         # Draft selection [2,5] remaps to CUDA2,CUDA3.
@@ -2268,9 +2324,7 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         assert "--spec-draft-device" in cmd
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA2,CUDA3"
 
-    def test_union_emits_spill_over_advisory(
-        self, manager, union_launcher, capsys
-    ):
+    def test_union_emits_spill_over_advisory(self, manager, union_launcher, capsys):
         """When draft GPUs are union'd in, the user must see a stderr hint
         about the main model spilling onto the draft GPUs unless they use
         --tensor-split. This is the explicit Option C tradeoff — silencing
@@ -2285,9 +2339,7 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         assert "[2, 5]" in err
         assert "--tensor-split" in err
 
-    def test_no_advisory_when_draft_subset_of_main(
-        self, manager, union_launcher, capsys
-    ):
+    def test_no_advisory_when_draft_subset_of_main(self, manager, union_launcher, capsys):
         """When the draft selection is a SUBSET of the main selection no
         GPUs need to be union'd in — the advisory must not print (it would
         be misleading)."""
@@ -2296,7 +2348,12 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         union_launcher.app_settings["spec_draft_selected_gpus"] = [7]
         manager.build_cmd()
         err = capsys.readouterr().err
-        assert "INFO: GPUs" not in err
+        # The CONTRACT under test is the absence of the draft-union
+        # advisory specifically; an unrelated ``INFO: GPUs ...``
+        # log line from some other code path shouldn't fail this
+        # test. Match the same draft-specific substring the
+        # sibling regression assertion uses.
+        assert "added to CUDA_VISIBLE_DEVICES for the draft model" not in err
 
     def test_spec_disabled_no_union(self, manager, union_launcher):
         """Spec disabled → draft selection ignored entirely. Main alone
@@ -2357,7 +2414,9 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         draft selection (synthetic indices have no relation to physical
         hardware, so unioning them would still be wrong)."""
         union_launcher.gpu_info = {
-            "device_count": 4, "available": True, "manual_mode": True,
+            "device_count": 4,
+            "available": True,
+            "manual_mode": True,
         }
         union_launcher.app_settings["selected_gpus"] = [0, 1]
         union_launcher.app_settings["gpu_order"] = [0, 1]
@@ -2365,10 +2424,15 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         action, value = manager._resolve_cuda_visible_devices_action()
         assert action == "unset"
         assert value is None
+        # Manual mode also disables draft-device emission: a synthetic
+        # ``CUDA2`` would refer to a different physical card than the
+        # user picked. ``build_cmd`` must not surface ``-devd`` /
+        # ``--spec-draft-device`` arguments under those settings.
+        cmd = manager.build_cmd()
+        assert "--spec-draft-device" not in cmd
+        assert "-devd" not in cmd
 
-    def test_empty_main_with_draft_does_not_create_filter(
-        self, manager, union_launcher
-    ):
+    def test_empty_main_with_draft_does_not_create_filter(self, manager, union_launcher):
         """When the user has NOT selected any main GPUs (= 'use all detected
         by default'), a draft-only selection must NOT silently create a
         filtered CUDA_VISIBLE_DEVICES. The pre-Option-C semantics for
@@ -2385,9 +2449,7 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--spec-draft-device") + 1] == "CUDA3"
 
-    def test_draft_selection_order_is_sorted_numerically(
-        self, manager, union_launcher
-    ):
+    def test_draft_selection_order_is_sorted_numerically(self, manager, union_launcher):
         """Union appends draft-only GPUs in numeric order regardless of
         the order they appear in spec_draft_selected_gpus. This makes the
         post-filter CUDA<i> remap reproducible across launches (the
@@ -2399,19 +2461,20 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         _, value = manager._resolve_cuda_visible_devices_action()
         assert value == "0,2,5"
 
-    def test_no_extra_advisory_when_full_main_no_draft_only(
-        self, manager, union_launcher, capsys
-    ):
-        """Subset main warning still fires, but the draft-only INFO line
-        does not when there are no draft-only additions."""
+    def test_no_extra_advisory_when_full_main_no_draft_only(self, manager, union_launcher, capsys):
+        """The draft-only INFO line MUST NOT fire when there are no
+        draft-only additions. The CONTRACT under test is the absence of
+        the draft-specific advisory; do not couple to the exact wording
+        of the generic subset warning emitted by an unrelated code path —
+        that wording can change for cosmetic reasons and would otherwise
+        break this regression test for the wrong reason.
+        """
         union_launcher.app_settings["selected_gpus"] = [1, 7]
         union_launcher.app_settings["gpu_order"] = [1, 7]
         union_launcher.app_settings["spec_draft_selected_gpus"] = []
         manager.build_cmd()
         err = capsys.readouterr().err
-        # Generic subset warning should appear.
-        assert "Specific GPUs (1,7)" in err
-        # Draft-only advisory should NOT appear.
+        # ONLY the draft-specific advisory is the contract here.
         assert "added to CUDA_VISIBLE_DEVICES for the draft model" not in err
 
 
@@ -2464,9 +2527,7 @@ class TestMainDeviceEmittedOnDraftUnion:
         launcher_mock.get_ordered_selected_gpus = _ordered
         return launcher_mock
 
-    def test_user_case_main_1_7_draft_2_5_emits_device_cuda0_cuda1(
-        self, manager, union_launcher
-    ):
+    def test_user_case_main_1_7_draft_2_5_emits_device_cuda0_cuda1(self, manager, union_launcher):
         """REGRESSION (the user's exact bug). main=[1,7] + draft=[2,5] →
         - CUDA_VISIBLE_DEVICES=1,7,2,5
         - --device CUDA0,CUDA1 (positions of main 1,7 in the union)
@@ -2482,9 +2543,7 @@ class TestMainDeviceEmittedOnDraftUnion:
         cmd = manager.build_cmd()
         # MAIN constraint: --device CUDA0,CUDA1 (main 1,7 = effective[0],
         # effective[1]).
-        assert "--device" in cmd, (
-            "expected --device to be emitted because draft GPUs were unioned in"
-        )
+        assert "--device" in cmd, "expected --device to be emitted because draft GPUs were unioned in"
         assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
         # DRAFT constraint: --spec-draft-device CUDA2,CUDA3 (draft 2,5 =
         # effective[2], effective[3]).
@@ -2516,9 +2575,7 @@ class TestMainDeviceEmittedOnDraftUnion:
         cmd = manager.build_cmd()
         assert "--device" not in cmd
 
-    def test_no_device_when_non_draft_capable_spec_type(
-        self, manager, union_launcher
-    ):
+    def test_no_device_when_non_draft_capable_spec_type(self, manager, union_launcher):
         """ngram-* spec_types don't use a draft model → no union → no
         --device emission, even with stale draft GPU selection."""
         union_launcher.spec_type.set("ngram-simple")
@@ -2546,13 +2603,19 @@ class TestMainDeviceEmittedOnDraftUnion:
         real CUDA devices — emitting --device CUDA<i> would refer to wrong
         hardware. Skip entirely."""
         union_launcher.gpu_info = {
-            "device_count": 4, "available": True, "manual_mode": True,
+            "device_count": 4,
+            "available": True,
+            "manual_mode": True,
         }
         union_launcher.app_settings["selected_gpus"] = [0, 1]
         union_launcher.app_settings["gpu_order"] = [0, 1]
         union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 3]
         cmd = manager.build_cmd()
         assert "--device" not in cmd
+        # Same rationale for the draft side: synthetic indices must
+        # not survive into ``--spec-draft-device`` / ``-devd``.
+        assert "--spec-draft-device" not in cmd
+        assert "-devd" not in cmd
 
     def test_no_device_when_empty_main_selection(self, manager, union_launcher):
         """Empty main selection means 'no filter' — union helper returns
@@ -2582,6 +2645,48 @@ class TestMainDeviceEmittedOnDraftUnion:
         assert "--device" not in cmd
         assert "-devd" not in cmd
 
+    def test_ik_llama_mtp_separate_draft_emits_device_and_devd(self, manager, union_launcher, tmp_path):
+        """ik_llama + mtp with the separate --model-draft opt-in uses the
+        same post-CUDA_VISIBLE_DEVICES assignment as llama.cpp separate-draft
+        modes. The emitted -devd value must be local to the filtered device
+        list, matching ik_llama's fixed -dev/-devd subset semantics.
+
+        Also asserts ``--model-draft`` is emitted with the draft file path
+        — without this, the test would have passed against a regression
+        that flipped ``spec_use_draft_model=True`` but failed to actually
+        plumb the draft path through to ``build_cmd``.
+        """
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set("mtp")
+        union_launcher.spec_use_draft_model.set(True)
+        # Materialize a real-looking draft GGUF on disk so the path
+        # validation inside ``build_cmd`` doesn't drop the flag.
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF" + b"\x00" * 64)
+        union_launcher.spec_draft_model.set(str(draft))
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7,2,5"
+
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
+        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+        assert "--spec-draft-device" not in cmd
+        # Separate-draft contract: the model path the user opted into
+        # has to land in the command line, otherwise the rest of the
+        # spec/draft surface is meaningless.
+        assert "--model-draft" in cmd
+        # Compare resolved paths so a tmp root that's a symlink (macOS
+        # /tmp → /private/tmp) or a Windows short-name path doesn't
+        # break the equality. ``Path.resolve()`` matches the pattern
+        # used elsewhere in this file (the inline ``os.path.realpath``
+        # was an oversight).
+        assert Path(cmd[cmd.index("--model-draft") + 1]).resolve() == draft.resolve()
+
     def test_device_value_preserves_main_order(self, manager, union_launcher):
         """Main order [7, 1] (user dragged 7 first) with draft [2] → union
         [7, 1, 2] → --device CUDA0,CUDA1 (positions of 7 then 1)."""
@@ -2594,9 +2699,7 @@ class TestMainDeviceEmittedOnDraftUnion:
         # main_ordered=[7,1], effective=[7,1,2] → positions 0 and 1.
         assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
 
-    def test_device_emitted_with_single_main_and_single_draft(
-        self, manager, union_launcher
-    ):
+    def test_device_emitted_with_single_main_and_single_draft(self, manager, union_launcher):
         """Minimum size: main=[0], draft=[1] → effective=[0,1] →
         --device CUDA0, --spec-draft-device CUDA1."""
         union_launcher.app_settings["selected_gpus"] = [0]
@@ -2652,9 +2755,7 @@ class TestMtpDoesNotUnionDraftGpus:
         launcher_mock.get_ordered_selected_gpus = _ordered
         return launcher_mock
 
-    def test_llamacpp_draft_mtp_cuda_visible_devices_is_main_only(
-        self, manager, mtp_launcher
-    ):
+    def test_llamacpp_draft_mtp_cuda_visible_devices_is_main_only(self, manager, mtp_launcher):
         """The bug: draft-mtp + persisted draft GPUs [2,3] used to widen
         CUDA_VISIBLE_DEVICES=0,1,2,3. After fix it stays 0,1."""
         mtp_launcher.backend_selection.set("llama.cpp")
@@ -2678,9 +2779,7 @@ class TestMtpDoesNotUnionDraftGpus:
         cmd = manager.build_cmd()
         assert "--device" not in cmd
 
-    def test_ik_llama_mtp_cuda_visible_devices_is_main_only(
-        self, manager, mtp_launcher
-    ):
+    def test_ik_llama_mtp_cuda_visible_devices_is_main_only(self, manager, mtp_launcher):
         mtp_launcher.backend_selection.set("ik_llama")
         mtp_launcher.spec_type.set("mtp")
         action, value = manager._resolve_cuda_visible_devices_action()

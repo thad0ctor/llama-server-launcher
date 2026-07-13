@@ -18,25 +18,55 @@ The per-backend whitelists below are the single source of truth for valid
 in ``modules.spec_tab.SpecTab``.
 """
 
+import re
 import sys
 from pathlib import Path
+
+# Comma-separated list of ``<Backend><Int>`` device tokens (e.g.
+# ``CUDA0``, ``Vulkan1``, ``SYCL0``, ``Metal0``). Used to validate the
+# free-text ``spec_draft_device`` override before passing it to the
+# launcher command line — restricted to backend names llama.cpp /
+# ik_llama actually recognise so a tokens like ``Banana0`` /
+# ``__init__0`` can't slip through the loose ``[A-Za-z]+`` previously
+# used. New backends can be added to the whitelist below as upstream
+# adds them. Case-insensitive: users sometimes type ``cuda0`` /
+# ``vulkan0``.
+_SPEC_DRAFT_BACKEND_NAMES = ("CUDA", "Vulkan", "SYCL", "Metal", "ROCm", "HIP", "CPU")
+_re_csv_cuda = re.compile(
+    r"(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+" r"(?:,(?:" + "|".join(_SPEC_DRAFT_BACKEND_NAMES) + r")\d+)*",
+    re.IGNORECASE,
+)
 
 
 # Per-backend allowed values for `--spec-type`. Used to validate spec_type
 # coming from saved/imported configs before emission; an unknown string can
 # crash the server at startup, so reject it with a stderr warning instead.
 # Sets mirror the UI's per-backend dropdown choices.
-_ALLOWED_SPEC_TYPES_LLAMA_CPP = frozenset({
-    "none",
-    "draft-simple", "draft-eagle3", "draft-mtp",
-    "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache",
-})
-_ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset({
-    "none",
-    "mtp",
-    "ngram-cache", "ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod",
-    "suffix",
-})
+_ALLOWED_SPEC_TYPES_LLAMA_CPP = frozenset(
+    {
+        "none",
+        "draft-simple",
+        "draft-eagle3",
+        "draft-mtp",
+        "ngram-simple",
+        "ngram-map-k",
+        "ngram-map-k4v",
+        "ngram-mod",
+        "ngram-cache",
+    }
+)
+_ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset(
+    {
+        "none",
+        "mtp",
+        "ngram-cache",
+        "ngram-simple",
+        "ngram-map-k",
+        "ngram-map-k4v",
+        "ngram-mod",
+        "suffix",
+    }
+)
 
 # Per-backend subsets of spec_types that use a separate draft model + the
 # associated draft-tuning/offload knobs. Non-draft-capable spec_types
@@ -55,7 +85,79 @@ _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
 # draft-mtp. Only the explicit draft-model variants need separate GPU
 # handling.
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3"})
-_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA = frozenset()  # mtp uses main GPUs
+_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA: frozenset[str] = frozenset()  # mtp uses main GPUs
+
+
+def _safe_var_str(launcher, name: str, *, context: str = "spec") -> str:
+    """Read ``launcher.<name>.get()`` and return a stripped string, defensively.
+
+    Module-level so ``emit_spec_args`` and ``emit_reasoning_args``
+    can share one implementation. CR-4467921108 flagged the
+    remaining direct ``var.get().strip()`` sites in
+    ``emit_spec_args``: a non-string persisted value (MagicMock,
+    bool, dict, etc.) raises ``AttributeError`` on ``.strip()`` and
+    aborts the outer try in ``emit_spec_args`` — dropping the rest
+    of the spec args instead of just skipping the bad field.
+
+    Returns:
+        Empty string when the var is missing, can't be read, or
+        holds a non-string value. The caller treats empty the
+        same as "skip this flag", so a corrupt field becomes a
+        silent skip instead of taking down the entire emission
+        block.
+
+    Args:
+        context: short noun used in the WARNING line ("spec",
+            "reasoning", etc.) so callers from different blocks
+            produce identifiable log output.
+    """
+    var = getattr(launcher, name, None)
+    if var is None:
+        return ""
+    try:
+        raw = var.get()
+    except Exception as exc:
+        print(
+            f"WARNING: {context} var {name!r} failed to read ({exc}); skipping.",
+            file=sys.stderr,
+        )
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    # Anything else (MagicMock with a configured ``__str__``, ``True``,
+    # ``{}``, etc.) is NOT a legitimate value. ``str(raw).strip()``
+    # would coerce a MagicMock to its ``str()`` form and feed garbage
+    # to the server. Treat as empty so the flag is dropped.
+    return ""
+
+
+def _coerce_strict_gpu_index(raw):
+    """Return ``raw`` as an int if it's a clean integer index, else ``None``.
+
+    Rejects:
+      * ``bool`` (a ``True`` in ``spec_draft_selected_gpus`` would otherwise
+        coerce to ``int(True) == 1`` and silently shadow GPU 1)
+      * ``float`` and complex (``1.5`` round-trips to 1; a typo, not a GPU)
+      * Strings that aren't a strict ``[+-]?\\d+`` form (``"1.0"`` ,
+        ``"1e0"``, ``"0x1"``, ``"1 "`` all rejected — JSON-edited configs
+        shouldn't ship those, and accepting them silently masks data
+        corruption).
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        # Reject negatives. CUDA device indices are always non-negative;
+        # a negative value here would emit ``CUDA-1`` and fail at runtime
+        # (or silently pass through a config-corruption sentinel).
+        return raw if raw >= 0 else None
+    if isinstance(raw, str):
+        if re.fullmatch(r"[+-]?\d+", raw):
+            try:
+                value = int(raw)
+            except ValueError:
+                return None
+            return value if value >= 0 else None
+    return None
 
 
 def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
@@ -167,11 +269,55 @@ def get_effective_visible_gpu_indices(launcher):
     if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return main_ordered
     try:
-        draft_indices = list(
-            launcher.app_settings.get("spec_draft_selected_gpus", []) or []
-        )
+        raw_value = launcher.app_settings.get("spec_draft_selected_gpus", [])
+        # ``list(some_string)`` would iterate character-by-character and
+        # surface ``"0,1"`` as ``["0", ",", "1"]`` — every entry would then
+        # silently fail ``_coerce_strict_gpu_index`` and the draft GPU
+        # subset would shrink to ``[]``. Only true list/tuple inputs make
+        # sense here; everything else is a config-corruption signal we
+        # discard up front.
+        if isinstance(raw_value, (list, tuple)):
+            draft_indices_raw = list(raw_value)
+        else:
+            draft_indices_raw = []
     except Exception:
-        draft_indices = []
+        draft_indices_raw = []
+    # Coerce persisted entries to int up front. A JSON-edited config can
+    # leave string entries like ``"2"`` in the list; the old code passed
+    # them straight into ``sorted({...})`` / set comparison, which would
+    # either raise on heterogeneous int+str sorts or silently fail to
+    # match a main-set membership check. Mirrors the same sanitization
+    # in ``_resolve_draft_device_value``.
+    # Additionally clamp to the host's detected device count so a stale
+    # config saved on a 4-GPU host can't leak ``CUDA7`` into the
+    # ``CUDA_VISIBLE_DEVICES`` union exported by
+    # ``LaunchManager._resolve_cuda_visible_devices_action`` — that
+    # method consumes this list directly.
+    detected_count = 0
+    try:
+        gpu_info = getattr(launcher, "gpu_info", {})
+        if isinstance(gpu_info, dict):
+            detected_count = int(gpu_info.get("device_count", 0) or 0)
+    except Exception:
+        detected_count = 0
+    draft_indices: list[int] = []
+    dropped: list = []
+    for raw_idx in draft_indices_raw:
+        idx = _coerce_strict_gpu_index(raw_idx)
+        if idx is None:
+            dropped.append(raw_idx)
+            continue
+        if detected_count > 0 and not (0 <= idx < detected_count):
+            dropped.append(raw_idx)
+            continue
+        draft_indices.append(idx)
+    if dropped:
+        print(
+            f"WARNING: dropping invalid draft GPU indices from "
+            f"spec_draft_selected_gpus in get_effective_visible_gpu_indices: "
+            f"{dropped}",
+            file=sys.stderr,
+        )
     if not draft_indices:
         return main_ordered
     # Don't auto-create a CUDA_VISIBLE_DEVICES filter when the user hasn't
@@ -320,6 +466,16 @@ def _resolve_draft_device_value(launcher):
     free-text ``spec_draft_device`` value if ``spec_draft_selected_gpus``
     is empty (allowing power users to type a raw override).
     """
+    # In manual GPU mode the user has explicitly opted out of detected-GPU
+    # logic. The saved ``spec_draft_selected_gpus`` (a SpecTab convenience
+    # populated from detected GPUs) must NOT bleed into the launch command,
+    # but the free-text ``spec_draft_device`` override IS a power-user
+    # affordance that should still flow through — manual mode is exactly
+    # the case where users hand-write that override.
+    try:
+        manual_mode = bool(getattr(launcher, "gpu_info", {}).get("manual_mode", False))
+    except Exception:
+        manual_mode = False
     # MTP variants (draft-mtp on llama.cpp, mtp on ik_llama) normally DON'T
     # use a separate draft model — the MTP head is embedded in the main
     # GGUF and rides along with the main GPU distribution. So any stored
@@ -336,13 +492,27 @@ def _resolve_draft_device_value(launcher):
     if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
         return ""
 
-    draft_indices = list(launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
-    if not draft_indices:
-        # No checkbox selection → fall back to the free-text override.
-        try:
-            return launcher.spec_draft_device.get().strip()
-        except Exception:
-            return ""
+    # Mirror the list/tuple gate from ``get_effective_visible_gpu_indices``:
+    # ``list("0,1")`` would split character-by-character into
+    # ``["0", ",", "1"]``, fail ``_coerce_strict_gpu_index`` on every entry,
+    # and ``emit_spec_args`` would skip the speculative-decoding block
+    # entirely. A bare scalar would raise here. Discard non-sequence
+    # persisted values up front. ``app_settings`` may be missing entirely
+    # on a stripped/mocked launcher; fall back to ``[]`` rather than
+    # ``AttributeError``-ing out of the spec-args emit path.
+    app_settings = getattr(launcher, "app_settings", None)
+    if hasattr(app_settings, "get"):
+        raw_value = app_settings.get("spec_draft_selected_gpus", []) or []
+    else:
+        raw_value = []
+    if isinstance(raw_value, (list, tuple)):
+        raw_draft_indices = list(raw_value)
+    else:
+        raw_draft_indices = []
+    if manual_mode:
+        # Ignore the detected-GPU checkbox state but keep the raw override
+        # path below alive.
+        raw_draft_indices = []
     # Effective visible GPU list (main ∪ draft). Single source of truth
     # shared with LaunchManager._resolve_cuda_visible_devices_action so
     # the env var the script exports and the indices emitted here can't
@@ -355,11 +525,114 @@ def _resolve_draft_device_value(launcher):
             detected_count = int(gpu_info.get("device_count", 0) or 0)
     except Exception:
         detected_count = 0
-    # If no filter is in effect (no selection at all, or the user selected
-    # every detected GPU), launcher indices pass through unchanged.
+    # Strict coercion runs UNCONDITIONALLY (even when detected_count == 0)
+    # so a saved value like ``["1"]`` or ``[True]`` can't fall through to
+    # the raw-token emission below as ``CUDA1`` / ``CUDATrue``. The range
+    # clamp ``0 <= idx < detected_count`` is the only piece that's gated
+    # behind ``detected_count > 0``; everything else (type checks, drop
+    # warning, fallback to free-text override) applies in both branches.
+    draft_indices: list[int] = []
+    skipped: list = []
+    for raw_idx in raw_draft_indices:
+        idx = _coerce_strict_gpu_index(raw_idx)
+        if idx is None:
+            skipped.append(raw_idx)
+            continue
+        if detected_count > 0 and not (0 <= idx < detected_count):
+            skipped.append(raw_idx)
+            continue
+        draft_indices.append(idx)
+    if skipped:
+        print(
+            f"WARNING: spec_draft_selected_gpus contained invalid entries; " f"dropping: {skipped}",
+            file=sys.stderr,
+        )
+    # Deduplicate (preserving first-occurrence order) so a stale
+    # config with ``[1, "1"]`` or ``[2, 2]`` doesn't emit ``CUDA1,CUDA1``.
+    # The binary errors on duplicate device entries; better to silently
+    # collapse than to surface a confusing "device specified twice"
+    # message at launch.
+    draft_indices = list(dict.fromkeys(draft_indices))
+    # ``no_filter`` is shared by both the free-text-override fallback
+    # (below) and the checkbox-derived path further down — both need
+    # the SAME canonical-order predicate so a non-canonical reorder
+    # of all-GPUs-selected can't bypass the CUDA_VISIBLE_DEVICES
+    # remap in either branch.
     no_filter = (not effective_ordered) or (
-        detected_count > 0 and len(effective_ordered) == detected_count
+        detected_count > 0
+        and len(effective_ordered) == detected_count
+        and list(effective_ordered) == list(range(detected_count))
     )
+    if not draft_indices:
+        # No usable checkbox selection → fall back to the free-text
+        # override, same as if the persisted list was empty to begin with.
+        try:
+            override = launcher.spec_draft_device.get().strip()
+        except Exception:
+            return ""
+        # Validate the raw override against the comma-separated
+        # ``CUDA<int>`` token form. A JSON-edited config could otherwise
+        # ship ``spec_draft_device = "CUDA0;malicious"`` and have it
+        # passed verbatim into the command line. Empty → empty (no flag).
+        if not override:
+            return ""
+        if not _re_csv_cuda.fullmatch(override):
+            # ``_re_csv_cuda`` accepts any of the backends in
+            # ``_SPEC_DRAFT_BACKEND_NAMES`` (CUDA, Vulkan, SYCL, Metal,
+            # ROCm, HIP, CPU), not just CUDA — keep the warning text in
+            # sync with that whitelist so users editing
+            # ``spec_draft_device`` by hand see the actual accepted form.
+            allowed = "/".join(_SPEC_DRAFT_BACKEND_NAMES)
+            print(
+                f"WARNING: spec_draft_device override {override!r} doesn't match "
+                f"``<{allowed}><int>[,…]`` form; dropping.",
+                file=sys.stderr,
+            )
+            return ""
+        # When the host has GPU filtering active (a reorder /
+        # subset that produces a non-canonical ``effective_ordered``)
+        # the binary sees physical CUDA indices remapped through
+        # CUDA_VISIBLE_DEVICES — so a raw override like ``CUDA2``
+        # silently targets a different physical GPU than the user
+        # typed. Manual mode keeps the override as a power-user
+        # affordance (no filtering happens). Otherwise drop it.
+        #
+        # CRITICAL: only suppress when the override contains CUDA
+        # tokens. CUDA_VISIBLE_DEVICES is a CUDA-only env var — a
+        # Vulkan / Metal / SYCL override (``Vulkan0``, ``Metal0``,
+        # ``SYCL1``) is unaffected by it and must pass through
+        # unchanged regardless of the visible-GPU reorder. The regex
+        # ``_re_csv_cuda`` accepts ``[A-Za-z]+\d+`` for free-text
+        # entries, so a non-CUDA backend can match.
+        if manual_mode or no_filter:
+            return override
+        # Detect ANY CUDA token, not just pure-CUDA lists. A mixed
+        # override like ``CUDA0,Vulkan1`` is still remap-sensitive
+        # because the ``CUDA0`` half points through the remapped
+        # ``CUDA_VISIBLE_DEVICES`` set — only fully non-CUDA overrides
+        # (``Vulkan0`` / ``Metal0`` / ``SYCL1`` …) are safe to pass
+        # through unchanged.
+        has_cuda_token = bool(re.search(r"CUDA\d+", override, flags=re.IGNORECASE))
+        if not has_cuda_token:
+            # Non-CUDA backend tokens (Vulkan0, Metal0, SYCL1, …) —
+            # ``CUDA_VISIBLE_DEVICES`` doesn't touch them, so the
+            # filtering rationale doesn't apply.
+            return override
+        print(
+            f"WARNING: spec_draft_device override {override!r} ignored because "
+            f"GPU filtering/reorder is active (effective_ordered="
+            f"{list(effective_ordered)}). The literal CUDA indices in the "
+            f"override would target the wrong post-CUDA_VISIBLE_DEVICES "
+            f"device. Use the draft-GPU checkboxes instead.",
+            file=sys.stderr,
+        )
+        return ""
+    # ``no_filter`` is the shared canonical-order predicate computed
+    # above. See its docstring for why the earlier length-only test
+    # was wrong — e.g. ``effective_ordered=[2,0,1]`` with
+    # detected_count=3 would have hit a fast pass-through and emitted
+    # ``CUDA0/1/2`` directly, targeting different physical devices
+    # than the user picked.
     parts = []
     if no_filter:
         for d in draft_indices:
@@ -402,14 +675,27 @@ def emit_spec_args(launcher, backend, cmd):
         spec_enabled_var = getattr(launcher, "spec_enabled", None)
         if spec_enabled_var is not None and spec_enabled_var.get():
             spec_type_var = getattr(launcher, "spec_type", None)
-            spec_type = (spec_type_var.get().strip() if spec_type_var is not None else "")
+            # Defensively coerce the Tk var value. A mocked launcher in
+            # tests / a freshly-rebuilt SpecTab caught between resync
+            # and the user's first edit could leave ``spec_type_var``
+            # holding a non-string (e.g. ``None`` from a MagicMock
+            # that wasn't configured) — calling ``.strip()`` straight
+            # on that would crash the spec-emission block entirely,
+            # taking the whole launch with it. Treat any non-string
+            # as the empty branch (= "don't emit any spec flag").
+            raw_spec_type = spec_type_var.get() if spec_type_var is not None else ""
+            if isinstance(raw_spec_type, str):
+                spec_type = raw_spec_type.strip()
+            elif raw_spec_type is None:
+                spec_type = ""
+            else:
+                spec_type = str(raw_spec_type).strip()
             # Reject unknown spec_type values before forwarding them — a
             # stale/hand-edited config can otherwise emit a garbage value
             # and crash the server at startup. Per-backend whitelists
             # match the UI dropdown choices.
             if spec_type and spec_type != "none":
-                allowed = (_ALLOWED_SPEC_TYPES_IK_LLAMA if backend == "ik_llama"
-                           else _ALLOWED_SPEC_TYPES_LLAMA_CPP)
+                allowed = _ALLOWED_SPEC_TYPES_IK_LLAMA if backend == "ik_llama" else _ALLOWED_SPEC_TYPES_LLAMA_CPP
                 if spec_type not in allowed:
                     print(
                         f"WARNING: spec_type {spec_type!r} is not valid for backend "
@@ -438,11 +724,9 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_draft_n_min", "--draft-min"),
                             ("spec_draft_p_min", "--draft-p-min"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                         # ik_llama+mtp opt-in for a SEPARATE draft model: when the
                         # user hasn't checked "Use a separate draft model", suppress
                         # --model-draft AND the per-draft offload flags. Embedded
@@ -454,17 +738,38 @@ def emit_spec_args(launcher, backend, cmd):
                             # hold a stale path to a moved/deleted draft GGUF; mirror
                             # the main -m behaviour of resolving + skipping with a
                             # stderr warning.
-                            mp_var = getattr(launcher, "spec_draft_model", None)
-                            if mp_var is not None:
-                                mp = mp_var.get().strip()
-                                if mp:
-                                    if Path(mp).is_file():
-                                        cmd.extend(["--model-draft", str(Path(mp).resolve())])
-                                    else:
-                                        print(
-                                            f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
-                                            file=sys.stderr,
-                                        )
+                            mp = _safe_var_str(launcher, "spec_draft_model")
+                            if mp:
+                                # ``expanduser()`` so a saved/hand-edited
+                                # config with ``~/models/draft.gguf``
+                                # validates against the real file
+                                # under ``$HOME`` instead of being
+                                # silently skipped — ``Path("~/...")``
+                                # is literal text on POSIX. Wrap in
+                                # try/except: ``Path("~unknown_user/foo")``
+                                # raises ``RuntimeError`` because the
+                                # named user can't be resolved, and we
+                                # don't want one malformed path to
+                                # abort the entire arg-emission loop.
+                                try:
+                                    draft_path = Path(mp).expanduser()
+                                    is_valid_file = draft_path.is_file()
+                                except Exception as exc:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' failed to resolve "
+                                        f"({type(exc).__name__}: {exc}); skipping "
+                                        f"--model-draft emission.",
+                                        file=sys.stderr,
+                                    )
+                                    is_valid_file = False
+                                    draft_path = None
+                                if is_valid_file and draft_path is not None:
+                                    cmd.extend(["--model-draft", str(draft_path.resolve())])
+                                elif draft_path is not None:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
+                                        file=sys.stderr,
+                                    )
                             # ik_llama uses the same short-form draft offload flags.
                             # ``spec_draft_device`` is resolved through the
                             # CUDA_VISIBLE_DEVICES remap helper rather than read
@@ -476,11 +781,9 @@ def emit_spec_args(launcher, backend, cmd):
                                 ("spec_draft_ctk", "-ctkd"),
                                 ("spec_draft_ctv", "-ctvd"),
                             ]:
-                                var = getattr(launcher, var_name, None)
-                                if var is not None:
-                                    v = var.get().strip()
-                                    if v:
-                                        cmd.extend([flag, v])
+                                v = _safe_var_str(launcher, var_name)
+                                if v:
+                                    cmd.extend([flag, v])
                             devd_val = _resolve_draft_device_value(launcher)
                             if devd_val:
                                 cmd.extend(["-devd", devd_val])
@@ -491,31 +794,25 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_ngram_size_m", "--spec-ngram-size-m"),
                             ("spec_ngram_min_hits", "--spec-ngram-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     # suffix
                     if spec_type == "suffix":
                         for var_name, flag in [
                             ("spec_suffix_pattern_len", "--suffix-pattern-len"),
                             ("spec_suffix_max_depth", "--suffix-max-depth"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     # ik_llama extras.
                     autotune_var = getattr(launcher, "spec_autotune", None)
                     if autotune_var is not None and autotune_var.get():
                         cmd.append("--spec-autotune")
-                    dp_var = getattr(launcher, "spec_draft_params", None)
-                    if dp_var is not None:
-                        dp = dp_var.get().strip()
-                        if dp:
-                            cmd.extend(["-draft", dp])
+                    dp = _safe_var_str(launcher, "spec_draft_params")
+                    if dp:
+                        cmd.extend(["-draft", dp])
                     # Warn (don't crash) if the user set llama.cpp-only knobs while ik_llama is active.
                     for var_name, label in [
                         ("spec_draft_p_split", "--spec-draft-p-split"),
@@ -531,9 +828,14 @@ def emit_spec_args(launcher, backend, cmd):
                             raw = None
                         if isinstance(raw, bool):
                             if raw:
-                                print(f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                                print(
+                                    f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.",
+                                    file=sys.stderr,
+                                )
                         elif isinstance(raw, str) and raw.strip():
-                            print(f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                            print(
+                                f"WARNING: {label} is llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr
+                            )
                 else:
                     # llama.cpp (mainline) branch.
                     cmd.extend(["--spec-type", spec_type])
@@ -552,11 +854,9 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_draft_p_min", "--spec-draft-p-min"),
                             ("spec_draft_p_split", "--spec-draft-p-split"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                         # llama.cpp mainline's ``--spec-type draft-mtp`` uses
                         # an MTP head embedded INSIDE the main GGUF (the model
                         # file is the MTP-converted variant); there is NO
@@ -569,33 +869,47 @@ def emit_spec_args(launcher, backend, cmd):
                         # preserving the "flip back" UX), so suppress the
                         # emission here with a one-line advisory.
                         if spec_type == "draft-mtp":
-                            mp_var = getattr(launcher, "spec_draft_model", None)
-                            if mp_var is not None:
-                                mp = mp_var.get().strip()
-                                if mp:
-                                    print(
-                                        f"INFO: spec_type=draft-mtp uses the MTP head embedded in the main GGUF;\n"
-                                        f"     ignoring spec_draft_model='{mp}'. Switch to draft-simple/draft-eagle3\n"
-                                        f"     to use a separate draft model.",
-                                        file=sys.stderr,
-                                    )
+                            mp = _safe_var_str(launcher, "spec_draft_model")
+                            if mp:
+                                print(
+                                    f"INFO: spec_type=draft-mtp uses the MTP head embedded in the main GGUF;\n"
+                                    f"     ignoring spec_draft_model='{mp}'. Switch to draft-simple/draft-eagle3\n"
+                                    f"     to use a separate draft model.",
+                                    file=sys.stderr,
+                                )
                         else:
                             # Validate the draft model path before emitting —
                             # a saved config can hold a stale path to a
                             # moved/deleted draft GGUF; mirror the main -m
                             # behaviour of resolving + skipping with a
                             # stderr warning.
-                            mp_var = getattr(launcher, "spec_draft_model", None)
-                            if mp_var is not None:
-                                mp = mp_var.get().strip()
-                                if mp:
-                                    if Path(mp).is_file():
-                                        cmd.extend(["--spec-draft-model", str(Path(mp).resolve())])
-                                    else:
-                                        print(
-                                            f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
-                                            file=sys.stderr,
-                                        )
+                            mp = _safe_var_str(launcher, "spec_draft_model")
+                            if mp:
+                                # ``expanduser()`` — same rationale as
+                                # the ik_llama branch above. Wrap in
+                                # try/except for the same reason too:
+                                # ``Path("~unknown/foo")`` raises
+                                # ``RuntimeError`` and would otherwise
+                                # abort the rest of arg emission.
+                                try:
+                                    draft_path = Path(mp).expanduser()
+                                    is_valid_file = draft_path.is_file()
+                                except Exception as exc:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' failed to resolve "
+                                        f"({type(exc).__name__}: {exc}); skipping "
+                                        f"--spec-draft-model emission.",
+                                        file=sys.stderr,
+                                    )
+                                    is_valid_file = False
+                                    draft_path = None
+                                if is_valid_file and draft_path is not None:
+                                    cmd.extend(["--spec-draft-model", str(draft_path.resolve())])
+                                elif draft_path is not None:
+                                    print(
+                                        f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
+                                        file=sys.stderr,
+                                    )
                         # ``spec_draft_device`` is resolved through the
                         # CUDA_VISIBLE_DEVICES remap helper (see ik_llama branch
                         # comment) so the value emitted matches what the binary
@@ -605,22 +919,18 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_draft_ctk", "--spec-draft-type-k"),
                             ("spec_draft_ctv", "--spec-draft-type-v"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                         devd_val = _resolve_draft_device_value(launcher)
                         if devd_val:
                             cmd.extend(["--spec-draft-device", devd_val])
                         cpu_moe_var = getattr(launcher, "spec_draft_cpu_moe", None)
                         if cpu_moe_var is not None and cpu_moe_var.get():
                             cmd.append("--spec-draft-cpu-moe")
-                        ncm_var = getattr(launcher, "spec_draft_n_cpu_moe", None)
-                        if ncm_var is not None:
-                            ncm = ncm_var.get().strip()
-                            if ncm:
-                                cmd.extend(["--spec-draft-n-cpu-moe", ncm])
+                        ncm = _safe_var_str(launcher, "spec_draft_n_cpu_moe")
+                        if ncm:
+                            cmd.extend(["--spec-draft-n-cpu-moe", ncm])
                     # llama.cpp has per-ngram-variant size knobs.
                     if spec_type == "ngram-simple":
                         for var_name, flag in [
@@ -628,44 +938,36 @@ def emit_spec_args(launcher, backend, cmd):
                             ("spec_ngram_simple_size_m", "--spec-ngram-simple-size-m"),
                             ("spec_ngram_simple_min_hits", "--spec-ngram-simple-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     elif spec_type == "ngram-map-k":
                         for var_name, flag in [
                             ("spec_ngram_mapk_size_n", "--spec-ngram-map-k-size-n"),
                             ("spec_ngram_mapk_size_m", "--spec-ngram-map-k-size-m"),
                             ("spec_ngram_mapk_min_hits", "--spec-ngram-map-k-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     elif spec_type == "ngram-map-k4v":
                         for var_name, flag in [
                             ("spec_ngram_mapk4v_size_n", "--spec-ngram-map-k4v-size-n"),
                             ("spec_ngram_mapk4v_size_m", "--spec-ngram-map-k4v-size-m"),
                             ("spec_ngram_mapk4v_min_hits", "--spec-ngram-map-k4v-min-hits"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     elif spec_type == "ngram-mod":
                         for var_name, flag in [
                             ("spec_ngram_mod_n_min", "--spec-ngram-mod-n-min"),
                             ("spec_ngram_mod_n_max", "--spec-ngram-mod-n-max"),
                             ("spec_ngram_mod_n_match", "--spec-ngram-mod-n-match"),
                         ]:
-                            var = getattr(launcher, var_name, None)
-                            if var is not None:
-                                v = var.get().strip()
-                                if v:
-                                    cmd.extend([flag, v])
+                            v = _safe_var_str(launcher, var_name)
+                            if v:
+                                cmd.extend([flag, v])
                     # ngram-cache has no extra knobs.
                     # Warn (don't crash) if ik_llama-only knobs are set while llama.cpp is active.
                     for var_name, label in [
@@ -683,56 +985,100 @@ def emit_spec_args(launcher, backend, cmd):
                             raw = None
                         if isinstance(raw, bool):
                             if raw:
-                                print(f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr)
+                                print(
+                                    f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.",
+                                    file=sys.stderr,
+                                )
                         elif isinstance(raw, str) and raw.strip():
-                            print(f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr)
+                            print(
+                                f"WARNING: {label} is ik_llama-only; ignoring for llama.cpp backend.", file=sys.stderr
+                            )
     except Exception as exc:
         # Never let a UI mis-state crash the launch flow - log and continue.
         print(f"WARNING: speculative-decoding block raised: {exc}", file=sys.stderr)
 
 
-def emit_reasoning_args(launcher, cmd):
+def emit_reasoning_args(launcher, cmd, supports_flag=None):
     """Append ``--reasoning`` / ``--reasoning-*`` / ``--chat-template-kwargs``
     flags to ``cmd``.
 
     Independent of spec_enabled — emit unconditionally based on per-var
-    values. All five flags are accepted by mainline llama.cpp and ik_llama.
+    values. All five flags are present in current llama.cpp
+    (verified at ``common/arg.cpp:3142-3192,3009-3020``) and current
+    ik_llama (verified at ``common/common.cpp:2489-2575``), but they
+    were added throughout 2025 and an older fork of either may lack
+    one or more. Pass ``supports_flag`` (a callable ``flag -> bool``;
+    typically a closure around ``LaunchManager._backend_supports_flag``
+    for the resolved server exe) to gate each flag against the target
+    binary's ``--help`` output. When ``supports_flag is None`` (e.g.
+    the save-script flow, where we don't want to spawn the server),
+    every flag is emitted unconditionally.
     """
-    try:
-        rm_var = getattr(launcher, "reasoning_mode", None)
-        if rm_var is not None:
-            rm = rm_var.get().strip()
-            if rm and rm in ("on", "off", "auto"):
-                cmd.extend(["--reasoning", rm])
-        rf_var = getattr(launcher, "reasoning_format", None)
-        if rf_var is not None:
-            rf = rf_var.get().strip()
-            if rf:
-                cmd.extend(["--reasoning-format", rf])
-        rb_var = getattr(launcher, "reasoning_budget", None)
-        if rb_var is not None:
-            rb = rb_var.get().strip()
-            if rb:
-                # Defend against a stale non-integer value persisted from a
-                # pre-validation config. The Entry validator blocks new
-                # bad input; this catches anything that slipped through.
-                try:
-                    int(rb)
-                    cmd.extend(["--reasoning-budget", rb])
-                except ValueError:
-                    print(f"WARNING: --reasoning-budget value {rb!r} is not an integer; skipping.", file=sys.stderr)
-        rbm_var = getattr(launcher, "reasoning_budget_message", None)
-        if rbm_var is not None:
-            rbm = rbm_var.get().strip()
-            if rbm:
-                cmd.extend(["--reasoning-budget-message", rbm])
-        ctk_var = getattr(launcher, "chat_template_kwargs", None)
-        if ctk_var is not None:
-            ctk = ctk_var.get().strip()
-            if ctk:
-                cmd.extend(["--chat-template-kwargs", ctk])
-    except Exception as exc:
-        print(f"WARNING: reasoning/chat-template emission raised: {exc}", file=sys.stderr)
+
+    def _ok(flag):
+        if supports_flag is None:
+            return True
+        try:
+            ok = bool(supports_flag(flag))
+        except Exception as exc:
+            # Fail closed: the whole reason this gating exists is to keep
+            # an unknown reasoning flag from crashing the server at
+            # startup. If the probe itself blew up (e.g. the exe is
+            # missing, the help cache stat raised), the safer move is to
+            # SKIP the flag, not optimistically emit it.
+            print(
+                f"WARNING: failed to probe support for {flag!r}: {exc}; " f"skipping for safety.",
+                file=sys.stderr,
+            )
+            return False
+        if not ok:
+            print(
+                f"WARNING: target server binary does not advertise {flag!r}; "
+                f"skipping. Update the binary or clear the field to suppress.",
+                file=sys.stderr,
+            )
+        return ok
+
+    def _safe_get_str(name: str) -> str:
+        """Closure-friendly wrapper around the module-level
+        ``_safe_var_str``. Kept as a thin shim so the rest of this
+        function reads naturally without threading ``launcher``
+        through every call site. See ``_safe_var_str`` for the
+        defensive-coercion rationale.
+        """
+        return _safe_var_str(launcher, name, context="reasoning")
+
+    rm = _safe_get_str("reasoning_mode")
+    if rm in ("on", "off", "auto") and _ok("--reasoning"):
+        cmd.extend(["--reasoning", rm])
+
+    rf = _safe_get_str("reasoning_format")
+    if rf and _ok("--reasoning-format"):
+        cmd.extend(["--reasoning-format", rf])
+
+    rb = _safe_get_str("reasoning_budget")
+    if rb:
+        # Defend against a stale non-integer value persisted from a
+        # pre-validation config. The Entry validator blocks new
+        # bad input; this catches anything that slipped through.
+        try:
+            int(rb)
+        except ValueError:
+            print(
+                f"WARNING: --reasoning-budget value {rb!r} is not an integer; skipping.",
+                file=sys.stderr,
+            )
+        else:
+            if _ok("--reasoning-budget"):
+                cmd.extend(["--reasoning-budget", rb])
+
+    rbm = _safe_get_str("reasoning_budget_message")
+    if rbm and _ok("--reasoning-budget-message"):
+        cmd.extend(["--reasoning-budget-message", rbm])
+
+    ctk = _safe_get_str("chat_template_kwargs")
+    if ctk and _ok("--chat-template-kwargs"):
+        cmd.extend(["--chat-template-kwargs", ctk])
 
 
 def emit_kv_unify_args(launcher, backend, cmd):
@@ -749,7 +1095,10 @@ def emit_kv_unify_args(launcher, backend, cmd):
         cis = cis_var.get().strip() if cis_var is not None else ""
         if backend == "ik_llama":
             if kvu in ("on", "off") or cis in ("on", "off"):
-                print("WARNING: --kv-unified / --cache-idle-slots are llama.cpp-only; ignoring for ik_llama backend.", file=sys.stderr)
+                print(
+                    "WARNING: --kv-unified / --cache-idle-slots are llama.cpp-only; ignoring for ik_llama backend.",
+                    file=sys.stderr,
+                )
         else:
             # --cache-idle-slots requires --kv-unified to be on (the
             # server itself warns and disables otherwise). Enforce the
@@ -765,14 +1114,12 @@ def emit_kv_unify_args(launcher, backend, cmd):
                 cmd.append("--no-kv-unified")
                 if cis in ("on", "off"):
                     print(
-                        "WARNING: --cache-idle-slots requires --kv-unified=on; "
-                        "skipping (kv_unified_mode is 'off').",
+                        "WARNING: --cache-idle-slots requires --kv-unified=on; " "skipping (kv_unified_mode is 'off').",
                         file=sys.stderr,
                     )
             elif cis in ("on", "off"):
                 print(
-                    "WARNING: --cache-idle-slots requires --kv-unified=on; "
-                    "skipping (kv_unified_mode is unset).",
+                    "WARNING: --cache-idle-slots requires --kv-unified=on; " "skipping (kv_unified_mode is unset).",
                     file=sys.stderr,
                 )
     except Exception as exc:
@@ -828,11 +1175,7 @@ def resolve_effective_parallel(launcher, backend):
             mtp_type_for_backend = "mtp"
         else:
             mtp_type_for_backend = "draft-mtp"
-        mtp_active = (
-            spec_enabled_var is not None
-            and spec_enabled_var.get()
-            and spec_type == mtp_type_for_backend
-        )
+        mtp_active = spec_enabled_var is not None and spec_enabled_var.get() and spec_type == mtp_type_for_backend
     except Exception:
         mtp_active = False
     if mtp_active and (parallel_val or "").strip() != "1":

@@ -40,10 +40,10 @@ if str(REPO_ROOT) not in sys.path:
 from tests.launcher_var_registry import ALL_NEW_LAUNCHER_TK_VARS  # noqa: E402
 
 _TK_CLS = {
-    "StringVar":  tk.StringVar,
+    "StringVar": tk.StringVar,
     "BooleanVar": tk.BooleanVar,
-    "IntVar":     tk.IntVar,
-    "DoubleVar":  tk.DoubleVar,
+    "IntVar": tk.IntVar,
+    "DoubleVar": tk.DoubleVar,
 }
 
 
@@ -193,6 +193,7 @@ def launcher_mock(tk_root, built_tree):
 @pytest.fixture()
 def manager(launcher_mock):
     from modules.launch import LaunchManager
+
     return LaunchManager(launcher_mock)
 
 
@@ -355,9 +356,7 @@ class TestFindServerExecutable:
         base = tmp_path / "root"
         bin_dir = base / "build" / "bin"
         bin_dir.mkdir(parents=True)
-        exe_name = (
-            "ik-llama-server.exe" if sys.platform == "win32" else "ik-llama-server"
-        )
+        exe_name = "ik-llama-server.exe" if sys.platform == "win32" else "ik-llama-server"
         exe = bin_dir / exe_name
         exe.write_text("fake")
         os.chmod(exe, 0o755)
@@ -365,17 +364,13 @@ class TestFindServerExecutable:
         assert result is not None
         assert result.name == exe_name
 
-    def test_llama_cpp_backend_does_not_pick_up_ik_specific_name(
-        self, manager, tmp_path
-    ):
+    def test_llama_cpp_backend_does_not_pick_up_ik_specific_name(self, manager, tmp_path):
         # llama.cpp exe list should not include ik-llama-server, so a tree that
         # ONLY contains ik-llama-server must not be matched.
         base = tmp_path / "root"
         bin_dir = base / "build" / "bin"
         bin_dir.mkdir(parents=True)
-        exe_name = (
-            "ik-llama-server.exe" if sys.platform == "win32" else "ik-llama-server"
-        )
+        exe_name = "ik-llama-server.exe" if sys.platform == "win32" else "ik-llama-server"
         (bin_dir / exe_name).write_text("fake")
         os.chmod(bin_dir / exe_name, 0o755)
         assert manager._find_server_executable(base, "llama.cpp") is None
@@ -401,18 +396,41 @@ class TestLaunchersDir:
 
 
 class TestBackendSupportsFlag:
+    """``_backend_supports_flag`` resolves an exe's signature via
+    ``_exe_signature`` (path, mtime_ns, size). The tests use synthetic
+    ``/fake/exe`` paths that can't be stat'd, so each test monkey-patches
+    the signature method to return a stable fake. The signature MUST
+    change between distinct exe paths so the per-exe cache invariant
+    holds — ``_fake_sig`` derives a per-path stable signature.
+    """
+
+    def _fake_sig(self, exe_path):  # noqa: D401 — helper, not a fixture
+        # Stable but path-distinct: hash the path string so different
+        # ``exe_path`` arguments get distinct keys.
+        return (str(exe_path), hash(str(exe_path)) & 0xFFFFFFFF, 0)
+
+    def _patch_sig(self, manager, monkeypatch):
+        """Patch ``manager._exe_signature`` so synthetic paths pass."""
+        monkeypatch.setattr(manager, "_exe_signature", self._fake_sig)
+
     def _fake_run(self, stdout="", stderr="", raise_exc=None):
         from unittest.mock import MagicMock as _MM
+
         if raise_exc is not None:
+
             def _runner(*a, **kw):
                 raise raise_exc
+
             return _runner
         result = _MM()
         result.stdout = stdout
         result.stderr = stderr
+        # Subprocess result needs a returncode for the empty-payload check.
+        result.returncode = 0
         return lambda *a, **kw: result
 
     def test_returns_true_when_flag_in_stdout(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stdout="usage: server [opts]\n  --fit on|off  fit memory\n"),
@@ -421,6 +439,7 @@ class TestBackendSupportsFlag:
 
     def test_returns_true_when_flag_in_stderr(self, manager, monkeypatch):
         # Some servers print --help to stderr.
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stderr="  --fit on|off\n"),
@@ -428,6 +447,7 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is True
 
     def test_returns_false_when_flag_absent(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stdout="usage: server [opts]\n  --threads N\n"),
@@ -435,7 +455,9 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
 
     def test_returns_false_on_subprocess_failure(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         import subprocess as _sp
+
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(raise_exc=_sp.TimeoutExpired(cmd="x", timeout=5)),
@@ -443,6 +465,7 @@ class TestBackendSupportsFlag:
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
 
     def test_returns_false_on_oserror(self, manager, monkeypatch):
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(raise_exc=OSError("exec format error")),
@@ -451,23 +474,25 @@ class TestBackendSupportsFlag:
 
     def test_does_not_match_substring_of_other_flag(self, manager, monkeypatch):
         # "--fitness" should not satisfy a probe for "--fit".
+        self._patch_sig(manager, monkeypatch)
         monkeypatch.setattr(
             "modules.launch.subprocess.run",
             self._fake_run(stdout="  --fitness foo\n"),
         )
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
 
-    def test_failure_is_not_cached_so_later_probe_can_succeed(
-        self, manager, monkeypatch
-    ):
-        """A transient timeout/OSError must not poison the cache. If the
-        first probe fails (load spike, momentarily-busy disk) but a later
-        probe would succeed, the second call must actually re-run subprocess
-        and return True. Caching False on transient failures would silently
-        disable the flag for the rest of the session."""
+    def test_failure_is_not_cached_so_later_probe_can_succeed(self, manager, monkeypatch):
+        """A transient timeout/OSError must not poison the cache PERMANENTLY.
+        Failures are now memoized for the rest of the current build/launch
+        (so a launch with five reasoning fields doesn't pay ``N * timeout``
+        on a broken exe), but the next build/launch clears that memo and
+        re-probes — which matters when the user has rebuilt the binary
+        between attempts.
+        """
         from unittest.mock import MagicMock as _MM
         import subprocess as _sp
 
+        self._patch_sig(manager, monkeypatch)
         call_count = {"n": 0}
 
         def _flaky_run(*a, **kw):
@@ -477,31 +502,52 @@ class TestBackendSupportsFlag:
             r = _MM()
             r.stdout = "  --fit on|off\n"
             r.stderr = ""
+            r.returncode = 0
             return r
 
         monkeypatch.setattr("modules.launch.subprocess.run", _flaky_run)
 
-        # First call hits the timeout — returns False, must NOT cache.
+        # First call hits the timeout — returns False. The per-flag cache
+        # remains untouched (``_help_text_failed_this_build`` is what gates
+        # re-probing inside the build); a NEW build/launch can re-probe.
         assert manager._backend_supports_flag("/fake/exe", "--fit") is False
-        assert ("/fake/exe", "--fit") not in manager._feature_probe_cache, (
-            "transient probe failures must not be memoized"
-        )
+        sig = self._fake_sig("/fake/exe")
+        assert (
+            *sig,
+            "--fit",
+        ) not in manager._feature_probe_cache, "transient probe failures must not be memoized as a per-flag result"
 
-        # Second call re-runs subprocess and finds the flag.
+        # Simulate the start of a new build/launch — ``build_cmd``/
+        # ``launch_server`` clear the per-build failure memo. The second
+        # call now actually re-runs subprocess and finds the flag.
+        manager._help_text_failed_this_build.clear()
         assert manager._backend_supports_flag("/fake/exe", "--fit") is True
-        assert call_count["n"] == 2, "second call should actually re-probe"
+        assert call_count["n"] == 2, "second build should actually re-probe"
 
-    def test_result_is_cached_per_exe_and_flag(self, manager, monkeypatch):
+    def test_result_is_cached_per_exe(self, manager, monkeypatch):
+        """Subprocess cost is amortized across all flag probes on the same exe.
+
+        The old implementation spawned one ``<exe> --help`` subprocess per
+        (exe, flag) probe — so a launch checking five reasoning flags paid
+        five subprocess startups in series. The current implementation
+        caches the raw ``--help`` text per exe and runs the per-flag regex
+        against that cached snapshot, so all flag probes for one exe share
+        a single subprocess. The (exe, flag) memoization is still in place
+        so the regex itself only runs once per pair, and ANSWERS per flag
+        remain independent (a build that lists ``--fit`` but not
+        ``--fit-margin`` reports True/False respectively).
+        """
+        self._patch_sig(manager, monkeypatch)
         calls = {"n": 0}
 
         def _counting_run(*a, **kw):
             calls["n"] += 1
             from unittest.mock import MagicMock as _MM
+
             r = _MM()
-            # Echo a help line that contains every flag the test asks about,
-            # so each (exe, flag) probe resolves to True.
             r.stdout = "  --fit on|off\n  --other-flag X\n"
             r.stderr = ""
+            r.returncode = 0
             return r
 
         monkeypatch.setattr("modules.launch.subprocess.run", _counting_run)
@@ -510,21 +556,21 @@ class TestBackendSupportsFlag:
         manager._backend_supports_flag("/fake/exe", "--fit")
         manager._backend_supports_flag("/fake/exe", "--fit")
         manager._backend_supports_flag("/fake/exe", "--fit")
-        assert calls["n"] == 1, "subprocess.run should only be invoked once per (exe, flag)"
+        assert calls["n"] == 1, "subprocess.run should only be invoked once per exe"
 
-        # Different flag on the same exe must re-probe — the cache key is
-        # (exe, flag), not exe alone. Without this, a build that supports
-        # --fit but not --fit-margin would be miscached as supporting both.
-        manager._backend_supports_flag("/fake/exe", "--other-flag")
-        assert calls["n"] == 2, (
-            "different flag on same exe must re-probe (cache key is per-flag)"
-        )
-        manager._backend_supports_flag("/fake/exe", "--other-flag")
-        assert calls["n"] == 2, "second call for same (exe, flag) should hit cache"
+        # Different flag on the same exe DOES NOT re-spawn the subprocess —
+        # it consults the cached help text and runs a per-flag regex.
+        # Answers stay correct per flag (the cache is text, not boolean).
+        assert manager._backend_supports_flag("/fake/exe", "--other-flag") is True
+        assert calls["n"] == 1, "different flag on the same exe must reuse the cached --help text"
+        # A flag the help text doesn't advertise reports False, proving the
+        # per-flag answer is still independent.
+        assert manager._backend_supports_flag("/fake/exe", "--never-mentioned") is False
+        assert calls["n"] == 1
 
         # Different exe path → re-probes.
         manager._backend_supports_flag("/other/exe", "--fit")
-        assert calls["n"] == 3
+        assert calls["n"] == 2
 
 
 # ============================================================================
@@ -550,9 +596,7 @@ class TestBuildCmdHappyPath:
         assert "--fit" in cmd
         assert cmd[cmd.index("--fit") + 1] == "off"
 
-    def test_ik_llama_emits_bare_fit_flag_when_supported(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_ik_llama_emits_bare_fit_flag_when_supported(self, manager, launcher_mock, built_tree, monkeypatch):
         """Launch-flow path: probing is on and the (stubbed) probe says --fit
         is supported. ik_llama's --fit is a bare flag (no on/off arg) — sending
         `--fit on` the way llama.cpp expects would either error or be
@@ -569,9 +613,7 @@ class TestBuildCmdHappyPath:
         # the next unrelated arg (or nothing if --fit is last).
         idx = cmd.index("--fit")
         if idx + 1 < len(cmd):
-            assert cmd[idx + 1] not in ("on", "off"), (
-                "ik_llama --fit is bare; emitting on/off after it would be wrong"
-            )
+            assert cmd[idx + 1] not in ("on", "off"), "ik_llama --fit is bare; emitting on/off after it would be wrong"
 
     def test_ik_llama_maps_fit_target_to_fit_margin_when_supported(
         self, manager, launcher_mock, built_tree, monkeypatch
@@ -590,9 +632,7 @@ class TestBuildCmdHappyPath:
         # Must NEVER emit the llama.cpp-spelled flag against ik_llama.
         assert "--fit-target" not in cmd
 
-    def test_ik_llama_omits_fit_margin_when_target_at_default(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_ik_llama_omits_fit_margin_when_target_at_default(self, manager, launcher_mock, built_tree, monkeypatch):
         """Launch-flow path with probing on. fit_target default of 1024 means
         'don't override' — must not emit --fit-margin even when ik_llama
         advertises it."""
@@ -603,9 +643,7 @@ class TestBuildCmdHappyPath:
         cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-margin" not in cmd
 
-    def test_ik_llama_drops_fit_ctx_silently(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_ik_llama_drops_fit_ctx_silently(self, manager, launcher_mock, built_tree, monkeypatch):
         """Launch-flow path with probing on. ik_llama has no --fit-ctx
         equivalent (regardless of binary version), so the shared UI value
         must be dropped without ever appearing on the command line under
@@ -617,9 +655,7 @@ class TestBuildCmdHappyPath:
         cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-ctx" not in cmd
 
-    def test_ik_llama_emits_nothing_when_disabled(
-        self, manager, launcher_mock, built_tree
-    ):
+    def test_ik_llama_emits_nothing_when_disabled(self, manager, launcher_mock, built_tree):
         """ik_llama has no `--fit off` — disabling fit means the flag is
         simply absent from the command line. fit_enabled=False short-circuits
         before any probe, so neither probe_backend nor a stub matters here."""
@@ -631,9 +667,7 @@ class TestBuildCmdHappyPath:
         assert "--fit-ctx" not in cmd
         assert "--fit-target" not in cmd
 
-    def test_ik_llama_skips_fit_when_probe_says_unsupported(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_ik_llama_skips_fit_when_probe_says_unsupported(self, manager, launcher_mock, built_tree, monkeypatch):
         """Older ik_llama builds whose --help omits --fit must not receive any
         fit flag — emitting one would crash the server. Only the launch flow
         opts into probing (probe_backend=True)."""
@@ -653,8 +687,10 @@ class TestBuildCmdHappyPath:
     ):
         """Mid-vintage ik_llama builds may advertise --fit but not yet
         --fit-margin. Emit the bare --fit, drop the margin silently."""
+
         def _probe(exe_path, flag):
             return flag == "--fit"
+
         monkeypatch.setattr(manager, "_backend_supports_flag", _probe)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
@@ -663,26 +699,24 @@ class TestBuildCmdHappyPath:
         assert "--fit" in cmd
         assert "--fit-margin" not in cmd
 
-    def test_llama_cpp_backend_does_not_probe_for_fit(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_llama_cpp_backend_does_not_probe_for_fit(self, manager, launcher_mock, built_tree, monkeypatch):
         """llama.cpp has supported --fit for a long time; the probe should be
         skipped entirely so we don't pay subprocess cost on the common path."""
         from unittest.mock import MagicMock
+
         probe_spy = MagicMock(return_value=True)
         monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
         cmd = manager.build_cmd(probe_backend=True)
         assert cmd is not None
         probe_spy.assert_not_called()
 
-    def test_default_build_cmd_does_not_probe_ik_llama_backend(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_default_build_cmd_does_not_probe_ik_llama_backend(self, manager, launcher_mock, built_tree, monkeypatch):
         """build_cmd() with default args (the save-script flow) must NOT
         execute the backend binary. Save-script callers may be writing a
         script for a different machine, and a 5s probe timeout would freeze
         the UI on every save. The probe is opt-in via probe_backend=True."""
         from unittest.mock import MagicMock
+
         probe_spy = MagicMock(return_value=True)
         monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
         launcher_mock.backend_selection.set("ik_llama")
@@ -690,13 +724,9 @@ class TestBuildCmdHappyPath:
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()  # default probe_backend=False
         assert cmd is not None
-        assert not probe_spy.called, (
-            "save-script flow must not invoke the runtime feature probe"
-        )
+        assert not probe_spy.called, "save-script flow must not invoke the runtime feature probe"
 
-    def test_default_build_cmd_emits_ik_llama_fit_optimistically(
-        self, manager, launcher_mock, built_tree, monkeypatch
-    ):
+    def test_default_build_cmd_emits_ik_llama_fit_optimistically(self, manager, launcher_mock, built_tree, monkeypatch):
         """When probing is disabled (the save-script flow), trust the user's
         UI selection and emit the flags they configured. The script writer
         can't know whether the target host's ik_llama build supports --fit
@@ -705,6 +735,7 @@ class TestBuildCmdHappyPath:
         # Even though we make the probe return False, the default-args call
         # must not consult it — flags should still be emitted optimistically.
         from unittest.mock import MagicMock
+
         probe_spy = MagicMock(return_value=False)
         monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
         launcher_mock.backend_selection.set("ik_llama")
@@ -823,17 +854,17 @@ class TestBuildCmdHappyPath:
         assert "--cache-type-v" in cmd
         assert cmd[cmd.index("--cache-type-v") + 1] == "q8_0"
 
-    def test_ik_llama_ctk_suppresses_standard_cache_flags(
-        self, manager, launcher_mock
-    ):
+    def test_ik_llama_ctk_suppresses_standard_cache_flags(self, manager, launcher_mock):
         """When ik_llama's -ctk/-ctv flags are used, build_cmd should
         NOT also add the standard --cache-type-k even if the UI value is
         non-default."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.cache_type_k.set("q8_0")
         launcher_mock.ik_llama_tab.get_ik_llama_flags.return_value = [
-            "-ctk", "q8_0",
-            "-ctv", "q8_0",
+            "-ctk",
+            "q8_0",
+            "-ctv",
+            "q8_0",
         ]
         cmd = manager.build_cmd()
         assert "--cache-type-k" not in cmd
@@ -853,7 +884,7 @@ class TestBuildCmdHappyPath:
         assert "--jinja" not in cmd
 
     def test_custom_parameters_applied(self, manager, launcher_mock):
-        launcher_mock.custom_parameters_list = ['--foo bar', '--baz "value with spaces"']
+        launcher_mock.custom_parameters_list = ["--foo bar", '--baz "value with spaces"']
         cmd = manager.build_cmd()
         # shlex splits the single-string parameter into args.
         assert "--foo" in cmd
@@ -868,9 +899,7 @@ class TestBuildCmdHappyPath:
         assert "--chat-template" in cmd
         assert cmd[cmd.index("--chat-template") + 1] == "chatml"
 
-    def test_chat_template_custom_with_empty_string_omits(
-        self, manager, launcher_mock
-    ):
+    def test_chat_template_custom_with_empty_string_omits(self, manager, launcher_mock):
         launcher_mock.template_source.set("custom")
         launcher_mock.current_template_display.set("")
         cmd = manager.build_cmd()
@@ -906,9 +935,7 @@ class TestBuildCmdHappyPath:
         assert "--fit-ctx" in cmd and cmd[cmd.index("--fit-ctx") + 1] == "8192"
         assert "--fit-target" in cmd and cmd[cmd.index("--fit-target") + 1] == "2048"
 
-    def test_fit_enabled_with_default_ctx_and_target_omits_sub_flags(
-        self, manager, launcher_mock
-    ):
+    def test_fit_enabled_with_default_ctx_and_target_omits_sub_flags(self, manager, launcher_mock):
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_ctx.set("4096")  # matches llama.cpp default
         launcher_mock.fit_target.set("1024")  # matches default
@@ -997,9 +1024,7 @@ class TestBuildCmdErrors:
         assert cmd is None
         assert mb.showerror.called
 
-    def test_ik_llama_backend_with_empty_ik_dir_returns_none(
-        self, manager, launcher_mock
-    ):
+    def test_ik_llama_backend_with_empty_ik_dir_returns_none(self, manager, launcher_mock):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.ik_llama_dir.set("")
         with patch("modules.launch.messagebox") as mb:
@@ -1014,9 +1039,7 @@ class TestBuildCmdErrors:
 
 
 class TestBuildCmdMmproj:
-    def test_mmproj_auto_detected_from_model_dir(
-        self, manager, launcher_mock, built_tree
-    ):
+    def test_mmproj_auto_detected_from_model_dir(self, manager, launcher_mock, built_tree):
         model_dir = built_tree["model"].parent
         mmproj_file = model_dir / "mmproj-model-f16.gguf"
         mmproj_file.write_bytes(b"GGUF\x00")
@@ -1026,9 +1049,7 @@ class TestBuildCmdMmproj:
         assert "--mmproj" in cmd
         assert Path(cmd[cmd.index("--mmproj") + 1]).name == "mmproj-model-f16.gguf"
 
-    def test_mmproj_explicit_selection_wins_over_autodetect(
-        self, manager, launcher_mock, built_tree
-    ):
+    def test_mmproj_explicit_selection_wins_over_autodetect(self, manager, launcher_mock, built_tree):
         model_dir = built_tree["model"].parent
         # Both a default and an explicit file
         (model_dir / "mmproj-default.gguf").write_bytes(b"GGUF")
@@ -1049,9 +1070,7 @@ class TestBuildCmdMmproj:
         cmd = manager.build_cmd()
         assert "--mmproj" not in cmd
 
-    def test_mmproj_none_found_does_not_add_flag(
-        self, manager, launcher_mock, built_tree
-    ):
+    def test_mmproj_none_found_does_not_add_flag(self, manager, launcher_mock, built_tree):
         launcher_mock.mmproj_enabled.set(True)
         cmd = manager.build_cmd()
         assert "--mmproj" not in cmd
@@ -1064,9 +1083,7 @@ class TestBuildCmdMmproj:
 
 class TestSaveShScript:
     def _write_and_read(self, manager, launcher_mock, out_path):
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ):
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
             fd.asksaveasfilename.return_value = str(out_path)
             manager.save_sh_script()
         return out_path.read_text()
@@ -1074,7 +1091,9 @@ class TestSaveShScript:
     def test_script_has_shebang_and_set_e(self, manager, launcher_mock, tmp_path):
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert text.startswith("#!/bin/bash")
+        # Env-based shebang for portability (NixOS / Homebrew / hosts
+        # without ``/bin/bash``).
+        assert text.startswith("#!/usr/bin/env bash")
         assert "set -e" in text
 
     @pytest.mark.skipif(
@@ -1092,27 +1111,28 @@ class TestSaveShScript:
         text = self._write_and_read(manager, launcher_mock, out)
         assert "CUDA_DEVICE_ORDER=PCI_BUS_ID" in text
 
-    def test_cuda_visible_devices_set_when_gpus_selected(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_cuda_visible_devices_set_when_gpus_selected(self, manager, launcher_mock, tmp_path):
         launcher_mock.get_ordered_selected_gpus.return_value = [1, 0]
         launcher_mock.gpu_info = {"device_count": 2}
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert 'export CUDA_VISIBLE_DEVICES="1,0"' in text
+        # Comma-separated numeric strings are safe in bash without
+        # quoting (no shell metacharacters), so the saved script
+        # emits the bare numeric form. ``shlex.quote("1,0")`` itself
+        # also returns ``"1,0"`` unquoted (the comma isn't on
+        # shlex's "needs quoting" list); the launch.py emitter
+        # writes the value verbatim because it knows the contract
+        # is numeric-only, which lines up with shlex's behavior.
+        assert "export CUDA_VISIBLE_DEVICES=1,0" in text
 
-    def test_cuda_visible_devices_cleared_when_gpus_exist_none_selected(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_cuda_visible_devices_cleared_when_gpus_exist_none_selected(self, manager, launcher_mock, tmp_path):
         launcher_mock.get_ordered_selected_gpus.return_value = []
         launcher_mock.gpu_info = {"device_count": 2}
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
         assert "unset CUDA_VISIBLE_DEVICES" in text
 
-    def test_no_cuda_lines_when_no_gpus_detected(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_no_cuda_lines_when_no_gpus_detected(self, manager, launcher_mock, tmp_path):
         launcher_mock.get_ordered_selected_gpus.return_value = []
         launcher_mock.gpu_info = {"device_count": 0}
         out = tmp_path / "launch.sh"
@@ -1131,22 +1151,18 @@ class TestSaveShScript:
         assert 'export FOO="bar"' in text
         assert 'export BAZ="val with spaces"' in text
 
-    def test_env_var_value_with_special_chars_escaped(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_env_var_value_with_special_chars_escaped(self, manager, launcher_mock, tmp_path):
         launcher_mock.env_vars_manager.get_enabled_env_vars.return_value = {
             "Q": 'has "quotes" $var `back`',
         }
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
         # Double quotes, $, and backticks should be backslash-escaped.
-        assert r'\"quotes\"' in text
+        assert r"\"quotes\"" in text
         assert r"\$var" in text
         assert r"\`back\`" in text
 
-    def test_venv_activation_line_when_venv_configured(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_venv_activation_line_when_venv_configured(self, manager, launcher_mock, tmp_path):
         venv = tmp_path / "my venv"  # space in name
         (venv / "bin").mkdir(parents=True)
         activate = venv / "bin" / "activate"
@@ -1155,18 +1171,30 @@ class TestSaveShScript:
 
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
-        # Path quoted with double quotes to preserve the space.
-        assert f'source "{activate}"' in text
+        # The script uses ``shlex.quote`` for the activator path — for a
+        # path containing a space that's single-quoted POSIX form, which
+        # (unlike the old double-quoted form) also prevents ``$VAR`` /
+        # ``$(...)`` / backtick expansion at script-run time. Assert the
+        # quoted form actually emitted, not a specific quote style.
+        import shlex
 
-    def test_no_venv_means_no_source_line(self, manager, launcher_mock, tmp_path):
+        quoted = shlex.quote(str(activate))
+        assert f"source {quoted}" in text, f"Expected shlex-quoted activate path in script, got:\n{text}"
+
+    def test_no_venv_means_no_source_line(self, manager, launcher_mock, tmp_path, monkeypatch):
         launcher_mock.venv_dir.set("")
+        # resolve_active_venv_path() falls back to <launcher_repo_dir>/venv
+        # when the launcher's venv_dir is blank — and in a dev checkout that
+        # path is the real launcher venv. Force the fallback to point at a
+        # directory that demonstrably isn't a venv.
+        from modules import venv_manager as _vm
+
+        monkeypatch.setattr(_vm, "launcher_repo_dir", lambda: tmp_path)
         out = tmp_path / "launch.sh"
         text = self._write_and_read(manager, launcher_mock, out)
         assert "source " not in text
 
-    def test_model_path_with_space_is_quoted(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_model_path_with_space_is_quoted(self, manager, launcher_mock, tmp_path):
         import shlex
 
         # Build a tree with a space in the path.
@@ -1193,21 +1221,17 @@ class TestSaveShScript:
         expected_model_token = shlex.quote(str(model))
         expected_exe_token = shlex.quote(str(exe))
         assert expected_model_token in text, (
-            f"Model path not shlex-quoted in script. Expected token: "
-            f"{expected_model_token!r}"
+            f"Model path not shlex-quoted in script. Expected token: " f"{expected_model_token!r}"
         )
         assert expected_exe_token in text, (
-            f"Executable path not shlex-quoted in script. Expected token: "
-            f"{expected_exe_token!r}"
+            f"Executable path not shlex-quoted in script. Expected token: " f"{expected_exe_token!r}"
         )
         # And the ``-m`` flag must be immediately followed by the quoted
         # model path (catches a regression where quoting is right but the
         # flag/value pair gets reordered).
         assert f"-m {expected_model_token}" in text
 
-    def test_chat_template_gets_single_quote_escape(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_chat_template_gets_single_quote_escape(self, manager, launcher_mock, tmp_path):
         import shlex
 
         template = "it's a template"
@@ -1229,24 +1253,16 @@ class TestSaveShScript:
         # have passed even if the apostrophe escape collapsed.
         assert f"--chat-template {expected}" in text
 
-    def test_script_returns_early_if_user_cancels_dialog(
-        self, manager, launcher_mock, tmp_path
-    ):
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ) as mb:
+    def test_script_returns_early_if_user_cancels_dialog(self, manager, launcher_mock, tmp_path):
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox") as mb:
             fd.asksaveasfilename.return_value = ""  # user cancelled
             manager.save_sh_script()
         # Nothing written and no "Saved" info dialog.
         assert not mb.showinfo.called
 
-    def test_script_returns_early_if_build_cmd_fails(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_script_returns_early_if_build_cmd_fails(self, manager, launcher_mock, tmp_path):
         launcher_mock.model_path.set("")  # triggers build_cmd None
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ):
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
             fd.asksaveasfilename.return_value = str(tmp_path / "x.sh")
             manager.save_sh_script()
         # The save-dialog must not even have been invoked.
@@ -1260,9 +1276,7 @@ class TestSaveShScript:
 
 class TestSavePs1Script:
     def _write_and_read(self, manager, launcher_mock, out_path):
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ):
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
             fd.asksaveasfilename.return_value = str(out_path)
             manager.save_ps1_script()
         return out_path.read_text(encoding="utf-8")
@@ -1278,18 +1292,16 @@ class TestSavePs1Script:
         text = self._write_and_read(manager, launcher_mock, out)
         assert '$env:CUDA_DEVICE_ORDER="PCI_BUS_ID"' in text
 
-    def test_ps1_cuda_visible_devices_quoted(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_ps1_cuda_visible_devices_quoted(self, manager, launcher_mock, tmp_path):
         launcher_mock.get_ordered_selected_gpus.return_value = [0, 2]
         launcher_mock.gpu_info = {"device_count": 3}
         out = tmp_path / "launch.ps1"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert '$env:CUDA_VISIBLE_DEVICES="0,2"' in text
+        # PS single-quoted literal is the safe form — see
+        # ``CUDA_VISIBLE_DEVICES`` hardening in modules/launch.py.
+        assert "$env:CUDA_VISIBLE_DEVICES='0,2'" in text
 
-    def test_ps1_cuda_cleared_when_gpus_detected_none_selected(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_ps1_cuda_cleared_when_gpus_detected_none_selected(self, manager, launcher_mock, tmp_path):
         launcher_mock.get_ordered_selected_gpus.return_value = []
         launcher_mock.gpu_info = {"device_count": 3}
         out = tmp_path / "launch.ps1"
@@ -1298,11 +1310,23 @@ class TestSavePs1Script:
 
     def test_ps1_env_vars_emitted(self, manager, launcher_mock, tmp_path):
         launcher_mock.env_vars_manager.get_enabled_env_vars.return_value = {
-            "FOO": "bar"
+            "FOO": "bar",
+            # Apostrophe inside the value: PowerShell's single-quoted
+            # literal terminates on the FIRST bare ``'``, so an
+            # unescaped apostrophe would either truncate the value or
+            # turn the rest of the line into a syntax error. The
+            # documented escape is to DOUBLE the apostrophe — locks
+            # that escaper into a regression test.
+            "QUOTE": "O'Hare",
         }
         out = tmp_path / "launch.ps1"
         text = self._write_and_read(manager, launcher_mock, out)
-        assert '$env:FOO="bar"' in text
+        # Env-var values are emitted as SINGLE-quoted PS literals so a
+        # value containing ``$env:...`` / ``$(...)`` / backticks can't be
+        # expression-expanded by PowerShell. Bare ``bar`` round-trips
+        # unchanged in the single-quoted form.
+        assert "$env:FOO='bar'" in text
+        assert "$env:QUOTE='O''Hare'" in text
 
     def test_ps1_chat_template_single_quoted(self, manager, launcher_mock, tmp_path):
         launcher_mock.template_source.set("custom")
@@ -1314,19 +1338,19 @@ class TestSavePs1Script:
         # Single quote should have been doubled.
         assert "Jinja''s template" in text
 
-    def test_ps1_exe_path_rendered_with_forward_slashes(
-        self, manager, launcher_mock, tmp_path, built_tree
-    ):
+    def test_ps1_exe_path_rendered_with_forward_slashes(self, manager, launcher_mock, tmp_path, built_tree):
         out = tmp_path / "launch.ps1"
         text = self._write_and_read(manager, launcher_mock, out)
-        # PowerShell block uses forward slashes (from Path.as_posix()).
+        # PowerShell block uses forward slashes (from Path.as_posix()) and
+        # wraps the path in a SINGLE-quoted PS literal so a path containing
+        # ``$env:TEMP`` / ``$(...)`` can't be expression-expanded by
+        # PowerShell. Single quotes inside the path itself are doubled
+        # (``'`` → ``''``) per ``_ps_escape_single_quoted``.
         exe_posix = built_tree["exe"].resolve().as_posix()
-        assert f'& "{exe_posix}"' in text
+        assert f"& '{exe_posix}'" in text
 
     def test_ps1_user_cancel_returns_early(self, manager, launcher_mock, tmp_path):
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ) as mb:
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox") as mb:
             fd.asksaveasfilename.return_value = ""
             manager.save_ps1_script()
         assert not mb.showinfo.called
@@ -1338,13 +1362,9 @@ class TestSavePs1Script:
 
 
 class TestSaveScriptDefaultFilename:
-    def test_sh_default_filename_uses_selected_model_name(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_sh_default_filename_uses_selected_model_name(self, manager, launcher_mock, tmp_path):
         launcher_mock.model_listbox.curselection = MagicMock(return_value=(0,))
-        launcher_mock.model_listbox.get = MagicMock(
-            return_value="My Fancy Model v2.gguf"
-        )
+        launcher_mock.model_listbox.get = MagicMock(return_value="My Fancy Model v2.gguf")
 
         captured_initialfile = {}
 
@@ -1352,9 +1372,7 @@ class TestSaveScriptDefaultFilename:
             captured_initialfile["name"] = kw.get("initialfile")
             return str(tmp_path / "out.sh")
 
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ):
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
             fd.asksaveasfilename.side_effect = fake_save
             manager.save_sh_script()
 
@@ -1362,13 +1380,9 @@ class TestSaveScriptDefaultFilename:
         assert captured_initialfile["name"].endswith(".sh")
         assert " " not in captured_initialfile["name"]
 
-    def test_ps1_default_filename_uses_selected_model_name(
-        self, manager, launcher_mock, tmp_path
-    ):
+    def test_ps1_default_filename_uses_selected_model_name(self, manager, launcher_mock, tmp_path):
         launcher_mock.model_listbox.curselection = MagicMock(return_value=(0,))
-        launcher_mock.model_listbox.get = MagicMock(
-            return_value='bad<chars>"name'
-        )
+        launcher_mock.model_listbox.get = MagicMock(return_value='bad<chars>"name')
 
         captured = {}
 
@@ -1376,9 +1390,7 @@ class TestSaveScriptDefaultFilename:
             captured["name"] = kw.get("initialfile")
             return str(tmp_path / "out.ps1")
 
-        with patch("modules.launch.filedialog") as fd, patch(
-            "modules.launch.messagebox"
-        ):
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
             fd.asksaveasfilename.side_effect = fake_save
             manager.save_ps1_script()
 

@@ -175,6 +175,11 @@ jobs:
   unit-tests:
     name: Unit tests (py${{ matrix.python-version }} on ${{ matrix.os }})
     needs: [syntax-check]
+    # Hard cap so a hanging test (historically a Windows-only deadlock)
+    # can't burn the runner's 6-hour default budget. The ubuntu/macOS legs
+    # finish in 1–2 min, so 20 min leaves plenty of headroom while still
+    # killing a wedged job fast.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -205,7 +210,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov coverage
+          pip install pytest pytest-cov pytest-timeout coverage
 
       # Collect-only first for a quick visibility check of what will run.
       # Hard-fails if nothing is discovered — tests now exist and a missing
@@ -224,6 +229,11 @@ jobs:
       - name: Run pytest with coverage
         shell: bash
         run: |
+          # ``--timeout=60`` + ``thread`` method: any single test that runs
+          # past 60s is killed and reported as a failure rather than hanging
+          # the whole suite. Catches Windows-only deadlocks (e.g. orphaned
+          # subprocesses, Tk roots that never close) without affecting the
+          # fast suites on Linux/macOS where every test finishes in <1s.
           pytest \
             --cov \
             --cov-report=xml:coverage.xml \
@@ -231,6 +241,8 @@ jobs:
             --cov-report=html:htmlcov \
             --junitxml=junit.xml \
             --strict-markers \
+            --timeout=60 \
+            --timeout-method=thread \
             -o xfail_strict=True \
             -ra \
             -v
@@ -642,9 +654,14 @@ jobs:
           mkdir -p "$STAGE"
           cp -r modules config launchers images Readme.md requirements.txt \
                 llamacpp-server-launcher.py "$STAGE/"
-          # Strip caches and user-local state from the bundle
+          # Strip caches and user-local state from the bundle.
+          # build_configs.json and gpu_detection_cache.json hold
+          # machine-local paths (toolchain dirs, venv paths) and
+          # detected GPU info — never ship those to other users.
           find "$STAGE" -type d -name '__pycache__' -exec rm -rf {} +
           rm -f "$STAGE/config/llama_cpp_launcher_configs.json"
+          rm -f "$STAGE/config/build_configs.json"
+          rm -f "$STAGE/config/gpu_detection_cache.json"
           (cd dist && zip -r "llama-server-launcher-${{ steps.version.outputs.version }}.zip" \
                      "llama-server-launcher-${{ steps.version.outputs.version }}")
 

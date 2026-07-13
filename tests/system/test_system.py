@@ -133,21 +133,54 @@ def test_gpu_info_static_multiple_devices_preserve_order(
     assert [d["compute_capability"] for d in info["devices"]] == ["7.5", "8.0", "8.9"]
 
 
-def test_gpu_info_static_sets_cuda_device_order_env(
+def test_gpu_info_static_zero_devices_treated_as_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    """``cuda.is_available()`` can return True on a CUDA-built torch
+    running against a host with no visible devices (driver gone, MIG
+    mode, ``CUDA_VISIBLE_DEVICES=""``). In that case the device-count
+    query returns 0. The live torch path must NOT report
+    ``available=True`` with an empty devices list — that violates
+    the contract ``load_cached_gpu_info`` enforces and makes
+    ``fetch_system_info`` short-circuit instead of falling through
+    to the next backend.
+    """
     fake_cuda = types.SimpleNamespace(
         is_available=lambda: True,
         device_count=lambda: 0,
-        get_device_properties=lambda i: _fake_device_props(),
+        get_device_properties=lambda i: None,
     )
     monkeypatch.setattr(sysmod, "torch", types.SimpleNamespace(cuda=fake_cuda))
     monkeypatch.setattr(sysmod, "TORCH_AVAILABLE", True)
 
-    sysmod.get_gpu_info_static()
+    info = sysmod.get_gpu_info_static()
 
+    assert info["available"] is False
+    assert info["device_count"] == 0
+    assert info["devices"] == []
+
+
+def test_gpu_info_static_sets_cuda_device_order_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``modules.system`` pins ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` at
+    # module-import time so it's in place BEFORE any torch CUDA call.
+    # The runtime assignment that used to live inside
+    # ``get_gpu_info_static`` was a no-op (the env var was already
+    # set by the module load that pulled in the function we're
+    # calling).
+    #
+    # Prove MODULE OWNERSHIP: clear the env var and force a fresh
+    # import of ``modules.system`` so its import-time logic re-runs.
+    # Without the clear + reload, this test could pass on ambient
+    # process state set by an unrelated module — making it useless
+    # if ``modules.system`` ever stops pinning the var.
+    import importlib
     import os
+
+    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    importlib.reload(sysmod)
+
     assert os.environ.get("CUDA_DEVICE_ORDER") == "PCI_BUS_ID"
 
 
@@ -169,7 +202,15 @@ def test_gpu_info_static_handles_device_query_exception(
 
     assert info["available"] is False
     assert info["device_count"] == 0
-    assert "CUDA driver exploded" in info["message"]
+    assert info["devices"] == []
+    assert info["detection_source"] == "torch"
+    # User-facing ``message`` is intentionally generic (the raw
+    # exception text would otherwise leak driver / path /
+    # subprocess details into the UI status bar). The full
+    # ``"CUDA driver exploded"`` text is only emitted to
+    # DEBUG-only stderr when ``LLAMA_LAUNCHER_DEBUG_ENV=1``.
+    assert "Error querying CUDA devices" in info["message"]
+    assert "CUDA driver exploded" not in info["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -181,25 +222,50 @@ def test_gpu_info_with_venv_none_falls_back_to_static(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sentinel = {"available": True, "device_count": 0, "devices": [], "message": "x"}
+    monkeypatch.setattr(
+        sysmod,
+        "get_gpu_info_from_nvidia_smi",
+        lambda: {"available": False, "device_count": 0, "devices": [], "message": "no smi"},
+    )
     monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
 
     assert sysmod.get_gpu_info_with_venv(None) is sentinel
     assert sysmod.get_gpu_info_with_venv("") is sentinel
 
 
-def test_gpu_info_with_venv_missing_path_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_with_venv_missing_path_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = {"available": False, "device_count": 0, "devices": [], "message": "fallback"}
+    monkeypatch.setattr(
+        sysmod,
+        "get_gpu_info_from_nvidia_smi",
+        lambda: {"available": False, "device_count": 0, "devices": [], "message": "no smi"},
+    )
     monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
     # A path that doesn't exist
     result = sysmod.get_gpu_info_with_venv(str(tmp_path / "does_not_exist"))
     assert result is sentinel
 
 
-def test_gpu_info_from_venv_success(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_gpu_info_with_venv_prefers_nvidia_smi(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    smi_info = {
+        "available": True,
+        "device_count": 1,
+        "devices": [{"id": 0, "name": "SMI GPU"}],
+        "detection_source": "nvidia-smi",
+    }
+    monkeypatch.setattr(sysmod, "get_gpu_info_from_nvidia_smi", lambda: smi_info)
+    static = mock.Mock(return_value={"available": False, "device_count": 0, "devices": []})
+    monkeypatch.setattr(sysmod, "get_gpu_info_static", static)
+
+    result = sysmod.get_gpu_info_with_venv(None)
+
+    assert result is smi_info
+    static.assert_not_called()
+
+
+def test_gpu_info_from_venv_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Build a fake venv layout with a python binary that exists.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -215,9 +281,7 @@ def test_gpu_info_from_venv_success(
             {"id": 1, "name": "GPU1", "total_memory_gb": 16},
         ],
     }
-    fake_result = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout=json.dumps(expected), stderr=""
-    )
+    fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(expected), stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
     monkeypatch.setattr(sys, "platform", "linux")
 
@@ -226,9 +290,30 @@ def test_gpu_info_from_venv_success(
     assert info == expected
 
 
-def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _forbid_static_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``get_gpu_info_static`` raise if invoked.
+
+    Used by the failure-path tests below to lock in the
+    "orchestrator owns the in-process torch fallback" contract.
+    Without this, a regression where ``get_gpu_info_from_venv`` re-acquires
+    its old habit of calling ``get_gpu_info_static`` internally (which
+    ``get_gpu_info_with_venv`` then calls AGAIN as the final fallback)
+    would slip through every venv-failure test below.
+    """
+
+    def _explode() -> dict:
+        raise AssertionError("get_gpu_info_static must NOT be invoked from get_gpu_info_from_venv")
+
+    monkeypatch.setattr(sysmod, "get_gpu_info_static", _explode)
+
+
+def test_gpu_info_from_venv_empty_stdout_triggers_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fake venv below uses POSIX layout (``bin/python``). On
+    # Windows, ``get_gpu_info_from_venv`` would short-circuit at
+    # "Scripts/python.exe missing" and never exercise the empty-stdout
+    # branch this test is meant to pin. Pin the platform here so the
+    # test fails for the right reason on a Windows CI runner.
+    monkeypatch.setattr(sys, "platform", "linux")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "python").write_text("")
@@ -236,9 +321,7 @@ def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
 
     fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
-
-    sentinel = {"available": False, "device_count": 0, "devices": [], "message": "s"}
-    monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     # Fallback path should be hit and we get a dict back with message about
@@ -247,23 +330,16 @@ def test_gpu_info_from_venv_empty_stdout_triggers_fallback(
     assert "message" in info
 
 
-def test_gpu_info_from_venv_bad_json_triggers_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_bad_json_triggers_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
     python_exe.chmod(0o755)
 
-    fake_result = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="not-json!!", stderr=""
-    )
+    fake_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="not-json!!", stderr="")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
@@ -272,28 +348,22 @@ def test_gpu_info_from_venv_bad_json_triggers_fallback(
 def test_gpu_info_from_venv_nonzero_return_code_triggers_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
     python_exe.chmod(0o755)
 
-    fake_result = subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: torch"
-    )
+    fake_result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="ModuleNotFoundError: torch")
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: fake_result)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
 
 
-def test_gpu_info_from_venv_subprocess_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_subprocess_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -303,19 +373,14 @@ def test_gpu_info_from_venv_subprocess_timeout(
         raise subprocess.TimeoutExpired(cmd="python", timeout=30)
 
     monkeypatch.setattr(subprocess, "run", raise_timeout)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
 
 
-def test_gpu_info_from_venv_permission_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gpu_info_from_venv_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
     (tmp_path / "bin").mkdir()
     python_exe = tmp_path / "bin" / "python"
     python_exe.write_text("")
@@ -325,25 +390,30 @@ def test_gpu_info_from_venv_permission_error(
         raise PermissionError("no access")
 
     monkeypatch.setattr(subprocess, "run", raise_perm)
-    monkeypatch.setattr(
-        sysmod,
-        "get_gpu_info_static",
-        lambda: {"available": False, "device_count": 0, "devices": []},
-    )
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
     assert info["available"] is False
 
 
-def test_gpu_info_from_venv_missing_python_exe_falls_back(
+def test_gpu_info_from_venv_missing_python_exe_returns_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # tmp_path exists but has no bin/python or python at top-level.
-    sentinel = {"available": False, "device_count": 0, "devices": [], "message": "s"}
-    monkeypatch.setattr(sysmod, "get_gpu_info_static", lambda: sentinel)
+    """When the venv has no python executable, ``get_gpu_info_from_venv``
+    returns an ``_unavailable_gpu_info`` marker (``source=torch-venv``).
+    Previously it called ``get_gpu_info_static`` directly, which the
+    orchestrator (``get_gpu_info_with_venv``) ALSO calls — so the same
+    slow CUDA init ran twice on every probe failure. The single in-process
+    fallback now lives only in the orchestrator.
+    """
+    # If anything still calls get_gpu_info_static here, fail the test
+    # immediately rather than silently re-running CUDA init.
+    _forbid_static_fallback(monkeypatch)
 
     info = sysmod.get_gpu_info_from_venv(str(tmp_path))
-    assert info is sentinel
+    assert info["available"] is False
+    assert info["detection_source"] == "torch-venv"
+    assert "Python executable not found" in info["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +525,7 @@ def test_cpu_info_with_psutil(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cpu_info_with_psutil_none_logical(monkeypatch: pytest.MonkeyPatch) -> None:
     """psutil can return None for logical cores on some platforms."""
+
     def cpu_count(logical=True):
         return None
 
@@ -470,6 +541,7 @@ def test_cpu_info_with_psutil_none_logical(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_cpu_info_with_psutil_none_physical_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Logical known, physical returns None -> estimate as logical // 2."""
+
     def cpu_count(logical=True):
         return 12 if logical else None
 
@@ -516,6 +588,7 @@ def test_cpu_info_psutil_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class _Var:
     """Minimal stand-in for tkinter StringVar used by the launcher."""
+
     def __init__(self, value=""):
         self._v = value
 
@@ -545,8 +618,7 @@ def test_fetch_system_info_populates_launcher_attributes(
         "devices": [{"id": 0, "name": "GPU0"}],
         "message": "ok",
     }
-    fake_ram = {"total_ram_bytes": 1, "total_ram_gb": 1,
-                "available_ram_bytes": 1, "available_ram_gb": 1}
+    fake_ram = {"total_ram_bytes": 1, "total_ram_gb": 1, "available_ram_bytes": 1, "available_ram_gb": 1}
     fake_cpu = {"logical_cores": 12, "physical_cores": 6, "model_name": "N/A"}
 
     monkeypatch.setattr(sysmod, "get_gpu_info_with_venv", lambda v: fake_gpu)
@@ -581,9 +653,7 @@ def test_fetch_system_info_sets_status_when_gpu_unavailable(
         "message": "No CUDA",
     }
     monkeypatch.setattr(sysmod, "get_gpu_info_with_venv", lambda v: fake_gpu)
-    monkeypatch.setattr(
-        sysmod, "get_ram_info_static", lambda: {"total_ram_gb": 0, "available_ram_gb": 0}
-    )
+    monkeypatch.setattr(sysmod, "get_ram_info_static", lambda: {"total_ram_gb": 0, "available_ram_gb": 0})
     monkeypatch.setattr(
         sysmod,
         "get_cpu_info_static",
@@ -600,6 +670,15 @@ def test_fetch_system_info_sets_status_when_gpu_unavailable(
 def test_fetch_system_info_uses_configured_venv_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Caller must pass venv_path; fetch_system_info forwards it verbatim.
+
+    The previous implementation re-read ``launcher.venv_dir.get()`` here
+    as a back-compat path, but that ran a cross-thread Tk-var read from
+    the detection worker, serializing through the Tcl interpreter lock
+    and blocking until the main thread went idle (observed: ~33 s on a
+    busy startup). The contract is now: ``_start_system_info_detection``
+    captures the path on the main thread and passes it explicitly.
+    """
     captured = {}
 
     def fake_gpu_with_venv(venv_path):
@@ -614,11 +693,13 @@ def test_fetch_system_info_uses_configured_venv_path(
         lambda: {"logical_cores": 8, "physical_cores": 4, "model_name": "N/A"},
     )
 
-    launcher = _FakeLauncher(venv_value="  /opt/myvenv  ")
-    sysmod.SystemInfoManager(launcher).fetch_system_info()
+    launcher = _FakeLauncher(venv_value="  /should-not-be-used  ")
+    # Caller (the real launcher's _start_system_info_detection) strips
+    # whitespace before passing the value; we mimic that here.
+    sysmod.SystemInfoManager(launcher).fetch_system_info(venv_path="/opt/myvenv")
 
-    # Whitespace gets stripped before being forwarded.
     assert captured["venv"] == "/opt/myvenv"
+    assert captured["venv"] != launcher.venv_dir.get().strip()
 
 
 def test_fetch_system_info_without_venv_passes_none(

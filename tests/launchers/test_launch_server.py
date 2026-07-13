@@ -18,6 +18,7 @@ Platforms exercised:
 
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -266,17 +267,48 @@ class TestLaunchServerLinuxTerminals:
         # Popen called exactly once when the first probe succeeds.
         assert popen.call_count == 1
 
+    def test_blank_venv_uses_normalized_active_path(self, manager, launcher_mock, tmp_path):
+        venv = tmp_path / "default-venv"
+        (venv / "bin").mkdir(parents=True)
+        activate = venv / "bin" / "activate"
+        activate.write_text("# mock activate\n", encoding="utf-8")
+        launcher_mock.venv_dir.set("")
+        captured = {}
+
+        def fake_resolve(raw_path, *, repo_dir=None, platform=None):
+            captured["raw_path"] = raw_path
+            return str(venv)
+
+        with patch.object(sys, "platform", "linux"), patch(
+            "modules.launch.venv_manager.resolve_active_venv_path",
+            side_effect=fake_resolve,
+        ), patch(
+            "modules.launch.shutil.which",
+            side_effect=lambda name: "/usr/bin/xterm" if name == "xterm" else None,
+        ), patch("modules.launch.subprocess.Popen") as popen, patch(
+            "modules.launch.messagebox"
+        ):
+            popen.return_value = MagicMock()
+            manager.launch_server()
+
+        assert captured["raw_path"] == ""
+        assert popen.called
+        full_script = popen.call_args.args[0][-1]
+        assert f"source {shlex.quote(str(activate))}" in full_script
+
 
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Linux-branch test; see TestLaunchServerLinuxTerminals skip note.",
 )
 class TestLaunchServerLinuxFallback:
-    def test_no_terminal_found_uses_shell_true_fallback(
+    def test_no_terminal_found_uses_bash_lc_argv_fallback(
         self, manager, launcher_mock
     ):
         """No supported terminal emulator is found; the code must
-        messagebox.warn, then fall back to Popen(script, shell=True)."""
+        messagebox.warn, then fall back to ``Popen([bash, '-lc', script])``
+        (``shell=False``, direct exec — no SAST-flagged shell layer).
+        """
         with patch.object(sys, "platform", "linux"), patch(
             "modules.launch.shutil.which", return_value=None
         ), patch("modules.launch.subprocess.Popen") as popen, patch(
@@ -286,10 +318,17 @@ class TestLaunchServerLinuxFallback:
             manager.launch_server()
 
         assert popen.called
-        # Popen(script_str, shell=True)
         args, kwargs = popen.call_args
-        assert isinstance(args[0], str), "Fallback must pass a single shell string"
-        assert kwargs.get("shell") is True
+        argv = args[0]
+        assert isinstance(argv, list), (
+            "Fallback must pass argv list [bash, '-lc', script], not a shell string"
+        )
+        assert len(argv) == 3
+        assert argv[0].endswith("bash") or argv[0].endswith("bash.exe")
+        assert argv[1] == "-lc"
+        assert isinstance(argv[2], str)
+        # ``shell=False`` (or omitted, which defaults to False).
+        assert not kwargs.get("shell", False)
         # User was warned.
         assert mb.showwarning.called
 

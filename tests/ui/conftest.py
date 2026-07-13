@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 
 
 @pytest.fixture
-def launcher_stub(tk_root):
+def launcher_stub(tk_root, tmp_path):
     """Minimal object-shape that ``SettingsTab`` expects from ``launcher``.
 
     ``SettingsTab.__init__`` reads ``launcher.root`` and
@@ -33,7 +33,19 @@ def launcher_stub(tk_root):
     """
     stub = MagicMock()
     stub.root = tk_root
+    # Seed ``repo_dir`` from the test's ``tmp_path`` so SettingsTab's
+    # ``__init__`` doesn't fall back to ``venv_manager.launcher_repo_dir()``
+    # (the real launcher checkout). On a local run that fallback
+    # would let blank-path tests probe / mutate the actual
+    # ``./venv`` next to the source code, which can flip
+    # ``looks_like_venv`` and trigger unrelated confirmation dialogs.
+    # Each test gets its own pristine ``tmp_path``, so isolation
+    # is guaranteed.
+    stub.repo_dir = tmp_path
     # A fresh dict per test so cross-test mutation can't leak.
     stub.app_settings = {}
+    import tkinter as tk  # noqa: PLC0415
+
+    stub.venv_dir = tk.StringVar(master=tk_root, value="")
     stub._save_configs = MagicMock()
     return stub

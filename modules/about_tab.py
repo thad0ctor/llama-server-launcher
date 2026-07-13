@@ -10,16 +10,37 @@ import webbrowser
 from pathlib import Path
 import sys
 import os
+import queue
 import shlex
 import subprocess
-import requests
 import threading
 from datetime import datetime
 import shutil
 
+try:
+    import requests
 
-def build_update_script(current_dir, backup_path, current_version, remote_version,
-                        github_url, exclusions):
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    requests = None
+    REQUESTS_AVAILABLE = False
+except Exception as exc:
+    # A binary-incompatible or partially installed ``requests``
+    # (e.g. a broken ``urllib3`` extension after a Python upgrade)
+    # can raise non-ImportError exceptions at import time.
+    # ``requests`` is OPTIONAL — it's only used for the version-check
+    # / auto-update flows — so we want the rest of the About tab to
+    # still load. Mirror the ``modules.system`` pattern (which does
+    # the same for its ``requests`` / ``psutil`` imports).
+    requests = None
+    REQUESTS_AVAILABLE = False
+    print(f"Warning: requests import failed: {exc}", file=sys.stderr)
+
+VERSION_CHECK_POLL_MS = 100
+_VERSION_CHECK_COMPLETE = object()
+
+
+def build_update_script(current_dir, backup_path, current_version, remote_version, github_url, exclusions):
     """Build the bash update script text.
 
     Pure helper extracted from :meth:`AboutTab._generate_update_script` so it
@@ -72,9 +93,7 @@ def build_update_script(current_dir, backup_path, current_version, remote_versio
     # shlex.quote'd; bash parses the single-quoted form inside the array
     # literal and stores the raw pattern as one array element — safe even if
     # the pattern contains apostrophes or whitespace.
-    exclusions_fragment = "".join(
-        f" -o -name {shlex.quote(str(p))} -prune" for p in exclusions
-    )
+    exclusions_fragment = "".join(f" -o -name {shlex.quote(str(p))} -prune" for p in exclusions)
 
     script = f"""#!/bin/bash
 set -e
@@ -102,18 +121,55 @@ find {q_current_dir} -maxdepth 1 -type f "${{EXCLUDE_ARGS[@]}}" -name "*.py" -pr
 "${{EXCLUDE_ARGS[@]}}" -name "*.md" -print -exec cp {{}} {q_backup_path}/ \\; -o \\
 "${{EXCLUDE_ARGS[@]}}" -name ".git*" -print -exec cp {{}} {q_backup_path}/ \\; 2>/dev/null || true
 
-# Backup important directories (excluding .git, __pycache__, etc.)
-for dir in {q_current_dir}/*; do
+# Backup important directories (excluding .git, __pycache__, etc.).
+# Iterate both visible and dotted entries so hidden dirs like
+# ``.github`` (workflow files) get backed up too. Without dotglob /
+# the explicit ``.[!.]*`` pattern, the original ``{q_current_dir}/*``
+# glob skipped every dot-directory and a self-update silently lost
+# them. ``[ -e "$dir" ]`` guards against the literal patterns
+# expanding when nothing matches.
+for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
+    [ -e "$dir" ] || continue
     if [ -d "$dir" ]; then
         dirname=$(basename "$dir")
+        # Hardcoded skip list now also covers ``.venv`` / ``venv`` /
+        # ``.tox`` — common virtualenv / tooling caches the user
+        # may have at the repo root. Without this, a local ``.venv``
+        # would be copied into ``backup/`` here AND deleted by the
+        # cleanup loop below, even though the user's `.gitignore`
+        # only ignores bare ``venv``. The cleanup loop applies the
+        # same extended skip list to keep parity — anything we
+        # don't back up must NOT be deleted either, otherwise a
+        # self-update wipes the user's environment.
         case "$dirname" in
-            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache)
+            .git|backup|images|__pycache__|*.egg-info|.pytest_cache|.mypy_cache|.venv|venv|.tox)
                 echo "Skipping $dirname (cache/git/static data)"
                 ;;
             *)
-                if [ ! -f {q_current_dir}/.gitignore ] || ! grep -q "^$dirname$" {q_current_dir}/.gitignore 2>/dev/null; then
+                # Prefer ``git check-ignore`` so globbed/anchored
+                # rules ("build-*", "venv*/", "/dist") are recognised
+                # exactly as the user's working tree treats them; the
+                # old printf-into-grep -Fxqf only matched literal
+                # entries and would happily back up an ignored
+                # ``build-cuda`` because the .gitignore line is
+                # ``build-*``. Fall back to the literal-line scan
+                # when git is unavailable or the working tree is not
+                # a git checkout — preserves the historical behaviour
+                # for the bundled .zip release path.
+                ignored=0
+                if command -v git >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} rev-parse --is-inside-work-tree >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} check-ignore -q -- "$dirname" 2>/dev/null; then
+                    ignored=1
+                elif [ -f {q_current_dir}/.gitignore ] \\
+                     && printf '%s\\n%s\\n%s\\n%s\\n' "$dirname" "$dirname/" "/$dirname" "/$dirname/" | grep -Fxqf - {q_current_dir}/.gitignore 2>/dev/null; then
+                    ignored=1
+                fi
+                if [ "$ignored" = "0" ]; then
                     echo "Backing up directory: $dirname"
                     cp -r "$dir" {q_backup_path}/
+                else
+                    echo "Skipping $dirname (gitignored)"
                 fi
                 ;;
         esac
@@ -123,7 +179,32 @@ done
 echo "Backup completed in: "{q_backup_path}
 echo ""
 
-# Remove old files (keep JSON files and backup directory)
+# Clone the replacement tree BEFORE wiping the current install.
+# The previous order (delete-then-clone) would self-destruct on any
+# clone failure (no network, git missing, server down) — ``set -e``
+# would abort right after the wipe, leaving the user with only the
+# manual backup to recover from. Clone into a sibling temp dir
+# OUTSIDE ``{q_current_dir}`` so the cleanup loop below can't reach
+# it, then verify the clone actually produced a non-empty tree
+# before touching the live install.
+echo "Cloning latest version from GitHub..."
+TEMP_CLONE_DIR=$(mktemp -d) || {{ echo "ERROR: mktemp failed; refusing to proceed" >&2; exit 1; }}
+# Cleanup the temp dir on any exit so we don't leave it lying
+# around after success / interruption. The find/move below
+# clears most of it; ``rm -rf`` covers the rest.
+trap 'rm -rf "$TEMP_CLONE_DIR"' EXIT
+git clone {q_github_url} "$TEMP_CLONE_DIR/repo"
+if [ ! -d "$TEMP_CLONE_DIR/repo" ] || [ -z "$(ls -A "$TEMP_CLONE_DIR/repo" 2>/dev/null)" ]; then
+    echo "ERROR: git clone produced an empty tree; refusing to wipe current install" >&2
+    exit 1
+fi
+echo "Clone verified — proceeding with install."
+echo ""
+
+# Remove old files (keep JSON files and backup directory). Safe to
+# proceed now that we have a verified replacement tree at
+# ``$TEMP_CLONE_DIR/repo``; any subsequent failure leaves a
+# recoverable state because the new files exist on disk.
 echo "Removing old files for clean installation..."
 
 # Remove Python files and other source files
@@ -132,15 +213,48 @@ find {q_current_dir} -maxdepth 1 -type f -name "*.md" -delete 2>/dev/null || tru
 find {q_current_dir}/config -maxdepth 1 -type f -name "version" -delete 2>/dev/null || true
 find {q_current_dir} -maxdepth 1 -type f -name ".git*" -delete 2>/dev/null || true
 
-# Remove directories (except JSON config dirs, backup, and .git)
-for dir in {q_current_dir}/*; do
+# Remove directories (except JSON config dirs, backup, and .git).
+# Match the backup loop above: iterate dotted entries too so stale
+# hidden directories like ``.github`` / ``.venv`` actually get
+# cleaned up, otherwise they'd survive a self-update and block the
+# new install from placing fresh copies in the same slots.
+# ``[ -e "$dir" ]`` guards against literal patterns when the glob
+# matches nothing.
+for dir in {q_current_dir}/* {q_current_dir}/.[!.]* {q_current_dir}/..?*; do
+    [ -e "$dir" ] || continue
     if [ -d "$dir" ]; then
         dirname=$(basename "$dir")
+        # Mirror the backup loop's extended skip list — anything we
+        # did NOT back up above must NOT be removed here, otherwise
+        # ``.venv`` / ``venv`` / ``.tox`` would be wiped on every
+        # self-update even though they were intentionally preserved.
         case "$dirname" in
-            backup|.git|images)
+            backup|.git|images|.venv|venv|.tox)
                 echo "Preserving $dirname"
                 ;;
             *)
+                # ALSO preserve any user-owned gitignored directory —
+                # the backup loop above already skipped these via
+                # ``git check-ignore``, so deleting them here would
+                # destroy user data that was never backed up. Common
+                # examples on a real install: ``models/``,
+                # ``.cache/``, ``build-cuda/``, anything the user
+                # added to ``.gitignore`` for the project's runtime
+                # layout. Same ``git check-ignore`` → ``.gitignore``
+                # fallback as the backup loop.
+                ignored=0
+                if command -v git >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} rev-parse --is-inside-work-tree >/dev/null 2>&1 \\
+                   && git -C {q_current_dir} check-ignore -q -- "$dirname" 2>/dev/null; then
+                    ignored=1
+                elif [ -f {q_current_dir}/.gitignore ] \\
+                     && printf '%s\\n%s\\n%s\\n%s\\n' "$dirname" "$dirname/" "/$dirname" "/$dirname/" | grep -Fxqf - {q_current_dir}/.gitignore 2>/dev/null; then
+                    ignored=1
+                fi
+                if [ "$ignored" = "1" ]; then
+                    echo "Preserving $dirname (gitignored)"
+                    continue
+                fi
                 echo "Removing directory: $dirname"
                 rm -rf "$dir"
                 ;;
@@ -151,19 +265,18 @@ done
 echo "Old files cleaned up."
 echo ""
 
-# Clone new version
-echo "Cloning latest version from GitHub..."
-cd {q_current_dir}
-git clone {q_github_url} temp_clone
-cd temp_clone
-
-# Move files from temp clone to current directory
+# Move files from the verified temp clone into the current
+# directory. Drop the ``2>/dev/null || true`` mask: a real ``mv``
+# failure (target stays occupied by a leftover hidden dir, perm
+# denied, etc.) used to be silently swallowed and the update
+# reported success even though the new files never landed. Let
+# the error propagate so the user sees it.
 echo "Installing new version..."
-# Move all files except .git and images directories
-find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} {q_current_dir}/ \\; 2>/dev/null || true
+cd "$TEMP_CLONE_DIR/repo"
+find . -maxdepth 1 ! -name . ! -name .git ! -name images -exec mv {{}} {q_current_dir}/ \\;
 echo "Skipped downloading images folder (using existing)"
 cd {q_current_dir}
-rm -rf temp_clone
+# ``$TEMP_CLONE_DIR`` is cleaned up by the trap above.
 
 # Restore user-owned gitignored state from backup. The fresh clone never
 # contains llama_cpp_launcher_configs.json (it's gitignored), so without this
@@ -178,6 +291,14 @@ elif [ -f {q_backup_path}/llama_cpp_launcher_configs.json ]; then
     USER_CONFIG_SRC={q_backup_path}/llama_cpp_launcher_configs.json
 fi
 
+# build_configs.json is also user-owned persisted state (saved Build
+# tab presets). gpu_detection_cache.json is host-specific and stays
+# excluded — the next launch re-detects.
+BUILD_CONFIG_SRC=""
+if [ -f {q_backup_path}/config/build_configs.json ]; then
+    BUILD_CONFIG_SRC={q_backup_path}/config/build_configs.json
+fi
+
 if [ -n "$USER_CONFIG_SRC" ]; then
     if [ -d {q_current_dir}/config ] && [ -d {q_current_dir}/modules ]; then
         cp "$USER_CONFIG_SRC" {q_current_dir}/config/llama_cpp_launcher_configs.json
@@ -188,6 +309,11 @@ if [ -n "$USER_CONFIG_SRC" ]; then
     fi
 else
     echo "  No user configuration found in backup - clean install, nothing to restore."
+fi
+
+if [ -n "$BUILD_CONFIG_SRC" ] && [ -d {q_current_dir}/config ]; then
+    cp "$BUILD_CONFIG_SRC" {q_current_dir}/config/build_configs.json
+    echo "  Restored: config/build_configs.json"
 fi
 
 echo ""
@@ -212,12 +338,24 @@ class AboutTab:
     def __init__(self):
         self.version = self._load_version()
         self.github_url = "https://github.com/thad0ctor/llama-server-launcher"
-        self.github_version_url = "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/config/version"
+        self.github_version_url = (
+            "https://raw.githubusercontent.com/thad0ctor/llama-server-launcher/main/config/version"
+        )
         self.donate_url = "https://www.paypal.me/thad0ctor"
         self.version_status = "Checking..."
         self.remote_version = None
         self.version_label = None
         self.update_button = None
+        self._version_queue = queue.Queue()
+        self._version_after_id = None
+        self._version_thread = None
+        self._version_check_pending = False
+        self._parent = None
+        # Generation token so a stale background check from a prior mount
+        # can't post results / COMPLETE into the new run's queue. Each
+        # ``setup_about_tab`` bumps this; worker threads stamp every
+        # outgoing item and the drain rejects mismatches.
+        self._version_generation = 0
         # Python-level flag the background version-check thread consults
         # before touching any Tk widget. Cleared by ``_mark_dead`` (bound
         # to the parent frame's ``<Destroy>`` event in ``setup_about_tab``)
@@ -246,16 +384,16 @@ class AboutTab:
                 self._mark_dead()
         except Exception:
             pass
-        
+
     def _load_version(self):
         """Load version from the version file."""
         try:
             # Get the repo root directory (this module lives in modules/)
             script_dir = Path(__file__).parent.parent
             version_file = script_dir / "config" / "version"
-            
+
             if version_file.exists():
-                with open(version_file, 'r', encoding='utf-8') as f:
+                with open(version_file, "r", encoding="utf-8") as f:
                     version = f.read().strip()
                     return version if version else "Unknown"
             else:
@@ -263,32 +401,32 @@ class AboutTab:
         except Exception as e:
             print(f"Error loading version: {e}", file=sys.stderr)
             return "Unknown"
-    
+
     def _parse_version(self, version_str):
         """Parse version string in format YYYY-MM-DD-REV to comparable tuple."""
         try:
             if version_str in ["Unknown", "Version file not found"]:
                 return (0, 0, 0, 0)
-            
-            parts = version_str.strip().split('-')
+
+            parts = version_str.strip().split("-")
             if len(parts) != 4:
                 return (0, 0, 0, 0)
-            
+
             year = int(parts[0])
             month = int(parts[1])
             day = int(parts[2])
             rev = int(parts[3])
-            
+
             return (year, month, day, rev)
         except (ValueError, IndexError):
             return (0, 0, 0, 0)
-    
+
     def _is_version_newer(self, current_version, remote_version):
         """Compare two versions to determine if remote is newer."""
         current_tuple = self._parse_version(current_version)
         remote_tuple = self._parse_version(remote_version)
         return remote_tuple > current_tuple
-    
+
     def _widget_alive(self):
         """Return True iff the About tab is still mounted.
 
@@ -305,7 +443,7 @@ class AboutTab:
         except Exception:
             return False
 
-    def _check_version_online(self):
+    def _check_version_online(self, generation=None):
         """Check version against GitHub repository.
 
         Runs in a daemon background thread. Every Tk-mutating helper is
@@ -315,31 +453,126 @@ class AboutTab:
         and leak a ``RuntimeError: main thread is not in main loop``
         into Tcl, which (Python 3.13) corrupts the next root's
         interpreter and deadlocks subsequent UI tests.
+
+        ``generation`` is the per-mount token captured at the time this
+        thread was spawned. The drain rejects results from a generation
+        that no longer matches ``self._version_generation`` so a stale
+        in-flight check from a prior mount can't leak status text or
+        COMPLETE into the new run.
         """
+        # Default to the current generation when called without one (the
+        # historical sync no-parent code path). New callers always pass
+        # the captured value.
+        if generation is None:
+            generation = self._version_generation
+        if not REQUESTS_AVAILABLE:
+            self._post_version_result(generation, "requests not installed", None)
+            if self._parent is not None:
+                self._version_queue.put((generation, _VERSION_CHECK_COMPLETE))
+            return
         try:
             response = requests.get(self.github_version_url, timeout=10)
             if not self._widget_alive():
                 return
             if response.status_code == 200:
-                self.remote_version = response.text.strip()
-
-                if self._is_version_newer(self.version, self.remote_version):
-                    self.version_status = "Update Available"
-                    self._update_version_display()
-                    self._show_update_button()
+                remote_version = response.text.strip()
+                # A 200 with blank/non-version text (proxy interception,
+                # broken CDN, captive portal) used to silently land in
+                # _parse_version → (0,0,0,0) and display as "Current".
+                # Reject anything that doesn't parse so the UI shows the
+                # check actually failed.
+                if not remote_version or self._parse_version(remote_version) == (0, 0, 0, 0):
+                    self._post_version_result(generation, "Check Failed", remote_version or None)
                 else:
-                    self.version_status = "Current"
-                    self._update_version_display()
+                    status = "Update Available" if self._is_version_newer(self.version, remote_version) else "Current"
+                    self._post_version_result(generation, status, remote_version)
             else:
-                self.version_status = "Check Failed"
-                self._update_version_display()
+                self._post_version_result(generation, "Check Failed", None)
         except requests.RequestException as e:
             print(f"Error checking version: {e}", file=sys.stderr)
             if not self._widget_alive():
                 return
-            self.version_status = "Check Failed"
+            self._post_version_result(generation, "Check Failed", None)
+        finally:
+            if self._parent is not None:
+                self._version_queue.put((generation, _VERSION_CHECK_COMPLETE))
+
+    def _post_version_result(self, generation, status, remote_version):
+        if self._parent is None:
+            self.version_status = status
+            self.remote_version = remote_version
             self._update_version_display()
-    
+            if status == "Update Available":
+                self._show_update_button()
+            return
+        self._version_queue.put((generation, status, remote_version))
+
+    def _schedule_version_queue_drain(self):
+        if self._version_after_id is None and self._parent is not None and self._version_check_pending:
+            try:
+                self._version_after_id = self._parent.after(
+                    VERSION_CHECK_POLL_MS,
+                    self._drain_version_queue,
+                )
+            except tk.TclError:
+                # Parent was destroyed between the worker thread queuing
+                # a result and this scheduler running. Drop the schedule
+                # and leave ``_version_after_id`` at ``None`` so future
+                # teardown logic doesn't try to ``after_cancel`` a bad id.
+                self._version_after_id = None
+
+    def _drain_version_queue(self):
+        self._version_after_id = None
+        while True:
+            try:
+                item = self._version_queue.get_nowait()
+            except queue.Empty:
+                if self._widget_alive() and self._version_check_pending:
+                    self._schedule_version_queue_drain()
+                return
+
+            # Every item posted by a worker is now ``(generation, ...)``.
+            # Drop items whose generation no longer matches — a stale
+            # check from a prior mount that resolved late shouldn't
+            # change current UI or clear the new-run pending flag.
+            if not (isinstance(item, tuple) and len(item) >= 2):
+                # Defensive: a bare COMPLETE sentinel from old code path.
+                if item is _VERSION_CHECK_COMPLETE:
+                    self._version_check_pending = False
+                    return
+                continue
+            item_generation = item[0]
+            if item_generation != self._version_generation:
+                continue
+            if item[1] is _VERSION_CHECK_COMPLETE:
+                self._version_check_pending = False
+                return
+
+            # Defensive: the queue should only ever carry 3-tuples
+            # (generation, status, remote_version) from
+            # ``_version_check_worker``, but a malformed entry from
+            # a future producer / corrupted state would otherwise
+            # raise ``ValueError`` mid-drain and leave
+            # ``_version_check_pending`` stuck True. Skip it.
+            if not isinstance(item, (tuple, list)) or len(item) != 3:
+                continue
+            _, status, remote_version = item
+            if not self._widget_alive():
+                return
+            self.version_status = status
+            self.remote_version = remote_version
+            self._update_version_display()
+            if status == "Update Available":
+                self._show_update_button()
+            # Don't clear ``_version_check_pending`` or return here —
+            # continue the loop so the trailing ``_VERSION_CHECK_COMPLETE``
+            # sentinel actually gets consumed. The old code returned
+            # mid-loop, leaving COMPLETE orphaned in the queue (and
+            # because ``_schedule_version_queue_drain`` checks
+            # ``_version_check_pending``, the drain would never be
+            # rescheduled to clean it up).
+            continue
+
     def _update_version_display(self):
         """Update the version display with status.
 
@@ -372,75 +605,90 @@ class AboutTab:
             self.update_button.pack(pady=(10, 0))
         except (tk.TclError, RuntimeError):
             pass
-    
+
     def _perform_update(self):
         """Perform the auto-update process."""
         result = messagebox.askyesno(
-            "Auto Update", 
+            "Auto Update",
             f"Update from {self.version} to {self.remote_version}?\n\n"
             "This will:\n"
             "• Create a backup of current files (excluding JSON files)\n"
             "• Clone the latest version from GitHub\n"
             "• Open a new terminal window\n\n"
             "Continue with update?",
-            icon='question'
+            icon="question",
         )
-        
+
         if result:
             self._start_update_process()
-    
+
     def _start_update_process(self):
         """Start the update process in a new terminal."""
         try:
             # Get the repo root directory (this module lives in modules/)
             current_dir = Path(__file__).parent.parent
-            
+
             # Create update script
             script_content = self._generate_update_script(current_dir)
             script_path = current_dir / "update_script.sh"
-            
-            with open(script_path, 'w', encoding='utf-8') as f:
+
+            with open(script_path, "w", encoding="utf-8") as f:
                 f.write(script_content)
-            
+
             # Make script executable
             os.chmod(script_path, 0o755)
-            
+
             # Open new terminal and run the update script
-            if sys.platform.startswith('linux'):
-                # Try different terminal emulators
-                terminals = ['gnome-terminal', 'konsole', 'xterm', 'xfce4-terminal']
+            if sys.platform.startswith("linux"):
+                # Try different terminal emulators. The flag families
+                # differ enough that lumping ``xterm`` and
+                # ``xfce4-terminal`` under one ``-e f"bash {path}"``
+                # branch breaks both on script paths with spaces or
+                # shell metacharacters:
+                #   * ``xterm -e PROGRAM [ARGS...]`` consumes the
+                #     remaining argv tokens directly — splitting the
+                #     payload into separate argv elements is the
+                #     correct form (no quoting needed, no word-split).
+                #   * ``xfce4-terminal -e "STRING"`` word-splits the
+                #     STRING in shell-like fashion, so a path with
+                #     spaces must be ``shlex.quote``-protected before
+                #     being embedded.
+                terminals = ["gnome-terminal", "konsole", "xterm", "xfce4-terminal"]
+                quoted_script_path = shlex.quote(str(script_path))
                 for terminal in terminals:
                     try:
-                        if terminal == 'gnome-terminal':
-                            subprocess.Popen([terminal, '--', 'bash', str(script_path)], 
-                                           cwd=current_dir)
-                        elif terminal == 'konsole':
-                            subprocess.Popen([terminal, '-e', 'bash', str(script_path)], 
-                                           cwd=current_dir)
-                        else:
-                            subprocess.Popen([terminal, '-e', f'bash {script_path}'], 
-                                           cwd=current_dir)
+                        if terminal == "gnome-terminal":
+                            subprocess.Popen([terminal, "--", "bash", str(script_path)], cwd=current_dir)
+                        elif terminal == "konsole":
+                            subprocess.Popen([terminal, "-e", "bash", str(script_path)], cwd=current_dir)
+                        elif terminal == "xterm":
+                            subprocess.Popen([terminal, "-e", "bash", str(script_path)], cwd=current_dir)
+                        else:  # xfce4-terminal
+                            subprocess.Popen([terminal, "-e", f"bash {quoted_script_path}"], cwd=current_dir)
                         break
                     except FileNotFoundError:
                         continue
                 else:
-                    # Fallback to xterm
-                    subprocess.Popen(['xterm', '-e', f'bash {script_path}'], 
-                                   cwd=current_dir)
-            elif sys.platform == 'darwin':  # macOS
-                subprocess.Popen(['open', '-a', 'Terminal', str(script_path)], 
-                               cwd=current_dir)
-            elif sys.platform.startswith('win'):  # Windows
-                subprocess.Popen(['cmd', '/c', 'start', 'cmd', '/k', str(script_path)], 
-                               cwd=current_dir, shell=True)
-            
-            messagebox.showinfo("Update Started", 
-                              "Update process started in new terminal window.\n"
-                              "Please follow the instructions in the terminal.")
-            
+                    # Fallback to xterm — same argv form as the loop above.
+                    subprocess.Popen(["xterm", "-e", "bash", str(script_path)], cwd=current_dir)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.Popen(["open", "-a", "Terminal", str(script_path)], cwd=current_dir)
+            elif sys.platform.startswith("win"):  # Windows
+                # ``shell=True`` is redundant here — we're already
+                # invoking ``cmd.exe`` explicitly via argv, so the
+                # extra cmd-wrapping layer ``shell=True`` would add
+                # only obscures argv parsing without changing what
+                # gets run. Pass the argv directly.
+                subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", str(script_path)], cwd=current_dir)
+
+            messagebox.showinfo(
+                "Update Started",
+                "Update process started in new terminal window.\n" "Please follow the instructions in the terminal.",
+            )
+
         except Exception as e:
             messagebox.showerror("Update Error", f"Failed to start update process:\n{str(e)}")
-    
+
     def _generate_update_script(self, current_dir):
         """Generate the update script content.
 
@@ -465,7 +713,7 @@ class AboutTab:
             github_url=self.github_url,
             exclusions=exclusions,
         )
-    
+
     def _get_backup_exclusions(self, current_dir):
         """Return a list of raw ``.gitignore``-style exclusion patterns.
 
@@ -477,35 +725,81 @@ class AboutTab:
         or inject into the generated update script.
         """
         patterns = [
-            "__pycache__", "*.pyc", "*.pyo", "*.pyd",
-            ".pytest_cache", ".mypy_cache", ".coverage",
-            "*.egg-info", ".tox", ".venv", "venv",
-            ".DS_Store", "Thumbs.db", "*.tmp", "*.log",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            "*.pyd",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".coverage",
+            "*.egg-info",
+            ".tox",
+            ".venv",
+            "venv",
+            ".DS_Store",
+            "Thumbs.db",
+            "*.tmp",
+            "*.log",
         ]
         gitignore_path = current_dir / ".gitignore"
 
         try:
             if gitignore_path.exists():
-                with open(gitignore_path, 'r', encoding='utf-8') as f:
+                with open(gitignore_path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith('#'):
+                        if line and not line.startswith("#"):
                             patterns.append(line)
         except Exception as e:
             print(f"Warning: Could not read .gitignore: {e}", file=sys.stderr)
 
         # Drop any accidentally-empty entries.
         return [p for p in patterns if p]
-    
+
     def _open_url(self, url):
         """Open URL in the default web browser."""
         try:
             webbrowser.open(url)
         except Exception as e:
             print(f"Error opening URL {url}: {e}", file=sys.stderr)
-    
+
     def setup_about_tab(self, parent):
         """Set up the About tab UI."""
+        # Re-arm teardown state in case this AboutTab is being remounted.
+        # ``_on_parent_destroy`` permanently clears ``_alive`` and may
+        # have left ``_version_after_id`` non-None — without re-arming
+        # here ``_check_version_online`` would short-circuit at
+        # ``_widget_alive()`` and a stale after id would also prevent
+        # the new queue drain from scheduling, leaving the version
+        # label stuck on ``Checking...``.
+        self._alive.set()
+        # If the previous mount left a pending ``after`` handle alive,
+        # cancel it BEFORE we drop the reference. A leftover timer would
+        # otherwise fire against the new mount's parent and either
+        # schedule against a destroyed widget or race the new
+        # ``_drain_version_queue`` loop. ``_parent`` from the prior mount
+        # is the widget the timer was registered against.
+        prev_after_id = self._version_after_id
+        prev_parent = getattr(self, "_parent", None)
+        if prev_after_id and prev_parent is not None:
+            try:
+                prev_parent.after_cancel(prev_after_id)
+            except Exception:
+                pass
+        self._version_after_id = None
+        self._version_check_pending = False
+        # Reset the per-instance version-check state so a remount
+        # doesn't briefly render a stale "Current"/"Update Available"
+        # from the previous mount while the new background worker
+        # is still in flight. The display update below will fall
+        # through ``_update_version_display`` once widgets exist.
+        self.version_status = "Checking..."
+        self.remote_version = None
+        # Bump the per-mount generation so any still-in-flight check
+        # from a prior mount (background worker hasn't returned yet)
+        # is rejected when its result tries to post into the queue.
+        self._version_generation += 1
+        self._parent = parent
         # Bind the parent's <Destroy> so background workers know to stop
         # touching widgets before Tcl tears them down. Without this, the
         # version-check thread can race into a destroyed widget and leak
@@ -521,91 +815,108 @@ class AboutTab:
         # Create main frame with padding
         main_frame = ttk.Frame(parent, padding=20)
         main_frame.pack(fill="both", expand=True)
-        
+
         # Configure grid weights for centering
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(0, weight=1)
-        
+
         # Create content frame
         content_frame = ttk.Frame(main_frame)
         content_frame.grid(row=0, column=0, sticky="")
-        
+
         row = 0
-        
+
         # Title
-        title_label = ttk.Label(content_frame, text="Llama.cpp Server Launcher", 
-                               font=("TkDefaultFont", 16, "bold"))
+        title_label = ttk.Label(content_frame, text="Llama.cpp Server Launcher", font=("TkDefaultFont", 16, "bold"))
         title_label.grid(row=row, column=0, pady=(0, 20))
         row += 1
-        
+
         # Version information
         version_frame = ttk.LabelFrame(content_frame, text="Version Information", padding=15)
         version_frame.grid(row=row, column=0, sticky="ew", pady=(0, 15))
         row += 1
-        
+
         # Version label that will be updated
-        self.version_label = ttk.Label(version_frame, 
-                                     text=f"Version: {self.version} ({self.version_status})", 
-                                     font=("TkDefaultFont", 11))
+        self.version_label = ttk.Label(
+            version_frame, text=f"Version: {self.version} ({self.version_status})", font=("TkDefaultFont", 11)
+        )
         self.version_label.pack(anchor="w")
-        
+
         # Update button (initially hidden)
-        self.update_button = ttk.Button(version_frame, text="🔄 Update Available - Click to Update", 
-                                      command=self._perform_update,
-                                      style="Accent.TButton")  # Use accent style if available
+        self.update_button = ttk.Button(
+            version_frame,
+            text="🔄 Update Available - Click to Update",
+            command=self._perform_update,
+            style="Accent.TButton",
+        )  # Use accent style if available
         # Don't pack initially - will be shown when update is available
-        
-        # Start version check in background
-        threading.Thread(target=self._check_version_online, daemon=True).start()
-        
+
+        if REQUESTS_AVAILABLE:
+            # Start version check in background; results are applied by the Tk thread.
+            # ``_version_queue`` is recreated so any stale items left in
+            # the old queue from a prior generation can't leak through —
+            # the drain ALSO filters by generation, this is just belt
+            # and braces.
+            self._version_queue = queue.Queue()
+            self._version_check_pending = True
+            generation = self._version_generation
+            self._version_thread = threading.Thread(
+                target=self._check_version_online,
+                args=(generation,),
+                daemon=True,
+            )
+            self._version_thread.start()
+            self._schedule_version_queue_drain()
+        else:
+            self.version_status = "requests not installed"
+            self._update_version_display()
+
         # Project information
         project_frame = ttk.LabelFrame(content_frame, text="Project Information", padding=15)
         project_frame.grid(row=row, column=0, sticky="ew", pady=(0, 15))
         row += 1
-        
+
         # Description
-        description = ("A user-friendly GUI to easily configure and launch the llama.cpp server, "
-                      "manage model configurations, set environment variables, and generate launch scripts.")
+        description = (
+            "A user-friendly GUI to easily configure and launch the llama.cpp server, "
+            "manage model configurations, set environment variables, and generate launch scripts."
+        )
         desc_label = ttk.Label(project_frame, text=description, wraplength=400, justify="left")
         desc_label.pack(anchor="w", pady=(0, 10))
-        
+
         # GitHub link
         github_frame = ttk.Frame(project_frame)
         github_frame.pack(fill="x", pady=(0, 5))
-        
+
         ttk.Label(github_frame, text="GitHub Repository:").pack(side="left")
-        github_button = ttk.Button(github_frame, text="Visit GitHub", 
-                                  command=lambda: self._open_url(self.github_url))
+        github_button = ttk.Button(github_frame, text="Visit GitHub", command=lambda: self._open_url(self.github_url))
         github_button.pack(side="right")
-        
+
         # Support section
         support_frame = ttk.LabelFrame(content_frame, text="Support the Project", padding=15)
         support_frame.grid(row=row, column=0, sticky="ew", pady=(0, 15))
         row += 1
-        
-        support_text = ("If you find this tool useful, consider supporting its development!")
+
+        support_text = "If you find this tool useful, consider supporting its development!"
         support_label = ttk.Label(support_frame, text=support_text, wraplength=400, justify="left")
         support_label.pack(anchor="w", pady=(0, 10))
-        
+
         # Donate button
         donate_frame = ttk.Frame(support_frame)
         donate_frame.pack(fill="x")
-        
+
         ttk.Label(donate_frame, text="Donate via PayPal:").pack(side="left")
-        donate_button = ttk.Button(donate_frame, text="💝 Donate", 
-                                  command=lambda: self._open_url(self.donate_url))
+        donate_button = ttk.Button(donate_frame, text="💝 Donate", command=lambda: self._open_url(self.donate_url))
         donate_button.pack(side="right")
-        
+
         # Credits section
         credits_frame = ttk.LabelFrame(content_frame, text="Credits", padding=15)
         credits_frame.grid(row=row, column=0, sticky="ew")
-        
-        credits_text = ("Built with Python and Tkinter\n"
-                       "Designed for use with llama.cpp\n"
-                       "Created by thad0ctor")
+
+        credits_text = "Built with Python and Tkinter\n" "Designed for use with llama.cpp\n" "Created by thad0ctor"
         credits_label = ttk.Label(credits_frame, text=credits_text, justify="left")
         credits_label.pack(anchor="w")
-        
+
         # Configure column weights for proper sizing
         content_frame.columnconfigure(0, weight=1)
         version_frame.columnconfigure(0, weight=1)
@@ -617,4 +928,4 @@ class AboutTab:
 # Factory function for creating the about tab
 def create_about_tab():
     """Factory function to create an AboutTab instance."""
-    return AboutTab() 
+    return AboutTab()

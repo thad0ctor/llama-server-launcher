@@ -795,7 +795,12 @@ def test_real_llama_cpp_launcher_configs_json_loads(
         cm.load_saved_configs()
     assert cm.configs_loaded_successfully is True
     assert isinstance(launcher.saved_configs, dict)
-    assert launcher.saved_configs, "live config file should contain at least one config"
+    # Don't require the live file to have entries — a freshly initialized
+    # dev checkout may legitimately ship an empty ``configs: {}`` mapping
+    # and that should still count as "loads cleanly". The shape check above
+    # is what matters. ``configs: []`` is NOT a supported on-disk shape:
+    # ``ConfigManager.load_saved_configs`` calls ``raw_configs.items()``
+    # which would raise ``AttributeError`` on a list.
 
 
 def test_real_chat_templates_json_is_valid_mapping(project_config_dir):

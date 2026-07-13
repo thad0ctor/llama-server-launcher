@@ -16,12 +16,14 @@ launch.py emission block.
 """
 
 import sys
+import queue
 import tkinter as tk
-from pathlib import Path
-from threading import Thread
+from threading import Event, Lock, Thread
 from tkinter import ttk
 
 from modules.system import parse_gguf_header_simple
+
+SPEC_DRAFT_ANALYSIS_POLL_MS = 80
 
 
 # Allowed values for the draft KV cache type comboboxes. Leading "" lets the
@@ -29,7 +31,15 @@ from modules.system import parse_gguf_header_simple
 # omission). Module-level so tests can import and assert against the SAME
 # tuple the UI actually uses — preventing silent drift when the set changes.
 SPEC_DRAFT_CACHE_TYPE_VALUES = (
-    "", "f16", "f32", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "q6_k",
+    "",
+    "f16",
+    "f32",
+    "q8_0",
+    "q4_0",
+    "q4_1",
+    "q5_0",
+    "q5_1",
+    "q6_k",
 )
 
 
@@ -99,59 +109,89 @@ class SpecTab:
         # Master toggle: when False, no --spec-* / --draft-* flags are emitted.
         # Initial values are sourced from app_settings so they persist across
         # sessions (same pattern as mmproj/selected_mmproj_path).
-        self.spec_enabled        = tk.BooleanVar(value=ib(app_settings, "spec_enabled"))
-        self.spec_type           = tk.StringVar(value=is_(app_settings, "spec_type", "none") or "none")
+        self.spec_enabled = tk.BooleanVar(value=ib(app_settings, "spec_enabled"))
+        self.spec_type = tk.StringVar(value=is_(app_settings, "spec_type", "none") or "none")
         # Common draft controls (numeric entries; blank = use binary default).
-        self.spec_draft_n_max    = tk.StringVar(value=is_(app_settings, "spec_draft_n_max"))
-        self.spec_draft_n_min    = tk.StringVar(value=is_(app_settings, "spec_draft_n_min"))
-        self.spec_draft_p_min    = tk.StringVar(value=is_(app_settings, "spec_draft_p_min"))
-        self.spec_draft_p_split  = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))   # llama.cpp only
+        self.spec_draft_n_max = tk.StringVar(value=is_(app_settings, "spec_draft_n_max"))
+        self.spec_draft_n_min = tk.StringVar(value=is_(app_settings, "spec_draft_n_min"))
+        self.spec_draft_p_min = tk.StringVar(value=is_(app_settings, "spec_draft_p_min"))
+        self.spec_draft_p_split = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))  # llama.cpp only
         # Draft model selection.
-        self.spec_draft_model    = tk.StringVar(value=is_(app_settings, "spec_draft_model"))    # -md path
+        self.spec_draft_model = tk.StringVar(value=is_(app_settings, "spec_draft_model"))  # -md path
         # Opt-in for ik_llama+mtp: when False, hide the draft picker UI AND
         # suppress --model-draft / draft offload emission so the embedded MTP
         # head in the base GGUF is used. Required-draft modes (draft-simple /
         # draft-eagle3 on llama.cpp) ignore this and always emit draft flags.
         self.spec_use_draft_model = tk.BooleanVar(value=ib(app_settings, "spec_use_draft_model"))
-        self.spec_draft_ngl      = tk.StringVar(value=is_(app_settings, "spec_draft_ngl"))
-        self.spec_draft_device   = tk.StringVar(value=is_(app_settings, "spec_draft_device"))
-        self.spec_draft_ctk      = tk.StringVar(value=is_(app_settings, "spec_draft_ctk"))
-        self.spec_draft_ctv      = tk.StringVar(value=is_(app_settings, "spec_draft_ctv"))
-        self.spec_draft_cpu_moe  = tk.BooleanVar(value=ib(app_settings, "spec_draft_cpu_moe"))  # llama.cpp only
-        self.spec_draft_n_cpu_moe= tk.StringVar(value=is_(app_settings, "spec_draft_n_cpu_moe"))  # llama.cpp only
+        self.spec_draft_ngl = tk.StringVar(value=is_(app_settings, "spec_draft_ngl"))
+        self.spec_draft_device = tk.StringVar(value=is_(app_settings, "spec_draft_device"))
+        self.spec_draft_ctk = tk.StringVar(value=is_(app_settings, "spec_draft_ctk"))
+        self.spec_draft_ctv = tk.StringVar(value=is_(app_settings, "spec_draft_ctv"))
+        self.spec_draft_cpu_moe = tk.BooleanVar(value=ib(app_settings, "spec_draft_cpu_moe"))  # llama.cpp only
+        self.spec_draft_n_cpu_moe = tk.StringVar(value=is_(app_settings, "spec_draft_n_cpu_moe"))  # llama.cpp only
         # Derived/UI state for the draft model's GPU layer slider + status (mirrors
         # self.n_gpu_layers_int / self.max_gpu_layers / self.gpu_layers_status_var
         # for the main model). Not persisted directly — set after draft GGUF
         # analysis succeeds and consumed only by the slider widget + status label.
-        self.spec_draft_ngl_int           = tk.IntVar(value=0)
-        self.max_spec_draft_gpu_layers    = tk.IntVar(value=0)
+        self.spec_draft_ngl_int = tk.IntVar(value=0)
+        self.max_spec_draft_gpu_layers = tk.IntVar(value=0)
         self.spec_draft_layers_status_var = tk.StringVar(value="Select draft model to see layer info")
-        self.current_spec_draft_analysis  = {}  # mirrors self.current_model_analysis
+        self.current_spec_draft_analysis = {}  # mirrors self.current_model_analysis
+        self._spec_draft_analysis_generation = 0
+        self._spec_draft_analysis_queue = queue.Queue()
+        self._spec_draft_analysis_lock = Lock()
+        self._spec_draft_analysis_after_id = None
+        self._spec_draft_analysis_thread = None
+        # Coalescing slots: ``_spec_draft_latest_path`` holds the most
+        # recent ``_start_spec_draft_gguf_analysis`` request; the
+        # single long-lived worker always re-reads this between
+        # parses so rapid listbox navigation collapses to one parse
+        # (the latest). ``_spec_draft_request_event`` wakes the
+        # idle-blocked worker; ``_spec_draft_worker_active`` is the
+        # atomic "do we already have a worker running?" flag, set /
+        # cleared only under ``_spec_draft_analysis_lock``.
+        self._spec_draft_latest_path: str | None = None
+        self._spec_draft_request_event = Event()
+        self._spec_draft_worker_active = False
+        # Snapshot of the SELECTION the checkbox UI last rendered into
+        # ``spec_draft_device``. Used by the conditional-clear logic so
+        # ``prior_derived`` reflects what the UI actually wrote — not
+        # the (possibly stale) value in ``app_settings`` /
+        # ``loaded_selected``. Without this snapshot, a change to
+        # ``spec_draft_selected_gpus`` between refreshes leaves the OLD
+        # ``CUDA…`` string in ``spec_draft_device`` and the next
+        # comparison treats it as a manual override.
+        self._spec_draft_last_rendered_selected: list[int] = []
+        # Suppresses ``_on_spec_draft_gpu_selection_changed`` for the
+        # duration of a programmatic ``var.set(...)`` sweep in
+        # ``_update_spec_draft_gpu_checkboxes``. See the handler for
+        # the full rationale.
+        self._suppress_spec_draft_gpu_events: bool = False
         # Ngram tuning (llama.cpp has per-variant size sets; ik_llama has a single shared set).
-        self.spec_ngram_simple_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
-        self.spec_ngram_simple_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
+        self.spec_ngram_simple_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_n"))
+        self.spec_ngram_simple_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_size_m"))
         self.spec_ngram_simple_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_simple_min_hits"))
-        self.spec_ngram_mapk_size_n     = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_n"))
-        self.spec_ngram_mapk_size_m     = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_m"))
-        self.spec_ngram_mapk_min_hits   = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_min_hits"))
-        self.spec_ngram_mapk4v_size_n   = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_n"))
-        self.spec_ngram_mapk4v_size_m   = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_m"))
+        self.spec_ngram_mapk_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_n"))
+        self.spec_ngram_mapk_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_size_m"))
+        self.spec_ngram_mapk_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk_min_hits"))
+        self.spec_ngram_mapk4v_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_n"))
+        self.spec_ngram_mapk4v_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_size_m"))
         self.spec_ngram_mapk4v_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_mapk4v_min_hits"))
-        self.spec_ngram_mod_n_min       = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_min"))
-        self.spec_ngram_mod_n_max       = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_max"))
-        self.spec_ngram_mod_n_match     = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_match"))
+        self.spec_ngram_mod_n_min = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_min"))
+        self.spec_ngram_mod_n_max = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_max"))
+        self.spec_ngram_mod_n_match = tk.StringVar(value=is_(app_settings, "spec_ngram_mod_n_match"))
         # Shared single ngram set used by ik_llama (one --spec-ngram-* set).
-        self.spec_ngram_size_n          = tk.StringVar(value=is_(app_settings, "spec_ngram_size_n"))
-        self.spec_ngram_size_m          = tk.StringVar(value=is_(app_settings, "spec_ngram_size_m"))
-        self.spec_ngram_min_hits        = tk.StringVar(value=is_(app_settings, "spec_ngram_min_hits"))
+        self.spec_ngram_size_n = tk.StringVar(value=is_(app_settings, "spec_ngram_size_n"))
+        self.spec_ngram_size_m = tk.StringVar(value=is_(app_settings, "spec_ngram_size_m"))
+        self.spec_ngram_min_hits = tk.StringVar(value=is_(app_settings, "spec_ngram_min_hits"))
         # Suffix tuning (ik_llama only).
-        self.spec_suffix_pattern_len    = tk.StringVar(value=is_(app_settings, "spec_suffix_pattern_len"))
-        self.spec_suffix_max_depth      = tk.StringVar(value=is_(app_settings, "spec_suffix_max_depth"))
+        self.spec_suffix_pattern_len = tk.StringVar(value=is_(app_settings, "spec_suffix_pattern_len"))
+        self.spec_suffix_max_depth = tk.StringVar(value=is_(app_settings, "spec_suffix_max_depth"))
         # ik_llama extras.
-        self.spec_autotune              = tk.BooleanVar(value=ib(app_settings, "spec_autotune"))
-        self.spec_draft_params          = tk.StringVar(value=is_(app_settings, "spec_draft_params"))  # -draft "k=v,k=v"
+        self.spec_autotune = tk.BooleanVar(value=ib(app_settings, "spec_autotune"))
+        self.spec_draft_params = tk.StringVar(value=is_(app_settings, "spec_draft_params"))  # -draft "k=v,k=v"
         # llama.cpp vision toggle.
-        self.no_mmproj                  = tk.BooleanVar(value=ib(app_settings, "no_mmproj"))  # --no-mmproj
+        self.no_mmproj = tk.BooleanVar(value=ib(app_settings, "no_mmproj"))  # --no-mmproj
 
         # Hint/status vars populated by setup_tab. Pre-create here so test
         # stubs (which don't run setup_tab) can still call refresh helpers.
@@ -205,26 +245,33 @@ class SpecTab:
         r = 0
 
         # --- Header / master toggle ---
-        ttk.Label(inner, text="MTP / Speculative Decoding", font=("TkDefaultFont", 12, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4); r += 1
-        ttk.Separator(inner, orient="horizontal")\
-            .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
+        ttk.Label(inner, text="MTP / Speculative Decoding", font=("TkDefaultFont", 12, "bold")).grid(
+            column=0, row=r, sticky="w", padx=10, pady=(10, 5), columnspan=4
+        )
+        r += 1
+        ttk.Separator(inner, orient="horizontal").grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5)
+        r += 1
 
         master_cb = ttk.Checkbutton(
             inner,
             text="Enable speculative decoding",
             variable=self.spec_enabled,
         )
-        master_cb.grid(column=0, row=r, sticky="w", padx=10, pady=4, columnspan=4); r += 1
+        master_cb.grid(column=0, row=r, sticky="w", padx=10, pady=4, columnspan=4)
+        r += 1
         self._spec_widgets["master_cb"] = master_cb
 
         self.spec_status_var = tk.StringVar(value="")
-        ttk.Label(inner, textvariable=self.spec_status_var, foreground="gray")\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4); r += 1
+        ttk.Label(inner, textvariable=self.spec_status_var, foreground="gray").grid(
+            column=0, row=r, sticky="w", padx=10, pady=(0, 6), columnspan=4
+        )
+        r += 1
 
         # --- Speculative type ---
-        ttk.Label(inner, text="Speculative type:", font=("TkDefaultFont", 10, "bold"))\
-            .grid(column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4); r += 1
+        ttk.Label(inner, text="Speculative type:", font=("TkDefaultFont", 10, "bold")).grid(
+            column=0, row=r, sticky="w", padx=10, pady=(8, 2), columnspan=4
+        )
+        r += 1
         type_combo = ttk.Combobox(
             inner,
             textvariable=self.spec_type,
@@ -265,8 +312,9 @@ class SpecTab:
         e_pmin.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["p_min"] = e_pmin
         self.spec_pmin_hint_var = tk.StringVar(value="")
-        ttk.Label(sec, textvariable=self.spec_pmin_hint_var, foreground="gray")\
-            .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
+        ttk.Label(sec, textvariable=self.spec_pmin_hint_var, foreground="gray").grid(
+            column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2
+        )
 
         sr += 1
         ttk.Label(sec, text="p-split:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
@@ -274,29 +322,32 @@ class SpecTab:
         e_psplit.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["p_split"] = e_psplit
         self.spec_psplit_hint_var = tk.StringVar(value="(llama.cpp only)")
-        ttk.Label(sec, textvariable=self.spec_psplit_hint_var, foreground="gray")\
-            .grid(column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2)
+        ttk.Label(sec, textvariable=self.spec_psplit_hint_var, foreground="gray").grid(
+            column=2, row=sr, sticky="w", padx=4, pady=2, columnspan=2
+        )
 
         # MTP requires --parallel 1 (single-slot operation). The trace
         # callbacks force this when MTP is selected, but show the hint
         # so users understand what's happening and can verify.
         sr += 1
         self.spec_parallel_hint_var = tk.StringVar(value="")
-        ttk.Label(sec, textvariable=self.spec_parallel_hint_var,
-                  foreground="#888888", font=("TkSmallCaptionFont"))\
-            .grid(column=0, row=sr, columnspan=4, sticky="w", padx=6, pady=(4, 2))
+        ttk.Label(
+            sec, textvariable=self.spec_parallel_hint_var, foreground="#888888", font=("TkSmallCaptionFont")
+        ).grid(column=0, row=sr, columnspan=4, sticky="w", padx=6, pady=(4, 2))
 
         # Reset-to-default button: overwrites all four common controls with
         # the recommended values for the current spec_type. For ngram/suffix
         # types (which have no recommended defaults), clears the fields.
         sr += 1
-        reset_btn = ttk.Button(sec, text="Reset to defaults",
-                               command=self._reset_spec_defaults)
+        reset_btn = ttk.Button(sec, text="Reset to defaults", command=self._reset_spec_defaults)
         reset_btn.grid(column=0, row=sr, sticky="w", padx=6, pady=(6, 4))
         self._spec_widgets["reset_defaults_btn"] = reset_btn
-        ttk.Label(sec, text="Overwrites n-max / n-min / p-min / p-split with the recommended defaults for the active type.",
-                  foreground="#888888", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=sr, columnspan=3, sticky="w", padx=4, pady=(6, 4))
+        ttk.Label(
+            sec,
+            text="Overwrites n-max / n-min / p-min / p-split with the recommended defaults for the active type.",
+            foreground="#888888",
+            font=("TkSmallCaptionFont"),
+        ).grid(column=1, row=sr, columnspan=3, sticky="w", padx=4, pady=(6, 4))
 
         # --- Draft model section ---
         # Picks the draft GGUF from the same scanned-models pool as the
@@ -315,7 +366,7 @@ class SpecTab:
         self.spec_use_draft_cb = ttk.Checkbutton(
             sec,
             text="Use a separate draft model "
-                 "(optional for ik_llama MTP — leave unchecked to use the embedded head from the base GGUF)",
+            "(optional for ik_llama MTP — leave unchecked to use the embedded head from the base GGUF)",
             variable=self.spec_use_draft_model,
         )
         self.spec_use_draft_cb.grid(column=0, row=0, sticky="w", padx=6, pady=(4, 2), columnspan=4)
@@ -366,7 +417,10 @@ class SpecTab:
 
         # Entry stays NORMAL so the user can type a value even before analysis.
         self.spec_draft_ngl_entry = ttk.Entry(
-            draft_ngl_frame, textvariable=self.spec_draft_ngl, width=6, state=tk.NORMAL,
+            draft_ngl_frame,
+            textvariable=self.spec_draft_ngl,
+            width=6,
+            state=tk.NORMAL,
         )
         self.spec_draft_ngl_entry.grid(column=0, row=0, sticky="w", padx=(0, 10))
 
@@ -411,7 +465,12 @@ class SpecTab:
         ttk.Label(sec, text="Draft devices (-devd):").grid(column=0, row=sr, sticky="nw", padx=6, pady=2)
         self.spec_draft_gpu_checkbox_frame = ttk.Frame(sec)
         self.spec_draft_gpu_checkbox_frame.grid(
-            column=1, row=sr, columnspan=3, sticky="ew", padx=4, pady=2,
+            column=1,
+            row=sr,
+            columnspan=3,
+            sticky="ew",
+            padx=4,
+            pady=2,
         )
         self.spec_draft_gpu_vars = []
         # Register the parent frame so _refresh_spec_tab_state's enable/disable
@@ -424,15 +483,21 @@ class SpecTab:
         # already treats "" as omission so behavior is unchanged.
         ttk.Label(sec, text="Draft K cache type (-ctkd):").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_ctk_combo = ttk.Combobox(
-            sec, textvariable=self.spec_draft_ctk, width=10,
-            values=SPEC_DRAFT_CACHE_TYPE_VALUES, state="readonly",
+            sec,
+            textvariable=self.spec_draft_ctk,
+            width=10,
+            values=SPEC_DRAFT_CACHE_TYPE_VALUES,
+            state="readonly",
         )
         self.spec_draft_ctk_combo.grid(column=1, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_ctk"] = self.spec_draft_ctk_combo
         ttk.Label(sec, text="Draft V cache type (-ctvd):").grid(column=2, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_ctv_combo = ttk.Combobox(
-            sec, textvariable=self.spec_draft_ctv, width=10,
-            values=SPEC_DRAFT_CACHE_TYPE_VALUES, state="readonly",
+            sec,
+            textvariable=self.spec_draft_ctv,
+            width=10,
+            values=SPEC_DRAFT_CACHE_TYPE_VALUES,
+            state="readonly",
         )
         self.spec_draft_ctv_combo.grid(column=3, row=sr, sticky="w", padx=4, pady=2)
         self._spec_widgets["draft_ctv"] = self.spec_draft_ctv_combo
@@ -454,19 +519,26 @@ class SpecTab:
         # checkbox. _refresh_spec_tab_state grid_remove()s these as a group when
         # ik_llama+mtp is active and spec_use_draft_model is False (so the
         # section collapses to just the checkbox); grid()s them back otherwise.
-        self._spec_draft_inner_widgets = [
-            w for w in sec.winfo_children() if w is not self.spec_use_draft_cb
-        ]
+        self._spec_draft_inner_widgets = [w for w in sec.winfo_children() if w is not self.spec_use_draft_cb]
 
         # --- Ngram tuning (llama.cpp per-variant; ik_llama shared) ---
         # Per-variant simple/mapk/mapk4v/mod groups for llama.cpp:
         for key, label, vars_triplet in [
-            ("ngram_simple", "Ngram simple (--spec-ngram-simple-*)",
-             (self.spec_ngram_simple_size_n, self.spec_ngram_simple_size_m, self.spec_ngram_simple_min_hits)),
-            ("ngram_mapk", "Ngram map-k (--spec-ngram-map-k-*)",
-             (self.spec_ngram_mapk_size_n, self.spec_ngram_mapk_size_m, self.spec_ngram_mapk_min_hits)),
-            ("ngram_mapk4v", "Ngram map-k4v (--spec-ngram-map-k4v-*)",
-             (self.spec_ngram_mapk4v_size_n, self.spec_ngram_mapk4v_size_m, self.spec_ngram_mapk4v_min_hits)),
+            (
+                "ngram_simple",
+                "Ngram simple (--spec-ngram-simple-*)",
+                (self.spec_ngram_simple_size_n, self.spec_ngram_simple_size_m, self.spec_ngram_simple_min_hits),
+            ),
+            (
+                "ngram_mapk",
+                "Ngram map-k (--spec-ngram-map-k-*)",
+                (self.spec_ngram_mapk_size_n, self.spec_ngram_mapk_size_m, self.spec_ngram_mapk_min_hits),
+            ),
+            (
+                "ngram_mapk4v",
+                "Ngram map-k4v (--spec-ngram-map-k4v-*)",
+                (self.spec_ngram_mapk4v_size_n, self.spec_ngram_mapk4v_size_m, self.spec_ngram_mapk4v_min_hits),
+            ),
         ]:
             sec = ttk.LabelFrame(inner, text=label)
             sec.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=4)
@@ -490,14 +562,17 @@ class SpecTab:
         self._spec_sections["ngram_mod"] = sec
         r += 1
         ttk.Label(sec, text="n-min:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_min, width=10)\
-            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_min, width=10).grid(
+            column=1, row=0, sticky="w", padx=4, pady=2
+        )
         ttk.Label(sec, text="n-max:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_max, width=10)\
-            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_max, width=10).grid(
+            column=3, row=0, sticky="w", padx=4, pady=2
+        )
         ttk.Label(sec, text="n-match:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_match, width=10)\
-            .grid(column=1, row=1, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_mod_n_match, width=10).grid(
+            column=1, row=1, sticky="w", padx=4, pady=2
+        )
 
         # Shared ngram set (ik_llama uses a single set across all ngram types):
         sec = ttk.LabelFrame(inner, text="Ngram tuning (--spec-ngram-*)")
@@ -507,14 +582,13 @@ class SpecTab:
         self._spec_sections["ngram_shared"] = sec
         r += 1
         ttk.Label(sec, text="size-n:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_size_n, width=10)\
-            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_size_n, width=10).grid(column=1, row=0, sticky="w", padx=4, pady=2)
         ttk.Label(sec, text="size-m:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_size_m, width=10)\
-            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_size_m, width=10).grid(column=3, row=0, sticky="w", padx=4, pady=2)
         ttk.Label(sec, text="min-hits:").grid(column=0, row=1, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_ngram_min_hits, width=10)\
-            .grid(column=1, row=1, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_ngram_min_hits, width=10).grid(
+            column=1, row=1, sticky="w", padx=4, pady=2
+        )
 
         # --- Suffix (ik_llama only) ---
         sec = ttk.LabelFrame(inner, text="Suffix tuning (ik_llama, --suffix-*)")
@@ -523,11 +597,13 @@ class SpecTab:
         self._spec_sections["suffix"] = sec
         r += 1
         ttk.Label(sec, text="pattern-len:").grid(column=0, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_suffix_pattern_len, width=10)\
-            .grid(column=1, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_suffix_pattern_len, width=10).grid(
+            column=1, row=0, sticky="w", padx=4, pady=2
+        )
         ttk.Label(sec, text="max-depth:").grid(column=2, row=0, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_suffix_max_depth, width=10)\
-            .grid(column=3, row=0, sticky="w", padx=4, pady=2)
+        ttk.Entry(sec, textvariable=self.spec_suffix_max_depth, width=10).grid(
+            column=3, row=0, sticky="w", padx=4, pady=2
+        )
 
         # --- ik_llama extras ---
         sec = ttk.LabelFrame(inner, text="ik_llama extras")
@@ -541,8 +617,9 @@ class SpecTab:
             variable=self.spec_autotune,
         ).grid(column=0, row=0, sticky="w", padx=6, pady=2, columnspan=2)
         ttk.Label(sec, text="Draft params (-draft):").grid(column=0, row=1, sticky="w", padx=6, pady=2)
-        ttk.Entry(sec, textvariable=self.spec_draft_params)\
-            .grid(column=1, row=1, sticky="ew", padx=4, pady=2, columnspan=2)
+        ttk.Entry(sec, textvariable=self.spec_draft_params).grid(
+            column=1, row=1, sticky="ew", padx=4, pady=2, columnspan=2
+        )
         ttk.Label(
             sec,
             text='Free-form comma list, e.g. "k=v,k=v"',
@@ -564,6 +641,37 @@ class SpecTab:
             text="Useful for MTP GGUFs that embed a vision projector you don't need.",
             foreground="gray",
         ).grid(column=0, row=1, sticky="w", padx=6, pady=(0, 4))
+
+        # Apply per-backend / per-spec_type visibility + enable rules
+        # now that every section + widget reference is registered.
+        # This call used to be unnecessary because ``setup_tab`` ran
+        # during launcher ``__init__`` and the subsequent config-load
+        # traces (on backend_selection / spec_enabled / spec_type)
+        # fired ``_refresh_spec_tab_state`` for us. With the tab now
+        # built lazily on first selection (see launcher
+        # ``_register_lazy_tab``), config load has long since finished
+        # — no trace fires when we build — so widgets render in their
+        # default (everything-shown) state unless we kick the refresh
+        # explicitly here.
+        try:
+            self._refresh_spec_tab_state()
+        except tk.TclError as exc:
+            print(
+                f"WARN: post-setup _refresh_spec_tab_state failed: {exc}",
+                file=sys.stderr,
+            )
+        # Replay the draft GPU checkbox build. Any earlier GPU-detection
+        # refresh fired before this lazy tab was constructed and short-
+        # circuited on ``spec_draft_gpu_checkbox_frame`` being None; without
+        # this explicit replay the "Draft devices" section opens blank
+        # until some unrelated later refresh restores it.
+        try:
+            self._update_spec_draft_gpu_checkboxes()
+        except tk.TclError as exc:
+            print(
+                f"WARN: post-setup _update_spec_draft_gpu_checkboxes failed: {exc}",
+                file=sys.stderr,
+            )
 
     def _on_spec_draft_model_selected(self, event=None):
         """Listbox <<ListboxSelect>> handler for the draft GGUF picker.
@@ -597,18 +705,23 @@ class SpecTab:
                 self._update_ui_after_spec_draft_analysis(main_analysis)
             else:
                 self.spec_draft_layers_status_var.set("Analyzing draft model...")
-                if (
-                    hasattr(self, "spec_draft_ngl_slider")
-                    and self.spec_draft_ngl_slider.winfo_exists()
-                ):
+                if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
                     self.spec_draft_ngl_slider.config(state=tk.DISABLED)
                 self.current_spec_draft_analysis = {}
-                t = Thread(
-                    target=self._run_spec_draft_gguf_analysis,
-                    args=(full_path_str,),
-                    daemon=True,
-                )
-                t.start()
+                # Reset the layer-count bound BEFORE kicking off the
+                # background analysis. ``_refresh_spec_tab_state``
+                # (and the lazy-tab re-render) read
+                # ``max_spec_draft_gpu_layers`` as the slider's
+                # upper bound; if a previous analysis left it >0,
+                # an intermediate refresh between now and the
+                # analysis-complete callback would re-enable the
+                # slider against the OLD model's bound while the
+                # status label still says "Analyzing...".
+                try:
+                    self.max_spec_draft_gpu_layers.set(0)
+                except Exception:
+                    pass
+                self._start_spec_draft_gguf_analysis(full_path_str)
         except Exception as e:
             print(f"WARN: _on_spec_draft_model_selected failed: {e}", file=sys.stderr)
 
@@ -661,10 +774,7 @@ class SpecTab:
 
     def _sync_spec_draft_gpu_layers_from_slider(self, value_str):
         """Slider callback for the draft layers control."""
-        if (
-            not hasattr(self, "spec_draft_ngl_entry")
-            or not self.spec_draft_ngl_entry.winfo_exists()
-        ):
+        if not hasattr(self, "spec_draft_ngl_entry") or not self.spec_draft_ngl_entry.winfo_exists():
             return
         try:
             value = int(float(value_str))
@@ -677,10 +787,7 @@ class SpecTab:
 
     def _sync_spec_draft_gpu_layers_from_entry(self, event=None):
         """FocusOut/Return callback for the draft layers entry."""
-        if (
-            not hasattr(self, "spec_draft_ngl_entry")
-            or not self.spec_draft_ngl_entry.winfo_exists()
-        ):
+        if not hasattr(self, "spec_draft_ngl_entry") or not self.spec_draft_ngl_entry.winfo_exists():
             return
         current_str = self.spec_draft_ngl.get().strip()
         if current_str == "":
@@ -728,26 +835,164 @@ class SpecTab:
         the resulting comma-joined string is written to ``self.spec_draft_device``
         so the existing emission block in ``modules/launch.py`` picks it up
         unchanged.
+
+        Incremental: when the GPU shape (count + names + manual-mode flag)
+        matches the prior render we just update the existing BooleanVars in
+        place. The main GPU panel uses the same trick — see the comment on
+        ``_gpu_checkboxes_fingerprint`` in the launcher for the motivation
+        (post-detection refresh was destroying + recreating 8 checkboxes
+        every time even when nothing changed).
         """
-        if (
-            not hasattr(self, "spec_draft_gpu_checkbox_frame")
-            or not self.spec_draft_gpu_checkbox_frame.winfo_exists()
-        ):
+        if not hasattr(self, "spec_draft_gpu_checkbox_frame") or not self.spec_draft_gpu_checkbox_frame.winfo_exists():
             return
-        for w in self.spec_draft_gpu_checkbox_frame.winfo_children():
-            w.destroy()
-        self.spec_draft_gpu_vars = []
 
         gpu_info = getattr(self.launcher, "gpu_info", {})
         count = gpu_info.get("device_count", 0) if isinstance(gpu_info, dict) else 0
-        loaded_selected = set(self.launcher.app_settings.get("spec_draft_selected_gpus", []) or [])
+        # Strictly coerce persisted indices to ``int`` before membership
+        # checks. Without this, a saved ``"1"`` (string) wouldn't match
+        # GPU 1 (int), and ``True``/``1.0`` would silently match GPU 1 —
+        # the checkbox state ended up corrupted, and the value written
+        # back to ``app_settings`` at lines below propagated the corruption.
+        # Mirror ``modules.spec_launch._coerce_strict_gpu_index``.
+        from modules.spec_launch import _coerce_strict_gpu_index as _coerce_idx
+
+        raw_persisted = self.launcher.app_settings.get("spec_draft_selected_gpus", []) or []
+        # Mirror the launch path (``spec_launch._resolve_draft_device_value``
+        # and ``get_effective_visible_gpu_indices``): only iterate
+        # genuine sequences. A persisted ``"0,1"`` string would
+        # otherwise iterate character-by-character into
+        # ``["0", ",", "1"]`` and either crash ``_coerce_idx`` or
+        # silently drop every entry. A bare scalar would raise on
+        # ``for raw_idx in raw_persisted``.
+        if not isinstance(raw_persisted, (list, tuple)):
+            raw_persisted = []
+        loaded_selected: set[int] = set()
+        for raw_idx in raw_persisted:
+            idx = _coerce_idx(raw_idx)
+            if idx is not None:
+                loaded_selected.add(idx)
         detected_devices = getattr(self.launcher, "detected_gpu_devices", [])
         # Manual GPU mode disables draft device emission entirely — the
         # manual GPU list isn't real CUDA hardware, so we can't tell the
         # binary "use CUDA<i>" reliably.
-        manual_mode = bool(
-            getattr(getattr(self.launcher, "manual_gpu_mode", None), "get", lambda: False)()
+        manual_mode = bool(getattr(getattr(self.launcher, "manual_gpu_mode", None), "get", lambda: False)())
+
+        new_fp = (
+            manual_mode,
+            count,
+            tuple(
+                (
+                    detected_devices[i].get("name", "")
+                    if i < len(detected_devices) and isinstance(detected_devices[i], dict)
+                    else ""
+                )
+                for i in range(count)
+            ),
         )
+        existing_fp = getattr(self, "_spec_draft_checkboxes_last_fp", None)
+        if (
+            existing_fp is not None
+            and existing_fp == new_fp
+            and count > 0
+            and not manual_mode
+            and len(self.spec_draft_gpu_vars) == count
+        ):
+            valid_selected = []
+            # Suppress the per-var trace handler during this
+            # programmatic ``var.set(desired)`` sweep. The handler
+            # (``_on_spec_draft_gpu_selection_changed``) would
+            # otherwise fire mid-loop on every flipped checkbox and
+            # write a PARTIAL ``CUDA…`` string into
+            # ``spec_draft_device`` before the loop finishes —
+            # producing transient intermediate values that the
+            # conditional-clear logic below then sees and
+            # mis-classifies as "manual override".
+            self._suppress_spec_draft_gpu_events = True
+            try:
+                for i, var in enumerate(self.spec_draft_gpu_vars):
+                    desired = i in loaded_selected
+                    if desired:
+                        valid_selected.append(i)
+                    try:
+                        if var.get() != desired:
+                            var.set(desired)
+                    except Exception:
+                        pass
+            finally:
+                self._suppress_spec_draft_gpu_events = False
+            self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+            # Same conditional-clear logic the manual-mode branch
+            # below uses: only overwrite ``spec_draft_device`` when
+            # it's empty OR already equals what the checkboxes would
+            # have produced (so an explicit override like
+            # ``Vulkan0`` / ``CUDA2,SYCL1`` survives a checkbox
+            # refresh). The previous unconditional ``set`` wiped
+            # those overrides on every UI refresh that came through
+            # this fast path.
+            checkbox_derived = ",".join(f"CUDA{i}" for i in valid_selected)
+            try:
+                current = self.spec_draft_device.get()
+                # Compare against what THIS code last actually wrote
+                # into ``spec_draft_device`` — not ``loaded_selected``
+                # (which is the NEW persisted set after a possible
+                # external mutation). Using the live snapshot
+                # prevents a stale ``CUDA…`` string from being
+                # treated as a manual override.
+                # ``getattr(..., [])`` so older test stubs (and any
+                # subclass that bypasses ``__init__``) don't crash on
+                # a missing attribute; an empty list correctly
+                # represents "no prior render".
+                prior_derived = ",".join(f"CUDA{i}" for i in getattr(self, "_spec_draft_last_rendered_selected", []))
+                if current in ("", prior_derived):
+                    self.spec_draft_device.set(checkbox_derived)
+                    self._spec_draft_last_rendered_selected = list(valid_selected)
+                else:
+                    # Preserving an explicit manual override
+                    # (``Vulkan0`` / ``CUDA2,SYCL1``). Clear the
+                    # persisted checkbox indices so the launch path's
+                    # ``_resolve_draft_device_value`` actually falls
+                    # back to ``spec_draft_device``. Without this,
+                    # ``app_settings["spec_draft_selected_gpus"]``
+                    # still holds the checkbox indices and the launch
+                    # command emits the checkbox-derived ``CUDA…``
+                    # list while the UI shows the user's override —
+                    # a silent contract mismatch.
+                    self.launcher.app_settings["spec_draft_selected_gpus"] = []
+                    # Also clear the live checkbox vars + the
+                    # rendered-selection snapshot so the UI ticks
+                    # match: with a manual override active there is
+                    # no checkbox-derived contribution, and a stale
+                    # snapshot here would let a future refresh
+                    # mistake itself into thinking ``CUDA0,CUDA1``
+                    # was the checkbox-derived string and clear the
+                    # override on the next pass. Use the
+                    # ``_suppress_spec_draft_gpu_events`` flag to
+                    # avoid the per-var trace handler firing in the
+                    # middle of the sweep (same pattern the
+                    # rebuild-from-scratch path uses ~line 897).
+                    self._suppress_spec_draft_gpu_events = True
+                    try:
+                        for var in self.spec_draft_gpu_vars:
+                            try:
+                                if var.get():
+                                    var.set(False)
+                            except Exception:
+                                pass
+                    finally:
+                        self._suppress_spec_draft_gpu_events = False
+                    self._spec_draft_last_rendered_selected = []
+            except Exception:
+                pass
+            try:
+                self._refresh_spec_tab_state()
+            except Exception:
+                pass
+            return
+
+        self._spec_draft_checkboxes_last_fp = new_fp
+        for w in self.spec_draft_gpu_checkbox_frame.winfo_children():
+            w.destroy()
+        self.spec_draft_gpu_vars = []
         # Sanitize: rebuild the persisted-index list from what's currently
         # valid, so a stale saved selection (e.g. GPUs that no longer exist
         # or were filtered, or any selection while manual GPU mode is on)
@@ -758,11 +1003,7 @@ class SpecTab:
         if count > 0 and not manual_mode:
             MAX_GPUS_PER_ROW = 3
             for i in range(count):
-                gpu_details = (
-                    detected_devices[i]
-                    if i < len(detected_devices)
-                    else {}
-                )
+                gpu_details = detected_devices[i] if i < len(detected_devices) else {}
                 is_selected = i in loaded_selected
                 if is_selected:
                     valid_selected.append(i)
@@ -786,8 +1027,11 @@ class SpecTab:
         else:
             ttk.Label(
                 self.spec_draft_gpu_checkbox_frame,
-                text=("No CUDA devices detected." if not manual_mode
-                      else "Draft device selection disabled in manual GPU mode."),
+                text=(
+                    "No CUDA devices detected."
+                    if not manual_mode
+                    else "Draft device selection disabled in manual GPU mode."
+                ),
                 foreground="orange",
             ).grid(row=0, column=0, sticky="w", padx=5, pady=3)
 
@@ -800,10 +1044,122 @@ class SpecTab:
         # spec_draft_device on machines/tests without detected CUDA hardware.
         if count > 0 and not manual_mode:
             self.launcher.app_settings["spec_draft_selected_gpus"] = valid_selected
+            # Same conditional-clear logic the fast path and the
+            # manual-mode branch below use: only overwrite
+            # ``spec_draft_device`` when the current value is empty
+            # OR equals the checkbox-derived string from the prior
+            # render. An explicit override like ``Vulkan0`` or
+            # ``CUDA2,SYCL1`` must survive a full rebuild
+            # (first lazy-tab render, GPU-shape change, manual/auto
+            # mode flip) instead of being wiped on every refresh
+            # that comes through this slow path.
+            checkbox_derived = ",".join(f"CUDA{i}" for i in valid_selected)
             try:
-                self.spec_draft_device.set(
-                    ",".join(f"CUDA{i}" for i in valid_selected)
-                )
+                current = self.spec_draft_device.get()
+                # Compare against what THIS code last actually wrote
+                # — same rationale as the fast path above. The
+                # snapshot is updated after a successful ``set``
+                # below so future refreshes recognise our own value.
+                # ``getattr(..., [])`` so older test stubs (and any
+                # subclass that bypasses ``__init__``) don't crash on
+                # a missing attribute; an empty list correctly
+                # represents "no prior render".
+                prior_derived = ",".join(f"CUDA{i}" for i in getattr(self, "_spec_draft_last_rendered_selected", []))
+                if current in ("", prior_derived):
+                    self.spec_draft_device.set(checkbox_derived)
+                    self._spec_draft_last_rendered_selected = list(valid_selected)
+                else:
+                    # Same rationale as the fast path above: when we
+                    # preserve a manual override here, the persisted
+                    # ``spec_draft_selected_gpus`` must be cleared too
+                    # so the launch-time fallback in
+                    # ``_resolve_draft_device_value`` reads
+                    # ``spec_draft_device`` instead of re-emitting the
+                    # checkbox-derived ``CUDA…`` list.
+                    self.launcher.app_settings["spec_draft_selected_gpus"] = []
+                    # Mirror the fast-path sweep: also untick the live
+                    # checkbox vars and clear the rendered-selection
+                    # snapshot. The slow rebuild branch just created
+                    # fresh BooleanVars at lines ~969-978 with
+                    # ``value=is_selected`` (i.e. the persisted
+                    # selection), so without this sweep the UI shows
+                    # ticked checkboxes that the launch path ignores
+                    # — same silent contract mismatch as the fast
+                    # path before its sibling fix.
+                    self._suppress_spec_draft_gpu_events = True
+                    try:
+                        for var in self.spec_draft_gpu_vars:
+                            try:
+                                if var.get():
+                                    var.set(False)
+                            except Exception:
+                                pass
+                    finally:
+                        self._suppress_spec_draft_gpu_events = False
+                    self._spec_draft_last_rendered_selected = []
+            except Exception:
+                pass
+        elif manual_mode:
+            # Manual GPU mode disables CUDA<i> draft device emission
+            # for the checkbox-derived value, but must NOT wipe out a
+            # user / imported override like ``Vulkan0`` /
+            # ``CUDA2,SYCL1``. Only clear when the current
+            # ``spec_draft_device`` value exactly matches the string
+            # the checkbox UI would have produced from the persisted
+            # selection — that's the leftover-from-prior-non-manual
+            # case the original clear was meant to handle.
+            #
+            # ``loaded_selected`` includes EVERY persisted index,
+            # even out-of-range ones (``CUDA99`` from a stale config)
+            # that the non-manual branch above filters out via
+            # ``valid_selected``. To detect the leftover-from-prior-
+            # non-manual case correctly, reconstruct the same
+            # filtered/valid list — otherwise a "stale config" with
+            # ``CUDA99`` baked into ``spec_draft_device`` would never
+            # match the recomputed string and we'd treat it as a
+            # manual override, which it isn't.
+            # Compare against the live snapshot of what THIS code
+            # last wrote, so we recognise our own checkbox-derived
+            # value AND the manual-mode flip cleanly clears it.
+            # ``getattr`` defaults to ``[]`` so test stubs and any
+            # subclass that bypasses ``__init__`` don't crash.
+            indices = getattr(self, "_spec_draft_last_rendered_selected", [])
+            if not indices:
+                # First render in manual mode after a non-manual session
+                # leaves the snapshot empty even though ``app_settings``
+                # may still hold the persisted checkbox-derived
+                # ``"CUDA0,CUDA1"`` string. Without a fallback, the
+                # snapshot-derived ``checkbox_derived`` is ``""`` and
+                # we'd treat the leftover as a manual override and
+                # leave it alone — meaning CUDA<i> emission survives
+                # into the launch command after the user toggled
+                # manual mode on. Reconstruct from ``loaded_selected``
+                # (the persisted indices) so the leftover-string
+                # detection works on first manual-mode render too.
+                #
+                # IMPORTANT: do NOT unconditionally gate on
+                # ``i < count``. In manual mode ``count`` is often
+                # 0 (manual mode hides the auto-detected GPU list),
+                # and on a cold start with ``count == 0`` and a
+                # persisted ``"CUDA0"`` we still need to recognise
+                # ``CUDA0`` as our own leftover and clear it. But
+                # when ``count > 0`` the upper bound DOES apply —
+                # without it, a stale config like
+                # ``loaded_selected == {0, 99}`` would reconstruct
+                # ``CUDA0,CUDA99`` and an old checkbox-derived
+                # ``"CUDA0"`` would no longer match, leaking the
+                # stale string into the launch command as a phantom
+                # "manual override". Pick the tighter bound when we
+                # have one and fall back to ``i >= 0`` only when
+                # there are no detected GPUs yet.
+                indices = sorted(i for i in loaded_selected if i >= 0 and (count <= 0 or i < count))
+            checkbox_derived = ",".join(f"CUDA{i}" for i in indices)
+            try:
+                if self.spec_draft_device.get() == checkbox_derived:
+                    self.spec_draft_device.set("")
+                    # Clear the snapshot too — there's nothing
+                    # checkbox-derived in the field now.
+                    self._spec_draft_last_rendered_selected = []
             except Exception:
                 pass
 
@@ -822,14 +1178,26 @@ class SpecTab:
         emission blocks consume. CUDA prefix is hardcoded because the
         launcher's GPU detection is CUDA-only.
         """
+        # Programmatic ``var.set(...)`` sweeps in
+        # ``_update_spec_draft_gpu_checkboxes`` set this flag for the
+        # duration of the for-loop so we don't fire on each
+        # intermediate flip and stamp a partial ``CUDA…`` string
+        # into ``spec_draft_device`` before the sweep completes.
+        if getattr(self, "_suppress_spec_draft_gpu_events", False):
+            return
         try:
-            selected_indices = [
-                i for i, v in enumerate(self.spec_draft_gpu_vars) if v.get()
-            ]
+            selected_indices = [i for i, v in enumerate(self.spec_draft_gpu_vars) if v.get()]
             self.launcher.app_settings["spec_draft_selected_gpus"] = selected_indices
             device_str = ",".join(f"CUDA{i}" for i in selected_indices)
             if self.spec_draft_device.get() != device_str:
                 self.spec_draft_device.set(device_str)
+            # Snapshot what THIS code just wrote so a later refresh /
+            # manual-mode flip recognises it as "checkbox-set" via the
+            # conditional-clear logic in
+            # ``_update_spec_draft_gpu_checkboxes``. Without the
+            # update, the snapshot stays at the previous render and
+            # the new ``CUDA…`` string looks like a manual override.
+            self._spec_draft_last_rendered_selected = list(selected_indices)
             try:
                 self.launcher._save_configs()
             except Exception:
@@ -842,17 +1210,181 @@ class SpecTab:
 
     # -- Draft GGUF analysis (mirrors _on_model_selected/_run_gguf_analysis) --
 
-    def _run_spec_draft_gguf_analysis(self, draft_path_str):
-        """Background worker that parses the draft GGUF and dispatches the
-        result back onto the Tk thread."""
+    def _start_spec_draft_gguf_analysis(self, draft_path_str):
+        """Submit ``draft_path_str`` to the single background analyser.
+
+        Coalescing: each call overwrites the "latest pending path" slot
+        and bumps the generation counter. A SINGLE long-lived worker
+        thread processes only the latest pending path between parses,
+        so rapid listbox navigation no longer fans out concurrent
+        ``parse_gguf_header_simple`` invocations on superseded paths.
+        Stale-result-after-parse guard is preserved via the generation
+        check in ``_drain_spec_draft_gguf_analysis``.
+        """
+        with self._get_spec_draft_analysis_lock():
+            self._spec_draft_analysis_generation += 1
+            self._spec_draft_latest_path = draft_path_str
+            self._spec_draft_request_event.set()
+            need_spawn = not self._spec_draft_worker_active
+            if need_spawn:
+                self._spec_draft_worker_active = True
+                t = Thread(
+                    target=self._run_spec_draft_gguf_analysis_loop,
+                    daemon=True,
+                )
+                self._spec_draft_analysis_thread = t
+        if need_spawn:
+            try:
+                t.start()
+            except Exception:
+                # ``Thread.start()`` can raise ``RuntimeError`` (already
+                # started — shouldn't happen here) or ``OSError`` on
+                # systems that hit a thread-creation limit. The
+                # worker-active latch was set under the lock above
+                # before ``start()`` ran; without rolling it back the
+                # next request would see ``_spec_draft_worker_active``
+                # still True and skip the respawn, so the GGUF analysis
+                # path silently goes dead until a process restart.
+                with self._get_spec_draft_analysis_lock():
+                    self._spec_draft_worker_active = False
+                    self._spec_draft_analysis_thread = None
+                raise
+        if self._spec_draft_analysis_after_id is None:
+            try:
+                self._spec_draft_analysis_after_id = self.launcher.root.after(
+                    SPEC_DRAFT_ANALYSIS_POLL_MS,
+                    self._drain_spec_draft_gguf_analysis,
+                )
+            except tk.TclError:
+                # Root was destroyed mid-flight (window closed while a
+                # background draft-analysis thread was still running). Drop
+                # the poll silently — the launcher is shutting down anyway.
+                self._spec_draft_analysis_after_id = None
+
+    def _get_spec_draft_analysis_lock(self):
+        lock = getattr(self, "_spec_draft_analysis_lock", None)
+        if lock is None:
+            lock = Lock()
+            self._spec_draft_analysis_lock = lock
+        return lock
+
+    def _run_spec_draft_gguf_analysis_loop(self):
+        """Single long-lived worker that processes only the LATEST
+        requested draft path. Exits when no request is pending after
+        a brief idle window so the next selection re-spawns cheaply.
+
+        Never calls Tk APIs directly — results are queued for the
+        main thread's ``_drain_spec_draft_gguf_analysis`` poll.
+        """
+        # Idle timeout: after this many seconds without a new request,
+        # the worker exits. A small value keeps the thread cheap when
+        # the spec tab is dormant; the next selection re-spawns under
+        # the lock atomically.
+        IDLE_TIMEOUT_S = 2.0
         try:
-            if self.spec_draft_model.get() != draft_path_str:
-                return  # selection changed before we even started
+            while True:
+                signalled = self._spec_draft_request_event.wait(timeout=IDLE_TIMEOUT_S)
+                with self._get_spec_draft_analysis_lock():
+                    pending = self._spec_draft_latest_path
+                    analysis_id = self._spec_draft_analysis_generation
+                    self._spec_draft_latest_path = None
+                    self._spec_draft_request_event.clear()
+                    if pending is None:
+                        if not signalled:
+                            # Idle timeout AND no request pending →
+                            # exit. Selection-side ``need_spawn`` check
+                            # under the same lock guarantees the next
+                            # selection re-spawns.
+                            self._spec_draft_worker_active = False
+                            return
+                        # Race: event fired but the producer reset the
+                        # slot before we read it. Loop back and wait again.
+                        continue
+                # Parse the latest pending path. May take a while; we
+                # release the lock so additional selections can keep
+                # updating the slot during this parse — they just won't
+                # spawn a second worker.
+                try:
+                    analysis_result = parse_gguf_header_simple(pending)
+                except Exception as exc:
+                    analysis_result = {"path": pending, "error": str(exc)}
+                with self._get_spec_draft_analysis_lock():
+                    # Stale guard: a newer selection bumped the
+                    # generation while we were parsing → drop our
+                    # result. The next loop iteration handles the new
+                    # latest path.
+                    if analysis_id != self._spec_draft_analysis_generation:
+                        continue
+                    self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
+        except Exception:
+            # Worker exception is fatal for this worker; let the next
+            # selection re-spawn a fresh one rather than masquerade as
+            # alive.
+            with self._get_spec_draft_analysis_lock():
+                self._spec_draft_worker_active = False
+            raise
+
+    def _run_spec_draft_gguf_analysis(self, draft_path_str, analysis_id=None):
+        """Compatibility shim for tests that call the worker entry-point
+        directly with an analysis_id (mocked path scenarios). The
+        production code path now uses ``_run_spec_draft_gguf_analysis_loop``;
+        this single-shot wrapper preserves the pre-coalescing test API
+        without leaving an old per-thread design in production."""
+        # Defensive init: ``_get_spec_draft_analysis_lock`` already
+        # lazily creates its lock if ``__init__`` hasn't run (test
+        # subclasses / stubs that bypass ``__init__``). Mirror that
+        # pattern for ``_spec_draft_analysis_generation`` and
+        # ``_spec_draft_analysis_queue`` so this shim doesn't
+        # AttributeError on those callers — the production
+        # ``_run_spec_draft_gguf_analysis_loop`` doesn't need this
+        # because ``__init__`` always runs before it spawns a worker.
+        if not hasattr(self, "_spec_draft_analysis_generation"):
+            # Seed from the caller's ``analysis_id`` (if any) so the
+            # stale-result gate below (``analysis_id !=
+            # self._spec_draft_analysis_generation``) doesn't drop
+            # the very result this shim is about to enqueue.
+            # Defaulting to ``0`` regardless made a call like
+            # ``_run_spec_draft_gguf_analysis(path, analysis_id=42)``
+            # against a test-stubbed instance fail the gate and
+            # silently discard the parse result.
+            self._spec_draft_analysis_generation = analysis_id if analysis_id is not None else 0
+        if not hasattr(self, "_spec_draft_analysis_queue"):
+            self._spec_draft_analysis_queue = queue.Queue()
+        try:
+            if analysis_id is None:
+                with self._get_spec_draft_analysis_lock():
+                    analysis_id = self._spec_draft_analysis_generation
             analysis_result = parse_gguf_header_simple(draft_path_str)
-            if self.spec_draft_model.get() == draft_path_str:
-                self.launcher.root.after(0, self._update_ui_after_spec_draft_analysis, analysis_result)
         except Exception as e:
-            print(f"WARN: spec draft GGUF analysis failed: {e}", file=sys.stderr)
+            analysis_result = {"path": draft_path_str, "error": str(e)}
+        with self._get_spec_draft_analysis_lock():
+            if analysis_id != self._spec_draft_analysis_generation:
+                return
+            self._spec_draft_analysis_queue.put((analysis_id, analysis_result))
+
+    def _drain_spec_draft_gguf_analysis(self):
+        self._spec_draft_analysis_after_id = None
+        try:
+            while True:
+                analysis_id, analysis_result = self._spec_draft_analysis_queue.get_nowait()
+                if analysis_id != self._spec_draft_analysis_generation:
+                    continue
+                if self.spec_draft_model.get() != analysis_result.get("path"):
+                    continue
+                self._update_ui_after_spec_draft_analysis(analysis_result)
+                return
+        except queue.Empty:
+            pass
+        if (
+            self._spec_draft_analysis_thread and self._spec_draft_analysis_thread.is_alive()
+        ) or not self._spec_draft_analysis_queue.empty():
+            try:
+                self._spec_draft_analysis_after_id = self.launcher.root.after(
+                    SPEC_DRAFT_ANALYSIS_POLL_MS,
+                    self._drain_spec_draft_gguf_analysis,
+                )
+            except tk.TclError:
+                self._spec_draft_analysis_after_id = None
 
     def _update_ui_after_spec_draft_analysis(self, analysis_result):
         """Apply analysis result to the draft slider/status (Tk thread)."""
@@ -866,22 +1398,14 @@ class SpecTab:
             msg = error if error else "Could not determine layers"
             self.spec_draft_layers_status_var.set(f"{msg} (manual entry available)")
             self.max_spec_draft_gpu_layers.set(0)
-            if (
-                hasattr(self, "spec_draft_ngl_slider")
-                and self.spec_draft_ngl_slider.winfo_exists()
-            ):
+            if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
                 self.spec_draft_ngl_slider.config(to=0, state=tk.DISABLED)
             return
         # Success: enable slider and update status. Mirrors main +1 for output.
         max_offloadable = n_layers + 1
         self.max_spec_draft_gpu_layers.set(max_offloadable)
-        self.spec_draft_layers_status_var.set(
-            f"Max Layers: {max_offloadable} ({n_layers} blocks + output)"
-        )
-        if (
-            hasattr(self, "spec_draft_ngl_slider")
-            and self.spec_draft_ngl_slider.winfo_exists()
-        ):
+        self.spec_draft_layers_status_var.set(f"Max Layers: {max_offloadable} ({n_layers} blocks + output)")
+        if hasattr(self, "spec_draft_ngl_slider") and self.spec_draft_ngl_slider.winfo_exists():
             self.spec_draft_ngl_slider.config(to=max_offloadable, state=tk.NORMAL)
         # Re-sync entry -> int so the slider reflects the entry's current value.
         try:
@@ -1017,7 +1541,7 @@ class SpecTab:
             return
 
         backend = self.backend_selection.get() if hasattr(self, "backend_selection") else "llama.cpp"
-        is_ik = (backend == "ik_llama")
+        is_ik = backend == "ik_llama"
         enabled = bool(self.spec_enabled.get())
         spec_type = (self.spec_type.get() or "none").strip()
 
@@ -1068,6 +1592,7 @@ class SpecTab:
                         _walk(child)
                         continue
                     _set_state(child, state)
+
             _walk(sec)
 
         type_combo_target_state = "normal" if enabled else "disabled"

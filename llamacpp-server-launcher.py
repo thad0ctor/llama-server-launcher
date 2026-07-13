@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -14,6 +15,7 @@ import ctypes
 import shlex # <-- Import shlex for parameter splitting
 import math
 import time
+from types import SimpleNamespace
 
 
 def _read_version_string():
@@ -70,6 +72,10 @@ def parse_cli_args(argv=None):
 
 # Debug logging control
 DEBUG_VERBOSE = os.getenv('LLAMA_LAUNCHER_DEBUG', '').lower() in ('1', 'true', 'yes')
+MODEL_SCAN_POLL_MS = 100
+ANALYSIS_POLL_MS = 80
+LISTBOX_INSERT_CHUNK = 1000
+SYSTEM_INFO_POLL_MS = 100
 
 def debug_print(message, force=False):
     """Print debug message only if verbose debug is enabled or force=True."""
@@ -84,13 +90,19 @@ from modules.about_tab import create_about_tab
 
 # Import the settings tab + UI theme helpers
 from modules.settings_tab import create_settings_tab
+from modules.hf_downloader import create_hf_downloader_tab
 from modules import ui_theme
+from modules import venv_manager
+from modules import terminal_launcher
 
 # Import the ik_llama configuration tab module
 from modules.ik_llama import IkLlamaTab
 
 # Import the MTP / Speculative Decoding tab module
 from modules.spec_tab import SpecTab
+
+# Import the Build tab (clone + cmake configure + build for llama.cpp / ik_llama)
+from modules.build import BuildTab
 
 # Import the launch functionality module
 from modules.launch import LaunchManager
@@ -104,7 +116,8 @@ from modules.spec_persistence import resync_spec_tk_vars_from_app_settings
 # Import system helper functions
 from modules.system import (
     get_gpu_info_static, get_ram_info_static, get_cpu_info_static,
-    calculate_total_gguf_size, parse_gguf_header_simple, SystemInfoManager
+    calculate_total_gguf_size, parse_gguf_header_simple, SystemInfoManager,
+    load_cached_gpu_info, save_cached_gpu_info,
 )
 
 
@@ -185,14 +198,30 @@ class LlamaCppLauncher:
 
     # --- New Imports ---
     # Define hardcoded templates, now primarily just the "default" option
+    # Fallback when ``config/chat_templates.json`` is missing.
+    #
+    # Values are **built-in template names** that both llama.cpp and ik_llama
+    # accept verbatim as ``--chat-template <name>``. Verified against
+    # ``llama.cpp/src/llama-chat.cpp::LLM_CHAT_TEMPLATES`` and
+    # ``ik_llama/src/llama.cpp::LLM_CHAT_TEMPLATES``.
+    #
+    # Previously this dict (and the shipped JSON) held Mustache-style
+    # template bodies with ``{{prompt}}`` / ``{{system_message}}``
+    # placeholders that don't exist in llama.cpp's Jinja2 context, so half
+    # the entries silently mapped to the wrong built-in via content
+    # detection (Mistral → llama2, Command R → falcon3, …) and the rest
+    # returned UNKNOWN and tripped a server error.
     _default_templates = {
-        "Let llama.cpp Decide (Use Model Default)": "", # Key for the explicit default option
-        # Add other core templates here if you want them available even without the JSON file
-        "Alpaca": "### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}",
-        "ChatML": "<|im_start|>system\\n{{system_message}}<|im_end|>\\n<|im_start|>user\\n{{prompt}}<|im_end|>\\n<|im_start|>assistant\\n",
-        "Llama 2 Chat": "  <<SYS>>\\n{{system_message}}\\n<</SYS>>\\n\\n{{prompt}} ",
-        "Vicuna": "A chat between a curious user and an AI assistant.\nThe assistant gives helpful, harmless, honest answers.\nUSER: {{prompt}}\nASSISTANT: ",
-        # Qwen3 templates are removed as requested
+        "Let llama.cpp Decide (Use Model Default)": "",  # explicit default option
+        "ChatML (chatml)": "chatml",
+        "Llama 2 (llama2)": "llama2",
+        "Llama 3 (llama3)": "llama3",
+        "Mistral v3 (mistral-v3)": "mistral-v3",
+        "Gemma (gemma)": "gemma",
+        "Phi-3 (phi3)": "phi3",
+        "Vicuna (vicuna)": "vicuna",
+        "DeepSeek 3 (deepseek3)": "deepseek3",
+        "Command R (command-r)": "command-r",
     }
 
     # ────────────────═════════════════════════════════════════════════
@@ -216,7 +245,7 @@ class LlamaCppLauncher:
         # (via WM_DELETE_WINDOW protocol and a <Destroy> binding) so any
         # late-completing worker becomes a no-op rather than racing into a
         # dead Tcl interpreter and corrupting the next launcher's UI
-        # threading state. See ``_safe_after_destroy`` / ``_mark_tk_dead``.
+        # threading state. See ``_mark_tk_dead``.
         import threading as _threading_local
         self._tk_alive = _threading_local.Event()
         self._tk_alive.set()
@@ -231,6 +260,28 @@ class LlamaCppLauncher:
         # ------------------------------------------------ Internal Data Attributes --
         # Attributes that hold data not directly tied to Tk variables, often
         # populated during setup or used for internal logic.
+
+        # Autosave guard. When True, ``_save_configs()`` returns immediately
+        # without writing to disk. We flip this on around startup
+        # ``load_from_config()`` calls so the 6+ Tk var ``.set()`` writes
+        # don't each trigger a JSON serialize + disk flush (every one of
+        # those saves also stat-walks model_dirs). Off by default in steady
+        # state — turning it on outside the documented spots will silently
+        # drop user-driven persistence.
+        self._suppress_autosave = False
+
+        # Registry for lazily-built tabs. Keyed by the tab's frame path
+        # (``str(frame)``) which is what ``notebook.select()`` returns.
+        # Each value is a dict ``{parent, builder, label, initialized}``
+        # — see ``_register_lazy_tab`` / ``_on_notebook_tab_changed``.
+        # Defers heavy widget-tree creation (build tab's 100+ flag widgets,
+        # MTP/Spec tab, etc.) until the user actually opens the tab,
+        # which avoids the multi-second X11 backpressure that otherwise
+        # freezes the Tk main loop at startup on multi-GPU systems.
+        self._lazy_tab_registry: dict = {}
+        self._lazy_tab_binding_attached = False
+        self._bootstrap_config_dirty = False
+        self.repo_dir = venv_manager.launcher_repo_dir()
 
         # --- System Info Attributes ---
         # These will be populated by SystemInfoManager later.
@@ -248,6 +299,7 @@ class LlamaCppLauncher:
             "last_llama_cpp_dir": "",
             "last_ik_llama_dir":  "",
             "last_venv_dir":      "",
+            "venv_bootstrap_prompt_mode": "ask",
             "last_model_path":    "",
             "selected_mmproj_path": "",
             "model_dirs":         [],
@@ -275,6 +327,15 @@ class LlamaCppLauncher:
             "ui_theme_name":       "",
             "ui_font_family":      "",
             "ui_font_size":        0,
+            "hf_repo_input":       "",
+            "hf_repo_revision":    "",
+            "hf_download_mode":    "selected",
+            "hf_target_dirs":      [],
+            "hf_include_patterns": "",
+            "hf_ignore_patterns":  "",
+            "hf_force_download":   False,
+            "hf_local_files_only": False,
+            "hf_max_workers":      4,
             # MTP / Speculative decoding defaults. Master off, no type.
             "spec_enabled":        False,
             "spec_type":           "none",
@@ -638,6 +699,13 @@ class LlamaCppLauncher:
         self.mmproj_display_to_path = {} # {display_value: path_string}
         self.current_model_analysis = {} # Holds the result of the last GGUF analysis
         self.analysis_thread = None
+        self._analysis_generation = 0
+        self._analysis_results_queue = queue.Queue()
+        self._analysis_after_id = None
+        self._scan_in_progress = False
+        self._scan_generation = 0
+        self._scan_results_queue = queue.Queue()
+        self._scan_after_id = None
         # detected_gpu_devices is populated by SystemInfoManager
         self.detected_gpu_devices = [] # List of detected GPU info dicts
         # logical_cores and physical_cores are populated by SystemInfoManager
@@ -648,9 +716,25 @@ class LlamaCppLauncher:
         # Timer to prevent excessive calls to _update_recommendations when slider is moved
         self._recommendations_update_timer = None
 
+        # Debounce IDs for traced text-entry vars whose handlers do disk
+        # writes or kick off GPU detection. Without these, holding a key
+        # in those Entry widgets fires the handler per keystroke.
+        self._backend_dir_change_after_id = None
+        self._venv_dir_change_after_id = None
+        # Coalesce GPU-checkbox cascades: a single toggle does selection
+        # bookkeeping + listbox rebuild + recommendations + config-name
+        # regen + save, and load_configuration() can flip ~8 boxes back-
+        # to-back. ``after_idle`` collapses those into one cascade.
+        self._gpu_selection_cascade_pending = False
+
         # --- Detection Progress Flag ---
         # Flag to prevent multiple simultaneous GPU detection threads
         self._detection_in_progress = False
+        self._system_info_queue = queue.Queue()
+        self._system_info_after_id = None
+        self._system_info_thread = None
+        self._system_info_generation = 0
+        self._system_info_active_generations = set()
 
 
         # --- System Info Initialization ---
@@ -704,13 +788,24 @@ class LlamaCppLauncher:
         # silently wiping the disk values. Same issue affects
         # ``selected_mmproj_path`` / ``mmproj_enabled``.
         # See modules/spec_persistence.resync_spec_tk_vars_from_app_settings.
-        resync_spec_tk_vars_from_app_settings(self)
+        #
+        # Hold off on autosaves while every one of these helpers does a
+        # cascade of ``Tk var .set()`` calls. Each set fires the per-var
+        # ``_save_configs`` trace registered by IkLlamaTab / env vars /
+        # spec, and without this guard you get one full disk write +
+        # stat sweep of ``model_dirs`` per variable. The on-disk state
+        # is already up-to-date here (we just read it).
+        self._suppress_autosave = True
+        try:
+            resync_spec_tk_vars_from_app_settings(self)
 
-        # Load environmental variables configuration
-        self.env_vars_manager.load_from_config(self.app_settings)
+            # Load environmental variables configuration
+            self.env_vars_manager.load_from_config(self.app_settings)
 
-        # Load ik_llama configuration
-        self.ik_llama_tab.load_from_config(self.app_settings)
+            # Load ik_llama configuration
+            self.ik_llama_tab.load_from_config(self.app_settings)
+        finally:
+            self._suppress_autosave = False
 
         # --- Initialize launch manager ---
         self.launch_manager = LaunchManager(self)
@@ -731,6 +826,8 @@ class LlamaCppLauncher:
         except Exception as e:
             print(f"Failed to apply saved UI preferences: {e}", file=sys.stderr)
 
+        self._maybe_prompt_for_initial_venv_setup()
+
         # build GUI
         self._create_widgets()
 
@@ -742,8 +839,11 @@ class LlamaCppLauncher:
              self.n_gpu_layers_entry.bind("<Return>", self._sync_gpu_layers_from_entry)
 
         # --- Bind callbacks for recommendations/info update ---
-        # Bind trace to cache_type_k variable to update the Model Info section
-        self.cache_type_k.trace_add("write", lambda *args: self._update_recommendations())
+        # Bind trace to cache_type_k variable to update the Model Info section.
+        # Debounced so back-to-back .set() calls during load_configuration()
+        # or startup don't each trigger a synchronous tensor-split recompute.
+        # The slider trace already uses the same debounce helper.
+        self.cache_type_k.trace_add("write", lambda *args: self._schedule_recommendations_update())
         # Context size updates handled in _override_ctx_size and _update_ctx_label_from_slider
         # n_gpu_layers updates handled in _set_gpu_layers (called by entry/slider sync)
         # GPU selection updates handled in _on_gpu_selection_changed
@@ -756,6 +856,10 @@ class LlamaCppLauncher:
         self.n_cpu_moe.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to mmproj_enabled to update default config name if needed
         self.mmproj_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        # Also re-run the mmproj selection UI refresh whenever the checkbox
+        # is toggled so the dropdown appears/disappears in lock-step with
+        # the checkbox state (visible only when auto-detection is enabled).
+        self.mmproj_enabled.trace_add("write", lambda *args: self._refresh_mmproj_selection())
         self.jinja_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -822,7 +926,16 @@ class LlamaCppLauncher:
             self._migrate_legacy_manual_gpu_config()
             self._setup_manual_gpus()
         else:
-            # Automatic mode - start background detection
+            # Automatic mode. Prime self.gpu_info from the on-disk
+            # detection cache (if any) so the initial _update_gpu_checkboxes
+            # below renders real GPU labels instead of a "Detecting…"
+            # placeholder. torch + CUDA init in the venv subprocess takes
+            # 3-10 s on systems with many GPUs, which is the rest of the
+            # visible startup lag. The background re-detection still runs
+            # and replaces stale data via the existing post-detection
+            # cascade (which is now incremental — see
+            # _gpu_checkboxes_fingerprint).
+            self._apply_cached_gpu_info_if_any()
             debug_print("Automatic GPU mode, starting background detection")
             self._start_system_info_detection()
 
@@ -835,11 +948,13 @@ class LlamaCppLauncher:
 
         self._update_recommendations() # Call initially to set all initial recommendations
 
+        if self._bootstrap_config_dirty:
+            self._save_configs()
+            self._bootstrap_config_dirty = False
+
         # Perform initial scan (in background) if dirs exist
         if self.model_dirs:
-            self.scan_status_var.set("Scanning on startup...")
-            scan_thread = Thread(target=self._scan_model_dirs, daemon=True)
-            scan_thread.start()
+            self._start_model_scan("Scanning on startup...", clear_ui=False)
         else:
              self.scan_status_var.set("Add directories and scan for models.")
 
@@ -848,6 +963,138 @@ class LlamaCppLauncher:
         # Update chat template display and controls initially based on initial state
         self._update_template_controls_state() # Sets initial state based on self.template_source
         self._update_effective_template_display() # Sets initial displayed template based on source
+
+    def _maybe_prompt_for_initial_venv_setup(self):
+        """Offer repo-venv bootstrap when managed deps are missing."""
+        if self.app_settings.get("venv_bootstrap_prompt_mode", "ask") == "never":
+            return
+        try:
+            raw_venv_path = self.venv_dir.get()
+        except Exception:
+            raw_venv_path = ""
+        configured_venv = venv_manager.describe_venv_target(
+            raw_venv_path,
+            repo_dir=self.repo_dir,
+        )
+        if configured_venv.looks_like_venv:
+            return
+
+        statuses = venv_manager.probe_current_python_dependencies(
+            venv_manager.required_managed_dependencies()
+        )
+        missing_statuses = [status for status in statuses if not status.available]
+        if not missing_statuses:
+            return
+
+        dep_names = ", ".join(status.dependency.label for status in missing_statuses)
+        target = configured_venv.effective_dir
+        action = self._ask_initial_venv_bootstrap_action(
+            dep_names=dep_names,
+            target=target,
+        )
+        if action == "never":
+            self.app_settings["venv_bootstrap_prompt_mode"] = "never"
+            self._bootstrap_config_dirty = True
+            # Save immediately — if the user quits before any later
+            # autosave fires, the "Don't ask again" preference would be
+            # lost and we'd re-prompt on next launch.
+            try:
+                self._save_configs()
+            except Exception as exc:
+                print(
+                    f"WARN: failed to persist bootstrap-prompt 'never' choice: {exc}",
+                    file=sys.stderr,
+                )
+            return
+        if action != "create":
+            return
+
+        command = venv_manager.build_bootstrap_venv_command(target)
+        try:
+            terminal_launcher.open_command_in_terminal(command, cwd=self.repo_dir)
+        except Exception as exc:
+            messagebox.showerror(
+                "Create virtual environment",
+                f"Failed to open terminal for virtual environment bootstrap:\n{exc}",
+            )
+            return
+
+        self.venv_dir.set(str(target))
+        self.app_settings["last_venv_dir"] = str(target)
+        self.app_settings["venv_bootstrap_prompt_mode"] = "ask"
+        self._bootstrap_config_dirty = True
+        # Persist the chosen venv path immediately so a crash or quit
+        # between here and the next autosave doesn't lose it.
+        try:
+            self._save_configs()
+        except Exception as exc:
+            print(
+                f"WARN: failed to persist bootstrap-prompt 'create' state: {exc}",
+                file=sys.stderr,
+            )
+        messagebox.showinfo(
+            "Create virtual environment",
+            "Opened a terminal to create the default repo venv and install the launcher packages.",
+        )
+
+    def _ask_initial_venv_bootstrap_action(self, *, dep_names, target):
+        """Show a three-action bootstrap prompt.
+
+        Returns one of ``create``, ``skip``, or ``never``.
+        """
+        result = {"action": "skip"}
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Create virtual environment?")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: _close("skip"))
+
+        body = ttk.Frame(dialog, padding=16)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(
+            body,
+            text="Some required launcher Python packages are missing.",
+            font=("TkDefaultFont", 11, "bold"),
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=(
+                f"Missing required packages: {dep_names}\n\n"
+                "Optional packages like torch can be installed later from Settings.\n\n"
+                f"Create the default repo virtual environment and install them at:\n{target}"
+            ),
+            justify="left",
+            wraplength=520,
+        ).pack(anchor="w", pady=(10, 14))
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+
+        def _close(action):
+            result["action"] = action
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Yes", command=lambda: _close("create")).pack(side="left")
+        ttk.Button(buttons, text="No", command=lambda: _close("skip")).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Don't ask again",
+            command=lambda: _close("never"),
+        ).pack(side="right")
+
+        dialog.update_idletasks()
+        try:
+            dialog.grab_set()
+        except Exception:
+            pass
+        self.root.wait_window(dialog)
+        return result["action"]
 
 
     # ═════════════════════════════════════════════════════════════════
@@ -860,18 +1107,23 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
-        nb.add(main_frame, text="Main Settings")
-        nb.add(adv_frame,  text="Advanced Settings")
-        nb.add(chat_frame, text="Chat Template") # Add the new tab
-        nb.add(env_frame,  text="Environment Variables") # Add environmental variables tab
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); hf_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        nb.add(main_frame, text="Main")
+        nb.add(adv_frame,  text="Advanced")
+        nb.add(chat_frame, text="Chat") # Add the new tab
+        nb.add(env_frame,  text="Env Vars") # Add environmental variables tab
         # MTP / Speculative decoding tab - always visible (both backends support spec).
-        nb.add(mtp_spec_frame, text="MTP / Spec")
+        nb.add(mtp_spec_frame, text="MTP-Spec")
         self.mtp_spec_frame = mtp_spec_frame
-        # ik_llama tab will be added conditionally
+        # ik_llama tab will be added conditionally between Env Vars and MTP-Spec
         self.ik_llama_frame = ik_llama_frame
-        nb.add(cfg_frame,  text="Configurations")
+        nb.add(cfg_frame,  text="Config")
         nb.add(settings_frame, text="Settings") # UI appearance / font
+        nb.add(hf_frame, text="Hugging Face")
+        # Build tab is always visible (lets you build either backend regardless of which is launched).
+        # Positioned 2nd-to-last; About is always last.
+        nb.add(build_frame, text="Build (beta)")
+        self.build_frame = build_frame
         nb.add(about_frame, text="About") # Add the about tab
 
 
@@ -881,8 +1133,10 @@ class LlamaCppLauncher:
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_mtp_spec_tab(mtp_spec_frame) # Setup the MTP / Spec tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
+        self._setup_build_tab(build_frame) # Setup the Build tab
         self._setup_config_tab(cfg_frame)
         self._setup_settings_tab(settings_frame) # UI settings tab
+        self._setup_hf_downloader_tab(hf_frame)
         self._setup_about_tab(about_frame) # Setup the about tab
 
         # Update ik_llama tab visibility based on current backend selection
@@ -994,16 +1248,20 @@ class LlamaCppLauncher:
 
         inner.rowconfigure(r-1, weight=0) # Don't expand the directory listbox row with height
 
-        # Move directory buttons to the right of the listbox
-        dir_btn_frame = ttk.Frame(inner)
-        dir_btn_frame.grid(column=2, row=r-1, sticky="n", padx=5, pady=3)
-        ttk.Button(dir_btn_frame, text="Add Dir…", width=10, command=self._add_model_dir)\
+        # Move directory buttons to the right of the listbox. Stored on
+        # ``self`` so the scan-start/finish handlers can disable / re-enable
+        # them while a scan is in flight — without this assignment the
+        # ``hasattr(self, 'dir_btn_frame')`` checks downstream always
+        # short-circuit and the buttons stay clickable during a scan.
+        self.dir_btn_frame = ttk.Frame(inner)
+        self.dir_btn_frame.grid(column=2, row=r-1, sticky="n", padx=5, pady=3)
+        ttk.Button(self.dir_btn_frame, text="Add Dir…", width=10, command=self._add_model_dir)\
            .pack(side=tk.TOP, pady=2, fill=tk.X)
-        ttk.Button(dir_btn_frame, text="Remove Dir", width=10, command=self._remove_model_dir)\
+        ttk.Button(self.dir_btn_frame, text="Remove Dir", width=10, command=self._remove_model_dir)\
            .pack(side=tk.TOP, pady=2, fill=tk.X)
 
         # Add scan button next to directory buttons
-        scan_btn = ttk.Button(dir_btn_frame, text="Scan Models", command=self._trigger_scan)
+        scan_btn = ttk.Button(self.dir_btn_frame, text="Scan Models", command=self._trigger_scan)
         scan_btn.pack(side=tk.TOP, pady=2, fill=tk.X)
 
         # Add some vertical space between directory section and model selection
@@ -1358,8 +1616,13 @@ class LlamaCppLauncher:
         # CUDA Devices Info & Checkboxes (Populated dynamically in _update_gpu_checkboxes)
         ttk.Label(inner, textvariable=self.gpu_availability_var)\
             .grid(column=0, row=r, sticky="nw", padx=10, pady=3)
-        ttk.Label(inner, textvariable=self.gpu_detected_status_var, font=("TkSmallCaptionFont"), foreground="orange")\
-             .grid(column=1, row=r, sticky="nw", padx=5, pady=3, columnspan=3)
+        self.gpu_detection_status_label = ttk.Label(
+            inner,
+            textvariable=self.gpu_detected_status_var,
+            font=("TkSmallCaptionFont"),
+            foreground="#666666",
+        )
+        self.gpu_detection_status_label.grid(column=1, row=r, sticky="nw", padx=5, pady=3, columnspan=3)
         r += 1
         self.gpu_checkbox_frame = ttk.Frame(inner)
         self.gpu_checkbox_frame.grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=(0, 5))
@@ -1821,6 +2084,22 @@ class LlamaCppLauncher:
 
         r += 1 # Next row
 
+        # Status line surfaced when a saved ``predefined_template_name``
+        # no longer exists in ``_all_templates`` (e.g. the user removed a
+        # sidecar template or upgraded across the Mustache→names rename).
+        # Previously this case silently emitted no ``--chat-template`` and
+        # fell back to the model default, leaving the user wondering why
+        # their selection had no effect.
+        self.predefined_template_status_var = tk.StringVar(value="")
+        ttk.Label(
+            frame,
+            textvariable=self.predefined_template_status_var,
+            font=("TkSmallCaptionFont",),
+            foreground="#b00020",
+            wraplength=720,
+            justify="left",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+
 
         # --- Custom Template Entry ---
         # This is now only active when "Use Custom Template" is selected via radio button
@@ -1844,21 +2123,47 @@ class LlamaCppLauncher:
         r += 1
 
 
-        # --- Effective Template Display --- (Logic remains the same, only the source changes)
-        ttk.Label(frame, text="Effective Template:").grid(column=0, row=r, sticky="w", padx=5, pady=3)
-        self.effective_template_display = ttk.Entry(frame, textvariable=self.current_template_display,
-                                                    state="readonly")
+        # --- Effective Template Display ---
+        # Multi-line so real Jinja2 templates aren't visually clipped to
+        # the first ~60 chars (a one-line Entry was previously used).
+        ttk.Label(frame, text="Effective Template:").grid(column=0, row=r, sticky="nw", padx=5, pady=3)
+        self.effective_template_display = scrolledtext.ScrolledText(
+            frame, wrap=tk.WORD, height=4, width=60, relief=tk.SUNKEN, bd=1,
+        )
         self.effective_template_display.grid(column=1, row=r, sticky="ew", padx=5, pady=3)
+        # Read-only via the disabled state; copy via the side button.
+        self.effective_template_display.configure(state="disabled")
         ttk.Button(frame, text="Copy", command=self._copy_template_display)\
-            .grid(column=2, row=r, sticky="w", padx=5, pady=3)
+            .grid(column=2, row=r, sticky="nw", padx=5, pady=3)
 
         r += 1
 
-        # Keep help labels, adjust wording if necessary
-        ttk.Label(frame, text="Enter a Go-template string. e.g., \"### Instruction:\\n{{instruction}}\\n### Response:\\n{{response}}\"", font=("TkSmallCaptionFont"))\
-            .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
-        ttk.Label(frame, text="Use double backslashes (\\\\) for newline characters within the template string for Python literals. The server uses Go-template syntax.", font=("TkSmallCaptionFont"), foreground="orange")\
-             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0,3)); r += 1
+        # Help text that switches based on --jinja state.
+        # llama.cpp's ``--chat-template`` accepts either:
+        #   • a built-in *name* from the LLM_CHAT_TEMPLATES table
+        #     (works in the legacy path; ``--jinja`` should be OFF), or
+        #   • a Jinja2 template source (rendered through Minja when
+        #     ``--jinja`` is ON).
+        # The previous help text claimed "Go-template syntax" which is
+        # wrong for both backends.
+        self.template_help_var = tk.StringVar(value="")
+        ttk.Label(
+            frame, textvariable=self.template_help_var,
+            font=("TkSmallCaptionFont",), foreground="gray",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        ttk.Label(
+            frame,
+            text=(
+                "Tip: Custom mode + ``--jinja`` ON expects a real Jinja2 template "
+                "(receives ``messages``, ``add_generation_prompt``, ``bos_token``, "
+                "``eos_token`` — not ``{{prompt}}`` / ``{{system_message}}``)."
+            ),
+            font=("TkSmallCaptionFont",), foreground="gray", wraplength=720, justify="left",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        # Keep the help text in sync with the jinja toggle and the source radios.
+        self.jinja_enabled.trace_add("write", lambda *_a: self._update_template_help_text())
+        self.template_source.trace_add("write", lambda *_a: self._update_template_help_text())
+        self._update_template_help_text()
 
 
         # --- Reasoning / Thinking section ---
@@ -1916,21 +2221,51 @@ class LlamaCppLauncher:
             .grid(column=0, row=r, sticky="w", padx=5, pady=3)
         self.reasoning_budget_message_entry = ttk.Entry(frame, textvariable=self.reasoning_budget_message)
         self.reasoning_budget_message_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2); r += 1
+        ttk.Label(
+            frame,
+            text="Only injected when --reasoning-budget is a positive integer; "
+                 "irrelevant for -1 (unlimited) or 0 (immediate end).",
+            font=("TkSmallCaptionFont",), foreground="gray",
+        ).grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
+        # Keep enabled/disabled in sync with the budget value.
+        self.reasoning_budget.trace_add(
+            "write", lambda *_a: self._update_reasoning_budget_message_state()
+        )
+        self._update_reasoning_budget_message_state()
 
         # --chat-template-kwargs
         ttk.Label(frame, text="Chat Template KWargs (--chat-template-kwargs):")\
             .grid(column=0, row=r, sticky="w", padx=5, pady=3)
         self.chat_template_kwargs_entry = ttk.Entry(frame, textvariable=self.chat_template_kwargs)
         self.chat_template_kwargs_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2); r += 1
-        ttk.Label(frame, text="(advanced: JSON string)", font=("TkSmallCaptionFont"), foreground="gray")\
+        # Lint as JSON on focus-out so a typo'd value tints the entry red
+        # right away instead of failing at server startup with an opaque
+        # parser error.
+        self.chat_template_kwargs_entry.bind(
+            "<FocusOut>", lambda _e: self._validate_chat_template_kwargs()
+        )
+        ttk.Label(frame, text="(advanced: JSON object — e.g. {\"enable_thinking\":true})",
+                  font=("TkSmallCaptionFont",), foreground="gray")\
             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
         ttk.Label(frame,
-                  text="Use --reasoning on/off instead of --chat-template-kwargs '{\"preserve_thinking\":true}'",
-                  font=("TkSmallCaptionFont"), foreground="gray")\
+                  text="Prefer --reasoning on/off over --chat-template-kwargs "
+                       "'{\"enable_thinking\":true}'; the kwarg path is deprecated upstream.",
+                  font=("TkSmallCaptionFont",), foreground="gray")\
             .grid(column=1, row=r, columnspan=2, sticky="w", padx=5, pady=(0, 3)); r += 1
 
 
-        # Initial state update based on self.template_source (called in __init__)
+        # Initial UI state — the earlier call in ``__init__`` ran BEFORE
+        # this tab existed (the ``hasattr`` guards short-circuited), so
+        # without this call the predefined combobox kept its constructed
+        # ``state="readonly"`` and the custom-template text widget kept
+        # its default NORMAL state regardless of which radio is selected.
+        # That made the dropdown look clickable even when the user has
+        # "Use Custom Template" checked. Sync now that the widgets exist.
+        self._update_template_controls_state()
+        # Same for the effective template display + help text + status —
+        # all of those derive from the radio state.
+        self._update_effective_template_display()
+        self._update_template_help_text()
 
 
     def _update_fit_fields_state(self, *args):
@@ -1990,20 +2325,66 @@ class LlamaCppLauncher:
         source = self.template_source.get()
         effective_template = "" # Default to empty
 
+        # Clear any prior stale-predefined warning by default; the
+        # predefined branch below sets it again only if needed.
+        status_var = getattr(self, "predefined_template_status_var", None)
+        if status_var is not None:
+            try:
+                status_var.set("")
+            except tk.TclError:
+                pass
+
         if source == "default":
             effective_template = "" # Explicitly empty when llama.cpp decides
         elif source == "predefined":
             selected_name = self.predefined_template_name.get()
-            # Get template string from the combined dictionary
-            effective_template = self._all_templates.get(selected_name, "") # Default to empty if key not found
+            # Detect a dangling saved selection: the launcher kept the
+            # config's ``predefined_template_name`` even when the templates
+            # dict no longer carries that label (e.g. a sidecar JSON was
+            # removed, or this is an upgrade across the old Mustache →
+            # built-in-name rename). Without this warning the user would
+            # see an empty effective template and the server would
+            # silently fall back to the model default.
+            if selected_name and selected_name not in self._all_templates:
+                if status_var is not None:
+                    try:
+                        status_var.set(
+                            f"⚠ Saved predefined template {selected_name!r} is not "
+                            f"available in the current list. ``--chat-template`` will "
+                            f"not be emitted and the server will use the model's "
+                            f"default template. Pick a different entry above to clear."
+                        )
+                    except tk.TclError:
+                        pass
+                print(
+                    f"WARNING: predefined chat template {selected_name!r} not found "
+                    f"in _all_templates; --chat-template will not be emitted.",
+                    file=sys.stderr,
+                )
+                effective_template = ""
+            else:
+                effective_template = self._all_templates.get(selected_name, "")
         elif source == "custom":
             effective_template = self.custom_template_string.get()
 
-        # Ensure the displayed entry is writable before setting, then set back to readonly
-        if hasattr(self, 'effective_template_display') and self.effective_template_display.winfo_exists():
-             self.effective_template_display.config(state=tk.NORMAL)
-             self.current_template_display.set(effective_template)
-             self.effective_template_display.config(state="readonly")
+        # Keep the underlying StringVar so save/load and the Copy button
+        # continue to work without changes.
+        self.current_template_display.set(effective_template)
+
+        # Rewrite the visible widget. Previously a one-line ttk.Entry —
+        # now a multi-line read-only ScrolledText so real Jinja2 templates
+        # render fully instead of being clipped to the leading ~60 chars.
+        widget = getattr(self, 'effective_template_display', None)
+        if widget is not None and widget.winfo_exists():
+            try:
+                widget.configure(state="normal")
+                widget.delete("1.0", tk.END)
+                if effective_template:
+                    widget.insert("1.0", effective_template)
+                widget.configure(state="disabled")
+            except tk.TclError:
+                # Widget torn down mid-update; safe to ignore.
+                pass
 
 
     def _on_custom_template_modified(self, event=None):
@@ -2066,6 +2447,153 @@ class LlamaCppLauncher:
         else:
             messagebox.showinfo("Copy Info", "No template string to copy.")
 
+    def _update_template_help_text(self, *_args) -> None:
+        """Switch the chat-template help line based on jinja + source mode.
+
+        The rules are non-obvious and previously the static "Go-template
+        syntax" hint actively misled users:
+
+        * Predefined: a built-in template *name* like ``chatml`` is sent
+          verbatim. Works in the legacy code path; ``--jinja`` should
+          stay OFF (with ``--jinja`` ON, Minja parses the literal string
+          ``"chatml"`` as a Jinja2 template — broken).
+        * Custom + ``--jinja`` OFF: llama.cpp tries to match the body
+          against the built-in name table, then falls through to
+          content-pattern detection. Anything that doesn't match a
+          known marker returns ``UNKNOWN`` and the server errors out.
+        * Custom + ``--jinja`` ON: the body is parsed as a real Jinja2
+          template via Minja; it receives ``messages``,
+          ``add_generation_prompt``, ``bos_token``, ``eos_token``.
+        """
+        var = getattr(self, "template_help_var", None)
+        if var is None:
+            return
+        try:
+            source = self.template_source.get()
+        except Exception:
+            return
+        jinja_on = False
+        try:
+            jinja_on = bool(self.jinja_enabled.get())
+        except Exception:
+            pass
+        if source == "default":
+            msg = (
+                "llama.cpp decides — the template embedded in the GGUF metadata is used. "
+                "``--chat-template`` is not emitted."
+            )
+        elif source == "predefined":
+            if jinja_on:
+                msg = (
+                    "⚠ Predefined entries send a built-in template *name* (e.g. "
+                    "``chatml``). With ``--jinja`` ON, Minja tries to parse the "
+                    "name as Jinja2 source — turn ``--jinja`` OFF or switch to "
+                    "Custom mode and paste a real Jinja2 template."
+                )
+            else:
+                msg = (
+                    "Sends a built-in template name as ``--chat-template <name>``. "
+                    "Verified against llama.cpp + ik_llama; ``--jinja`` not required."
+                )
+        elif source == "custom":
+            if jinja_on:
+                msg = (
+                    "Custom Jinja2 template. Receives ``messages`` (list of "
+                    "{role, content}), ``add_generation_prompt`` (bool), "
+                    "``bos_token``, ``eos_token``. Validated by Minja at "
+                    "server startup."
+                )
+            else:
+                msg = (
+                    "Without ``--jinja``, the body is matched against the built-in "
+                    "name table, then against known content markers. Anything "
+                    "that doesn't match returns UNKNOWN and the server errors. "
+                    "Easiest: either type a built-in name (``chatml``, ``llama3``, "
+                    "…) or enable ``--jinja`` and paste a real Jinja2 template."
+                )
+        else:
+            msg = ""
+        var.set(msg)
+
+    def _validate_chat_template_kwargs(self) -> None:
+        """Lint ``--chat-template-kwargs`` as JSON on focus-out.
+
+        The server requires this flag to be valid JSON (it merges the
+        parsed object into the per-request template context). A typo
+        like ``{"a":}`` was previously only surfaced at server startup
+        as an opaque parse error; show it here while the user can still
+        fix it.
+        """
+        widget = getattr(self, "chat_template_kwargs_entry", None)
+        if widget is None:
+            return
+        raw = self.chat_template_kwargs.get().strip()
+        # Empty is fine — flag won't be emitted.
+        if not raw:
+            try:
+                widget.configure(foreground="")
+            except tk.TclError:
+                pass
+            return
+        try:
+            parsed = json.loads(raw)
+        except Exception as exc:
+            try:
+                widget.configure(foreground="#b00020")
+            except tk.TclError:
+                pass
+            print(
+                f"WARNING: --chat-template-kwargs value is not valid JSON: {exc}",
+                file=sys.stderr,
+            )
+            return
+        if not isinstance(parsed, dict):
+            try:
+                widget.configure(foreground="#b00020")
+            except tk.TclError:
+                pass
+            print(
+                "WARNING: --chat-template-kwargs must be a JSON object "
+                "(e.g. {\"enable_thinking\":true}); got "
+                f"{type(parsed).__name__}.",
+                file=sys.stderr,
+            )
+            return
+        try:
+            widget.configure(foreground="")
+        except tk.TclError:
+            pass
+
+    def _update_reasoning_budget_message_state(self, *_args) -> None:
+        """Disable ``--reasoning-budget-message`` when the budget is blank
+        or set to ``-1`` (unlimited) or ``0`` (immediate end).
+
+        Per ``llama.cpp/common/arg.cpp:3187-3192`` the message is *only*
+        emitted when the reasoning budget is exhausted — meaning a
+        positive integer budget. When ``--reasoning-budget`` is blank
+        (= flag not emitted), ``-1`` (unlimited; never exhausted) or
+        ``0`` (immediately ended; no time to inject the message), the
+        flag would have no effect. Greyed-out + cleared makes that
+        relationship obvious.
+        """
+        entry = getattr(self, "reasoning_budget_message_entry", None)
+        if entry is None:
+            return
+        try:
+            budget = self.reasoning_budget.get().strip()
+        except Exception:
+            budget = ""
+        try:
+            budget_int = int(budget) if budget else None
+        except ValueError:
+            budget_int = None
+        # Active state: budget is a positive integer.
+        active = budget_int is not None and budget_int >= 1
+        try:
+            entry.configure(state=("normal" if active else "disabled"))
+        except tk.TclError:
+            pass
+
 
     # ░░░░░ CONFIG TAB ░░░░░
     def _setup_config_tab(self, parent):
@@ -2115,14 +2643,29 @@ class LlamaCppLauncher:
         self._update_config_listbox()
 
     def _setup_env_vars_tab(self, parent):
-        """Set up the Environmental Variables tab using the EnvironmentalVariablesTab class."""
-        # Create the environmental variables tab using the dedicated class
-        self.env_vars_tab = EnvironmentalVariablesTab(parent, self.env_vars_manager)
+        """Set up the Environmental Variables tab (deferred build).
+
+        ``EnvironmentalVariablesTab.__init__`` creates the widget tree
+        immediately, so we wrap it in a lazy builder that runs the
+        first time the user selects the tab.
+        """
+        def _build(p):
+            self.env_vars_tab = EnvironmentalVariablesTab(p, self.env_vars_manager)
+        self._register_lazy_tab(parent, _build, "Env Vars tab")
+        self._ensure_lazy_tab_binding()
 
     def _setup_ik_llama_tab(self, parent):
-        """Set up the ik_llama configuration tab using the IkLlamaTab class."""
-        # Create the ik_llama tab using the dedicated class
-        self.ik_llama_tab.create_tab(parent)
+        """Set up the ik_llama configuration tab (deferred build).
+
+        The ``IkLlamaTab`` instance + its Tk vars + save-trace bindings
+        are already created in ``LlamaCppLauncher.__init__``, so loading
+        a saved config (which writes those vars) still works before
+        the user has opened the tab. Only the widget tree is deferred.
+        """
+        self._register_lazy_tab(
+            parent, self.ik_llama_tab.create_tab, "ik_llama tab",
+        )
+        self._ensure_lazy_tab_binding()
 
     # ░░░░░ MTP / SPECULATIVE DECODING TAB ░░░░░
     # Backend-aware tab; class lives in modules/spec_tab.py. The launcher
@@ -2131,13 +2674,176 @@ class LlamaCppLauncher:
     # delegation for the few attributes SpecTab rebinds (see
     # ``_SPEC_TAB_DELEGATED_ATTRS``).
     def _setup_mtp_spec_tab(self, parent):
-        """Set up the MTP / Speculative Decoding tab (thin delegator to SpecTab.setup_tab)."""
-        self.spec_tab.setup_tab(parent)
+        """Set up the MTP / Speculative Decoding tab (deferred build).
+
+        ``SpecTab`` is constructed during launcher ``__init__`` so the
+        Tk vars / handler methods are wired up immediately; the widget
+        tree (controls + draft model listbox + 8 draft GPU checkboxes
+        + tuning fields) is the part we defer.
+
+        When the model scan completes before this tab is built,
+        ``_update_model_listbox_after_scan`` can't populate the
+        spec_draft_listbox (it doesn't exist yet) and the user's
+        saved draft selection is lost. The lazy builder below
+        repopulates the listbox from ``self.found_models`` after
+        the widgets exist.
+        """
+        def _build(p):
+            self.spec_tab.setup_tab(p)
+            self._restore_spec_draft_listbox_from_scan()
+        self._register_lazy_tab(parent, _build, "MTP-Spec tab")
+        self._ensure_lazy_tab_binding()
+
+    def _restore_spec_draft_listbox_from_scan(self):
+        """Populate the spec_draft_listbox with the current scan result
+        and restore the saved draft selection. Idempotent — safe to
+        call multiple times. No-op if the listbox doesn't exist or
+        the scan hasn't produced results yet.
+
+        Mirrors the spec_draft-specific branch of
+        ``_update_model_listbox_after_scan`` so the two paths produce
+        the same end state. Called from the lazy MTP-Spec tab builder.
+        """
+        listbox = getattr(self, "spec_draft_listbox", None)
+        if listbox is None:
+            return
+        try:
+            if not listbox.winfo_exists():
+                return
+        except Exception:
+            return
+        found = getattr(self, "found_models", {}) or {}
+        if not found:
+            return
+        model_names = sorted(found.keys())
+        try:
+            listbox.config(state=tk.NORMAL)
+            self._replace_listbox_items(listbox, model_names)
+        except Exception:
+            return
+        saved_draft = (self.spec_draft_model.get() or "").strip()
+        restored = False
+        if saved_draft:
+            try:
+                saved_path = Path(saved_draft).resolve()
+                for idx, display_name in enumerate(model_names):
+                    full_path = found.get(display_name)
+                    if full_path is not None and full_path == saved_path:
+                        listbox.selection_clear(0, tk.END)
+                        listbox.selection_set(idx)
+                        listbox.see(idx)
+                        restored = True
+                        break
+            except (ValueError, OSError):
+                pass
+        if hasattr(self, "spec_draft_path_display_var"):
+            cur = (self.spec_draft_model.get() or "").strip()
+            self.spec_draft_path_display_var.set(
+                cur or "(none — uses base GGUF for MTP)"
+            )
+        if restored:
+            try:
+                self._on_spec_draft_model_selected()
+            except Exception as exc:
+                print(
+                    f"DEBUG: restored draft selection handler failed: {exc}",
+                    file=sys.stderr,
+                )
 
     def _setup_settings_tab(self, parent):
         """Set up the Settings (UI appearance) tab."""
         self.settings_tab = create_settings_tab(self)
         self.settings_tab.setup_settings_tab(parent)
+
+    def _setup_hf_downloader_tab(self, parent):
+        """Set up the Hugging Face downloader tab (deferred build)."""
+        self.hf_downloader_tab = create_hf_downloader_tab(self)
+        self._register_lazy_tab(parent, self.hf_downloader_tab.setup_tab, "Hugging Face tab")
+        self._ensure_lazy_tab_binding()
+
+    def _register_lazy_tab(self, parent, builder, label):
+        """Register a tab whose heavy widget tree is built on first
+        selection. ``builder`` is a callable taking ``parent`` that
+        creates the real widgets; it runs at most once. A "Loading …"
+        placeholder is shown in the meantime so an empty tab doesn't
+        look broken if the user clicks it before the placeholder has
+        had a chance to be replaced.
+
+        Motivation: realising ~100+ ttk widgets per tab at startup
+        causes X11 backpressure on multi-GPU systems with the NVIDIA
+        driver — the Tk main loop can't drain the X queue and after()
+        callbacks (model-restore, GGUF analysis drain, etc.) all
+        stall behind it. Building tabs on first click trades a brief
+        moment of widget-creation when the user opens the tab for a
+        much faster initial paint.
+        """
+        registry = self._lazy_tab_registry
+        registry[str(parent)] = {
+            "parent": parent,
+            "builder": builder,
+            "label": label,
+            "initialized": False,
+        }
+        ttk.Label(
+            parent,
+            text=f"Loading {label}…",
+            font=("TkSmallCaptionFont",),
+        ).pack(padx=20, pady=20, anchor="w")
+
+    def _ensure_lazy_tab_binding(self):
+        """Attach the ``<<NotebookTabChanged>>`` dispatcher once. Idempotent."""
+        if getattr(self, "_lazy_tab_binding_attached", False):
+            return
+        self.notebook.bind(
+            "<<NotebookTabChanged>>",
+            self._on_notebook_tab_changed,
+            add="+",
+        )
+        self._lazy_tab_binding_attached = True
+
+    def _on_notebook_tab_changed(self, event=None):
+        """Lazy-init heavy tabs the first time they're selected."""
+        try:
+            current = self.notebook.select()
+        except Exception:
+            return
+        if not current:
+            return
+        registry = getattr(self, "_lazy_tab_registry", None)
+        if not registry:
+            return
+        entry = registry.get(current)
+        if entry is None or entry["initialized"]:
+            return
+        parent = entry["parent"]
+        # Tear down the placeholder and build the real UI.
+        for child in parent.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        try:
+            entry["builder"](parent)
+            entry["initialized"] = True
+        except Exception as exc:
+            print(
+                f"ERROR: lazy tab setup for {entry['label']!r} failed: {exc}",
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
+
+    def _setup_build_tab(self, parent):
+        """Set up the Build tab (clone + cmake configure + build).
+
+        The BuildTab instance is created eagerly (cheap — only Tk vars +
+        a deferred toolchain-probe schedule), but the heavy widget tree
+        (~112 flag widgets + arch picker + env grid + cmake-preview
+        pane) is deferred until the user actually clicks the tab.
+        """
+        self.build_tab = BuildTab(self)
+        self.build_tab.register_with_notebook(self.notebook, "Build (beta)")
+        self._register_lazy_tab(parent, self.build_tab.setup_tab, "Build tab")
+        self._ensure_lazy_tab_binding()
 
     def _setup_about_tab(self, parent):
         """Set up the About tab using the AboutTab class."""
@@ -2287,32 +2993,70 @@ class LlamaCppLauncher:
 
     def _trigger_scan(self):
         """Initiates model scanning in a background thread."""
-        self.scan_status_var.set("Scanning...")
-        self.model_listbox.config(state=tk.NORMAL)
-        self.model_listbox.delete(0, tk.END)
-        self.model_path.set("")
-        self._reset_gpu_layer_controls()
-        self._reset_model_info_display()
-        self.current_model_analysis = {} # Clear analysis result
-        self._update_recommendations() # Update recommendations display
-        # Disable Add/Remove buttons during scan to prevent modifying the list while scanning
-        # Need to find the buttons - assuming they are in the dir_btn_frame
+        self._start_model_scan("Scanning...", clear_ui=True)
+
+    def _start_model_scan(self, status_text, *, clear_ui):
+        """Start one background scan using a main-thread snapshot of paths."""
+        if self._scan_in_progress:
+            self.scan_status_var.set("Scan already running...")
+            return
+
+        self._scan_in_progress = True
+        self._scan_generation += 1
+        scan_id = self._scan_generation
+        self.scan_status_var.set(status_text)
+
+        if clear_ui:
+            self.model_listbox.config(state=tk.NORMAL)
+            self.model_listbox.delete(0, tk.END)
+            self.model_path.set("")
+            self._reset_gpu_layer_controls()
+            self._reset_model_info_display()
+            self.current_model_analysis = {} # Clear analysis result
+            self._update_recommendations() # Update recommendations display
+
+        # Disable Add/Remove buttons during scan to prevent modifying the list while scanning.
         if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
              for child in self.dir_btn_frame.winfo_children():
                  if isinstance(child, ttk.Button):
                       child.config(state=tk.DISABLED)
 
-        # Ensure self.model_dirs contains Path objects before scanning
-        # It should already contain Path objects from _update_model_dirs_listbox, but double check
-        self.model_dirs = [Path(d) for d in [str(p) for p in self.model_dirs] if d] # Re-create list of Paths
+        # Snapshot paths on the Tk thread. The worker must not read self.model_dirs
+        # while the UI can mutate it.
+        self.model_dirs = [Path(d) for d in [str(p) for p in self.model_dirs] if d]
+        model_dirs_snapshot = list(self.model_dirs)
 
-
-        scan_thread = Thread(target=self._scan_model_dirs, daemon=True)
+        scan_thread = Thread(
+            target=self._scan_model_dirs,
+            args=(scan_id, model_dirs_snapshot),
+            daemon=True,
+        )
         scan_thread.start()
+        if self._scan_after_id is None:
+            self._scan_after_id = self.root.after(MODEL_SCAN_POLL_MS, self._drain_model_scan_results)
 
-    def _scan_model_dirs(self):
+    @staticmethod
+    def _iter_gguf_candidates(model_dir):
+        """Yield candidate GGUF paths without stat'ing every non-matching file."""
+        def onerror(exc):
+            print(f"ERROR: Error scanning directory {model_dir}: {exc}", file=sys.stderr)
+
+        for dirpath, _dirnames, filenames in os.walk(model_dir, onerror=onerror):
+            for filename in filenames:
+                filename_l = filename.lower()
+                if not re.search(r"\.gguf(?:\.part\d+of\d+)?$", filename_l):
+                    continue
+                if "mmproj" in filename_l or filename_l.endswith(".bin.gguf"):
+                    continue
+                yield Path(dirpath) / filename
+
+    def _scan_model_dirs(self, scan_id=None, model_dirs_snapshot=None):
         """Scans configured directories for GGUF models (runs in background thread)."""
-        print("DEBUG: _scan_model_dirs thread started", file=sys.stderr)
+        debug_print("_scan_model_dirs thread started")
+        if scan_id is None:
+            scan_id = self._scan_generation
+        if model_dirs_snapshot is None:
+            model_dirs_snapshot = list(self.model_dirs)
         found = {} # {display_name: full_path_obj}
         # Pattern to match multi-part files
         # model_name-BF16-00001-of-00005.gguf from bartowski/unsloth
@@ -2324,64 +3068,98 @@ class LlamaCppLauncher:
         re_first2 = re.compile(r"^(.*?)\.gguf\.part0*1of\d+$", re.I)
 
         # Two-pass approach to handle multi-part files correctly
-        all_gguf_files = []
-        for model_dir in self.model_dirs:
-            # Skip invalid or non-existent directories silently during scan
-            if not isinstance(model_dir, Path) or not model_dir.is_dir(): continue
-            print(f"DEBUG: Scanning directory: {model_dir}", file=sys.stderr)
-            try:
-                # Collect GGUF model files with case-insensitive matching, including *.gguf.partXofY.
-                for gguf_path in model_dir.rglob('*'):
-                    if not gguf_path.is_file():
-                        continue
-                    filename_l = gguf_path.name.lower()
-                    if not re.search(r"\.gguf(?:\.part\d+of\d+)?$", filename_l):
-                        continue
-                    # Skip non-model GGUF files often found with models
-                    if "mmproj" in filename_l or filename_l.endswith(".bin.gguf"):
-                        continue
-                    all_gguf_files.append(gguf_path)
-            except Exception as e:
-                print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
+        try:
+            all_gguf_files = []
+            for model_dir in model_dirs_snapshot:
+                # Skip invalid or non-existent directories silently during scan.
+                if not isinstance(model_dir, Path) or not model_dir.is_dir():
+                    continue
+                debug_print(f"Scanning directory: {model_dir}")
+                try:
+                    all_gguf_files.extend(self._iter_gguf_candidates(model_dir))
+                except Exception as e:
+                    print(f"ERROR: Error scanning directory {model_dir}: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
 
-        # First pass: find all first parts of multi-part files
-        processed_multipart_bases = set()
-        for gguf_path in all_gguf_files:
-            filename = gguf_path.name
-            first_part_match = re_first1.match(filename) or re_first2.match(filename)
-            if first_part_match:
-                base_name = first_part_match.group(1)
-                if base_name not in processed_multipart_bases:
+            # First pass: find all first parts of multi-part files.
+            processed_multipart_bases = set()
+            for gguf_path in all_gguf_files:
+                filename = gguf_path.name
+                first_part_match = re_first1.match(filename) or re_first2.match(filename)
+                if first_part_match:
+                    base_name = first_part_match.group(1)
+                    if base_name not in processed_multipart_bases:
+                        try:
+                            resolved_gguf_path = gguf_path.resolve()
+                            found[base_name] = resolved_gguf_path
+                            processed_multipart_bases.add(base_name)
+                            debug_print(f"Found multi-part model: {base_name}")
+                        except Exception as resolve_exc:
+                            print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+
+            # Second pass: find single-part files that aren't part of multi-part sets.
+            for gguf_path in all_gguf_files:
+                filename = gguf_path.name
+
+                # Skip if this is any part of a multi-part file.
+                if re_multi1.match(filename) or re_multi2.match(filename):
+                    continue
+
+                # Handle single-part files.
+                if filename.lower().endswith(".gguf"):
+                    display_name = gguf_path.stem
+                    if display_name not in processed_multipart_bases and display_name not in found:
+                        try:
+                            resolved_gguf_path = gguf_path.resolve()
+                            found[display_name] = resolved_gguf_path
+                            debug_print(f"Found single-part model: {display_name}")
+                        except Exception as resolve_exc:
+                            print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+
+            debug_print(f"Scan completed, found {len(found)} models")
+            self._scan_results_queue.put((scan_id, found, ""))
+        except Exception as exc:
+            self._scan_results_queue.put((scan_id, found, str(exc)))
+
+    def _drain_model_scan_results(self):
+        self._scan_after_id = None
+        try:
+            while True:
+                scan_id, found, error = self._scan_results_queue.get_nowait()
+                if scan_id != self._scan_generation:
+                    continue
+                self._scan_in_progress = False
+                if error:
+                    self.scan_status_var.set(f"Scan failed: {error}")
+                    self._reenable_model_dir_buttons()
+                    return
+                self._update_model_listbox_after_scan(found)
+                return
+        except queue.Empty:
+            pass
+        if self._scan_in_progress:
+            self._scan_after_id = self.root.after(MODEL_SCAN_POLL_MS, self._drain_model_scan_results)
+
+    def _reenable_model_dir_buttons(self):
+        if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
+            for child in self.dir_btn_frame.winfo_children():
+                if isinstance(child, ttk.Button):
                     try:
-                        resolved_gguf_path = gguf_path.resolve()
-                        found[base_name] = resolved_gguf_path
-                        processed_multipart_bases.add(base_name)
-                        print(f"DEBUG: Found multi-part model: {base_name}", file=sys.stderr)
-                    except Exception as resolve_exc:
-                        print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
+                        child.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
 
-        # Second pass: find single-part files that aren't part of multi-part sets
-        for gguf_path in all_gguf_files:
-            filename = gguf_path.name
-
-            # Skip if this is any part of a multi-part file
-            if re_multi1.match(filename) or re_multi2.match(filename):
-                continue
-
-            # Handle single-part files
-            if filename.lower().endswith(".gguf"):
-                display_name = gguf_path.stem
-                if display_name not in processed_multipart_bases and display_name not in found:
-                    try:
-                        resolved_gguf_path = gguf_path.resolve()
-                        found[display_name] = resolved_gguf_path
-                        print(f"DEBUG: Found single-part model: {display_name}", file=sys.stderr)
-                    except Exception as resolve_exc:
-                        print(f"Warning: Could not resolve path '{gguf_path}' during scan: {resolve_exc}", file=sys.stderr)
-
-        print(f"DEBUG: Scan completed, found {len(found)} models", file=sys.stderr)
-        self.root.after(0, self._update_model_listbox_after_scan, found)
+    @staticmethod
+    def _replace_listbox_items(listbox, items):
+        listbox.delete(0, tk.END)
+        for start in range(0, len(items), LISTBOX_INSERT_CHUNK):
+            chunk = items[start:start + LISTBOX_INSERT_CHUNK]
+            if chunk:
+                try:
+                    listbox.insert(tk.END, *chunk)
+                except TypeError:
+                    for item in chunk:
+                        listbox.insert(tk.END, item)
 
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis
@@ -2389,25 +3167,39 @@ class LlamaCppLauncher:
 
     def _update_model_listbox_after_scan(self, found_models_dict):
         """Populates the model listbox AFTER scan and handles selection restoration."""
-        # Store found models with their resolved paths
-        self.found_models = {name: path.resolve() for name, path in found_models_dict.items() if path.is_file()}
+        _t_scan_start = time.perf_counter()
+        print(
+            f"DEBUG: _update_model_listbox_after_scan ENTER "
+            f"(t={_t_scan_start:.3f}, model_count={len(found_models_dict)})",
+            file=sys.stderr,
+        )
+        # Store resolved paths produced by the worker. Avoid filesystem stat/resolve
+        # work here; this method runs on the Tk thread.
+        self.found_models = dict(found_models_dict)
         model_names = sorted(list(self.found_models.keys()))
 
+        _t_step = time.perf_counter()
         self.model_listbox.config(state=tk.NORMAL)
-        self.model_listbox.delete(0, tk.END)
-        for name in model_names:
-            self.model_listbox.insert(tk.END, name)
-        self.root.update_idletasks()
+        self._replace_listbox_items(self.model_listbox, model_names)
+        print(
+            f"DEBUG: scan-listbox: main listbox replace took "
+            f"{(time.perf_counter() - _t_step) * 1000.0:.1f} ms ({len(model_names)} items)",
+            file=sys.stderr,
+        )
 
         # Mirror the population into the MTP/Spec tab's draft-model listbox so
         # the user can pick the draft GGUF from the same pool. State is
         # forced to NORMAL while inserting; _refresh_spec_tab_state() at the
         # end restores the per-backend/per-spec_type enable/disable rules.
         if hasattr(self, "spec_draft_listbox") and self.spec_draft_listbox.winfo_exists():
+            _t_step = time.perf_counter()
             self.spec_draft_listbox.config(state=tk.NORMAL)
-            self.spec_draft_listbox.delete(0, tk.END)
-            for name in model_names:
-                self.spec_draft_listbox.insert(tk.END, name)
+            self._replace_listbox_items(self.spec_draft_listbox, model_names)
+            print(
+                f"DEBUG: scan-listbox: spec_draft replace took "
+                f"{(time.perf_counter() - _t_step) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
             # Restore the user's prior draft selection if its path still exists.
             saved_draft = (self.spec_draft_model.get() or "").strip()
             restored_draft_selection = False
@@ -2434,14 +3226,26 @@ class LlamaCppLauncher:
             # label would otherwise stay stale until the user clicked the
             # item. Call the handler directly to repopulate them now.
             if restored_draft_selection:
+                _t_step = time.perf_counter()
                 try:
                     self._on_spec_draft_model_selected()
                 except Exception as exc:
                     print(f"DEBUG: restored draft selection handler failed: {exc}", file=sys.stderr)
+                print(
+                    f"DEBUG: scan-listbox: _on_spec_draft_model_selected took "
+                    f"{(time.perf_counter() - _t_step) * 1000.0:.1f} ms",
+                    file=sys.stderr,
+                )
+            _t_step = time.perf_counter()
             try:
                 self._refresh_spec_tab_state()
             except Exception:
                 pass
+            print(
+                f"DEBUG: scan-listbox: _refresh_spec_tab_state took "
+                f"{(time.perf_counter() - _t_step) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
 
         # Re-enable Add/Remove buttons after scan
         if hasattr(self, 'dir_btn_frame') and self.dir_btn_frame.winfo_exists():
@@ -2497,10 +3301,20 @@ class LlamaCppLauncher:
                  self.current_model_analysis = {}
                  self._update_recommendations()
                  self._generate_default_config_name() # Generate default name for no model state
+        print(
+            f"DEBUG: _update_model_listbox_after_scan EXIT total "
+            f"{(time.perf_counter() - _t_scan_start) * 1000.0:.1f} ms",
+            file=sys.stderr,
+        )
 
 
     def _select_model_in_listbox(self, index):
          """Selects a specific index in the model listbox."""
+         _t_sel_start = time.perf_counter()
+         print(
+             f"DEBUG: _select_model_in_listbox ENTER "
+             f"(t={_t_sel_start:.3f}, idx={index})", file=sys.stderr,
+         )
          try:
             if 0 <= index < self.model_listbox.size():
                  self.model_listbox.selection_clear(0, tk.END)
@@ -2531,6 +3345,11 @@ class LlamaCppLauncher:
              self.current_model_analysis = {}
              self._update_recommendations()
              self._generate_default_config_name() # Generate default name for no model state
+         print(
+             f"DEBUG: _select_model_in_listbox EXIT total "
+             f"{(time.perf_counter() - _t_sel_start) * 1000.0:.1f} ms",
+             file=sys.stderr,
+         )
 
     def _find_mmproj_candidates_for_model(self, model_path_str):
         """Returns sorted mmproj candidate Paths for a selected model path."""
@@ -2578,9 +3397,36 @@ class LlamaCppLauncher:
             return []
 
     def _refresh_mmproj_selection(self, model_path_str=None):
-        """Updates mmproj selection UI and selected path for the active model."""
+        """Updates mmproj selection UI and selected path for the active model.
+
+        Visibility rules:
+          * Checkbox OFF → dropdown + label hidden; no ``--mmproj`` emitted
+            (gated in ``modules/launch.py``); selection cleared so a later
+            re-enable starts from a known state.
+          * Checkbox ON + no candidates → dropdown hidden, status notes
+            none were detected for the model dir.
+          * Checkbox ON + ≥1 candidate → dropdown always visible so the
+            user can override the auto-pick (previously the dropdown only
+            appeared when multiple candidates existed, leaving the user
+            no UI hook to override the single-candidate auto-pick).
+        """
         if model_path_str is None:
             model_path_str = self.model_path.get().strip()
+
+        # Checkbox gating short-circuit. When auto-mmproj is disabled, the
+        # downstream emission path skips ``--mmproj`` regardless, so we
+        # tear down the selector UI to make that obvious.
+        if not self.mmproj_enabled.get():
+            self.mmproj_candidates = []
+            self.mmproj_display_to_path = {}
+            self.mmproj_selector_var.set("")
+            self.selected_mmproj_path.set("")
+            self.mmproj_status_var.set("Automatic mmproj detection disabled.")
+            if hasattr(self, "mmproj_selector_label"):
+                self.mmproj_selector_label.grid_remove()
+            if hasattr(self, "mmproj_selector_combo"):
+                self.mmproj_selector_combo.grid_remove()
+            return
 
         self.mmproj_candidates = self._find_mmproj_candidates_for_model(model_path_str)
         self.mmproj_display_to_path = {}
@@ -2622,14 +3468,21 @@ class LlamaCppLauncher:
                 break
         self.mmproj_selector_var.set(selected_display)
 
+        # Always surface the dropdown when the checkbox is on so the user
+        # can override the auto-pick — including the single-candidate case
+        # which previously had no UI for overriding.
+        self.mmproj_selector_label.grid()
+        self.mmproj_selector_combo.grid()
         if len(self.mmproj_candidates) > 1:
-            self.mmproj_status_var.set(f"Multiple mmproj files found ({len(self.mmproj_candidates)}). Select one.")
-            self.mmproj_selector_label.grid()
-            self.mmproj_selector_combo.grid()
+            self.mmproj_status_var.set(
+                f"Multiple mmproj files found ({len(self.mmproj_candidates)}). "
+                f"Currently using: {Path(selected_path).name}. Override below if needed."
+            )
         else:
-            self.mmproj_status_var.set(f"Using mmproj: {self.mmproj_candidates[0].name}")
-            self.mmproj_selector_label.grid_remove()
-            self.mmproj_selector_combo.grid_remove()
+            self.mmproj_status_var.set(
+                f"Auto-detected mmproj: {self.mmproj_candidates[0].name}. "
+                f"Override below if needed."
+            )
 
     def _on_mmproj_selected(self, event=None):
         """Stores the selected mmproj path from the dropdown."""
@@ -2643,12 +3496,16 @@ class LlamaCppLauncher:
 
     def _on_model_selected(self, event=None):
         """Callback when a model is selected. Triggers GGUF analysis."""
+        _t_sel = time.perf_counter()
+        print(
+            f"DEBUG: _on_model_selected ENTER (t={_t_sel:.3f})",
+            file=sys.stderr,
+        )
         selection = self.model_listbox.curselection()
         if not selection:
             self.model_path.set("")
             self._refresh_mmproj_selection("")
             self.app_settings["last_model_path"] = ""
-            self._save_configs()
             self._reset_gpu_layer_controls()
             self._reset_model_info_display()
             self.current_model_analysis = {}
@@ -2665,9 +3522,13 @@ class LlamaCppLauncher:
             full_path_str = str(full_path)
             self.model_path.set(full_path_str)
             self._refresh_mmproj_selection(full_path_str)
-            # Save last model path immediately on selection
+            # Record the selection in-memory; persistence happens via the
+            # existing trace-driven saves and on_exit. Writing here ran a
+            # synchronous JSON flush + ``model_dirs`` stat sweep before
+            # GGUF analysis could start, which was the most visible source
+            # of "click model, UI hangs" lag on directories with many
+            # entries.
             self.app_settings["last_model_path"] = full_path_str
-            self._save_configs()
 
 
             # Update current KV cache type display immediately
@@ -2681,16 +3542,12 @@ class LlamaCppLauncher:
             self.current_model_analysis = {}  # Clear old analysis
             self._update_recommendations()  # Update recommendations display based on no analysis yet
 
-            # Start analysis thread
-            if self.analysis_thread and self.analysis_thread.is_alive():
-                print("DEBUG: Previous analysis thread is still running, cancelling old analysis.", file=sys.stderr)
-                # Ideally, you'd have a way to signal the thread to stop.
-                # For simplicity here, we just let the old thread finish and ignore its result
-                # if a new analysis starts, by checking self.model_path in _update_ui_after_analysis.
-                pass  # No explicit cancel mechanism here
-
-            self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(full_path_str,), daemon=True)
-            self.analysis_thread.start()
+            self._start_gguf_analysis(full_path_str)
+            print(
+                f"DEBUG: _on_model_selected EXIT (success path) total "
+                f"{(time.perf_counter() - _t_sel) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
 
 
         else:
@@ -2698,32 +3555,17 @@ class LlamaCppLauncher:
             self.model_path.set("")
             self._refresh_mmproj_selection("")
             self.app_settings["last_model_path"] = ""
-            self._save_configs()
             self._reset_gpu_layer_controls()
             self._reset_model_info_display()
             self.current_model_analysis = {}
             self._update_recommendations() # Update based on no model
             self._generate_default_config_name() # Generate default name for no model state
             self._update_manual_model_visibility() # Update manual model section visibility
-
-
-    def _run_gguf_analysis(self, model_path_str):
-        """Worker function for background GGUF analysis using built-in GGUF parser."""
-        print(f"Analyzing GGUF in background: {model_path_str}", file=sys.stderr)
-        # Check if the currently selected model in the GUI still matches the one being analyzed
-        # This prevents updating the UI with stale results if the user quickly selects another model
-        if self.model_path.get() == model_path_str:
-            # Use the built-in GGUF parser directly
-            analysis_result = parse_gguf_header_simple(model_path_str)
-
-            # Only update UI if the model path hasn't changed while analyzing
-            if self.model_path.get() == model_path_str:
-                self.root.after(0, self._update_ui_after_analysis, analysis_result)
-            else:
-                print(f"DEBUG: Analysis for {model_path_str} finished, but model selection changed. Discarding result.", file=sys.stderr)
-        else:
-            print(f"DEBUG: Analysis started for {model_path_str}, but model selection changed before analysis began. Skipping.", file=sys.stderr)
-
+            print(
+                f"DEBUG: _on_model_selected EXIT (not-found path) total "
+                f"{(time.perf_counter() - _t_sel) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
 
     # ═════════════════════════════════════════════════════════════════
     #  Model Selection & Analysis - Updated Handler
@@ -2764,17 +3606,81 @@ class LlamaCppLauncher:
         self.current_model_analysis = {}
         self._update_recommendations()
 
-        # Cancel any existing analysis
-        if self.analysis_thread and self.analysis_thread.is_alive():
-            print("DEBUG: Cancelling previous analysis thread for force analysis.", file=sys.stderr)
+        self._start_gguf_analysis(model_path_str)
 
-        # Start new analysis thread
-        self.analysis_thread = Thread(target=self._run_gguf_analysis, args=(model_path_str,), daemon=True)
+    def _start_gguf_analysis(self, model_path_str):
+        """Start GGUF header parsing and drain results from the Tk thread."""
+        if self.analysis_thread and self.analysis_thread.is_alive():
+            debug_print("Previous analysis thread is still running; its result will be ignored if stale.")
+        self._analysis_generation += 1
+        analysis_id = self._analysis_generation
+        self.analysis_thread = Thread(
+            target=self._run_gguf_analysis,
+            args=(model_path_str, analysis_id),
+            daemon=True,
+        )
         self.analysis_thread.start()
+        if self._analysis_after_id is None:
+            self._analysis_after_id = self.root.after(ANALYSIS_POLL_MS, self._drain_gguf_analysis_results)
+
+    def _run_gguf_analysis(self, model_path_str, analysis_id=None):
+        """Worker function for background GGUF analysis using built-in GGUF parser."""
+        debug_print(f"Analyzing GGUF in background: {model_path_str}")
+        if analysis_id is None:
+            analysis_id = self._analysis_generation
+        worker_start = time.perf_counter()
+        try:
+            analysis_result = parse_gguf_header_simple(model_path_str)
+        except Exception as exc:
+            analysis_result = {"path": model_path_str, "error": str(exc)}
+        worker_elapsed = (time.perf_counter() - worker_start) * 1000.0
+        # Stamp the queue payload so the drain side can measure wall-clock
+        # gap between worker exit and Tk-thread pickup. Numbers print to
+        # stderr only — UI ignores it.
+        analysis_result["_worker_exit_ts"] = time.perf_counter()
+        print(
+            f"DEBUG: GGUF worker finished parse in {worker_elapsed:.1f} ms; "
+            f"queueing result.", file=sys.stderr,
+        )
+        self._analysis_results_queue.put((analysis_id, analysis_result))
+
+    def _drain_gguf_analysis_results(self):
+        self._analysis_after_id = None
+        # Timestamp diagnostic — same purpose as system_info drain.
+        print(
+            f"DEBUG: _drain_gguf_analysis_results fired "
+            f"(t={time.perf_counter():.3f}, queue_empty="
+            f"{self._analysis_results_queue.empty()})",
+            file=sys.stderr,
+        )
+        try:
+            while True:
+                analysis_id, analysis_result = self._analysis_results_queue.get_nowait()
+                if analysis_id != self._analysis_generation:
+                    continue
+                if self.model_path.get() != analysis_result.get("path"):
+                    debug_print("_drain_gguf_analysis_results received stale model result; ignoring.")
+                    continue
+                self._update_ui_after_analysis(analysis_result)
+                return
+        except queue.Empty:
+            pass
+        if (self.analysis_thread and self.analysis_thread.is_alive()) or not self._analysis_results_queue.empty():
+            self._analysis_after_id = self.root.after(ANALYSIS_POLL_MS, self._drain_gguf_analysis_results)
 
     def _update_ui_after_analysis(self, analysis_result):
         """Updates controls based on GGUF analysis results (runs in main thread)."""
-        print("DEBUG: _update_ui_after_analysis running", file=sys.stderr)
+        cascade_start = time.perf_counter()
+        worker_exit_ts = analysis_result.pop("_worker_exit_ts", None)
+        if worker_exit_ts is not None:
+            gap_ms = (cascade_start - worker_exit_ts) * 1000.0
+            print(
+                f"DEBUG: _update_ui_after_analysis running "
+                f"(worker→drain gap: {gap_ms:.1f} ms)",
+                file=sys.stderr,
+            )
+        else:
+            print("DEBUG: _update_ui_after_analysis running", file=sys.stderr)
 
         # Re-enable the analyze button
         if hasattr(self, 'analyze_model_button') and self.analyze_model_button.winfo_exists():
@@ -2829,6 +3735,11 @@ class LlamaCppLauncher:
              self._reset_gpu_layer_controls(keep_entry_enabled=True)
              # IMPORTANT: Don't sync from entry when analysis fails to preserve user's value
              # The entry remains enabled and the user can still manually set GPU layers
+             # The success path runs _update_recommendations via
+             # _sync_gpu_layers_from_entry → _set_gpu_layers; on the
+             # error path nothing else triggers it, so call it once
+             # here to refresh the tensor-split recommendation.
+             self._update_recommendations()
 
         else: # Analysis succeeded, layers found (n_layers > 0)
             # llama.cpp's --n-gpu-layers counts repeating blocks + 1 output layer
@@ -2848,20 +3759,41 @@ class LlamaCppLauncher:
                 # Set to max layers (show actual number instead of -1)
                 self.n_gpu_layers.set(str(max_offloadable))
 
-            # Sync the controls based on the *current* value in the n_gpu_layers StringVar
-            # This will set the slider and potentially update the entry format (-1 vs number)
+            # Sync the controls based on the *current* value in the n_gpu_layers StringVar.
+            # This already calls _update_recommendations internally via
+            # _set_gpu_layers, so we don't repeat that call below.
+            _t = time.perf_counter()
             self._sync_gpu_layers_from_entry()
-
-        # --- Update Recommendations based on new analysis ---
-        self._update_recommendations()
+            print(
+                f"DEBUG: cascade: _sync_gpu_layers_from_entry took "
+                f"{(time.perf_counter() - _t) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
 
         # --- Generate Default Config Name ---
-        # Call this after analysis completes, as n_layers is needed for the name
+        # Call this after analysis completes — only places that scheduled
+        # a debounced regen will run it; one direct call here guarantees
+        # the name reflects the just-loaded n_layers / GPU-layer state
+        # even when no trace fired.
+        _t = time.perf_counter()
         self._generate_default_config_name()
+        print(
+            f"DEBUG: cascade: _generate_default_config_name took "
+            f"{(time.perf_counter() - _t) * 1000.0:.1f} ms",
+            file=sys.stderr,
+        )
 
         # --- Update Manual Model Visibility ---
         # Hide/show manual model section based on analysis success
+        _t = time.perf_counter()
         self._update_manual_model_visibility()
+        cascade_total = (time.perf_counter() - cascade_start) * 1000.0
+        print(
+            f"DEBUG: cascade: _update_manual_model_visibility took "
+            f"{(time.perf_counter() - _t) * 1000.0:.1f} ms; "
+            f"_update_ui_after_analysis total {cascade_total:.1f} ms",
+            file=sys.stderr,
+        )
 
     def _reset_gpu_layer_controls(self, keep_entry_enabled=False):
          """Resets GPU layer slider state and max layers (but *not* entry StringVar).
@@ -3130,12 +4062,33 @@ class LlamaCppLauncher:
     # ═════════════════════════════════════════════════════════════════
     #  dynamic GPU checkboxes and info display
     # ═════════════════════════════════════════════════════════════════
+    def _gpu_checkboxes_fingerprint(self):
+        """Captures the inputs that determine the GPU-checkbox widget shape.
+
+        If this fingerprint matches between two calls to
+        ``_update_gpu_checkboxes`` we can skip the destroy + recreate
+        cycle and just update the existing BooleanVar values in place —
+        the visible widget count, labels, and ordering are unchanged.
+        Triggered most visibly by post-detection refresh: detection
+        thread reports the same 8 GPUs it already showed during a
+        prior probe (e.g. venv-dir change), so the full rebuild was
+        pure widget churn.
+        """
+        is_manual = bool(self.manual_gpu_mode.get())
+        if is_manual:
+            labels = tuple(
+                (g.get("name", ""), float(g.get("vram_gb", 0.0) or 0.0))
+                for g in self.manual_gpu_list
+            )
+        else:
+            labels = tuple(
+                (i, (g.get("name") if isinstance(g, dict) else "") or "")
+                for i, g in enumerate(self.detected_gpu_devices)
+            )
+        return (is_manual, labels)
+
     def _update_gpu_checkboxes(self):
         """Updates GPU checkboxes based on detected devices and loaded config."""
-        # Clear previous checkboxes
-        for w in self.gpu_checkbox_frame.winfo_children(): w.destroy()
-        self.gpu_vars.clear() # Clear list of BooleanVars
-
         count = self.gpu_info["device_count"]
         # Get selected GPUs from app settings, default to empty list if not found
         loaded_selected_gpus = set(self.app_settings.get("selected_gpus", []))
@@ -3144,6 +4097,43 @@ class LlamaCppLauncher:
 
         # Check if we're in manual mode
         is_manual_mode = self.manual_gpu_mode.get()
+
+        # Fast path: widget shape is unchanged from the last build, so just
+        # mirror the selection state into the existing BooleanVars. Avoids
+        # destroying + recreating 8 checkboxes (and 8 traces) on every
+        # post-detection refresh. Only touch vars whose current value
+        # actually differs so we don't fire the selection trace.
+        existing_fp = getattr(self, "_gpu_checkboxes_last_fp", None)
+        new_fp = self._gpu_checkboxes_fingerprint()
+        if (
+            existing_fp is not None
+            and existing_fp == new_fp
+            and len(self.gpu_vars) == (count if not is_manual_mode else len(self.manual_gpu_list))
+        ):
+            for i, var in enumerate(self.gpu_vars):
+                desired = i in loaded_selected_gpus
+                try:
+                    if var.get() != desired:
+                        var.set(desired)
+                except Exception:
+                    pass
+            self._update_gpu_order_listbox()
+            self._update_recommendations()
+            try:
+                self._update_spec_draft_gpu_checkboxes()
+            except Exception as exc:
+                print(
+                    f"WARN: _update_spec_draft_gpu_checkboxes from _update_gpu_checkboxes failed: {exc}",
+                    file=sys.stderr,
+                )
+            return
+        # Full rebuild path — widget shape changed (e.g. GPU count differs,
+        # manual mode toggled, manual list edited). Cache the new fingerprint
+        # for the next call.
+        self._gpu_checkboxes_last_fp = new_fp
+        # Clear previous checkboxes
+        for w in self.gpu_checkbox_frame.winfo_children(): w.destroy()
+        self.gpu_vars.clear() # Clear list of BooleanVars
 
         # Max GPUs per row
         MAX_GPUS_PER_ROW = 3
@@ -3280,11 +4270,53 @@ class LlamaCppLauncher:
                 print(f"DEBUG: Could not refresh VRAM display: {e}", file=sys.stderr)
 
     def _display_gpu_vram_info(self, parent, row):
-        """Displays VRAM information for detected GPUs."""
-        # Clear any previous VRAM info labels in this grid location
-        # Use grid_slaves to find widgets at specific row/column
-        # We need to find the frame first if it exists to clear its contents, or create it
-        if not hasattr(self, '_vram_info_frame') or not self._vram_info_frame.winfo_exists():
+        """Displays VRAM information for detected GPUs.
+
+        Incremental: cache a fingerprint of (manual_mode, [(id, name,
+        vram_gb)...]) per render so a no-op refresh — common after a
+        successful re-detection that produced the same hardware list —
+        leaves the existing labels in place. Falls back to the original
+        destroy+rebuild path when the GPU set or mode actually changed.
+        """
+        # Build the new fingerprint before deciding whether to rebuild.
+        available = bool(self.gpu_info.get("available")) and self.gpu_info.get("device_count", 0) > 0
+        is_manual_mode = self.gpu_info.get("manual_mode", False)
+        if available:
+            fp_kind = "gpus"
+            fp_payload = tuple(
+                (gpu.get("id"), gpu.get("name", ""),
+                 float(gpu.get("total_memory_gb", 0.0) or 0.0))
+                for gpu in self.detected_gpu_devices
+            )
+        elif self.gpu_detected_status_var.get():
+            fp_kind = "status"
+            fp_payload = self.gpu_detected_status_var.get()
+        else:
+            fp_kind = "empty"
+            fp_payload = ()
+        new_fp = (bool(is_manual_mode), fp_kind, fp_payload)
+
+        existing_frame_ok = (
+            hasattr(self, "_vram_info_frame")
+            and self._vram_info_frame.winfo_exists()
+        )
+        if (
+            existing_frame_ok
+            and getattr(self, "_vram_display_last_fp", None) == new_fp
+        ):
+            # Same content as last render — keep the frame and labels;
+            # only ensure the grid position hasn't drifted.
+            try:
+                self._vram_info_frame.grid(
+                    column=0, row=row, columnspan=4,
+                    sticky="ew", padx=10, pady=(0, 10),
+                )
+            except Exception:
+                pass
+            return
+
+        # Content changed (or first render): full rebuild as before.
+        if not existing_frame_ok:
             self._vram_info_frame = ttk.Frame(parent)
             self._vram_info_frame.grid(column=0, row=row, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
             # Allow VRAM frame contents to align left but not be squeezed
@@ -3297,8 +4329,7 @@ class LlamaCppLauncher:
              self._vram_info_frame.grid(column=0, row=row, columnspan=4, sticky="ew", padx=10, pady=(0, 10))
 
 
-        if self.gpu_info['available'] and self.gpu_info['device_count'] > 0:
-            is_manual_mode = self.gpu_info.get("manual_mode", False)
+        if available:
             vram_label_text = "VRAM (Total GB):" if not is_manual_mode else "VRAM (Manual Setup):"
 
             ttk.Label(self._vram_info_frame, text=vram_label_text, font=("TkSmallCaptionFont", 8, ("bold",)))\
@@ -3321,13 +4352,33 @@ class LlamaCppLauncher:
                  .pack(side="left", padx=5, expand=True, fill="x")
 
         # No action needed if no GPUs, no error, and no specific message
+        self._vram_display_last_fp = new_fp
 
 
     def _on_gpu_selection_changed(self, index):
-         """Callback when a GPU checkbox is changed."""
-         # This callback doesn't need to do much itself, as the state is held by the BooleanVar.
-         # Its primary purpose is to trigger recalculation/update of things that depend on selected GPUs.
+         """Trace callback for a single GPU checkbox.
+
+         Defers the actual cascade (selection bookkeeping, listbox
+         rebuild, recommendations, config-name regen, save) to an
+         after_idle pass so that a burst of toggles — most commonly
+         the programmatic .set() storm during ``load_configuration``
+         that touches up to 8 boxes — collapses into a single cascade
+         instead of N.
+         """
          print(f"DEBUG: GPU {index} selection changed. Recalculating recommendations...", file=sys.stderr)
+         if self._gpu_selection_cascade_pending:
+             return
+         self._gpu_selection_cascade_pending = True
+         try:
+             self.root.after_idle(self._apply_gpu_selection_cascade)
+         except Exception:
+             # Fallback: run synchronously if Tk's idle queue isn't
+             # available (very rare — only during teardown).
+             self._gpu_selection_cascade_pending = False
+             self._apply_gpu_selection_cascade()
+
+    def _apply_gpu_selection_cascade(self):
+         self._gpu_selection_cascade_pending = False
          # Update the selected_gpus list in app_settings immediately
          self.app_settings["selected_gpus"] = [i for i, v in enumerate(self.gpu_vars) if v.get()]
 
@@ -3354,17 +4405,18 @@ class LlamaCppLauncher:
          self._save_configs() # Save selection change
 
     def _update_gpu_order_listbox(self):
-        """Updates the GPU order listbox to reflect current gpu_order."""
+        """Updates the GPU order listbox to reflect current gpu_order.
+
+        Incremental: compute the would-be display strings first; if they
+        match what's already shown verbatim, skip the delete+insert
+        cycle entirely (which also avoids a Tk selection wobble). On
+        an actual change we fall back to clear+repopulate.
+        """
         if not hasattr(self, 'gpu_order_listbox') or not self.gpu_order_listbox.winfo_exists():
             return
 
-        # Preserve selection
-        current_selection = self.gpu_order_listbox.curselection()
-        selected_idx = current_selection[0] if current_selection else None
-
-        self.gpu_order_listbox.delete(0, tk.END)
         gpu_order = self.app_settings.get("gpu_order", [])
-
+        new_items = []
         for gpu_idx in gpu_order:
             # detected_gpu_devices is the authoritative source in both auto and manual modes
             gpu_details = next((gpu for gpu in self.detected_gpu_devices if gpu['id'] == gpu_idx), None)
@@ -3372,7 +4424,23 @@ class LlamaCppLauncher:
                 display_text = f"GPU {gpu_idx}: {gpu_details.get('name', 'Unknown')} ({gpu_details.get('total_memory_gb', 0):.1f} GB)"
             else:
                 display_text = f"GPU {gpu_idx}"
-            self.gpu_order_listbox.insert(tk.END, display_text)
+            new_items.append(display_text)
+
+        try:
+            existing_items = list(self.gpu_order_listbox.get(0, tk.END))
+        except Exception:
+            existing_items = None
+        if existing_items == new_items:
+            # Nothing to redraw — keep current selection too.
+            return
+
+        # Preserve selection across the delete+insert cycle.
+        current_selection = self.gpu_order_listbox.curselection()
+        selected_idx = current_selection[0] if current_selection else None
+
+        self.gpu_order_listbox.delete(0, tk.END)
+        for item in new_items:
+            self.gpu_order_listbox.insert(tk.END, item)
 
         # Restore selection if valid
         if selected_idx is not None and selected_idx < self.gpu_order_listbox.size():
@@ -3900,45 +4968,82 @@ class LlamaCppLauncher:
                         warn_label.config(text="Requires --kv-unified to be 'on'.")
 
     def _update_ik_llama_tab_visibility(self):
-        """Show or hide the ik_llama tab based on backend selection."""
+        """Show or hide the ik_llama tab based on backend selection.
+
+        Insertion strategy is anchor-based rather than index-based: we look up
+        a sibling tab by text and insert relative to it. This survives any
+        future tab reordering as long as the anchors exist; a chain of
+        fallbacks ensures we still place ik_llama in a reasonable spot if
+        every anchor is missing.
+        """
         if not hasattr(self, 'notebook') or not hasattr(self, 'ik_llama_frame'):
             return  # Not initialized yet
 
         backend = self.backend_selection.get()
+        try:
+            tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
+        except Exception as e:
+            print(f"DEBUG: Error reading notebook tabs: {e}", file=sys.stderr)
+            return
 
         if backend == "ik_llama":
-            # Show the ik_llama tab if not already visible
+            if "ik_llama" in tab_ids:
+                return  # already visible
+            insert_idx = None
+            # Preferred: after Env Vars
+            if "Env Vars" in tab_ids:
+                insert_idx = tab_ids.index("Env Vars") + 1
+            # Fallback 1: before MTP-Spec
+            elif "MTP-Spec" in tab_ids:
+                insert_idx = tab_ids.index("MTP-Spec")
+            # Fallback 2: before Build (beta)
+            elif "Build (beta)" in tab_ids:
+                insert_idx = tab_ids.index("Build (beta)")
+            # Fallback 3: before About
+            elif "About" in tab_ids:
+                insert_idx = tab_ids.index("About")
             try:
-                # Check if tab is already in notebook
-                tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
-                if "ik_llama Config" not in tab_ids:
-                    # Insert ik_llama tab after Environment Variables tab
-                    env_tab_index = None
-                    for i, tab_text in enumerate(tab_ids):
-                        if tab_text == "Environment Variables":
-                            env_tab_index = i
-                            break
-
-                    if env_tab_index is not None:
-                        self.notebook.insert(env_tab_index + 1, self.ik_llama_frame, text="ik_llama Config")
-                    else:
-                        # Fallback: add at the end before About tab
-                        self.notebook.insert(self.notebook.index("end") - 1, self.ik_llama_frame, text="ik_llama Config")
+                if insert_idx is not None:
+                    self.notebook.insert(insert_idx, self.ik_llama_frame, text="ik_llama")
+                else:
+                    self.notebook.add(self.ik_llama_frame, text="ik_llama")
             except Exception as e:
                 print(f"DEBUG: Error adding ik_llama tab: {e}", file=sys.stderr)
         else:
-            # Hide the ik_llama tab if visible
+            if "ik_llama" not in tab_ids:
+                return  # already hidden
             try:
-                tab_ids = [self.notebook.tab(i, "text") for i in range(self.notebook.index("end"))]
-                for i, tab_text in enumerate(tab_ids):
-                    if tab_text == "ik_llama Config":
-                        self.notebook.forget(i)
-                        break
+                self.notebook.forget(tab_ids.index("ik_llama"))
             except Exception as e:
                 print(f"DEBUG: Error removing ik_llama tab: {e}", file=sys.stderr)
 
     def _on_backend_dir_changed(self):
-        """Handler for when the current backend directory is manually changed."""
+        """Handler for when the current backend directory is manually changed.
+
+        Debounced: the trace fires once per keystroke on the Entry widget,
+        but we only want one disk write after the user stops typing.
+        """
+        # During bulk config loads (_suppress_autosave=True), this trace fires
+        # for transient values. Don't queue the debounced apply — by the time
+        # the 400ms timer pops, the guard has been lowered and the apply
+        # would flush mid-load state to disk.
+        if self._suppress_autosave:
+            return
+        if self._backend_dir_change_after_id is not None:
+            try:
+                self.root.after_cancel(self._backend_dir_change_after_id)
+            except Exception:
+                pass
+        self._backend_dir_change_after_id = self.root.after(
+            400, self._apply_backend_dir_change
+        )
+
+    def _apply_backend_dir_change(self):
+        self._backend_dir_change_after_id = None
+        # Belt-and-braces: a callback that survived a re-entered suppression
+        # window still has no business writing the config.
+        if self._suppress_autosave:
+            return
         backend = self.backend_selection.get()
         new_dir = self.current_backend_dir.get()
 
@@ -4015,93 +5120,195 @@ class LlamaCppLauncher:
     #  Asynchronous System Info Detection
     # ═════════════════════════════════════════════════════════════════
 
+    def _effective_venv_path(self):
+        """Return the normalized venv path used by launch and GPU detection."""
+        try:
+            raw_path = self.venv_dir.get()
+        except Exception:
+            raw_path = ""
+        return venv_manager.resolve_active_venv_path(
+            raw_path,
+            repo_dir=venv_manager.launcher_repo_dir(),
+        )
+
+    def _apply_cached_gpu_info_if_any(self):
+        """Populate ``self.gpu_info`` + ``self.detected_gpu_devices`` from
+        the on-disk detection cache, if the venv key matches what the
+        last successful detection saw. Returns True on cache hit so the
+        caller can adjust the status message (otherwise the placeholder
+        'Detecting…' label stays up until the background worker
+        finishes).
+        """
+        try:
+            config_dir = self.config_path.parent
+        except Exception:
+            return False
+        try:
+            venv_path = self._effective_venv_path()
+        except Exception:
+            venv_path = ""
+        cached = load_cached_gpu_info(config_dir, venv_path)
+        if not cached:
+            return False
+        self.gpu_info = cached
+        self.detected_gpu_devices = cached.get("devices", []) or []
+        device_count = cached.get("device_count", 0)
+        if cached.get("available") and device_count > 0:
+            self.gpu_availability_var.set(
+                f"CUDA Devices ({device_count} available, cached):"
+            )
+            self.gpu_detected_status_var.set("GPU info: cached, verifying via nvidia-smi…")
+        print(
+            f"DEBUG: Loaded {device_count} GPUs from detection cache "
+            f"(refreshing in background).",
+            file=sys.stderr,
+        )
+        return True
+
+    def _save_gpu_info_to_cache(self):
+        """Persist the just-detected GPU info to the on-disk cache so the
+        next startup can skip the multi-second venv-torch-CUDA probe."""
+        try:
+            config_dir = self.config_path.parent
+        except Exception:
+            return
+        try:
+            venv_path = self._effective_venv_path()
+        except Exception:
+            venv_path = ""
+        gpu_info = getattr(self, "gpu_info", None)
+        if not isinstance(gpu_info, dict):
+            return
+        # Skip caching a failure result; on next startup we'd rather
+        # retry the real probe than instantly tell the user "no GPUs"
+        # based on a transient venv-import failure.
+        if not gpu_info.get("available"):
+            return
+        save_cached_gpu_info(config_dir, venv_path, gpu_info)
+
     def _start_system_info_detection(self):
         """Start system info detection in a background thread.
 
-        Reads the venv path on the *main* thread before forking — touching
-        a ``tk.StringVar`` from a worker thread after the root has been
-        destroyed (e.g. during pytest teardown between UI cases) raises
-        ``RuntimeError: main thread is not in main loop`` and corrupts
-        Tcl's threading state on Python 3.13, which then deadlocks the
-        next ``ttk.Notebook.add()``. The worker only consumes the captured
-        string and dispatches Tk-mutating work back through ``.after(...)``
-        wrapped in ``_safe_after_destroy``.
+        Reads the venv path on the *main* thread before forking. The worker
+        consumes only captured plain strings and posts completion into a
+        Python queue; the Tk thread polls that queue and applies Tk vars.
         """
-        # Prevent multiple simultaneous detection threads
-        if hasattr(self, '_detection_in_progress') and self._detection_in_progress:
-            debug_print("GPU detection already in progress, skipping new request")
-            return
-
+        generation = getattr(self, "_system_info_generation", 0) + 1
+        self._system_info_generation = generation
+        active_generations = getattr(self, "_system_info_active_generations", None)
+        if active_generations is None:
+            active_generations = set()
+            self._system_info_active_generations = active_generations
+        active_generations.add(generation)
         self._detection_in_progress = True
+        try:
+            current_status = self.gpu_detected_status_var.get()
+        except Exception:
+            current_status = ""
+        if "cached" not in current_status.lower():
+            try:
+                self.gpu_detected_status_var.set("GPU info: checking nvidia-smi…")
+            except Exception:
+                pass
 
         # Pre-read all Tk vars the worker would otherwise touch — done here
         # on the main thread so a late-completing worker can't reach back
         # into a destroyed interpreter.
         try:
-            captured_venv_path = self.venv_dir.get().strip() or None
+            captured_venv_path = self._effective_venv_path() or None
         except (tk.TclError, RuntimeError):
             captured_venv_path = None
 
-        def detect_system_info(venv_path=captured_venv_path):
+        def detect_system_info(
+            venv_path=captured_venv_path,
+            generation_id=generation,
+        ):
             """Background thread function to detect system info."""
             try:
-                print("DEBUG: Starting background system info detection...", file=sys.stderr)
+                print(
+                    f"DEBUG: Starting background system info detection "
+                    f"(generation {generation_id})...",
+                    file=sys.stderr,
+                )
                 # ``defer_tk_writes=True`` keeps the worker from touching
-                # Tcl: it only populates plain-Python attributes. The
-                # completion callback (main thread) applies Tk vars
-                # afterwards via ``_apply_system_info_to_tk_vars``.
-                self.system_info_manager.fetch_system_info(
+                # Tcl. Use a staging object so an older worker cannot mutate
+                # live launcher fields after a newer request supersedes it.
+                staged = SimpleNamespace()
+                SystemInfoManager(staged).fetch_system_info(
                     venv_path=venv_path, defer_tk_writes=True
                 )
-                print("DEBUG: Background system info detection completed.", file=sys.stderr)
+                staged_result = {
+                    "gpu_info": getattr(staged, "gpu_info", {}),
+                    "ram_info": getattr(staged, "ram_info", {}),
+                    "cpu_info": getattr(staged, "cpu_info", {}),
+                    "detected_gpu_devices": getattr(
+                        staged, "detected_gpu_devices", []
+                    ),
+                    "logical_cores": getattr(staged, "logical_cores", 4),
+                    "physical_cores": getattr(staged, "physical_cores", 2),
+                }
+                print(
+                    f"DEBUG: Background system info detection completed "
+                    f"(generation {generation_id}).",
+                    file=sys.stderr,
+                )
 
-                # Schedule UI update on main thread (flag will be cleared there)
-                self._safe_after_destroy(0, self._on_system_info_detection_complete)
+                self._system_info_queue.put((generation_id, staged_result, None))
             except Exception as e:
                 print(f"ERROR: System info detection failed: {e}", file=sys.stderr)
                 traceback.print_exc(file=sys.stderr)
-                # Capture the message eagerly. ``except ... as e`` unbinds ``e``
-                # when the block exits, and Tk's ``.after(0, ...)`` runs the
-                # callback later on the main thread — so a naive ``lambda:
-                # ... error=str(e)`` raises NameError at callback time.
-                error_message = str(e)
-                self._safe_after_destroy(
-                    0,
-                    lambda: self._on_system_info_detection_complete(error=error_message),
-                )
+                self._system_info_queue.put((generation_id, None, str(e)))
 
         # Start detection in background thread
-        detection_thread = Thread(target=detect_system_info, daemon=True)
-        detection_thread.start()
+        self._system_info_thread = Thread(target=detect_system_info, daemon=True)
+        self._system_info_thread.start()
+        self._schedule_system_info_drain()
 
-    def _safe_after_destroy(self, delay, callback):
-        """``self.root.after(delay, callback)`` that swallows post-destroy
-        races. Background threads that complete after the launcher root
-        has been destroyed (common during test teardown) would otherwise
-        raise ``RuntimeError: main thread is not in main loop`` from deep
-        inside Tcl, and on Python 3.13 that error corrupts the global
-        interpreter state and deadlocks the next root's UI calls.
+    def _schedule_system_info_drain(self):
+        if self._system_info_after_id is None and self._tk_alive.is_set():
+            self._system_info_after_id = self.root.after(
+                SYSTEM_INFO_POLL_MS,
+                self._drain_system_info_queue,
+            )
 
-        Uses a Python-level ``threading.Event`` flag (``_tk_alive``) so
-        the check itself never touches Tcl from the worker thread —
-        ``root.winfo_exists()`` would raise ``RuntimeError`` from a
-        non-main thread on Python 3.13 and the raise itself wedges the
-        global Tcl interpreter, blocking any subsequent ``ttk`` call on
-        the next root. The flag is cleared in ``_mark_tk_dead`` which
-        every teardown path (on_exit, root.destroy via Tk's WM_DELETE
-        protocol, test fixtures) must call.
-        """
-        if not getattr(self, "_tk_alive", None) or not self._tk_alive.is_set():
+    def _drain_system_info_queue(self):
+        self._system_info_after_id = None
+        if not self._tk_alive.is_set():
             return
-        root = getattr(self, "root", None)
-        if root is None:
-            return
-        try:
-            root.after(delay, callback)
-        except (tk.TclError, RuntimeError):
-            # Final fence: even with the Python flag, the root could
-            # have been destroyed between the flag check and the call.
-            pass
+        # Timestamp diagnostic: drain firing is gated on Tk's event loop
+        # being responsive. If the main thread is blocked on a synchronous
+        # handler, this print won't appear until the block releases.
+        print(
+            f"DEBUG: _drain_system_info_queue fired "
+            f"(t={time.perf_counter():.3f}, queue_empty="
+            f"{self._system_info_queue.empty()})",
+            file=sys.stderr,
+        )
+        active_generations = getattr(self, "_system_info_active_generations", set())
+        saw_result = False
+        while True:
+            try:
+                generation, staged_result, error_message = self._system_info_queue.get_nowait()
+            except queue.Empty:
+                break
+            saw_result = True
+            active_generations.discard(generation)
+            if generation != getattr(self, "_system_info_generation", 0):
+                print(
+                    f"DEBUG: Discarding stale system info generation {generation} "
+                    f"(current {getattr(self, '_system_info_generation', 0)}).",
+                    file=sys.stderr,
+                )
+                continue
+            self._on_system_info_detection_complete(
+                generation=generation,
+                staged_result=staged_result,
+                error=error_message,
+            )
+
+        self._detection_in_progress = bool(active_generations)
+        if active_generations or (not saw_result and self._detection_in_progress):
+            self._schedule_system_info_drain()
 
     def _mark_tk_dead(self):
         """Clear the ``_tk_alive`` flag so worker threads stop dispatching
@@ -4125,11 +5332,34 @@ class LlamaCppLauncher:
         except Exception:
             pass
 
-    def _on_system_info_detection_complete(self, error=None):
+    def _on_system_info_detection_complete(
+        self,
+        *,
+        generation=None,
+        staged_result=None,
+        error=None,
+    ):
         """Handle completion of system info detection (runs on main thread)."""
+        _t_start = time.perf_counter()
+        print(
+            f"DEBUG: _on_system_info_detection_complete ENTER "
+            f"(t={_t_start:.3f}, generation={generation})", file=sys.stderr,
+        )
         try:
-            # Clear detection flag (single point of clearing)
-            self._detection_in_progress = False
+            active_generations = getattr(
+                self, "_system_info_active_generations", set()
+            )
+            self._detection_in_progress = bool(active_generations)
+
+            if staged_result:
+                self.gpu_info = staged_result.get("gpu_info", {})
+                self.ram_info = staged_result.get("ram_info", {})
+                self.cpu_info = staged_result.get("cpu_info", {})
+                self.detected_gpu_devices = staged_result.get(
+                    "detected_gpu_devices", []
+                )
+                self.logical_cores = staged_result.get("logical_cores", 4)
+                self.physical_cores = staged_result.get("physical_cores", 2)
 
             # Apply the system-info Tk vars on the main thread — the worker
             # populated plain-Python attributes only (defer_tk_writes=True),
@@ -4137,17 +5367,37 @@ class LlamaCppLauncher:
             # main thread. Bail out if the root has been destroyed under us.
             self._apply_system_info_to_tk_vars()
 
+            _t = time.perf_counter()
             if error:
                 self._handle_detection_error(error)
             else:
                 self._handle_detection_success()
+            print(
+                f"DEBUG: sysinfo-cascade: _handle_detection_success took "
+                f"{(time.perf_counter() - _t) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
 
-            # Update UI components
+            # Update UI components. ``_update_gpu_checkboxes`` already
+            # calls ``_update_recommendations`` at its tail, so dropping
+            # the explicit trailing call avoids one redundant recompute
+            # per detection cycle.
+            _t = time.perf_counter()
             self._update_gpu_checkboxes()
+            print(
+                f"DEBUG: sysinfo-cascade: _update_gpu_checkboxes took "
+                f"{(time.perf_counter() - _t) * 1000.0:.1f} ms",
+                file=sys.stderr,
+            )
+            _t = time.perf_counter()
             self._refresh_vram_display()
-            self._update_recommendations()
-
-            print("DEBUG: UI update after system info detection completed.", file=sys.stderr)
+            total_ms = (time.perf_counter() - _t_start) * 1000.0
+            print(
+                f"DEBUG: sysinfo-cascade: _refresh_vram_display took "
+                f"{(time.perf_counter() - _t) * 1000.0:.1f} ms; "
+                f"_on_system_info_detection_complete total {total_ms:.1f} ms",
+                file=sys.stderr,
+            )
 
         except Exception as e:
             print(f"ERROR: Failed to update UI after system info detection: {e}", file=sys.stderr)
@@ -4208,6 +5458,10 @@ class LlamaCppLauncher:
         # Log GPU detection results
         self._log_gpu_detection_results()
 
+        # Persist the fresh result so the next launch can skip the
+        # subprocess + torch + CUDA init. Best-effort; never blocks.
+        self._save_gpu_info_to_cache()
+
     def _update_cpu_info(self):
         """Update CPU-related UI components after detection."""
         self.threads.set(str(self.physical_cores))
@@ -4223,15 +5477,24 @@ class LlamaCppLauncher:
 
     def _update_gpu_info(self):
         """Update GPU-related UI components after detection."""
-        # Update GPU detection status message
-        self.gpu_detected_status_var.set(self.gpu_info['message'] if not self.gpu_info['available'] and self.gpu_info.get('message') else "")
-
         # Update GPU availability display
         gpu_count = len(self.detected_gpu_devices)
         if self.gpu_info['available'] and gpu_count > 0:
             self.gpu_availability_var.set(f"CUDA Devices ({gpu_count} available):")
+            source = self.gpu_info.get("detection_source") or "detector"
+            source_label = {
+                "nvidia-smi": "nvidia-smi",
+                "torch": "torch fallback",
+                "torch-venv": "venv torch fallback",
+            }.get(source, source)
+            self.gpu_detected_status_var.set(f"GPU info: {source_label}")
         else:
             self.gpu_availability_var.set("CUDA Devices (Not available):")
+            self.gpu_detected_status_var.set(
+                self.gpu_info['message']
+                if not self.gpu_info['available'] and self.gpu_info.get('message')
+                else ""
+            )
 
     def _log_gpu_detection_results(self):
         """Log GPU detection results for debugging."""
@@ -4547,7 +5810,11 @@ class LlamaCppLauncher:
             # Switching to manual mode - do this immediately without waiting for detection
             print("DEBUG: Switching to manual GPU mode", file=sys.stderr)
 
-            # Clear any ongoing detection
+            # Invalidate any auto-detection worker already in flight. Its
+            # staged result is discarded when the queue drains.
+            self._system_info_generation = getattr(
+                self, "_system_info_generation", 0
+            ) + 1
             if hasattr(self, '_detection_in_progress'):
                 self._detection_in_progress = False
 
@@ -4614,7 +5881,37 @@ class LlamaCppLauncher:
         self._setup_manual_gpus()
 
     def _on_venv_dir_changed(self):
-        """Handler for when the virtual environment directory is manually changed."""
+        """Handler for when the virtual environment directory is manually changed.
+
+        Debounced because the trace fires once per keystroke; each fire
+        used to write the config to disk AND spawn a GPU-detection
+        subprocess, which made typing a path into the Entry visibly lag.
+        """
+        # Bulk config loads must not flush mid-load values or kick off a GPU
+        # probe from a transient venv path. The debounce timer would
+        # otherwise fire after _suppress_autosave was lowered.
+        if self._suppress_autosave:
+            return
+        if not self.manual_gpu_mode.get():
+            # The currently running probe, if any, used the previous venv
+            # snapshot. Bump immediately; the debounced handler starts the
+            # replacement probe after typing settles.
+            self._system_info_generation = getattr(
+                self, "_system_info_generation", 0
+            ) + 1
+        if self._venv_dir_change_after_id is not None:
+            try:
+                self.root.after_cancel(self._venv_dir_change_after_id)
+            except Exception:
+                pass
+        self._venv_dir_change_after_id = self.root.after(
+            500, self._apply_venv_dir_change
+        )
+
+    def _apply_venv_dir_change(self):
+        self._venv_dir_change_after_id = None
+        if self._suppress_autosave:
+            return
         new_dir = self.venv_dir.get()
         if new_dir:
             self.app_settings["last_venv_dir"] = new_dir
