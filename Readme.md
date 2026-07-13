@@ -14,8 +14,10 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   Chat Template (select predefined, use model default, custom Jinja, plus reasoning / thinking controls)
     *   Environment Variables (manage CUDA and custom variables)
     *   MTP / Speculative Decoding (draft model picker, cross-backend draft controls)
+    *   Build (beta) (build llama.cpp / ik_llama from source with a full CMake-flag editor and saved build profiles)
+    *   HF Downloader (browse and download models from the Hugging Face Hub)
     *   Configurations (save/load/import/export launch setups)
-    *   Settings (theme, fonts, Windows high-DPI scaling)
+    *   Settings (theme, fonts, Windows high-DPI scaling, managed Python venv)
 
 <details>
 <summary><h3>📸 View Advanced Settings Screenshot</h3></summary>
@@ -77,6 +79,36 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   MTP enforces `--parallel 1` automatically; optional `--no-mmproj` for MTP GGUFs that embed an unused vision projector.
 
 <details>
+<summary><h3>📸 View Build Tab Screenshot</h3></summary>
+
+![Build tab](images/build.png)
+
+</details>
+
+*   **Build from Source (beta):** Build `llama.cpp` or `ik_llama` directly from the launcher — no separate CMake wrangling required.
+    *   **Backend + source management:** Pick the backend (kept in sync with the launcher), auto-clone the upstream repo if the source directory is missing, and check out any branch / tag / commit. Optional `git pull --ff-only` before building, plus an update banner with **Check**, **Pull only**, and **Pull & Rebuild** actions.
+    *   **Toolchain auto-detection:** Enumerates every CUDA toolkit on disk, `nvcc`, versioned CC/CXX compilers (gcc-9…15, Homebrew gcc, Apple clang, MSYS2/MinGW), plus cmake, ninja, ccache, and git with versions. A one-click helper installs missing **CMake / Ninja / Git** with an OS-aware command (apt/dnf/pacman/zypper/apk/brew, winget/choco/scoop).
+    *   **CUDA architecture picker:** Auto-detect installed GPUs (via `nvidia-smi`, falling back to PyTorch) to populate `CMAKE_CUDA_ARCHITECTURES`, or choose by generation (Kepler → Blackwell) from a validated catalog, with `-a` (arch-accelerated) and `-f` (family-forward) variant toggles.
+    *   **Full CMake-flag editor:** Backend-aware, grouped controls for build targets (server, Web UI, tools, OpenSSL/CURL), CUDA (FlashAttention, graphs, MMQ, NCCL, compression), ik_llama IQK CPU kernels, alternate GPU backends (Vulkan, HIP/ROCm, Metal, SYCL, OpenCL, MUSA, RPC), the full x86 SIMD matrix (AVX2/AVX-VNNI/AVX512…), BLAS vendors, and LTO/ccache/OpenMP. An **"Optimized for this system"** preset tunes a sensible set automatically.
+    *   **Live preview & in-app build:** See the exact resolved `cmake -D…` invocation, **Copy command** or **Save as `.sh`**, then **Start build** to stream staged git/configure/build output into a color-coded console (cancel, auto-scroll, save log). Auto-recommended parallel job count and Ninja / Unix Makefiles generator selection.
+    *   **Saved build profiles:** Name, save, and reload complete build configurations (backend, dirs, git ref, archs, every flag) to `build_configs.json`.
+    *   **Managed Python venv:** Create and manage a launcher-owned virtual environment (Settings tab) — install/update/remove `requests`, `torch`, `psutil`, and `huggingface_hub` per venv, with safety guards against deleting anything that isn't actually a venv.
+
+<details>
+<summary><h3>📸 View Hugging Face Downloader Screenshot</h3></summary>
+
+![Hugging Face downloader](images/hf-downloader.png)
+
+</details>
+
+*   **Hugging Face Downloader:** Browse and pull models from the Hugging Face Hub without leaving the launcher.
+    *   **Load any repo** by ID or `huggingface.co` URL (`tree/` / `blob/` / `resolve/` links auto-seed the revision), then pick a branch or tag — downloads pin to the exact commit SHA so a moving ref can't cause a mismatched download.
+    *   **File browser** with human-readable sizes and multi-select, plus **Select defaults** (smartly picks GGUF files and all shards of a sharded set), **Select all**, and include/ignore glob patterns (e.g. `*.gguf`) for quant filtering.
+    *   **Two modes:** download selected files or a full **repo snapshot**, into one or more of your configured model directories.
+    *   **Gated/private repos:** optional masked auth token, passed via `HF_TOKEN` to the download subprocess and never written to disk.
+    *   **Options & progress:** `Force download`, `Local files only`, tunable `Max workers` (1–32), live status/progress bar with tqdm-style throughput/ETA, and a reliable **Cancel**. Backed by the managed venv's `huggingface_hub`, with a one-click install/update button.
+
+<details>
 <summary><h3>📸 View Environment Variables Screenshot</h3></summary>
 
 ![CUDA Flags](images/env.png)
@@ -98,6 +130,17 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
     *   Save, load, and delete named launch configurations.
     *   Import and export configurations to JSON for sharing or backup.
     *   Application settings (last used paths, UI preferences) are remembered.
+
+<details>
+<summary><h3>📸 View Settings Screenshot</h3></summary>
+
+![Settings](images/settings.png)
+
+</details>
+
+*   **Settings & Appearance:**
+    *   Theme and font-size controls, plus Windows high-DPI scaling.
+    *   Manage a launcher-owned Python virtual environment: create it, and install / update / remove `requests`, `torch`, `psutil`, and `huggingface_hub` per venv (shared by the Build and HF Downloader tabs).
 *   **Script Generation:**
     *   Generate ready-to-use PowerShell (`.ps1`) and Bash (`.sh`) scripts from your current settings (including environment variables).
 *   **Cross-Platform Design:**
@@ -108,6 +151,7 @@ This python script provides a comprehensive graphical interface for `llama.cpp a
 
 ## 🆕 Recent Features
 
+*   **July 2026** — **Build (beta)** tab: build llama.cpp / ik_llama from source with toolchain auto-detection, CUDA architecture picker, a full backend-aware CMake-flag editor, an "optimized for this system" preset, live `cmake` preview, in-app streaming builds, and saved build profiles. New **HF Downloader** tab for browsing and pulling models from the Hugging Face Hub (revision-pinned downloads, GGUF/shard-aware selection, gated-repo token, snapshot mode). Managed Python venv controls added to the Settings tab.
 *   **May 2026** — MTP / Speculative Decoding tab with full cross-backend support: draft GGUF picker, spec-type-aware default prefill, smart draft GPU controls, and auto `--parallel 1` for MTP. Reasoning / Thinking controls added to the Chat Template tab (`--reasoning`, `--reasoning-format`, `--reasoning-budget`, `--chat-template-kwargs`) plus a `--jinja` toggle.
 *   **April 2026** — Settings tab (theme/font controls, Windows high-DPI); user-orderable GPU list and `mmproj` selector dropdown; modular project layout (`modules/`, `config/`, `launchers/`); automated test suite + CI workflow.
 *   **January 2026** — `--fit` (auto-fit context to VRAM) and `--parallel` slot options; improved GGUF parser.
