@@ -198,7 +198,7 @@ def test_gpu_env_overrides_carries_cuda_visible_devices(bench_tab):
     bench_tab.launcher.launch_manager = SimpleNamespace(
         _resolve_cuda_visible_devices_action=lambda: ("export", "2,0,1")
     )
-    env = bench_tab._gpu_env_overrides()
+    env = bench_tab._plan_env()
     assert env == {"CUDA_VISIBLE_DEVICES": "2,0,1"}
 
 
@@ -206,13 +206,29 @@ def test_gpu_env_overrides_unset_leaves_var_unset(bench_tab):
     # 'unset'/'skip' actions intentionally add no override (child sees all GPUs,
     # matching server-launch behaviour in manual / all-deselected modes).
     bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("unset", None))
-    assert bench_tab._gpu_env_overrides() == {}
+    assert bench_tab._plan_env() == {}
 
 
 def test_gpu_env_overrides_defensive_without_launch_manager(bench_tab):
     # A launcher without a usable launch_manager must not raise and yields no
     # override. (The fixture's fake launcher has no launch_manager attribute.)
-    assert bench_tab._gpu_env_overrides() == {}
+    assert bench_tab._plan_env() == {}
+
+
+def test_plan_env_merges_enabled_env_vars_with_gpu_override(bench_tab):
+    # Finding B: the benchmark plan env must carry BOTH the launcher's enabled
+    # environment variables (same backend knobs the server launch applies) and
+    # the GPU-visibility override, with GPU visibility winning on conflict.
+    bench_tab.launcher.env_vars_manager = SimpleNamespace(
+        get_enabled_env_vars=lambda: {"GGML_CUDA_FORCE_MMQ": "1", "CUDA_VISIBLE_DEVICES": "9"}
+    )
+    bench_tab.launcher.launch_manager = SimpleNamespace(
+        _resolve_cuda_visible_devices_action=lambda: ("export", "2,0,1")
+    )
+    env = bench_tab._plan_env()
+    assert env["GGML_CUDA_FORCE_MMQ"] == "1"
+    # GPU visibility override wins on key conflict.
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,0,1"
 
 
 def test_start_blocks_when_no_axis_applies_to_tool(bench_tab, monkeypatch, tmp_path):
@@ -320,3 +336,116 @@ def test_stop_polling_on_teardown_cancels_running_worker(bench_tab, monkeypatch)
     bench_tab._stop_polling_on_teardown()
     assert calls["cancel"] == 1
     assert bench_tab._poll_after_id is None
+
+
+def test_selecting_ik_build_flips_backend_and_syncs_launcher(bench_tab):
+    # Finding A: manually picking a build whose backend differs from the radio
+    # must flip backend_var (source of truth for ik-only levers / flash-attn)
+    # AND push the choice to the launcher, before tool/lever state is refreshed.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH, BuildEntry
+
+    build = BuildEntry(
+        label="ik (backend dir)",
+        backend="ik_llama",
+        root_dir="/ik",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/ik/llama-bench", TOOL_SWEEP_BENCH: "/ik/llama-sweep-bench"},
+    )
+    bench_tab._builds = [build]
+    bench_tab._build_labels = [build.label]
+    bench_tab._build_combo.configure(values=bench_tab._build_labels)
+    assert bench_tab.backend_var.get() == "llama.cpp"
+
+    bench_tab.build_var.set(build.label)
+    bench_tab._on_build_changed()
+
+    assert bench_tab.backend_var.get() == "ik_llama"
+    assert bench_tab.launcher.backend_selection.get() == "ik_llama"
+
+
+def test_duplicate_custom_flag_raises_sweep_error(bench_tab):
+    # Finding C: two included custom rows sharing a flag would collide (each
+    # command reads the last value) — reject them from _collect_axes().
+    from modules.benchmark.matrix import SweepError
+
+    bench_tab._set_custom_axis_rows(
+        [
+            {"flag": "-ot", "enabled": True, "mode": "list", "raw": "exps=CPU", "min": 0, "max": 0, "step": 1},
+            {"flag": "-ot", "enabled": True, "mode": "list", "raw": "attn=CPU", "min": 0, "max": 0, "step": 1},
+        ]
+    )
+    with pytest.raises(SweepError):
+        bench_tab._collect_axes()
+
+
+def test_save_script_blocks_when_no_axis_applies_to_tool(bench_tab, monkeypatch):
+    # Finding D: ticking a llama-bench-only lever then saving a sweep-bench
+    # script must error (no file written) instead of writing a default command.
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    # -p (Prompt tokens) applies ONLY to llama-bench.
+    bench_tab.lever_vars["n_prompt"]["include"].set(True)
+    bench_tab.lever_vars["n_prompt"]["mode"].set("list")
+    bench_tab.lever_vars["n_prompt"]["values"].set("128")
+
+    errors = []
+    monkeypatch.setattr(bench_tab_mod.messagebox, "showerror", lambda title, msg: errors.append(msg))
+    save_calls = {"n": 0}
+    monkeypatch.setattr(
+        bench_tab_mod.filedialog,
+        "asksaveasfilename",
+        lambda *a, **k: save_calls.__setitem__("n", save_calls["n"] + 1) or "/should-not-write.sh",
+    )
+
+    bench_tab._save_script("sh")
+
+    assert save_calls["n"] == 0
+    assert errors and "apply to" in errors[0]
+
+
+def test_save_script_exports_gpu_env_line(bench_tab, monkeypatch, tmp_path):
+    # Finding E: the saved script must export the same CUDA_VISIBLE_DEVICES the
+    # in-app run uses. Depends on bench_script.render(..., env=...) landing (the
+    # other agent adds it in parallel) — may transiently fail until then.
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    bench_tab.lever_vars["threads"]["include"].set(True)
+    bench_tab.lever_vars["threads"]["mode"].set("list")
+    bench_tab.lever_vars["threads"]["values"].set("8")
+    bench_tab.launcher.launch_manager = SimpleNamespace(
+        _resolve_cuda_visible_devices_action=lambda: ("export", "2,0,1")
+    )
+
+    out = tmp_path / "bench.sh"
+    monkeypatch.setattr(bench_tab_mod.filedialog, "asksaveasfilename", lambda *a, **k: str(out))
+    # No build selected -> confirm the placeholder-exe prompt.
+    monkeypatch.setattr(bench_tab_mod.messagebox, "askyesno", lambda *a, **k: True)
+    errors = []
+    monkeypatch.setattr(bench_tab_mod.messagebox, "showerror", lambda title, msg: errors.append(msg))
+
+    bench_tab._save_script("sh")
+
+    assert out.exists(), f"script not written; errors={errors}"
+    content = out.read_text()
+    assert "CUDA_VISIBLE_DEVICES" in content
+    assert "2,0,1" in content
+
+
+def test_repetitions_field_disabled_for_sweep_bench(bench_tab):
+    # Finding F: llama-sweep-bench has no -r flag; the Repetitions entry must be
+    # greyed for it and re-enabled for llama-bench.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab._on_tool_changed()
+    assert str(bench_tab._repetitions_entry["state"]) == "disabled"
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab._on_tool_changed()
+    assert str(bench_tab._repetitions_entry["state"]) == "normal"

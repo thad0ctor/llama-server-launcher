@@ -68,6 +68,27 @@ _LLAMA_BENCH_FIELD_MAP = {
     "n_depth": "n_depth",
 }
 
+# Noisy metadata fields that must NOT be surfaced as extra columns even though
+# llama-bench emits them. Everything else scalar (custom-flag / option sweeps
+# like ``use_mmap`` or ``split_mode``) is appended after the curated columns so
+# those rows stay distinguishable in the grid/export. Fields ending in ``_ns``/
+# ``_ts`` (timing internals / already-mapped throughput) and any non-scalar
+# (sample arrays, nested objects) are skipped separately.
+_LLAMA_BENCH_EXTRA_DENYLIST = frozenset(
+    {
+        "build_commit",
+        "build_number",
+        "cpu_info",
+        "gpu_info",
+        "backend",
+        "model_filename",
+        "model_type",
+        "model_size",
+        "model_n_params",
+        "test_time",
+    }
+)
+
 
 def _stringify(value) -> str:
     if value is None:
@@ -111,6 +132,17 @@ def parse_llama_bench_json(stdout: str) -> list[ResultRow]:
         for field_name, display in _LLAMA_BENCH_FIELD_MAP.items():
             if field_name in obj:
                 cols[display] = _stringify(obj[field_name])
+        # Surface any remaining scalar fields the curated map dropped so custom /
+        # option-sweep rows stay distinguishable, skipping noisy metadata, the
+        # ``_ns``/``_ts`` timing internals, and non-scalars (sample arrays etc.).
+        for key, value in obj.items():
+            if key in _LLAMA_BENCH_FIELD_MAP or key in _LLAMA_BENCH_EXTRA_DENYLIST:
+                continue
+            if key.endswith("_ns") or key.endswith("_ts"):
+                continue
+            if not isinstance(value, (str, int, float, bool)):
+                continue
+            cols.setdefault(key, _stringify(value))
         rows.append(ResultRow(columns=_order_columns(cols, _LLAMA_BENCH_PREFERRED)))
     return rows
 

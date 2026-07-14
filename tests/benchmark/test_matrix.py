@@ -320,16 +320,18 @@ def test_custom_axis_matrix_size_both_tools():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_ik_lever_applies_only_to_ik_llama_bench():
+def test_ik_lever_applies_only_to_ik_backend():
     from modules.benchmark.matrix import LEVERS_BY_KEY
 
     rtr = LEVERS_BY_KEY["rtr"]
-    # Applies to llama-bench on the ik_llama backend only.
+    # Applies on the ik_llama backend for BOTH tools (as a native comma sweep on
+    # llama-bench, as a bare flag on llama-sweep-bench).
     assert rtr.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
-    # NOT on the llama.cpp backend (the flag doesn't exist upstream).
+    assert rtr.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    # NOT on the llama.cpp backend for either tool (the flag doesn't exist
+    # upstream).
     assert not rtr.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
-    # NOT on llama-sweep-bench even under ik_llama (scoped to llama-bench).
-    assert not rtr.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    assert not rtr.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
 
 
 def test_ik_lever_renders_native_comma_sweep_on_llama_bench():
@@ -341,15 +343,16 @@ def test_ik_lever_renders_native_comma_sweep_on_llama_bench():
     assert cmd[idx + 1] == "0,1"
 
 
-def test_mqkv_is_value_lever_not_bare_flag():
-    # -mqkv takes a <0|1> value (NOT a bare flag): it renders as a native
-    # comma-sweepable value on ik_llama's llama-bench and is dropped on llama.cpp.
+def test_mqkv_is_value_lever_on_llama_bench_bare_on_sweep():
+    # -mqkv takes a <0|1> value on llama-bench (native comma-sweepable) but is a
+    # BARE flag on sweep-bench; it is dropped on the llama.cpp backend entirely.
     from modules.benchmark.matrix import LEVERS_BY_KEY
 
     mqkv = LEVERS_BY_KEY["mqkv"]
     assert mqkv.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
     assert not mqkv.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
-    assert not mqkv.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    assert mqkv.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    assert mqkv.sweep_bare is True
 
     axes = [Axis("mqkv", ["0", "1"])]
     pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
@@ -398,3 +401,60 @@ def test_tensor_split_still_device_separated_after_gating():
     cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
     idx = cmd.index("-ts")
     assert cmd[idx + 1] == "0.6/0.4"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ik_llama levers enabled on llama-sweep-bench (value + bare-flag rendering)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_ik_value_lever_applies_to_sweep_bench():
+    # An ik value lever (e.g. -mla) also works on sweep-bench with the same
+    # ``<flag> <value>`` rendering, under the ik_llama backend.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    mla = LEVERS_BY_KEY["mla"]
+    assert mla.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    assert mla.sweep_bare is False
+    axes = [Axis("mla", ["2"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd = pairs[0][0]
+    idx = cmd.index("-mla")
+    assert cmd[idx + 1] == "2"
+
+
+def test_rtr_renders_bare_flag_on_sweep_bench():
+    # -rtr is a BARE flag on sweep-bench: present for a truthy value, absent
+    # otherwise (never "-rtr 1", which errors). The combo dict still records the
+    # value so both rows stay labelled.
+    axes = [Axis("rtr", ["0", "1"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    on_cmd = next(cmd for cmd, combo in pairs if combo["rtr"] == "1")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["rtr"] == "0")
+    assert "-rtr" in on_cmd
+    # Bare flag: no value token follows it.
+    assert on_cmd[on_cmd.index("-rtr") + 1 :] == []
+    assert "-rtr" not in off_cmd
+
+
+def test_rtr_still_native_comma_sweep_on_llama_bench():
+    # On llama-bench the same lever keeps its native "<flag> 0,1" value form.
+    axes = [Axis("rtr", ["0", "1"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-rtr")
+    assert cmd[idx + 1] == "0,1"
+
+
+def test_fmoe_still_not_applicable_to_sweep_bench():
+    # -fmoe remains llama-bench-only; it must NOT leak onto sweep-bench.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    fmoe = LEVERS_BY_KEY["fmoe"]
+    assert fmoe.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert not fmoe.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    axes = [Axis("fmoe", ["0", "1"]), Axis("threads", ["8"])]
+    applicable, ignored = split_axes_for_tool(axes, TOOL_SWEEP_BENCH, "ik_llama")
+    assert [a.key for a in applicable] == ["threads"]
+    assert [a.key for a in ignored] == ["fmoe"]

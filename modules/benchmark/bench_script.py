@@ -28,8 +28,22 @@ def _ps_quote(token: str) -> str:
     return "'" + str(token).replace("'", "''") + "'"
 
 
-def to_sh(commands: list[Command], *, header: str = "") -> str:
-    """Render ``commands`` as a self-contained bash script."""
+def _sh_env_quote(value: str) -> str:
+    """Single-quoted bash literal for an env value (embedded ``'`` escaped).
+
+    Always wraps in single quotes (unlike ``shlex.quote``, which omits them for
+    already-safe values) so the prelude reads uniformly as ``KEY='value'``.
+    """
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def to_sh(commands: list[Command], *, header: str = "", env: dict[str, str] | None = None) -> str:
+    """Render ``commands`` as a self-contained bash script.
+
+    When ``env`` is given, an ``export KEY='value'`` prelude (sorted keys) is
+    emitted before the commands so a saved script sees the same environment the
+    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``).
+    """
     lines: list[str] = ["#!/usr/bin/env bash"]
     if header:
         for hl in header.splitlines():
@@ -42,6 +56,10 @@ def to_sh(commands: list[Command], *, header: str = "") -> str:
     # count rather than fail-fast. Close stdin so no tool blocks on input.
     lines.append("exec </dev/null")
     lines.append("")
+    if env:
+        for key in sorted(env):
+            lines.append(f"export {key}={_sh_env_quote(env[key])}")
+        lines.append("")
     total = len(commands)
     multi = total > 1
     if multi:
@@ -71,8 +89,13 @@ def to_sh(commands: list[Command], *, header: str = "") -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def to_ps1(commands: list[Command], *, header: str = "") -> str:
-    """Render ``commands`` as a self-contained PowerShell script."""
+def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | None = None) -> str:
+    """Render ``commands`` as a self-contained PowerShell script.
+
+    When ``env`` is given, a ``$env:KEY = 'value'`` prelude (sorted keys) is
+    emitted before the commands so a saved script sees the same environment the
+    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``).
+    """
     lines: list[str] = []
     if header:
         for hl in header.splitlines():
@@ -84,6 +107,10 @@ def to_ps1(commands: list[Command], *, header: str = "") -> str:
     # throw in PowerShell anyway; this also covers any cmdlet errors.)
     lines.append("$ErrorActionPreference = 'Continue'")
     lines.append("")
+    if env:
+        for key in sorted(env):
+            lines.append(f"$env:{key} = {_ps_quote(env[key])}")
+        lines.append("")
     total = len(commands)
     multi = total > 1
     if multi:
@@ -112,9 +139,9 @@ def to_ps1(commands: list[Command], *, header: str = "") -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def render(commands: list[Command], fmt: str, *, header: str = "") -> str:
+def render(commands: list[Command], fmt: str, *, header: str = "", env: dict[str, str] | None = None) -> str:
     if fmt == "sh":
-        return to_sh(commands, header=header)
+        return to_sh(commands, header=header, env=env)
     if fmt == "ps1":
-        return to_ps1(commands, header=header)
+        return to_ps1(commands, header=header, env=env)
     raise ValueError(f"unknown script format {fmt!r}")

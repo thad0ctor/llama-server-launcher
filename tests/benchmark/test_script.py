@@ -82,3 +82,38 @@ def test_render_dispatch():
     assert "$ErrorActionPreference" in bench_script.render(cmds, "ps1")
     with pytest.raises(ValueError):
         bench_script.render(cmds, "bogus")
+
+
+def test_sh_env_prelude_precedes_command():
+    sh = bench_script.to_sh([["/b/llama-bench", "-m", "/m.gguf"]], env={"CUDA_VISIBLE_DEVICES": "0,1"})
+    assert "export CUDA_VISIBLE_DEVICES='0,1'" in sh
+    # The prelude must come before the command so the tool sees the GPUs.
+    assert sh.index("export CUDA_VISIBLE_DEVICES") < sh.index("/b/llama-bench")
+
+
+def test_ps1_env_prelude_precedes_command():
+    ps = bench_script.to_ps1([["/b/x.exe", "-m", "/m.gguf"]], env={"CUDA_VISIBLE_DEVICES": "0,1"})
+    assert "$env:CUDA_VISIBLE_DEVICES = '0,1'" in ps
+    assert ps.index("$env:CUDA_VISIBLE_DEVICES") < ps.index("/b/x.exe")
+
+
+def test_env_prelude_sorted_and_quote_escaped():
+    sh = bench_script.to_sh([["/b/x"]], env={"B": "2", "A": "o'ne"})
+    # Sorted keys: A before B.
+    assert sh.index("export A=") < sh.index("export B=")
+    # Embedded single quote is escaped for bash.
+    assert "export A='o'\\''ne'" in sh
+
+
+def test_no_env_prelude_when_none_or_empty():
+    assert "export " not in bench_script.to_sh([["/b/x", "-c", "1"]], env=None)
+    assert "export " not in bench_script.to_sh([["/b/x", "-c", "1"]], env={})
+    assert "$env:" not in bench_script.to_ps1([["/b/x.exe"]], env=None)
+    assert "$env:" not in bench_script.to_ps1([["/b/x.exe"]], env={})
+
+
+def test_render_forwards_env():
+    sh = bench_script.render([["/b/x", "-c", "1"]], "sh", env={"CUDA_VISIBLE_DEVICES": "0"})
+    assert "export CUDA_VISIBLE_DEVICES='0'" in sh
+    ps = bench_script.render([["/b/x.exe"]], "ps1", env={"CUDA_VISIBLE_DEVICES": "0"})
+    assert "$env:CUDA_VISIBLE_DEVICES = '0'" in ps

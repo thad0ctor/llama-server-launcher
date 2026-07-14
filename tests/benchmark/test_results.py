@@ -46,6 +46,35 @@ def test_parse_llama_bench_json_basic():
     assert rows[1].get("n_threads") == "16"
 
 
+def test_parse_llama_bench_json_surfaces_unmapped_scalar_fields():
+    # Custom-flag / option sweeps emit JSON keys the curated map drops (e.g.
+    # use_mmap, split_mode); they must appear as columns so rows stay distinct.
+    # Noisy metadata (build_commit, cpu_info, ...) and sample arrays must NOT.
+    stdout = json.dumps(
+        [
+            {
+                "model_type": "Q",
+                "test": "pp512",
+                "avg_ts": 10.0,
+                "use_mmap": False,
+                "split_mode": "layer",
+                "no_kv_offload": True,
+                "build_commit": "abc123",
+                "cpu_info": "some cpu",
+                "samples_ns": [1, 2, 3],
+            }
+        ]
+    )
+    rows = results.parse_llama_bench_json(stdout)
+    assert rows[0].get("use_mmap") == "0"
+    assert rows[0].get("split_mode") == "layer"
+    assert rows[0].get("no_kv_offload") == "1"
+    cols = rows[0].columns
+    assert "build_commit" not in cols
+    assert "cpu_info" not in cols
+    assert "samples_ns" not in cols  # non-scalar array is skipped
+
+
 def test_parse_llama_bench_json_basename_model():
     stdout = json.dumps([{"model_filename": "/models/sub/Qwen3-9B-Q6_K.gguf", "avg_ts": 1.0, "test": "pp"}])
     rows = results.parse_llama_bench_json(stdout)

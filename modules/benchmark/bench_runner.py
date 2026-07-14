@@ -34,7 +34,7 @@ EVENT_QUEUE_MAXSIZE = 4000
 PROC_TERMINATE_WAIT_SECONDS = 5.0
 PROC_KILL_WAIT_SECONDS = 2.0
 PROC_POLL_SECONDS = 0.05
-MAX_CAPTURE_BYTES = 8 * 1024 * 1024  # cap stdout capture per step
+MAX_CAPTURE_BYTES = 256 * 1024 * 1024  # cap stdout capture per step (bounds memory)
 
 
 @dataclass
@@ -269,6 +269,7 @@ class BenchRunner:
         assert proc.stdout is not None and proc.stderr is not None
         captured = bytearray()
         capture_lock = threading.Lock()
+        truncated = threading.Event()
 
         def _capture_stdout() -> None:
             try:
@@ -276,8 +277,18 @@ class BenchRunner:
                     chunk = proc.stdout.read(4096)  # type: ignore[union-attr]
                     if not chunk:
                         break
+                    # Keep memory bounded by MAX_CAPTURE_BYTES: append only what
+                    # fits and flag the overflow so we can WARN. A truncated
+                    # JSON array would otherwise parse to zero rows silently,
+                    # losing the whole run's results while it reports Done.
                     with capture_lock:
-                        if len(captured) < MAX_CAPTURE_BYTES:
+                        room = MAX_CAPTURE_BYTES - len(captured)
+                        if room <= 0:
+                            truncated.set()
+                        elif len(chunk) > room:
+                            captured.extend(chunk[:room])
+                            truncated.set()
+                        else:
                             captured.extend(chunk)
             except Exception:
                 pass
@@ -303,6 +314,11 @@ class BenchRunner:
                     pass
         with capture_lock:
             text = bytes(captured).decode("utf-8", errors="replace")
+        if truncated.is_set():
+            self._emit_line(
+                f"WARNING: benchmark output exceeded {MAX_CAPTURE_BYTES // (1024 * 1024)} MiB "
+                "and was truncated; some result rows may be missing."
+            )
         return rc, text
 
     def _stream_stderr(self, stderr) -> None:

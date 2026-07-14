@@ -55,6 +55,11 @@ class Lever:
     # Backends whose build of the tool actually accepts this flag. Defaults to
     # both; ik_llama-only levers narrow it to ``_IK_BACKEND``.
     backends: frozenset[str] = _BOTH_BACKENDS
+    # On llama-sweep-bench a handful of ik_llama toggles are BARE flags (present
+    # when on, absent when off) rather than the ``<flag> <0|1>`` value form they
+    # keep on llama-bench. When True, :func:`sweep_bench_commands` renders this
+    # lever like flash-attn's bare pattern; llama-bench rendering is unaffected.
+    sweep_bare: bool = False
     # Attribute on the launcher to seed a baseline value from, if any.
     seed_attr: str = ""
     help: str = ""
@@ -122,17 +127,20 @@ LEVERS: tuple[Lever, ...] = (
     ),
     Lever("main_gpu", "Main GPU (-mg)", "-mg", KIND_INT, _BOTH, seed_attr="main_gpu"),
     # ── ik_llama-only sweep levers ──────────────────────────────────────────
-    # These flags exist only in ik_llama's build of llama-bench (not upstream
-    # llama.cpp, and not llama-sweep-bench), so they are scoped to llama-bench
-    # AND the ik_llama backend. The value flags below are natively
-    # comma-sweepable by llama-bench just like the built-in list levers.
+    # These flags exist only in ik_llama's builds (not upstream llama.cpp), so
+    # they are scoped to the ik_llama backend. Some apply to llama-bench only;
+    # others (verified against the real binaries) also apply to
+    # llama-sweep-bench. On llama-bench every value lever is natively
+    # comma-sweepable just like the built-in list levers; on sweep-bench the
+    # ``sweep_bare`` toggles below render as bare present/absent flags instead.
     Lever(
         "rtr",
         "Run-time repack (-rtr)",
         "-rtr",
         KIND_INT,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
+        sweep_bare=True,
         help="ik_llama run-time tensor repack (0/1).",
     ),
     Lever(
@@ -167,7 +175,7 @@ LEVERS: tuple[Lever, ...] = (
         "MLA attention (-mla)",
         "-mla",
         KIND_INT,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
         help="ik_llama MLA attention mode (0/1/2).",
     ),
@@ -176,7 +184,7 @@ LEVERS: tuple[Lever, ...] = (
         "Attn max batch (-amb)",
         "-amb",
         KIND_INT,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
         help="ik_llama attention max batch size.",
     ),
@@ -185,7 +193,7 @@ LEVERS: tuple[Lever, ...] = (
         "N CPU MoE (--n-cpu-moe)",
         "--n-cpu-moe",
         KIND_INT,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
         help="ik_llama number of MoE layers kept on CPU.",
     ),
@@ -194,8 +202,9 @@ LEVERS: tuple[Lever, ...] = (
         "Merge QKV (-mqkv)",
         "-mqkv",
         KIND_INT,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
+        sweep_bare=True,
         help="ik_llama merge QKV (0/1).",
     ),
     Lever(
@@ -221,7 +230,7 @@ LEVERS: tuple[Lever, ...] = (
         "Smart expert reduction (-ser)",
         "-ser",
         KIND_VEC,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
         help='Value is "i,f" (e.g. 7,1) — ONE value; sweep several with ";".',
     ),
@@ -230,7 +239,7 @@ LEVERS: tuple[Lever, ...] = (
         "Override tensor (-ot)",
         "-ot",
         KIND_VEC,
-        _BENCH_ONLY,
+        _BOTH,
         backends=_IK_BACKEND,
         help='A tensor-override pattern is ONE value; sweep several with ";".',
     ),
@@ -389,6 +398,15 @@ class Axis:
         """Human label for previews and ignored-axis notes."""
         return self.custom_flag if self.is_custom else self.lever.label
 
+    @property
+    def sweep_bare(self) -> bool:
+        """Whether sweep-bench renders this as a bare present/absent flag.
+
+        Custom flags always render as ``<flag> <value>`` pairs, so they are
+        never bare; built-in levers delegate to their lever definition.
+        """
+        return False if self.is_custom else self.lever.sweep_bare
+
     def applies_to(self, tool: str, backend: str = "llama.cpp") -> bool:
         # A custom flag has no per-tool/per-backend restriction — it sweeps on
         # whichever tool the user runs (a comma-list on llama-bench, per-combo
@@ -477,6 +495,11 @@ _LLAMA_BENCH_VEC_DEVICE_SEP = "/"
 def _vec_for_llama_bench(value: str) -> str:
     """Rewrite a KIND_VEC value's internal device commas for llama-bench."""
     return value.replace(",", _LLAMA_BENCH_VEC_DEVICE_SEP)
+
+
+def _is_truthy(value: str) -> bool:
+    """Whether a sweep-bare toggle value means "on" (present) vs "off" (absent)."""
+    return str(value).strip().lower() in ("1", "on", "true")
 
 
 def _render_fa_values(values: list[str], backend: str) -> list[str]:
@@ -589,6 +612,16 @@ def sweep_bench_commands(
         cmd: list[str] = [exe, "-m", model]
         for axis in applicable:
             value = combo[axis.key]
+            if axis.sweep_bare:
+                # A handful of ik_llama toggles (-rtr, -mqkv) are BARE flags on
+                # sweep-bench: present when on, absent when off. Emitting
+                # "-rtr 1" errors here (unlike llama-bench, where they are
+                # native "<flag> 0,1" value sweeps). Append the bare flag only
+                # for a truthy value; the combo dict still records the value so
+                # the result row stays labelled either way.
+                if _is_truthy(value):
+                    cmd.append(axis.flag)
+                continue
             # Flash-attn renders like any other flag/value pair: ik_llama's
             # server-style --flash-attn requires an explicit on/off token (a
             # bare flag errors, and "off" must be explicit to override the
@@ -628,5 +661,8 @@ def build_commands(
         )
         return [(cmd, {})]
     if tool == TOOL_SWEEP_BENCH:
+        # ``repetitions`` is intentionally NOT forwarded: llama-sweep-bench has
+        # no -r/--repetitions flag (it sweeps context internally), so there is
+        # nothing to render for it.
         return sweep_bench_commands(exe, model, axes, backend=backend, extra_args=extra_args)
     raise SweepError(f"unknown tool {tool!r}")

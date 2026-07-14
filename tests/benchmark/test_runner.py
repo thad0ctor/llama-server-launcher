@@ -117,6 +117,26 @@ def test_runner_reports_nonzero_rc_as_failure(tmp_path):
     assert int(done_payload) == 1
 
 
+def test_runner_signals_truncation_when_capture_exceeds_cap(tmp_path, monkeypatch):
+    # With a small injected cap, an over-long stdout must be capped AND a
+    # truncation WARNING emitted, so a silently-truncated JSON array (which would
+    # parse to zero rows) is at least signalled rather than reported as a clean
+    # Done with no results.
+    monkeypatch.setattr("modules.benchmark.bench_runner.MAX_CAPTURE_BYTES", 16)
+    big = "X" * 4096
+    step = BenchStep(cmd=_py_stub(big, "err\n"), combo={}, label="")
+    plan = BenchPlan(tool=STUB_TOOL, steps=[step], cwd=str(tmp_path))
+
+    runner = BenchRunner()
+    assert runner.start(plan) is True
+    events = _drain_until_terminal(runner)
+
+    lines = [str(p) for k, p in events if k == EVENT_LINE]
+    assert any("truncated" in line.lower() for line in lines)
+    result = next(p for k, p in events if k == EVENT_STEP_RESULT)
+    assert len(result.stdout) <= 16
+
+
 def test_runner_empty_plan_emits_error():
     runner = BenchRunner()
     plan = BenchPlan(tool=STUB_TOOL, steps=[])

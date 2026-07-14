@@ -139,6 +139,8 @@ class BenchmarkTab:
         self._build_combo: ttk.Combobox | None = None
         self._tool_combo: ttk.Combobox | None = None
         self._config_combo: ttk.Combobox | None = None
+        self._repetitions_entry: ttk.Entry | None = None
+        self._repetitions_note: ttk.Label | None = None
         self._lever_rows: dict[str, dict] = {}
 
         self._poll_after_id: str | None = None
@@ -337,7 +339,12 @@ class BenchmarkTab:
         row2 = ttk.Frame(sec)
         row2.pack(fill="x", padx=6, pady=3)
         ttk.Label(row2, text="Repetitions (-r):", width=18).pack(side="left")
-        ttk.Entry(row2, textvariable=self.repetitions_var, width=8).pack(side="left")
+        self._repetitions_entry = ttk.Entry(row2, textvariable=self.repetitions_var, width=8)
+        self._repetitions_entry.pack(side="left")
+        # llama-sweep-bench has no -r flag; the tool-change handler greys this
+        # field (and shows the note) so a typed value isn't silently dropped.
+        self._repetitions_note = ttk.Label(row2, text="", foreground="#666")
+        self._repetitions_note.pack(side="left", padx=6)
 
         # Multi-row Extra-args editor. Every non-empty row is shlex-split and
         # appended (in order) to EVERY command in the matrix.
@@ -442,6 +449,25 @@ class BenchmarkTab:
 
     def _on_build_changed(self) -> None:
         build = self._selected_build()
+        # Keep the backend selection in lockstep with the chosen build BEFORE
+        # any tool/lever refresh: _current_backend() gates ik-only levers and
+        # flash-attn handling, so a manually-picked build whose backend differs
+        # from the radio (e.g. an ik_llama build while the radio says llama.cpp)
+        # must flip the backend first, or the UI would render/gate flags for the
+        # stale backend. Guarded by _syncing_backend so the launcher write-back
+        # (which traces back into this tab) can't recurse.
+        if build is not None and not self._syncing_backend:
+            build_backend = getattr(build, "backend", "")
+            if build_backend in ("llama.cpp", "ik_llama") and build_backend != self.backend_var.get():
+                self._syncing_backend = True
+                try:
+                    self.backend_var.set(build_backend)
+                    try:
+                        self.launcher.backend_selection.set(build_backend)
+                    except Exception:
+                        pass
+                finally:
+                    self._syncing_backend = False
         # Constrain the tool list to what this build actually ships.
         available = build.available_tools() if build else list(ALL_TOOLS)
         if self._tool_combo is not None:
@@ -573,6 +599,23 @@ class BenchmarkTab:
             except Exception:
                 pass
             self._apply_mode_state(key)
+        # Repetitions (-r) exists only on llama-bench: grey the field for
+        # llama-sweep-bench so a typed value isn't silently ignored.
+        if self._repetitions_entry is not None:
+            if tool == TOOL_SWEEP_BENCH:
+                try:
+                    self._repetitions_entry.configure(state="disabled")
+                except Exception:
+                    pass
+                if self._repetitions_note is not None:
+                    self._repetitions_note.configure(text="(n/a for llama-sweep-bench)")
+            else:
+                try:
+                    self._repetitions_entry.configure(state="normal")
+                except Exception:
+                    pass
+                if self._repetitions_note is not None:
+                    self._repetitions_note.configure(text="")
         # Tool availability note
         note = ""
         if build is not None and tool not in build.available_tools():
@@ -790,12 +833,19 @@ class BenchmarkTab:
         axis key, so results tag combos with a ``[<flag>]`` column.
         """
         axes: list[Axis] = []
+        seen_flags: set[str] = set()
         for row in self._custom_axis_rows:
             if not row["include"].get():
                 continue
             flag = str(row["flag"].get()).strip()
             if not flag:
                 continue
+            # Two included rows sharing a flag would collide: the per-flag combo
+            # dict overwrites, so every command reads the second value (e.g.
+            # ``-ot C -ot C``) while the preview still claims the full product.
+            if flag in seen_flags:
+                raise SweepError(f"duplicate custom flag {flag!r} — combine its values into one row")
+            seen_flags.add(flag)
             mode = row["mode"].get()
             if mode == "range":
                 try:
@@ -996,32 +1046,49 @@ class BenchmarkTab:
             self.refresh_preview()
 
     # ------------------------------------------------------------------ run
-    def _gpu_env_overrides(self) -> dict[str, str]:
-        """Mirror the server launch's ``CUDA_VISIBLE_DEVICES`` choice into the
-        benchmark child's environment.
+    def _plan_env(self) -> dict[str, str]:
+        """Environment overrides for the benchmark child: the launcher's enabled
+        environment variables merged with the ``CUDA_VISIBLE_DEVICES`` choice.
 
-        ``system.py`` clears any inherited ``CUDA_VISIBLE_DEVICES`` at startup,
-        so a benchmark child would otherwise see ALL physical GPUs — making a
-        seeded ``main_gpu`` / ``tensor_split`` index refer to a different logical
-        device than the server would use. Reuse the launcher's single source of
-        truth (``LaunchManager._resolve_cuda_visible_devices_action``) so the
-        benchmark and the live server always agree on the visible-device subset
-        and order. Only the ``export`` action carries a concrete value; ``unset``
-        and ``skip`` intentionally leave the variable unset (the child sees all
-        GPUs), matching the server-launch behaviour in those modes.
+        Two sources, GPU visibility winning on a key conflict:
 
-        Defensive: a launcher without a usable launch_manager / GPU state simply
-        yields no override.
+        1. The launcher's *enabled* env vars (e.g. ``GGML_CUDA_FORCE_MMQ``,
+           ``GGML_CUDA_FORCE_CUBLAS``) — the same set the server launch applies
+           via ``env_vars_manager.get_enabled_env_vars()`` — so the benchmark
+           child runs with the same backend knobs as the server being compared.
+        2. The ``CUDA_VISIBLE_DEVICES`` override. ``system.py`` clears any
+           inherited value at startup, so a benchmark child would otherwise see
+           ALL physical GPUs — making a seeded ``main_gpu`` / ``tensor_split``
+           index refer to a different logical device than the server would use.
+           Reuse the launcher's single source of truth
+           (``LaunchManager._resolve_cuda_visible_devices_action``) so benchmark
+           and live server agree on the visible-device subset and order. Only the
+           ``export`` action carries a concrete value; ``unset`` / ``skip`` leave
+           the variable unset (the child sees all GPUs), matching server launch.
+
+        Applied last so GPU visibility wins if an enabled env var also set
+        ``CUDA_VISIBLE_DEVICES``.
+
+        Defensive: a launcher missing either accessor simply contributes nothing.
         """
         env: dict[str, str] = {}
+        # 1) Enabled environment variables (same accessor the server launch uses).
+        try:
+            manager = getattr(self.launcher, "env_vars_manager", None)
+            getter = getattr(manager, "get_enabled_env_vars", None)
+            if getter is not None:
+                for key, value in (getter() or {}).items():
+                    env[str(key)] = str(value)
+        except Exception:
+            pass
+        # 2) GPU visibility override — wins on key conflict (applied last).
         try:
             launch_manager = getattr(self.launcher, "launch_manager", None)
             resolver = getattr(launch_manager, "_resolve_cuda_visible_devices_action", None)
-            if resolver is None:
-                return env
-            action, value = resolver()
-            if action == "export" and value not in (None, ""):
-                env["CUDA_VISIBLE_DEVICES"] = str(value)
+            if resolver is not None:
+                action, value = resolver()
+                if action == "export" and value not in (None, ""):
+                    env["CUDA_VISIBLE_DEVICES"] = str(value)
         except Exception:
             pass
         return env
@@ -1079,7 +1146,7 @@ class BenchmarkTab:
             return
         steps = [BenchStep(cmd=cmd, combo=combo, label=self._combo_label(combo)) for cmd, combo in pairs]
         cwd = str(Path(exe).parent)
-        plan = BenchPlan(tool=tool, steps=steps, cwd=cwd, env=self._gpu_env_overrides())
+        plan = BenchPlan(tool=tool, steps=steps, cwd=cwd, env=self._plan_env())
 
         self._clear_console()
         self._append_console(f"Running {len(steps)} benchmark invocation(s) with {tool}…", tag="stage")
@@ -1277,6 +1344,27 @@ class BenchmarkTab:
 
     # ------------------------------------------------------------------ scripts
     def _save_script(self, fmt: str) -> None:
+        tool = self.tool_var.get()
+        backend = self._current_backend()
+        try:
+            axes = self._collect_axes()
+        except SweepError as exc:
+            messagebox.showerror("Save script", str(exc))
+            return
+        # Same guard start()/refresh_preview() apply: a matrix whose ticked axes
+        # are ALL ignored for this tool (e.g. a llama-bench-only lever with
+        # tool=sweep-bench) still yields one unswept default command, which the
+        # ``if not commands`` check below wouldn't catch. Reject it here.
+        if axes:
+            applicable, ignored = split_axes_for_tool(axes, tool, backend)
+            if not applicable:
+                names = ", ".join(a.label for a in ignored)
+                messagebox.showerror(
+                    "Save script",
+                    f"None of the selected parameters apply to {_TOOL_LABELS.get(tool, tool)} — "
+                    f"the ignored ones are: {names}.",
+                )
+                return
         try:
             commands, _combos = self._build_command_list()
         except SweepError as exc:
@@ -1301,7 +1389,10 @@ class BenchmarkTab:
             return
         header = f"Benchmark: {self.tool_var.get()} — {len(commands)} invocation(s)"
         try:
-            script = bench_script.render(commands, fmt, header=header)
+            # Same merged GPU + enabled-env-vars environment as the in-app run,
+            # so the exported script exports CUDA_VISIBLE_DEVICES and the enabled
+            # env vars the server launch would apply.
+            script = bench_script.render(commands, fmt, header=header, env=self._plan_env())
             Path(path).write_text(script, encoding="utf-8")
             if fmt == "sh":
                 try:
