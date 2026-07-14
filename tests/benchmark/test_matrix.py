@@ -217,3 +217,73 @@ def test_build_commands_unknown_tool():
 def test_missing_model_raises():
     with pytest.raises(SweepError):
         llama_bench_command("/b/llama-bench", "", [Axis("threads", ["8"])])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom-flag axes
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _custom_axis(flag, values, kind=None):
+    from modules.benchmark.matrix import KIND_STR
+
+    return Axis(key=flag, values=values, custom_flag=flag, custom_kind=kind or KIND_STR)
+
+
+def test_builtin_axis_still_exposes_lever_and_uniform_accessors():
+    # Regression: the built-in construction and the ``lever`` property must keep
+    # working, and the new uniform accessors must delegate to the lever.
+    axis = Axis("threads", ["8", "16"])
+    assert axis.is_custom is False
+    assert axis.lever.key == "threads"
+    assert axis.flag == "-t"
+    assert axis.label == "Threads (-t)"
+    assert axis.applies_to(TOOL_LLAMA_BENCH)
+    assert axis.applies_to(TOOL_SWEEP_BENCH)
+
+
+def test_custom_axis_sweep_bench_renders_flag_value_per_combo():
+    axes = [_custom_axis("-ot", ["exps=CPU", "attn=CPU"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    assert len(pairs) == 2
+    # Each combo renders ``<flag> <value>`` and is tagged with the flag as key.
+    for cmd, combo in pairs:
+        val = combo["-ot"]
+        idx = cmd.index("-ot")
+        assert cmd[idx + 1] == val
+    assert {combo["-ot"] for _, combo in pairs} == {"exps=CPU", "attn=CPU"}
+
+
+def test_custom_axis_llama_bench_renders_comma_list():
+    axes = [_custom_axis("--cache-reuse", ["0", "256"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("--cache-reuse")
+    assert cmd[idx + 1] == "0,256"
+
+
+def test_custom_axis_applies_to_both_tools():
+    axis = _custom_axis("-ot", ["exps=CPU"])
+    assert axis.is_custom is True
+    assert axis.applies_to(TOOL_LLAMA_BENCH)
+    assert axis.applies_to(TOOL_SWEEP_BENCH)
+
+
+def test_custom_flag_without_dash_raises():
+    with pytest.raises(SweepError):
+        Axis(key="ot", values=["exps=CPU"], custom_flag="ot")
+
+
+def test_custom_axis_counts_toward_sweep_cap():
+    # A custom axis applies to sweep-bench, so the MAX_SWEEP_COMBOS guard must
+    # include it in the product.
+    big = [str(i) for i in range(200)]
+    axes = [Axis("n_gpu_layers", big), _custom_axis("-ot", big)]  # 200*200 = 40000
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) > MAX_SWEEP_COMBOS
+    with pytest.raises(SweepError):
+        sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+
+
+def test_custom_axis_matrix_size_both_tools():
+    axes = [_custom_axis("-ot", ["a", "b", "c"]), Axis("threads", ["8", "16"])]
+    assert matrix_size(axes, TOOL_LLAMA_BENCH) == 6
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) == 6

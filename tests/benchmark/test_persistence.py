@@ -78,6 +78,64 @@ def test_load_refuses_to_clobber_unreadable(tmp_path):
     assert not store.save(_cfg())  # refuses because load failed
 
 
+def test_extra_args_rows_and_custom_axes_roundtrip(tmp_path):
+    store = BenchConfigStore(tmp_path)
+    cfg = _cfg("multi")
+    cfg.extra_args_rows = ["--numa distribute", "--no-mmap"]
+    cfg.custom_axes = [
+        {"flag": "-ot", "enabled": True, "mode": "list", "raw": "exps=CPU,attn=CPU", "min": 0, "max": 0, "step": 1}
+    ]
+    assert store.save(cfg)
+    loaded = store.get("multi")
+    assert loaded.extra_args_rows == ["--numa distribute", "--no-mmap"]
+    assert len(loaded.custom_axes) == 1
+    assert loaded.custom_axes[0]["flag"] == "-ot"
+    assert loaded.custom_axes[0]["raw"] == "exps=CPU,attn=CPU"
+    assert loaded.custom_axes[0]["mode"] == "list"
+
+
+def test_legacy_scalar_extra_args_migrates_to_single_row(tmp_path):
+    path = tmp_path / "bench_configs.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "configs": {"legacy": {"tool": "llama-bench", "extra_args": "--numa distribute"}},
+            }
+        )
+    )
+    store = BenchConfigStore(tmp_path)
+    cfg = store.get("legacy")
+    assert cfg.extra_args == "--numa distribute"
+    assert cfg.extra_args_rows == ["--numa distribute"]
+
+
+def test_malformed_custom_axes_dropped(tmp_path):
+    path = tmp_path / "bench_configs.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "configs": {
+                    "c": {
+                        "tool": "llama-bench",
+                        "custom_axes": [
+                            "not-a-dict",
+                            {"enabled": True},  # no flag -> dropped
+                            {"flag": "-ot", "mode": "weird", "raw": "a,b"},
+                        ],
+                    }
+                },
+            }
+        )
+    )
+    store = BenchConfigStore(tmp_path)
+    cfg = store.get("c")
+    assert len(cfg.custom_axes) == 1
+    assert cfg.custom_axes[0]["flag"] == "-ot"
+    assert cfg.custom_axes[0]["mode"] == "list"  # coerced from invalid
+
+
 def test_coerce_axes_drops_malformed(tmp_path):
     path = tmp_path / "bench_configs.json"
     path.write_text(

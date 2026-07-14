@@ -19,6 +19,11 @@ Each entry on disk:
           "output_format": "json",
           "repetitions": 5,
           "extra_args": "",
+          "extra_args_rows": ["--numa distribute", "--no-mmap"],
+          "custom_axes": [
+            {"flag": "-ot", "enabled": true, "mode": "list",
+             "raw": "exps=CPU,attn=CPU", "min": 0, "max": 0, "step": 1}
+          ],
           "created_at": "2026-07-13T00:00:00Z",
           "last_used_at": "2026-07-13T00:00:00Z"
         }
@@ -116,6 +121,56 @@ def _coerce_axes(raw: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _coerce_extra_args_rows(raw: Any, legacy: str) -> list[str]:
+    """Coerce the multi-row Extra-args editor to a ``list[str]``.
+
+    Each row is a free-form shell string (``shlex.split`` at build time). When
+    an older config predates the rows field, its scalar ``extra_args`` string is
+    migrated in as a single row so nothing is lost.
+    """
+    rows: list[str] = []
+    if isinstance(raw, list):
+        rows = [_as_str(item, "") for item in raw]
+    if not any(r.strip() for r in rows) and legacy.strip():
+        # Legacy scalar → single row (migration). Only when no rows were stored.
+        return [legacy]
+    return rows
+
+
+def _coerce_custom_axes(raw: Any) -> list[dict[str, Any]]:
+    """Coerce persisted custom sweep flags to a list of normalised specs.
+
+    Each spec is ``{flag, enabled, mode, raw, min, max, step}``. Malformed
+    entries (non-mappings, or rows without a flag) are dropped rather than
+    poisoning the config; ``mode`` is clamped to ``{list, range}`` — mirroring
+    :func:`_coerce_axes`.
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for spec in raw:
+        if not isinstance(spec, Mapping):
+            continue
+        flag = _as_str(spec.get("flag"), "").strip()
+        if not flag:
+            continue
+        mode = _as_str(spec.get("mode"), "list")
+        if mode not in _VALID_MODES:
+            mode = "list"
+        out.append(
+            {
+                "flag": flag,
+                "enabled": _safe_bool(spec.get("enabled", True), default=True),
+                "mode": mode,
+                "raw": _as_str(spec.get("raw"), ""),
+                "min": _safe_float(spec.get("min", 0)),
+                "max": _safe_float(spec.get("max", 0)),
+                "step": _safe_float(spec.get("step", 1)) or 1.0,
+            }
+        )
+    return out
+
+
 @dataclass
 class BenchConfig:
     name: str
@@ -126,7 +181,11 @@ class BenchConfig:
     axes: dict[str, dict[str, Any]] = field(default_factory=dict)
     output_format: str = "json"
     repetitions: int = 0
+    # ``extra_args`` (scalar) is retained for backward compat and external
+    # consumers; ``extra_args_rows`` is the authoritative multi-row editor state.
     extra_args: str = ""
+    extra_args_rows: list[str] = field(default_factory=list)
+    custom_axes: list[dict[str, Any]] = field(default_factory=list)
     created_at: str = ""
     last_used_at: str = ""
 
@@ -143,6 +202,7 @@ class BenchConfig:
         backend = _as_str(data.get("backend"), "llama.cpp")
         if backend not in _VALID_BACKENDS:
             backend = "llama.cpp"
+        extra_args = _as_str(data.get("extra_args"), "")
         return cls(
             name=name,
             tool=tool,
@@ -152,7 +212,9 @@ class BenchConfig:
             axes=_coerce_axes(data.get("axes")),
             output_format=_as_str(data.get("output_format"), "json") or "json",
             repetitions=_safe_int(data.get("repetitions", 0), min_value=0),
-            extra_args=_as_str(data.get("extra_args"), ""),
+            extra_args=extra_args,
+            extra_args_rows=_coerce_extra_args_rows(data.get("extra_args_rows"), extra_args),
+            custom_axes=_coerce_custom_axes(data.get("custom_axes")),
             created_at=_as_str(data.get("created_at"), ""),
             last_used_at=_as_str(data.get("last_used_at"), ""),
         )

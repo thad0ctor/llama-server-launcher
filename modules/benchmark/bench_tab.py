@@ -36,6 +36,8 @@ from .bench_runner import (
 )
 from .detection import ALL_TOOLS, TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH, BuildEntry, discover_builds
 from .matrix import (
+    KIND_INT,
+    KIND_STR,
     LEVERS,
     Axis,
     SweepError,
@@ -83,10 +85,18 @@ class BenchmarkTab:
         self.model_var = tk.StringVar(value=self._launcher_model_path())
         self.output_format_var = tk.StringVar(value="json")
         self.repetitions_var = tk.StringVar(value="")
-        self.extra_args_var = tk.StringVar(value="")
         self.config_name_var = tk.StringVar()
         self.autoscroll_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Idle.")
+
+        # Dynamic multi-row editors (rebuilt into the UI on add/remove/load).
+        # Each Extra-args row is a free-form string appended to EVERY command;
+        # each custom-flag row is a user-defined sweep axis. Both are lists of
+        # dict-of-Tk-vars so they round-trip through save/load like lever rows.
+        self._extra_args_rows: list[dict[str, tk.Variable]] = []
+        self._custom_axis_rows: list[dict[str, tk.Variable]] = []
+        self._extra_args_container: ttk.Frame | None = None
+        self._custom_axis_container: ttk.Frame | None = None
 
         # Per-lever row vars: key -> dict(include, mode, values, vmin, vmax, vstep)
         self.lever_vars: dict[str, dict[str, tk.Variable]] = {}
@@ -152,6 +162,7 @@ class BenchmarkTab:
 
         self._build_source_section(body)
         self._build_sweep_section(body)
+        self._build_custom_flags_section(body)
         self._build_options_section(body)
         self._build_preview_section(body)
         self._build_run_section(body)
@@ -252,6 +263,32 @@ class BenchmarkTab:
             self._lever_rows[lever.key] = widgets
         grid.columnconfigure(3, weight=1)
 
+    def _build_custom_flags_section(self, parent) -> None:
+        sec = self._section(parent, "Custom sweep flags")
+        ttk.Label(
+            sec,
+            text="Sweep an arbitrary flag not listed above (e.g. -ot, --override-tensor, --cache-reuse). "
+            "Tick to include; use 'list' for comma-separated values or 'range' for numeric min/max/step. "
+            "Each value becomes its own matrix combo on llama-sweep-bench; on llama-bench the values are "
+            "passed as one comma-list, so a custom flag only sweeps there if it accepts comma-separated values.",
+            foreground="#666",
+            wraplength=680,
+            justify="left",
+        ).pack(fill="x", padx=6, pady=(2, 4))
+
+        grid = ttk.Frame(sec)
+        grid.pack(fill="x", padx=6, pady=2)
+        headers = ["", "Flag", "Mode", "List values", "Min", "Max", "Step", ""]
+        for c, text in enumerate(headers):
+            ttk.Label(grid, text=text, foreground="#444").grid(row=0, column=c, sticky="w", padx=3)
+        grid.columnconfigure(3, weight=1)
+        # Rows are re-gridded into this container on add/remove/load.
+        self._custom_axis_container = grid
+        ttk.Button(sec, text="Add custom flag", command=self._add_custom_axis_row).pack(
+            side="left", padx=6, pady=(0, 4)
+        )
+        self._render_custom_axis_rows()
+
     def _build_options_section(self, parent) -> None:
         sec = self._section(parent, "Options")
         row = ttk.Frame(sec)
@@ -271,12 +308,20 @@ class BenchmarkTab:
         ttk.Label(row2, text="Repetitions (-r):", width=18).pack(side="left")
         ttk.Entry(row2, textvariable=self.repetitions_var, width=8).pack(side="left")
 
-        row3 = ttk.Frame(sec)
-        row3.pack(fill="x", padx=6, pady=3)
-        ttk.Label(row3, text="Extra args:", width=18).pack(side="left")
-        e = ttk.Entry(row3, textvariable=self.extra_args_var)
-        e.pack(side="left", fill="x", expand=True)
-        e.bind("<FocusOut>", lambda ev: self.refresh_preview())
+        # Multi-row Extra-args editor. Every non-empty row is shlex-split and
+        # appended (in order) to EVERY command in the matrix.
+        ttk.Label(sec, text="Extra args (appended to every run):", foreground="#444").pack(
+            anchor="w", padx=6, pady=(3, 0)
+        )
+        self._extra_args_container = ttk.Frame(sec)
+        self._extra_args_container.pack(fill="x", padx=6, pady=1)
+        ttk.Button(sec, text="Add extra-args row", command=self._add_extra_args_row).pack(
+            side="left", padx=6, pady=(0, 4)
+        )
+        if not self._extra_args_rows:
+            # Seed a single empty row so the editor is never blank on first open.
+            self._extra_args_rows.append({"value": tk.StringVar(value="")})
+        self._render_extra_args_rows()
 
     def _build_preview_section(self, parent) -> None:
         sec = self._section(parent, "Command preview")
@@ -442,9 +487,152 @@ class BenchmarkTab:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------ extra-args rows
+    def _render_extra_args_rows(self) -> None:
+        """Re-grid the Extra-args editor from ``self._extra_args_rows``."""
+        c = self._extra_args_container
+        if c is None:
+            return
+        for w in c.winfo_children():
+            w.destroy()
+        for idx, row in enumerate(self._extra_args_rows):
+            r = ttk.Frame(c)
+            r.pack(fill="x", pady=1)
+            ttk.Label(r, text=f"{idx + 1}.", width=3).pack(side="left")
+            e = ttk.Entry(r, textvariable=row["value"])
+            e.pack(side="left", fill="x", expand=True)
+            e.bind("<FocusOut>", lambda ev: self.refresh_preview())
+            ttk.Button(r, text="Remove", command=lambda i=idx: self._remove_extra_args_row(i)).pack(side="left", padx=4)
+
+    def _add_extra_args_row(self) -> None:
+        self._extra_args_rows.append({"value": tk.StringVar(value="")})
+        self._render_extra_args_rows()
+        self.refresh_preview()
+
+    def _remove_extra_args_row(self, idx: int) -> None:
+        if 0 <= idx < len(self._extra_args_rows):
+            self._extra_args_rows.pop(idx)
+        if not self._extra_args_rows:
+            # Never leave the editor with zero rows — keep one empty row.
+            self._extra_args_rows.append({"value": tk.StringVar(value="")})
+        self._render_extra_args_rows()
+        self.refresh_preview()
+
+    def _set_extra_args_rows(self, values: list[str]) -> None:
+        """Rebuild the Extra-args editor from persisted row strings."""
+        self._extra_args_rows = [{"value": tk.StringVar(value=str(v))} for v in values]
+        if not self._extra_args_rows:
+            self._extra_args_rows.append({"value": tk.StringVar(value="")})
+        self._render_extra_args_rows()
+
+    def _current_extra_args(self) -> list[str]:
+        """Free-form Extra-args rows to append to every command, empties dropped.
+
+        Returned as a list so the matrix builder shlex-splits each row
+        independently and concatenates them in order.
+        """
+        rows: list[str] = []
+        for row in self._extra_args_rows:
+            text = str(row["value"].get()).strip()
+            if text:
+                rows.append(text)
+        return rows
+
+    # ------------------------------------------------------------------ custom-flag rows
+    def _make_custom_axis_row(
+        self,
+        *,
+        flag: str = "",
+        include: bool = True,
+        mode: str = "list",
+        values: str = "",
+        vmin: str = "0",
+        vmax: str = "0",
+        vstep: str = "1",
+    ) -> dict[str, tk.Variable]:
+        return {
+            "include": tk.BooleanVar(value=include),
+            "flag": tk.StringVar(value=flag),
+            "mode": tk.StringVar(value=mode if mode in ("list", "range") else "list"),
+            "values": tk.StringVar(value=values),
+            "vmin": tk.StringVar(value=vmin),
+            "vmax": tk.StringVar(value=vmax),
+            "vstep": tk.StringVar(value=vstep),
+        }
+
+    def _render_custom_axis_rows(self) -> None:
+        """Re-grid the custom-flag editor from ``self._custom_axis_rows``."""
+        grid = self._custom_axis_container
+        if grid is None:
+            return
+        # Wipe every widget below the header row (row 0) and re-grid.
+        for w in grid.grid_slaves():
+            try:
+                if int(w.grid_info().get("row", 0)) > 0:
+                    w.destroy()
+            except Exception:
+                pass
+        for i, row in enumerate(self._custom_axis_rows, start=1):
+            ttk.Checkbutton(grid, variable=row["include"], command=self.refresh_preview).grid(
+                row=i, column=0, sticky="w", padx=3
+            )
+            fe = ttk.Entry(grid, textvariable=row["flag"], width=18)
+            fe.grid(row=i, column=1, sticky="we", padx=3)
+            fe.bind("<FocusOut>", lambda ev: self.refresh_preview())
+            me = ttk.Combobox(grid, textvariable=row["mode"], state="readonly", values=["list", "range"], width=6)
+            me.grid(row=i, column=2, sticky="w", padx=3)
+            me.bind("<<ComboboxSelected>>", lambda ev: self.refresh_preview())
+            ve = ttk.Entry(grid, textvariable=row["values"], width=22)
+            ve.grid(row=i, column=3, sticky="we", padx=3)
+            ve.bind("<FocusOut>", lambda ev: self.refresh_preview())
+            emin = ttk.Entry(grid, textvariable=row["vmin"], width=6)
+            emin.grid(row=i, column=4, padx=2)
+            emax = ttk.Entry(grid, textvariable=row["vmax"], width=6)
+            emax.grid(row=i, column=5, padx=2)
+            estep = ttk.Entry(grid, textvariable=row["vstep"], width=6)
+            estep.grid(row=i, column=6, padx=2)
+            for e in (emin, emax, estep):
+                e.bind("<FocusOut>", lambda ev: self.refresh_preview())
+            ttk.Button(grid, text="Remove", command=lambda r=row: self._remove_custom_axis_row(r)).grid(
+                row=i, column=7, padx=3
+            )
+
+    def _add_custom_axis_row(self) -> None:
+        self._custom_axis_rows.append(self._make_custom_axis_row())
+        self._render_custom_axis_rows()
+        self.refresh_preview()
+
+    def _remove_custom_axis_row(self, row: dict[str, tk.Variable]) -> None:
+        try:
+            self._custom_axis_rows.remove(row)
+        except ValueError:
+            pass
+        self._render_custom_axis_rows()
+        self.refresh_preview()
+
+    def _set_custom_axis_rows(self, specs: list[dict]) -> None:
+        """Rebuild the custom-flag editor from persisted specs."""
+        self._custom_axis_rows = [
+            self._make_custom_axis_row(
+                flag=str(spec.get("flag", "")),
+                include=bool(spec.get("enabled", True)),
+                mode=str(spec.get("mode", "list")),
+                values=str(spec.get("raw", "")),
+                vmin=self._fmt(spec.get("min", 0)),
+                vmax=self._fmt(spec.get("max", 0)),
+                vstep=self._fmt(spec.get("step", 1)),
+            )
+            for spec in specs
+        ]
+        self._render_custom_axis_rows()
+
     # ------------------------------------------------------------------ axes
     def _collect_axes(self) -> list[Axis]:
-        """Build sweep axes from the included lever rows. Raises SweepError."""
+        """Build sweep axes from the included lever rows AND custom-flag rows.
+
+        Raises :class:`SweepError` on malformed input (bad numbers, empty
+        included rows, or a custom flag that doesn't start with ``-``).
+        """
         axes: list[Axis] = []
         for lever in LEVERS:
             v = self.lever_vars[lever.key]
@@ -464,6 +652,40 @@ class BenchmarkTab:
             if not values:
                 raise SweepError(f"{lever.label} is ticked but has no values.")
             axes.append(Axis(lever.key, values))
+        axes.extend(self._collect_custom_axes())
+        return axes
+
+    def _collect_custom_axes(self) -> list[Axis]:
+        """Turn the included, named custom-flag rows into real matrix axes.
+
+        A custom flag uses KIND_STR for list mode and KIND_INT for numeric
+        range mode, mirroring the built-in lever rows. The flag itself is the
+        axis key, so results tag combos with a ``[<flag>]`` column.
+        """
+        axes: list[Axis] = []
+        for row in self._custom_axis_rows:
+            if not row["include"].get():
+                continue
+            flag = str(row["flag"].get()).strip()
+            if not flag:
+                continue
+            mode = row["mode"].get()
+            if mode == "range":
+                try:
+                    vmin = float(row["vmin"].get())
+                    vmax = float(row["vmax"].get())
+                    vstep = float(row["vstep"].get())
+                except ValueError as exc:
+                    raise SweepError(f"custom flag {flag!r}: min/max/step must be numeric") from exc
+                values = expand_range(vmin, vmax, vstep, KIND_INT)
+                kind = KIND_INT
+            else:
+                values = parse_list(row["values"].get(), KIND_STR)
+                kind = KIND_STR
+            if not values:
+                raise SweepError(f"custom flag {flag!r} is included but has no values.")
+            # Axis.__post_init__ rejects a flag that doesn't start with '-'.
+            axes.append(Axis(key=flag, values=values, custom_flag=flag, custom_kind=kind))
         return axes
 
     def _current_exe(self) -> str | None:
@@ -503,7 +725,7 @@ class BenchmarkTab:
             backend=self._current_backend(),
             output_format=self.output_format_var.get(),
             repetitions=self._repetitions(),
-            extra_args=self.extra_args_var.get(),
+            extra_args=self._current_extra_args(),
         )
         return [c for c, _ in pairs], [combo for _, combo in pairs]
 
@@ -534,7 +756,7 @@ class BenchmarkTab:
                 backend=self._current_backend(),
                 output_format=self.output_format_var.get(),
                 repetitions=self._repetitions(),
-                extra_args=self.extra_args_var.get(),
+                extra_args=self._current_extra_args(),
             )
         except SweepError as exc:
             self._set_preview(f"(incomplete) {exc}")
@@ -544,7 +766,7 @@ class BenchmarkTab:
         else:
             lines.append(f"# {len(pairs)} invocation(s) (cartesian product)")
         if ignored:
-            names = ", ".join(a.lever.label for a in ignored)
+            names = ", ".join(a.label for a in ignored)
             lines.append(f"# ignored (n/a for {tool}): {names}")
         for cmd, _combo in pairs[:24]:
             lines.append(" ".join(shlex.quote(t) for t in cmd))
@@ -669,7 +891,7 @@ class BenchmarkTab:
                 backend=self._current_backend(),
                 output_format=self.output_format_var.get(),
                 repetitions=self._repetitions(),
-                extra_args=self.extra_args_var.get(),
+                extra_args=self._current_extra_args(),
             )
         except SweepError as exc:
             messagebox.showerror("Benchmark", str(exc))
@@ -934,6 +1156,23 @@ class BenchmarkTab:
                 "max": self._safe_float(v["vmax"].get()),
                 "step": self._safe_float(v["vstep"].get(), 1.0),
             }
+        extra_args_rows = self._current_extra_args()
+        custom_axes_spec: list[dict] = []
+        for row in self._custom_axis_rows:
+            flag = str(row["flag"].get()).strip()
+            if not flag:
+                continue
+            custom_axes_spec.append(
+                {
+                    "flag": flag,
+                    "enabled": bool(row["include"].get()),
+                    "mode": row["mode"].get(),
+                    "raw": row["values"].get(),
+                    "min": self._safe_float(row["vmin"].get()),
+                    "max": self._safe_float(row["vmax"].get()),
+                    "step": self._safe_float(row["vstep"].get(), 1.0),
+                }
+            )
         return BenchConfig(
             name=name,
             tool=self.tool_var.get(),
@@ -943,7 +1182,10 @@ class BenchmarkTab:
             axes=axes_spec,
             output_format=self.output_format_var.get(),
             repetitions=self._repetitions() or 0,
-            extra_args=self.extra_args_var.get(),
+            # Keep the scalar joined for external consumers; rows are canonical.
+            extra_args=" ".join(extra_args_rows),
+            extra_args_rows=extra_args_rows,
+            custom_axes=custom_axes_spec,
         )
 
     @staticmethod
@@ -1022,7 +1264,10 @@ class BenchmarkTab:
         # Run output is JSON-only (see Options); ignore any legacy csv/markdown.
         self.output_format_var.set("json")
         self.repetitions_var.set(str(cfg.repetitions) if cfg.repetitions else "")
-        self.extra_args_var.set(cfg.extra_args)
+        # Restore the multi-row Extra-args editor (persistence migrates a legacy
+        # scalar extra_args into a single row for us).
+        self._set_extra_args_rows(list(cfg.extra_args_rows))
+        self._set_custom_axis_rows(list(cfg.custom_axes))
         # Reset all levers, then apply saved axes.
         for lever in LEVERS:
             v = self.lever_vars[lever.key]

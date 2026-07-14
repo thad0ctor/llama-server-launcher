@@ -123,6 +123,74 @@ def test_load_sweep_bench_config_keeps_tool(bench_tab):
     assert bench_tab.tool_var.get() == TOOL_SWEEP_BENCH
 
 
+def test_multiple_extra_args_rows_combine_in_command(bench_tab):
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    # Tick one built-in lever so a command is buildable.
+    bench_tab.lever_vars["threads"]["include"].set(True)
+    bench_tab.lever_vars["threads"]["mode"].set("list")
+    bench_tab.lever_vars["threads"]["values"].set("8")
+    # Two extra-args rows.
+    bench_tab._set_extra_args_rows(["--numa distribute", "--no-mmap"])
+    commands, _ = bench_tab._build_command_list()
+    assert len(commands) == 1
+    cmd = commands[0]
+    # Combined, shlex-split tokens appear (in order) at the tail.
+    assert cmd[-3:] == ["--numa", "distribute", "--no-mmap"]
+
+
+def test_custom_sweep_flag_yields_two_combos(bench_tab):
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    bench_tab._set_custom_axis_rows(
+        [{"flag": "-ot", "enabled": True, "mode": "list", "raw": "exps=CPU,attn=CPU", "min": 0, "max": 0, "step": 1}]
+    )
+    commands, combos = bench_tab._build_command_list()
+    assert len(commands) == 2
+    assert {c["-ot"] for c in combos} == {"exps=CPU", "attn=CPU"}
+    for cmd, combo in zip(commands, combos):
+        idx = cmd.index("-ot")
+        assert cmd[idx + 1] == combo["-ot"]
+
+
+def test_invalid_custom_flag_raises_sweep_error(bench_tab):
+    from modules.benchmark.matrix import SweepError
+
+    bench_tab._set_custom_axis_rows(
+        [{"flag": "ot", "enabled": True, "mode": "list", "raw": "a,b", "min": 0, "max": 0, "step": 1}]
+    )
+    with pytest.raises(SweepError):
+        bench_tab._collect_axes()
+
+
+def test_save_load_roundtrips_extra_args_and_custom_axes(bench_tab):
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab._set_extra_args_rows(["--numa distribute", "--no-mmap"])
+    bench_tab._set_custom_axis_rows(
+        [{"flag": "-ot", "enabled": True, "mode": "list", "raw": "exps=CPU,attn=CPU", "min": 0, "max": 0, "step": 1}]
+    )
+    bench_tab.config_name_var.set("rt")
+    bench_tab._save_config()
+
+    # Wipe live state, then load it back.
+    bench_tab._set_extra_args_rows([])
+    bench_tab._set_custom_axis_rows([])
+    bench_tab._load_config()
+
+    assert bench_tab._current_extra_args() == ["--numa distribute", "--no-mmap"]
+    assert len(bench_tab._custom_axis_rows) == 1
+    row = bench_tab._custom_axis_rows[0]
+    assert row["flag"].get() == "-ot"
+    assert row["values"].get() == "exps=CPU,attn=CPU"
+    assert bool(row["include"].get()) is True
+
+
 def test_stop_polling_on_teardown_cancels_running_worker(bench_tab, monkeypatch):
     calls = {"cancel": 0}
     monkeypatch.setattr(type(bench_tab.runner), "is_running", property(lambda self: True))

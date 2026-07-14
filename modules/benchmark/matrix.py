@@ -212,10 +212,38 @@ def expand_range(vmin: float, vmax: float, vstep: float, kind: str = KIND_INT) -
 
 @dataclass
 class Axis:
-    """A lever plus the concrete values to benchmark for it."""
+    """A sweep dimension: concrete values plus how they map to each tool.
+
+    An axis wraps EITHER a built-in :class:`Lever` (identified by ``key``) or a
+    user-defined *custom flag* (``custom_flag`` set to something like ``-ot``).
+    Command builders never reach into the lever directly; they go through the
+    uniform :pyattr:`flag` / :pyattr:`kind` / :pyattr:`label` accessors and
+    :meth:`applies_to`, which dispatch to the lever or the custom fields as
+    appropriate. This keeps a custom flag a first-class matrix dimension while
+    leaving the built-in ``Axis(key, values)`` construction (and the
+    :pyattr:`lever` property) working unchanged.
+
+    Custom flags apply to BOTH tools and are never flash-attn. Their values use
+    :data:`KIND_STR` (list mode) or :data:`KIND_INT` (numeric range mode),
+    mirroring the built-in lever rows.
+    """
 
     key: str
     values: list[str] = field(default_factory=list)
+    custom_flag: str = ""
+    custom_kind: str = KIND_STR
+
+    def __post_init__(self) -> None:
+        # A custom flag must look like a CLI flag; otherwise a stray word would
+        # be rendered as ``word value`` and silently mis-invoke the tool.
+        if self.custom_flag and not str(self.custom_flag).startswith("-"):
+            raise SweepError(
+                f"custom flag {self.custom_flag!r} must start with '-' " f"(e.g. -ot or --override-tensor)"
+            )
+
+    @property
+    def is_custom(self) -> bool:
+        return bool(self.custom_flag)
 
     @property
     def lever(self) -> Lever:
@@ -225,6 +253,26 @@ class Axis:
             raise SweepError(f"unknown lever {self.key!r}") from exc
 
     @property
+    def flag(self) -> str:
+        """CLI flag this axis renders (e.g. ``-ngl`` or a custom ``-ot``)."""
+        return self.custom_flag if self.is_custom else self.lever.flag
+
+    @property
+    def kind(self) -> str:
+        """Value kind driving rendering (KIND_INT/KIND_STR/KIND_FA/KIND_VEC)."""
+        return self.custom_kind if self.is_custom else self.lever.kind
+
+    @property
+    def label(self) -> str:
+        """Human label for previews and ignored-axis notes."""
+        return self.custom_flag if self.is_custom else self.lever.label
+
+    def applies_to(self, tool: str) -> bool:
+        # A custom flag has no per-tool restriction — it sweeps on whichever
+        # tool the user runs (a comma-list on llama-bench, per-combo otherwise).
+        return True if self.is_custom else self.lever.applies_to(tool)
+
+    @property
     def is_swept(self) -> bool:
         return len(self.values) > 1
 
@@ -232,15 +280,15 @@ class Axis:
 def split_axes_for_tool(axes: list[Axis], tool: str) -> tuple[list[Axis], list[Axis]]:
     """Partition ``axes`` into (applicable, ignored) for ``tool``.
 
-    An axis is ignored when its lever doesn't apply to the tool (e.g.
-    ``-p`` on sweep-bench) or when it has no values.
+    An axis is ignored when it doesn't apply to the tool (e.g. ``-p`` on
+    sweep-bench) or when it has no values. Custom flags always apply.
     """
     applicable: list[Axis] = []
     ignored: list[Axis] = []
     for axis in axes:
         if not axis.values:
             continue
-        if axis.lever.applies_to(tool):
+        if axis.applies_to(tool):
             applicable.append(axis)
         else:
             ignored.append(axis)
@@ -266,19 +314,31 @@ def matrix_size(axes: list[Axis], tool: str) -> int:
 
 
 def _extra_tokens(extra_args: str | list[str] | None) -> list[str]:
+    """Flatten fixed extra-args into shell tokens appended to every command.
+
+    Accepts a single free-form string OR a list of free-form strings (one per
+    UI "Extra args" row). Each element is ``shlex.split`` independently and the
+    results are concatenated in order, so the multi-row editor composes exactly
+    like the old single field did.
+    """
     if not extra_args:
         return []
-    if isinstance(extra_args, str):
-        import shlex
+    import shlex
 
+    rows = [extra_args] if isinstance(extra_args, str) else extra_args
+    tokens: list[str] = []
+    for row in rows:
+        text = str(row)
+        if not text:
+            continue
         try:
-            return shlex.split(extra_args)
+            tokens.extend(shlex.split(text))
         except ValueError as exc:
-            # e.g. an unmatched quote in the Extra-args field. Surface it as a
+            # e.g. an unmatched quote in an Extra-args row. Surface it as a
             # SweepError so the UI's validation path reports it instead of
             # letting it escape the Tk callback as an uncaught exception.
             raise SweepError(f"could not parse extra args: {exc}") from exc
-    return [str(a) for a in extra_args]
+    return tokens
 
 
 def _render_fa_values(values: list[str], backend: str) -> list[str]:
@@ -320,12 +380,13 @@ def llama_bench_command(
     cmd: list[str] = [exe, "-m", model]
     applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH)
     for axis in applicable:
-        lever = axis.lever
-        if lever.kind == KIND_FA:
+        if axis.kind == KIND_FA:
             values = _render_fa_values(axis.values, backend)
         else:
             values = axis.values
-        cmd += [lever.flag, ",".join(values)]
+        # Custom flags render as a native comma-list too; they only sweep on
+        # llama-bench when the flag itself accepts comma-separated values.
+        cmd += [axis.flag, ",".join(values)]
     if repetitions and repetitions > 0:
         cmd += ["-r", str(repetitions)]
     if output_format:
@@ -378,14 +439,13 @@ def sweep_bench_commands(
     for combo in _cartesian(applicable):
         cmd: list[str] = [exe, "-m", model]
         for axis in applicable:
-            lever = axis.lever
             value = combo[axis.key]
-            if lever.kind == KIND_FA:
+            if axis.kind == KIND_FA:
                 if value == "on":
-                    cmd.append(lever.flag)
+                    cmd.append(axis.flag)
                 # "off" => omit the flag entirely (server-style default off)
             else:
-                cmd += [lever.flag, value]
+                cmd += [axis.flag, value]
         cmd += extra
         out.append((cmd, combo))
     return out
