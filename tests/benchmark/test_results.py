@@ -9,6 +9,14 @@ import json
 from modules.benchmark import results
 
 
+def test_main_gpu_column_present_when_emitted():
+    # -mg is a sweepable lever; llama-bench emits main_gpu in JSON, so the grid
+    # must surface it (otherwise -mg sweep rows are indistinguishable).
+    stdout = json.dumps([{"model_type": "Q", "main_gpu": 1, "test": "pp512", "avg_ts": 10.0}])
+    rows = results.parse_llama_bench_json(stdout)
+    assert rows[0].get("main_gpu") == "1"
+
+
 def test_csv_does_not_escape_negative_or_plain_numbers():
     # Regression: formula-injection escaping must not corrupt legitimate
     # signed numbers like -1 (``-ngl -1`` = "all layers") or main_gpu columns.

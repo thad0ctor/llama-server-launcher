@@ -74,7 +74,12 @@ class BenchmarkTab:
 
         # Selection vars
         self.build_var = tk.StringVar()
+        # ``tool_var`` always holds the CANONICAL tool id; ``_tool_display_var``
+        # is what the combobox shows (a human label). Keeping them separate
+        # stops the combobox from writing its display label back into the
+        # canonical var (which broke tool selection when loading a config).
         self.tool_var = tk.StringVar(value=TOOL_LLAMA_BENCH)
+        self._tool_display_var = tk.StringVar(value=_TOOL_LABELS[TOOL_LLAMA_BENCH])
         self.model_var = tk.StringVar(value=self._launcher_model_path())
         self.output_format_var = tk.StringVar(value="json")
         self.repetitions_var = tk.StringVar(value="")
@@ -178,13 +183,12 @@ class BenchmarkTab:
         ttk.Label(row2, text="Tool:", width=12).pack(side="left")
         self._tool_combo = ttk.Combobox(
             row2,
-            textvariable=self.tool_var,
+            textvariable=self._tool_display_var,
             state="readonly",
             values=[_TOOL_LABELS[t] for t in ALL_TOOLS],
         )
         self._tool_combo.pack(side="left", fill="x", expand=True)
         self._tool_combo.bind("<<ComboboxSelected>>", lambda e: self._on_tool_label_selected())
-        self._tool_combo.set(_TOOL_LABELS[TOOL_LLAMA_BENCH])
 
         row3 = ttk.Frame(sec)
         row3.pack(fill="x", padx=6, pady=3)
@@ -350,6 +354,16 @@ class BenchmarkTab:
                 return b
         return None
 
+    def _set_tool(self, tool: str) -> None:
+        """Set the canonical tool id AND sync the combobox's display label.
+
+        Routing every programmatic tool change through here keeps ``tool_var``
+        (canonical id) and ``_tool_display_var`` (human label) consistent
+        without the combobox ever writing its label back into ``tool_var``.
+        """
+        self.tool_var.set(tool)
+        self._tool_display_var.set(_TOOL_LABELS.get(tool, tool))
+
     def _on_build_changed(self) -> None:
         build = self._selected_build()
         # Constrain the tool list to what this build actually ships.
@@ -360,13 +374,13 @@ class BenchmarkTab:
             )
         current = self.tool_var.get()
         if available and current not in available:
-            self.tool_var.set(available[0])
-            if self._tool_combo is not None:
-                self._tool_combo.set(_TOOL_LABELS[available[0]])
+            self._set_tool(available[0])
         self._on_tool_changed()
 
     def _on_tool_label_selected(self) -> None:
-        label = self._tool_combo.get() if self._tool_combo else ""
+        # The combobox already wrote the selected label into ``_tool_display_var``;
+        # map it back to the canonical id in ``tool_var``.
+        label = self._tool_display_var.get()
         for tool, lbl in _TOOL_LABELS.items():
             if lbl == label:
                 self.tool_var.set(tool)
@@ -1002,9 +1016,7 @@ class BenchmarkTab:
                 f"'{name}' isn't available in any detected build. The tool selection "
                 "may change to one this build provides.",
             )
-        self.tool_var.set(saved_tool)
-        if self._tool_combo is not None:
-            self._tool_combo.set(_TOOL_LABELS.get(saved_tool, saved_tool))
+        self._set_tool(saved_tool)
         if cfg.model_path:
             self.model_var.set(cfg.model_path)
         # Run output is JSON-only (see Options); ignore any legacy csv/markdown.

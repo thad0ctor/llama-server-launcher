@@ -80,6 +80,49 @@ def test_poll_runner_reschedules_while_worker_alive(bench_tab, monkeypatch):
     assert str(bench_tab._start_btn["state"]) == "disabled"
 
 
+def test_set_tool_keeps_canonical_id_and_display_label(bench_tab):
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    # Canonical id in tool_var; human label in the combobox display var.
+    assert bench_tab.tool_var.get() == TOOL_SWEEP_BENCH
+    assert "(ik_llama)" in bench_tab._tool_display_var.get()
+
+
+def test_load_sweep_bench_config_keeps_tool(bench_tab):
+    # Regression (Codex P2): loading a sweep-bench config on an ik_llama build
+    # that offers both tools must NOT revert the run to llama-bench.
+    from modules.benchmark.bench_persistence import BenchConfig
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH, BuildEntry
+
+    build = BuildEntry(
+        label="ik (backend dir)",
+        backend="ik_llama",
+        root_dir="/ik",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/ik/llama-bench", TOOL_SWEEP_BENCH: "/ik/llama-sweep-bench"},
+    )
+    bench_tab._builds = [build]
+    bench_tab._build_labels = [build.label]
+    bench_tab._build_combo.configure(values=bench_tab._build_labels)
+    bench_tab.build_var.set(build.label)
+
+    bench_tab.store.save(
+        BenchConfig(
+            name="sweep",
+            tool=TOOL_SWEEP_BENCH,
+            backend="ik_llama",
+            build_root="/ik",
+            model_path="/m.gguf",
+            axes={"ctx_size": {"enabled": True, "mode": "list", "raw": "4096", "min": 0, "max": 0, "step": 1}},
+        )
+    )
+    bench_tab.config_name_var.set("sweep")
+    bench_tab._load_config()
+
+    assert bench_tab.tool_var.get() == TOOL_SWEEP_BENCH
+
+
 def test_stop_polling_on_teardown_cancels_running_worker(bench_tab, monkeypatch):
     calls = {"cancel": 0}
     monkeypatch.setattr(type(bench_tab.runner), "is_running", property(lambda self: True))

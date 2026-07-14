@@ -6,6 +6,8 @@ import pytest
 
 from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
 from modules.benchmark.matrix import (
+    KIND_VEC,
+    MAX_SWEEP_COMBOS,
     Axis,
     SweepError,
     build_commands,
@@ -16,6 +18,38 @@ from modules.benchmark.matrix import (
     split_axes_for_tool,
     sweep_bench_commands,
 )
+
+
+def test_tensor_split_is_one_value_not_comma_split():
+    # A split vector like "0.6,0.4" is a single --tensor-split argument; commas
+    # are internal, so it must NOT expand into separate sweep points.
+    assert parse_list("0.6,0.4", KIND_VEC) == ["0.6,0.4"]
+    assert parse_list("1,1", KIND_VEC) == ["1,1"]  # not deduped to "1"
+    # Multiple splits sweep on ';'.
+    assert parse_list("0.6,0.4;0.7,0.3", KIND_VEC) == ["0.6,0.4", "0.7,0.3"]
+
+
+def test_tensor_split_sweep_bench_command_keeps_vector():
+    axes = [Axis("tensor_split", ["0.6,0.4"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    assert len(pairs) == 1
+    assert pairs[0][0] == ["/b/llama-sweep-bench", "-m", "/m.gguf", "-ts", "0.6,0.4"]
+
+
+def test_sweep_bench_matrix_cap_rejects_explosion():
+    # Two big axes whose product exceeds the cap must raise before materialising.
+    big = [str(i) for i in range(200)]
+    axes = [Axis("n_gpu_layers", big), Axis("threads", big)]  # 200*200 = 40000
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) > MAX_SWEEP_COMBOS
+    with pytest.raises(SweepError):
+        sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+
+
+def test_malformed_extra_args_raises_sweep_error():
+    # Unmatched quote -> shlex ValueError -> surfaced as SweepError, not a raw
+    # exception escaping the Tk callback.
+    with pytest.raises(SweepError):
+        llama_bench_command("/b/llama-bench", "/m.gguf", [Axis("threads", ["8"])], extra_args='--numa "distribute')
 
 
 def test_parse_list_int_normalises_and_dedupes():

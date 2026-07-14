@@ -28,6 +28,13 @@ from .detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
 KIND_INT = "int"
 KIND_STR = "str"
 KIND_FA = "fa"  # flash-attn: on/off, rendered per-tool (list value vs bare flag)
+KIND_VEC = "vec"  # a whole vector value (e.g. tensor-split "0.6,0.4"); commas are
+# INTERNAL to one value, so sweep points are separated by ';' instead of ','.
+
+# Upper bound on the cartesian product a single llama-sweep-bench sweep may
+# expand to. Guards the UI against a two-range sweep allocating millions of
+# per-combo commands (each range can already reach 4096 values on its own).
+MAX_SWEEP_COMBOS = 4096
 
 
 @dataclass(frozen=True)
@@ -95,7 +102,15 @@ LEVERS: tuple[Lever, ...] = (
     Lever("cache_type_k", "KV cache K (-ctk)", "-ctk", KIND_STR, _BOTH, seed_attr="cache_type_k"),
     Lever("cache_type_v", "KV cache V (-ctv)", "-ctv", KIND_STR, _BOTH, seed_attr="cache_type_v"),
     Lever("flash_attn", "Flash attention (-fa)", "-fa", KIND_FA, _BOTH, seed_attr="flash_attn"),
-    Lever("tensor_split", "Tensor split (-ts)", "-ts", KIND_STR, _BOTH, seed_attr="tensor_split"),
+    Lever(
+        "tensor_split",
+        "Tensor split (-ts)",
+        "-ts",
+        KIND_VEC,
+        _BOTH,
+        seed_attr="tensor_split",
+        help="A whole split vector like 0.6,0.4 is ONE value; separate multiple splits with ';'.",
+    ),
     Lever("main_gpu", "Main GPU (-mg)", "-mg", KIND_INT, _BOTH, seed_attr="main_gpu"),
 )
 
@@ -131,7 +146,10 @@ def parse_list(raw: str, kind: str = KIND_STR) -> list[str]:
     """
     if raw is None:
         return []
-    tokens = [t.strip() for t in str(raw).replace("\n", ",").split(",")]
+    # Vector values (tensor-split) keep commas internally, so they sweep on
+    # ';' rather than ','. Everything else sweeps on ','.
+    sep = ";" if kind == KIND_VEC else ","
+    tokens = [t.strip() for t in str(raw).replace("\n", sep).split(sep)]
     tokens = [t for t in tokens if t]
     out: list[str] = []
     for tok in tokens:
@@ -253,7 +271,13 @@ def _extra_tokens(extra_args: str | list[str] | None) -> list[str]:
     if isinstance(extra_args, str):
         import shlex
 
-        return shlex.split(extra_args)
+        try:
+            return shlex.split(extra_args)
+        except ValueError as exc:
+            # e.g. an unmatched quote in the Extra-args field. Surface it as a
+            # SweepError so the UI's validation path reports it instead of
+            # letting it escape the Tk callback as an uncaught exception.
+            raise SweepError(f"could not parse extra args: {exc}") from exc
     return [str(a) for a in extra_args]
 
 
@@ -337,6 +361,18 @@ def sweep_bench_commands(
     if not model:
         raise SweepError("no model selected")
     applicable, _ = split_axes_for_tool(axes, TOOL_SWEEP_BENCH)
+    # Bound the cartesian product BEFORE materialising it. Each axis range can
+    # expand to 4096 values, so two ranges could otherwise allocate millions of
+    # combo dicts and hang/exhaust memory in the UI (even just building the
+    # preview). Compute the product from lengths and refuse early.
+    total = 1
+    for axis in applicable:
+        total *= max(1, len(axis.values))
+    if total > MAX_SWEEP_COMBOS:
+        raise SweepError(
+            f"sweep expands to {total} llama-sweep-bench runs (max {MAX_SWEEP_COMBOS}); "
+            f"narrow the parameter ranges."
+        )
     extra = _extra_tokens(extra_args)
     out: list[tuple[list[str], dict[str, str]]] = []
     for combo in _cartesian(applicable):
