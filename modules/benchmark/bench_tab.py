@@ -75,6 +75,25 @@ class BenchmarkTab:
         self._build_labels: list[str] = []
 
         # Selection vars
+        # Backend is the source of truth for ik-only UI + matrix rendering. Seed
+        # from the launcher's live backend selection and keep the two in sync.
+        seed_backend = "llama.cpp"
+        try:
+            seed_backend = self.launcher.backend_selection.get() or "llama.cpp"
+        except Exception:
+            pass
+        self.backend_var = tk.StringVar(value=seed_backend)
+        # Re-entrancy guard for the two-way backend sync (mirrors build_tab.py's
+        # ``_syncing_backend_selection``).
+        self._syncing_backend = False
+        # Mirror the launcher's backend selection into this tab (build_tab.py
+        # does the same for its own backend var). Guarded so a launcher without a
+        # usable backend var simply skips the two-way sync.
+        try:
+            self.launcher.backend_selection.trace_add("write", self._on_launcher_backend_changed)
+        except Exception:
+            pass
+
         self.build_var = tk.StringVar()
         # ``tool_var`` always holds the CANONICAL tool id; ``_tool_display_var``
         # is what the combobox shows (a human label). Keeping them separate
@@ -180,6 +199,18 @@ class BenchmarkTab:
 
     def _build_source_section(self, parent) -> None:
         sec = self._section(parent, "Build & Tool")
+
+        brow = ttk.Frame(sec)
+        brow.pack(fill="x", padx=6, pady=3)
+        ttk.Label(brow, text="Backend:", width=12).pack(side="left")
+        for label, value in (("llama.cpp", "llama.cpp"), ("ik_llama", "ik_llama")):
+            ttk.Radiobutton(
+                brow,
+                text=label,
+                value=value,
+                variable=self.backend_var,
+                command=self._on_backend_radio_changed,
+            ).pack(side="left", padx=(0, 12))
 
         row = ttk.Frame(sec)
         row.pack(fill="x", padx=6, pady=3)
@@ -432,13 +463,104 @@ class BenchmarkTab:
                 break
         self._on_tool_changed()
 
+    @staticmethod
+    def _is_ik_lever(lever) -> bool:
+        """True for levers that exist only in ik_llama's tool build."""
+        return "llama.cpp" not in lever.backends
+
+    @staticmethod
+    def _set_lever_row_visible(widgets: dict, visible: bool) -> None:
+        """Grid-show or grid-remove a whole lever row (position preserved)."""
+        for w in ("chk", "lbl", "mode", "vals", "emin", "emax", "estep"):
+            try:
+                if visible:
+                    widgets[w].grid()
+                else:
+                    widgets[w].grid_remove()
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ backend
+    def _on_backend_radio_changed(self) -> None:
+        """Fired by the Backend radio: push the choice to the launcher, then
+        refresh build/tool/ik state and the preview."""
+        self._sync_launcher_backend_from_tab()
+        self._on_backend_changed()
+
+    def _on_launcher_backend_changed(self, *_a) -> None:
+        """Trace on ``launcher.backend_selection``: mirror it into this tab.
+
+        Guarded by ``_syncing_backend`` so the write-back path can't recurse.
+        """
+        if self._syncing_backend:
+            return
+        try:
+            new_backend = self.launcher.backend_selection.get()
+        except Exception:
+            return
+        if new_backend and new_backend != self.backend_var.get():
+            self._syncing_backend = True
+            try:
+                self.backend_var.set(new_backend)
+            finally:
+                self._syncing_backend = False
+            self._on_backend_changed()
+
+    def _sync_launcher_backend_from_tab(self) -> None:
+        """Write this tab's backend selection back to the launcher var."""
+        if self._syncing_backend:
+            return
+        backend = self.backend_var.get() or "llama.cpp"
+        try:
+            if self.launcher.backend_selection.get() == backend:
+                return
+        except Exception:
+            return
+        self._syncing_backend = True
+        try:
+            self.launcher.backend_selection.set(backend)
+        except Exception:
+            pass
+        finally:
+            self._syncing_backend = False
+
+    def _on_backend_changed(self) -> None:
+        """Backend switched: auto-pick a matching build, refresh the tool list
+        (which re-evaluates ik-only lever-row visibility) and the preview."""
+        backend = self.backend_var.get()
+        # Prefer a discovered build of this backend (if any); _on_build_changed
+        # then refreshes the tool list and lever-row applicability.
+        self._auto_select_build_for_backend(backend)
+        self.refresh_preview()
+
+    def _auto_select_build_for_backend(self, backend: str) -> None:
+        """Select the first discovered build matching ``backend`` (if any), then
+        re-run the build-changed cascade so the tool list + lever rows update."""
+        for b in self._builds:
+            if getattr(b, "backend", "") == backend:
+                if self.build_var.get() != b.label:
+                    self.build_var.set(b.label)
+                self._on_build_changed()
+                return
+        # No build of this backend — still refresh tool/lever state so ik levers
+        # appear/disappear even without a concrete build selected.
+        self._on_build_changed()
+
     def _on_tool_changed(self) -> None:
         tool = self.tool_var.get()
+        backend = self._current_backend()
         build = self._selected_build()
-        # Show/hide lever rows by applicability to the current tool.
+        # Show/hide lever rows by applicability to the current tool AND backend.
         for key, widgets in self._lever_rows.items():
             lever = widgets["lever"]
-            applies = lever.applies_to(tool)
+            # ik_llama-only levers are grid_removed entirely on a llama.cpp
+            # backend (they are noise there); other levers are only enabled or
+            # greyed out by per-tool applicability, exactly as before.
+            if self._is_ik_lever(lever) and backend != "ik_llama":
+                self._set_lever_row_visible(widgets, False)
+                continue
+            self._set_lever_row_visible(widgets, True)
+            applies = lever.applies_to(tool, backend)
             state = "normal" if applies else "disabled"
             for w in ("chk", "mode", "vals", "emin", "emax", "estep"):
                 try:
@@ -469,7 +591,7 @@ class BenchmarkTab:
         if not widgets:
             return
         lever = widgets["lever"]
-        applies = lever.applies_to(self.tool_var.get())
+        applies = lever.applies_to(self.tool_var.get(), self._current_backend())
         mode = self.lever_vars[key]["mode"].get()
         if not applies:
             for w in ("vals", "emin", "emax", "estep"):
@@ -634,9 +756,14 @@ class BenchmarkTab:
         included rows, or a custom flag that doesn't start with ``-``).
         """
         axes: list[Axis] = []
+        backend = self._current_backend()
         for lever in LEVERS:
             v = self.lever_vars[lever.key]
             if not v["include"].get():
+                continue
+            # ik_llama-only levers must not produce axes on a llama.cpp backend
+            # (their rows are hidden there, but a stale ``include`` could linger).
+            if self._is_ik_lever(lever) and backend != "ik_llama":
                 continue
             mode = v["mode"].get()
             if mode == "range":
@@ -695,10 +822,12 @@ class BenchmarkTab:
         return build.tool_path(self.tool_var.get())
 
     def _current_backend(self) -> str:
-        """Backend of the selected build (drives flash-attn handling in the
-        matrix), defaulting to ``llama.cpp`` when no build is selected."""
-        build = self._selected_build()
-        return getattr(build, "backend", "llama.cpp") if build is not None else "llama.cpp"
+        """Backend selection is the source of truth (drives flash-attn handling,
+        ik-only levers and the ik fuse toggles), defaulting to ``llama.cpp``."""
+        try:
+            return self.backend_var.get() or "llama.cpp"
+        except Exception:
+            return "llama.cpp"
 
     def _repetitions(self) -> int | None:
         raw = self.repetitions_var.get().strip()
@@ -743,7 +872,8 @@ class BenchmarkTab:
         if not axes:
             self._set_preview("(no parameters selected — tick at least one to sweep)")
             return
-        _applicable, ignored = split_axes_for_tool(axes, tool)
+        backend = self._current_backend()
+        _applicable, ignored = split_axes_for_tool(axes, tool, backend)
         if not _applicable:
             names = ", ".join(a.label for a in ignored)
             self._set_preview(
@@ -751,7 +881,7 @@ class BenchmarkTab:
                 f"the ignored ones are: {names})"
             )
             return
-        size = matrix_size(axes, tool)
+        size = matrix_size(axes, tool, backend)
         model = self.model_var.get().strip() or "<model.gguf>"
         exe = self._current_exe() or f"<{tool}>"
         try:
@@ -760,7 +890,7 @@ class BenchmarkTab:
                 exe,
                 model,
                 axes,
-                backend=self._current_backend(),
+                backend=backend,
                 output_format=self.output_format_var.get(),
                 repetitions=self._repetitions(),
                 extra_args=self._current_extra_args(),
@@ -923,7 +1053,8 @@ class BenchmarkTab:
         # empty-axes guard above counts axes BEFORE tool filtering, so without
         # this check build_commands() would silently drop every axis and run a
         # single unswept default command.
-        applicable, ignored = split_axes_for_tool(axes, tool)
+        backend = self._current_backend()
+        applicable, ignored = split_axes_for_tool(axes, tool, backend)
         if not applicable:
             names = ", ".join(a.label for a in ignored)
             messagebox.showerror(
@@ -938,7 +1069,7 @@ class BenchmarkTab:
                 exe,
                 model,
                 axes,
-                backend=self._current_backend(),
+                backend=backend,
                 output_format=self.output_format_var.get(),
                 repetitions=self._repetitions(),
                 extra_args=self._current_extra_args(),
@@ -1226,7 +1357,9 @@ class BenchmarkTab:
         return BenchConfig(
             name=name,
             tool=self.tool_var.get(),
-            backend=(build.backend if build else "llama.cpp"),
+            # Backend selection is the source of truth (a build may not be
+            # selected); fall back to the selected build only if unavailable.
+            backend=self._current_backend(),
             build_root=(build.root_dir if build else ""),
             model_path=self.model_var.get().strip(),
             axes=axes_spec,
@@ -1276,6 +1409,19 @@ class BenchmarkTab:
             messagebox.showerror("Load config", f"No sweep config named '{name}'.")
             return
         saved_tool = cfg.tool
+
+        # Restore the backend first (source of truth for ik-only UI + rendering)
+        # and mirror it to the launcher, guarded against the sync trace recursing.
+        if cfg.backend in ("llama.cpp", "ik_llama"):
+            self._syncing_backend = True
+            try:
+                self.backend_var.set(cfg.backend)
+                try:
+                    self.launcher.backend_selection.set(cfg.backend)
+                except Exception:
+                    pass
+            finally:
+                self._syncing_backend = False
 
         def _root_matches(b) -> bool:
             if not cfg.build_root:

@@ -313,3 +313,88 @@ def test_custom_axis_matrix_size_both_tools():
     axes = [_custom_axis("-ot", ["a", "b", "c"]), Axis("threads", ["8", "16"])]
     assert matrix_size(axes, TOOL_LLAMA_BENCH) == 6
     assert matrix_size(axes, TOOL_SWEEP_BENCH) == 6
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ik_llama-only levers (backend-gated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_ik_lever_applies_only_to_ik_llama_bench():
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    rtr = LEVERS_BY_KEY["rtr"]
+    # Applies to llama-bench on the ik_llama backend only.
+    assert rtr.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    # NOT on the llama.cpp backend (the flag doesn't exist upstream).
+    assert not rtr.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    # NOT on llama-sweep-bench even under ik_llama (scoped to llama-bench).
+    assert not rtr.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+
+
+def test_ik_lever_renders_native_comma_sweep_on_llama_bench():
+    axes = [Axis("rtr", ["0", "1"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd = pairs[0][0]
+    idx = cmd.index("-rtr")
+    assert cmd[idx + 1] == "0,1"
+
+
+def test_mqkv_is_value_lever_not_bare_flag():
+    # -mqkv takes a <0|1> value (NOT a bare flag): it renders as a native
+    # comma-sweepable value on ik_llama's llama-bench and is dropped on llama.cpp.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    mqkv = LEVERS_BY_KEY["mqkv"]
+    assert mqkv.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert not mqkv.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    assert not mqkv.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+
+    axes = [Axis("mqkv", ["0", "1"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    cmd = pairs[0][0]
+    idx = cmd.index("-mqkv")
+    assert cmd[idx + 1] == "0,1"
+    # Dropped entirely on the llama.cpp backend.
+    applicable, ignored = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "llama.cpp")
+    assert applicable == []
+    assert [a.key for a in ignored] == ["mqkv"]
+
+
+def test_ik_lever_dropped_for_llama_cpp_backend():
+    # The same axes on the llama.cpp backend must drop the ik-only axis.
+    axes = [Axis("rtr", ["0", "1"]), Axis("threads", ["8"])]
+    applicable, ignored = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "llama.cpp")
+    assert [a.key for a in applicable] == ["threads"]
+    assert [a.key for a in ignored] == ["rtr"]
+    # And it applies under ik_llama.
+    applicable_ik, ignored_ik = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "ik_llama")
+    assert {a.key for a in applicable_ik} == {"rtr", "threads"}
+    assert ignored_ik == []
+
+
+def test_ser_vec_not_device_separated_on_llama_bench():
+    # -ser's value is literally "i,f" (e.g. 7,1) — a single token that must NOT
+    # have its comma rewritten to the tensor-split device separator.
+    axes = [Axis("ser", ["7,1"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-ser")
+    assert cmd[idx + 1] == "7,1"
+
+
+def test_ot_vec_pattern_passes_through_on_llama_bench():
+    # -ot patterns use '=' and ',' literally; no device-separator conversion.
+    axes = [Axis("ot", ["exps=CPU"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-ot")
+    assert cmd[idx + 1] == "exps=CPU"
+
+
+def test_tensor_split_still_device_separated_after_gating():
+    # Regression: gating the vec conversion to tensor_split must leave -ts's
+    # 0.6,0.4 -> 0.6/0.4 rewrite intact.
+    axes = [Axis("tensor_split", ["0.6,0.4"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4"

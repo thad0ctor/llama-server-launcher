@@ -242,6 +242,76 @@ def test_start_blocks_when_no_axis_applies_to_tool(bench_tab, monkeypatch, tmp_p
     assert errors and "apply to" in errors[0]
 
 
+def test_backend_radio_reveals_ik_levers_and_syncs_launcher(bench_tab):
+    # Switching the Backend selection to ik_llama must reveal the ik-only lever
+    # rows (grid_remove'd on llama.cpp) and push the choice to the launcher var.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    # Baseline: on llama.cpp the ik lever row is grid_removed (no grid info).
+    assert bench_tab.backend_var.get() == "llama.cpp"
+    assert bench_tab._lever_rows["rtr"]["chk"].grid_info() == {}
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+
+    assert bench_tab.launcher.backend_selection.get() == "ik_llama"
+    # ik lever row is now gridded (position preserved).
+    assert bench_tab._lever_rows["rtr"]["chk"].grid_info() != {}
+
+
+def test_launcher_backend_change_mirrors_into_tab(bench_tab):
+    # The reverse sync: writing the launcher backend var updates the tab.
+    bench_tab.launcher.backend_selection.set("ik_llama")
+    assert bench_tab.backend_var.get() == "ik_llama"
+
+
+def test_ik_value_lever_renders_in_command(bench_tab):
+    # -mqkv is a VALUE lever (0/1), not a bare flag: on ik_llama's llama-bench
+    # it renders as a native comma-swept value.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    bench_tab.lever_vars["mqkv"]["include"].set(True)
+    bench_tab.lever_vars["mqkv"]["mode"].set("list")
+    bench_tab.lever_vars["mqkv"]["values"].set("0,1")
+
+    commands, _ = bench_tab._build_command_list()
+    assert len(commands) == 1
+    cmd = commands[0]
+    idx = cmd.index("-mqkv")
+    assert cmd[idx + 1] == "0,1"
+
+
+def test_ik_sweep_lever_roundtrips_through_save_load(bench_tab):
+    # ik value levers persist via the axes mechanism by their lever key.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    bench_tab.lever_vars["rtr"]["include"].set(True)
+    bench_tab.lever_vars["rtr"]["mode"].set("list")
+    bench_tab.lever_vars["rtr"]["values"].set("0,1")
+
+    bench_tab.config_name_var.set("ikcfg")
+    bench_tab._save_config()
+
+    # Wipe live state, then load it back.
+    bench_tab.backend_var.set("llama.cpp")
+    bench_tab.lever_vars["rtr"]["include"].set(False)
+    bench_tab.lever_vars["rtr"]["values"].set("")
+    bench_tab._load_config()
+
+    assert bench_tab.backend_var.get() == "ik_llama"
+    assert bool(bench_tab.lever_vars["rtr"]["include"].get()) is True
+    assert bench_tab.lever_vars["rtr"]["values"].get() == "0,1"
+
+
 def test_stop_polling_on_teardown_cancels_running_worker(bench_tab, monkeypatch):
     calls = {"cancel": 0}
     monkeypatch.setattr(type(bench_tab.runner), "is_running", property(lambda self: True))

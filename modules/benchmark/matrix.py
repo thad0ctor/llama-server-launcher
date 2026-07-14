@@ -36,6 +36,12 @@ KIND_VEC = "vec"  # a whole vector value (e.g. tensor-split "0.6,0.4"); commas a
 # per-combo commands (each range can already reach 4096 values on its own).
 MAX_SWEEP_COMBOS = 4096
 
+# Backends a lever can apply to. Most levers exist in BOTH backends' builds of
+# the benchmark tools; a handful of tuning knobs (run-time repack, fused MoE,
+# MLA, …) exist ONLY in ik_llama's fork of llama-bench.
+_BOTH_BACKENDS = frozenset({"llama.cpp", "ik_llama"})
+_IK_BACKEND = frozenset({"ik_llama"})
+
 
 @dataclass(frozen=True)
 class Lever:
@@ -46,12 +52,15 @@ class Lever:
     flag: str
     kind: str
     tools: frozenset[str]
+    # Backends whose build of the tool actually accepts this flag. Defaults to
+    # both; ik_llama-only levers narrow it to ``_IK_BACKEND``.
+    backends: frozenset[str] = _BOTH_BACKENDS
     # Attribute on the launcher to seed a baseline value from, if any.
     seed_attr: str = ""
     help: str = ""
 
-    def applies_to(self, tool: str) -> bool:
-        return tool in self.tools
+    def applies_to(self, tool: str, backend: str = "llama.cpp") -> bool:
+        return tool in self.tools and backend in self.backends
 
 
 _BOTH = frozenset({TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH})
@@ -112,6 +121,119 @@ LEVERS: tuple[Lever, ...] = (
         help="A whole split vector like 0.6,0.4 is ONE value; separate multiple splits with ';'.",
     ),
     Lever("main_gpu", "Main GPU (-mg)", "-mg", KIND_INT, _BOTH, seed_attr="main_gpu"),
+    # ── ik_llama-only sweep levers ──────────────────────────────────────────
+    # These flags exist only in ik_llama's build of llama-bench (not upstream
+    # llama.cpp, and not llama-sweep-bench), so they are scoped to llama-bench
+    # AND the ik_llama backend. The value flags below are natively
+    # comma-sweepable by llama-bench just like the built-in list levers.
+    Lever(
+        "rtr",
+        "Run-time repack (-rtr)",
+        "-rtr",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama run-time tensor repack (0/1).",
+    ),
+    Lever(
+        "fmoe",
+        "Fused MoE (-fmoe)",
+        "-fmoe",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama fused mixture-of-experts (0/1).",
+    ),
+    Lever(
+        "ger",
+        "Grouped expert routing (-ger)",
+        "-ger",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama grouped expert routing (0/1).",
+    ),
+    Lever(
+        "no_fug",
+        "No fused up-gate (-no-fug)",
+        "-no-fug",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama disable fused up-gate (0/1).",
+    ),
+    Lever(
+        "mla",
+        "MLA attention (-mla)",
+        "-mla",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama MLA attention mode (0/1/2).",
+    ),
+    Lever(
+        "amb",
+        "Attn max batch (-amb)",
+        "-amb",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama attention max batch size.",
+    ),
+    Lever(
+        "ik_n_cpu_moe",
+        "N CPU MoE (--n-cpu-moe)",
+        "--n-cpu-moe",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama number of MoE layers kept on CPU.",
+    ),
+    Lever(
+        "mqkv",
+        "Merge QKV (-mqkv)",
+        "-mqkv",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama merge QKV (0/1).",
+    ),
+    Lever(
+        "muge",
+        "Merge up-gate experts (-muge)",
+        "-muge",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama merge up-gate experts (0/1).",
+    ),
+    Lever(
+        "rcache",
+        "Rope cache (-rcache)",
+        "-rcache",
+        KIND_INT,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help="ik_llama rope cache (0/1).",
+    ),
+    Lever(
+        "ser",
+        "Smart expert reduction (-ser)",
+        "-ser",
+        KIND_VEC,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help='Value is "i,f" (e.g. 7,1) — ONE value; sweep several with ";".',
+    ),
+    Lever(
+        "ot",
+        "Override tensor (-ot)",
+        "-ot",
+        KIND_VEC,
+        _BENCH_ONLY,
+        backends=_IK_BACKEND,
+        help='A tensor-override pattern is ONE value; sweep several with ";".',
+    ),
 )
 
 LEVERS_BY_KEY: dict[str, Lever] = {lever.key: lever for lever in LEVERS}
@@ -267,41 +389,43 @@ class Axis:
         """Human label for previews and ignored-axis notes."""
         return self.custom_flag if self.is_custom else self.lever.label
 
-    def applies_to(self, tool: str) -> bool:
-        # A custom flag has no per-tool restriction — it sweeps on whichever
-        # tool the user runs (a comma-list on llama-bench, per-combo otherwise).
-        return True if self.is_custom else self.lever.applies_to(tool)
+    def applies_to(self, tool: str, backend: str = "llama.cpp") -> bool:
+        # A custom flag has no per-tool/per-backend restriction — it sweeps on
+        # whichever tool the user runs (a comma-list on llama-bench, per-combo
+        # otherwise) and on either backend.
+        return True if self.is_custom else self.lever.applies_to(tool, backend)
 
     @property
     def is_swept(self) -> bool:
         return len(self.values) > 1
 
 
-def split_axes_for_tool(axes: list[Axis], tool: str) -> tuple[list[Axis], list[Axis]]:
-    """Partition ``axes`` into (applicable, ignored) for ``tool``.
+def split_axes_for_tool(axes: list[Axis], tool: str, backend: str = "llama.cpp") -> tuple[list[Axis], list[Axis]]:
+    """Partition ``axes`` into (applicable, ignored) for ``tool``/``backend``.
 
     An axis is ignored when it doesn't apply to the tool (e.g. ``-p`` on
-    sweep-bench) or when it has no values. Custom flags always apply.
+    sweep-bench) or backend (e.g. an ik_llama-only lever on a llama.cpp build)
+    or when it has no values. Custom flags always apply.
     """
     applicable: list[Axis] = []
     ignored: list[Axis] = []
     for axis in axes:
         if not axis.values:
             continue
-        if axis.applies_to(tool):
+        if axis.applies_to(tool, backend):
             applicable.append(axis)
         else:
             ignored.append(axis)
     return applicable, ignored
 
 
-def matrix_size(axes: list[Axis], tool: str) -> int:
-    """Number of distinct parameter combinations for ``tool``.
+def matrix_size(axes: list[Axis], tool: str, backend: str = "llama.cpp") -> int:
+    """Number of distinct parameter combinations for ``tool``/``backend``.
 
     For llama-bench this is the number of rows the single invocation
     produces; for sweep-bench it is the number of separate processes run.
     """
-    applicable, _ = split_axes_for_tool(axes, tool)
+    applicable, _ = split_axes_for_tool(axes, tool, backend)
     total = 1
     for axis in applicable:
         total *= max(1, len(axis.values))
@@ -392,14 +516,16 @@ def llama_bench_command(
     if not model:
         raise SweepError("no model selected")
     cmd: list[str] = [exe, "-m", model]
-    applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH)
+    applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
     for axis in applicable:
         if axis.kind == KIND_FA:
             values = _render_fa_values(axis.values, backend)
-        elif axis.kind == KIND_VEC:
-            # A vector value's commas separate DEVICES, not sweep cases, so
-            # rewrite them to llama-bench's within-vector separator before the
-            # comma-join across swept vectors turns comma into the case delimiter.
+        elif axis.kind == KIND_VEC and axis.key == "tensor_split":
+            # ONLY tensor-split's vector commas separate DEVICES: rewrite them to
+            # llama-bench's within-vector separator before the comma-join across
+            # swept vectors turns comma into the case delimiter. Other KIND_VEC
+            # levers (ik_llama's -ser "i,f" and -ot patterns) use commas/'='
+            # literally, so they must pass through UNCHANGED.
             values = [_vec_for_llama_bench(v) for v in axis.values]
         else:
             values = axis.values
@@ -427,6 +553,7 @@ def sweep_bench_commands(
     model: str,
     axes: list[Axis],
     *,
+    backend: str = "llama.cpp",
     extra_args: str | list[str] | None = None,
 ) -> list[tuple[list[str], dict[str, str]]]:
     """Build one llama-sweep-bench command per parameter combination.
@@ -443,7 +570,7 @@ def sweep_bench_commands(
         raise SweepError("no llama-sweep-bench executable")
     if not model:
         raise SweepError("no model selected")
-    applicable, _ = split_axes_for_tool(axes, TOOL_SWEEP_BENCH)
+    applicable, _ = split_axes_for_tool(axes, TOOL_SWEEP_BENCH, backend)
     # Bound the cartesian product BEFORE materialising it. Each axis range can
     # expand to 4096 values, so two ranges could otherwise allocate millions of
     # combo dicts and hang/exhaust memory in the UI (even just building the
@@ -501,5 +628,5 @@ def build_commands(
         )
         return [(cmd, {})]
     if tool == TOOL_SWEEP_BENCH:
-        return sweep_bench_commands(exe, model, axes, extra_args=extra_args)
+        return sweep_bench_commands(exe, model, axes, backend=backend, extra_args=extra_args)
     raise SweepError(f"unknown tool {tool!r}")
