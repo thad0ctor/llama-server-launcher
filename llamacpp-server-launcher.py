@@ -5096,6 +5096,25 @@ class LlamaCppLauncher:
             runner = getattr(bench_tab, "runner", None) if bench_tab is not None else None
             if runner is not None and getattr(runner, "is_running", False):
                 runner.cancel()
+                # cancel() only *signals* SIGTERM (non-blocking); its
+                # SIGTERM->SIGKILL escalation runs on the runner's daemon worker
+                # thread. The os._exit(0) below can fire before that completes,
+                # leaving the benchmark's detached process group alive. Wait a
+                # bounded time for the worker to finish; if it's still alive,
+                # kill the child process group directly so nothing outlives us.
+                thread = getattr(runner, "_thread", None)
+                if thread is not None:
+                    try:
+                        thread.join(timeout=5.0)
+                    except Exception:
+                        pass
+                if getattr(runner, "is_running", False):
+                    proc = getattr(runner, "_proc", None)
+                    if proc is not None:
+                        try:
+                            type(runner)._signal_kill(proc)
+                        except Exception:
+                            pass
         except Exception as e:
             print(f"on_exit: benchmark cancel failed: {e}", file=sys.stderr)
         try:

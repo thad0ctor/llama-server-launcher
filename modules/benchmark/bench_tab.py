@@ -744,6 +744,13 @@ class BenchmarkTab:
             self._set_preview("(no parameters selected — tick at least one to sweep)")
             return
         _applicable, ignored = split_axes_for_tool(axes, tool)
+        if not _applicable:
+            names = ", ".join(a.label for a in ignored)
+            self._set_preview(
+                f"(none of the selected parameters apply to {_TOOL_LABELS.get(tool, tool)} — "
+                f"the ignored ones are: {names})"
+            )
+            return
         size = matrix_size(axes, tool)
         model = self.model_var.get().strip() or "<model.gguf>"
         exe = self._current_exe() or f"<{tool}>"
@@ -859,6 +866,36 @@ class BenchmarkTab:
             self.refresh_preview()
 
     # ------------------------------------------------------------------ run
+    def _gpu_env_overrides(self) -> dict[str, str]:
+        """Mirror the server launch's ``CUDA_VISIBLE_DEVICES`` choice into the
+        benchmark child's environment.
+
+        ``system.py`` clears any inherited ``CUDA_VISIBLE_DEVICES`` at startup,
+        so a benchmark child would otherwise see ALL physical GPUs — making a
+        seeded ``main_gpu`` / ``tensor_split`` index refer to a different logical
+        device than the server would use. Reuse the launcher's single source of
+        truth (``LaunchManager._resolve_cuda_visible_devices_action``) so the
+        benchmark and the live server always agree on the visible-device subset
+        and order. Only the ``export`` action carries a concrete value; ``unset``
+        and ``skip`` intentionally leave the variable unset (the child sees all
+        GPUs), matching the server-launch behaviour in those modes.
+
+        Defensive: a launcher without a usable launch_manager / GPU state simply
+        yields no override.
+        """
+        env: dict[str, str] = {}
+        try:
+            launch_manager = getattr(self.launcher, "launch_manager", None)
+            resolver = getattr(launch_manager, "_resolve_cuda_visible_devices_action", None)
+            if resolver is None:
+                return env
+            action, value = resolver()
+            if action == "export" and value not in (None, ""):
+                env["CUDA_VISIBLE_DEVICES"] = str(value)
+        except Exception:
+            pass
+        return env
+
     def start(self) -> None:
         if self.runner.is_running:
             return
@@ -882,6 +919,19 @@ class BenchmarkTab:
             messagebox.showerror("Benchmark", "Tick at least one parameter to sweep.")
             return
         tool = self.tool_var.get()
+        # Reject a matrix whose ticked rows all apply to the OTHER tool: the
+        # empty-axes guard above counts axes BEFORE tool filtering, so without
+        # this check build_commands() would silently drop every axis and run a
+        # single unswept default command.
+        applicable, ignored = split_axes_for_tool(axes, tool)
+        if not applicable:
+            names = ", ".join(a.label for a in ignored)
+            messagebox.showerror(
+                "Benchmark",
+                f"None of the selected parameters apply to {_TOOL_LABELS.get(tool, tool)} — "
+                f"the ignored ones are: {names}.",
+            )
+            return
         try:
             pairs = build_commands(
                 tool,
@@ -898,7 +948,7 @@ class BenchmarkTab:
             return
         steps = [BenchStep(cmd=cmd, combo=combo, label=self._combo_label(combo)) for cmd, combo in pairs]
         cwd = str(Path(exe).parent)
-        plan = BenchPlan(tool=tool, steps=steps, cwd=cwd)
+        plan = BenchPlan(tool=tool, steps=steps, cwd=cwd, env=self._gpu_env_overrides())
 
         self._clear_console()
         self._append_console(f"Running {len(steps)} benchmark invocation(s) with {tool}…", tag="stage")

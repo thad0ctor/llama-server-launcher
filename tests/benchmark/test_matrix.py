@@ -33,7 +33,28 @@ def test_tensor_split_sweep_bench_command_keeps_vector():
     axes = [Axis("tensor_split", ["0.6,0.4"])]
     pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
     assert len(pairs) == 1
+    # sweep-bench uses server-style params: devices stay comma-separated (raw
+    # vector), unchanged.
     assert pairs[0][0] == ["/b/llama-sweep-bench", "-m", "/m.gguf", "-ts", "0.6,0.4"]
+
+
+def test_tensor_split_llama_bench_uses_device_separator():
+    # llama-bench splits -ts on ',' into separate benchmark CASES and on '/'
+    # (or ';') into devices WITHIN a vector, so a single 2-GPU split must render
+    # as ONE device-separated token, not two 1-GPU cases.
+    axes = [Axis("tensor_split", ["0.6,0.4"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4"
+
+
+def test_tensor_split_llama_bench_multiple_vectors():
+    # Two swept splits: devices joined by '/' within each vector, vectors joined
+    # by ',' as separate benchmark cases.
+    axes = [Axis("tensor_split", ["0.6,0.4", "0.7,0.3"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4,0.7/0.3"
 
 
 def test_sweep_bench_matrix_cap_rejects_explosion():
@@ -143,14 +164,17 @@ def test_sweep_bench_cartesian_product():
     assert {"n_gpu_layers": "10", "threads": "16"} in combos
 
 
-def test_sweep_bench_flash_attn_bare_flag():
+def test_sweep_bench_flash_attn_explicit_value():
+    # sweep-bench uses ik_llama's server-style --flash-attn, which requires an
+    # explicit on/off token (a bare flag errors, and "off" must be explicit to
+    # override the binary default), mirroring modules/launch.py.
     axes = [Axis("flash_attn", ["on", "off"])]
     pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
     assert len(pairs) == 2
     on_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "on")
     off_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "off")
-    assert "-fa" in on_cmd
-    assert "-fa" not in off_cmd
+    assert on_cmd[on_cmd.index("-fa") + 1] == "on"
+    assert off_cmd[off_cmd.index("-fa") + 1] == "off"
 
 
 def _fa_arg(cmd):
@@ -184,14 +208,16 @@ def test_build_commands_forwards_backend_to_fa_rendering():
     assert _fa_arg(pairs[0][0]) == "1,0"
 
 
-def test_sweep_bench_fa_still_bare_flag_regardless_of_backend():
-    # sweep-bench renders FA as a bare flag; no backend parameter involved.
+def test_sweep_bench_fa_explicit_value_no_backend_param():
+    # sweep-bench renders FA with an explicit on/off value and takes no backend
+    # parameter (unlike llama-bench, it never maps to numeric 1/0).
     axes = [Axis("flash_attn", ["on", "off"])]
     pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
     on_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "on")
     off_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "off")
-    assert "-fa" in on_cmd and "1" not in on_cmd
-    assert "-fa" not in off_cmd
+    assert on_cmd[on_cmd.index("-fa") + 1] == "on"
+    assert off_cmd[off_cmd.index("-fa") + 1] == "off"
+    assert "1" not in on_cmd and "0" not in off_cmd
 
 
 def test_matrix_size():

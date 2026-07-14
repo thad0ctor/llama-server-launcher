@@ -43,16 +43,30 @@ def to_sh(commands: list[Command], *, header: str = "") -> str:
     lines.append("exec </dev/null")
     lines.append("")
     total = len(commands)
+    multi = total > 1
+    if multi:
+        # Track whether any combo failed so the script's own exit status
+        # reflects it, while still continuing past individual failures.
+        lines.append("_bench_rc=0")
+        lines.append("")
     for i, cmd in enumerate(commands, start=1):
         if not cmd:
             continue
         rendered = " ".join(_sh_quote(tok) for tok in cmd)
-        if total > 1:
+        if multi:
             lines.append(f'echo "== benchmark {i}/{total} =="')
-            # Continue past a nonzero exit, but surface it on stderr.
-            lines.append(f'{rendered} || echo "== benchmark {i}/{total} FAILED (exit $?) ==" >&2')
+            # Continue past a nonzero exit, but remember the failure and surface
+            # it on stderr. Capture $? first: assigning _bench_rc would reset it.
+            lines.append(
+                f"{rendered} || {{ _rc=$?; _bench_rc=1; "
+                f'echo "== benchmark {i}/{total} FAILED (exit $_rc) ==" >&2; }}'
+            )
         else:
+            # A single command's own exit status is the script's exit status.
             lines.append(rendered)
+        lines.append("")
+    if multi:
+        lines.append('exit "$_bench_rc"')
         lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
 
@@ -71,20 +85,29 @@ def to_ps1(commands: list[Command], *, header: str = "") -> str:
     lines.append("$ErrorActionPreference = 'Continue'")
     lines.append("")
     total = len(commands)
+    multi = total > 1
+    if multi:
+        # Track whether any combo failed so the script's own exit status
+        # reflects it, while still continuing past individual failures.
+        lines.append("$_benchRc = 0")
+        lines.append("")
     for i, cmd in enumerate(commands, start=1):
         if not cmd:
             continue
-        if total > 1:
+        if multi:
             lines.append(f'Write-Host "== benchmark {i}/{total} =="')
         # First token is the executable, invoked with the call operator.
         parts = ["& " + _ps_quote(cmd[0])]
         parts += [_ps_quote(tok) for tok in cmd[1:]]
         lines.append(" ".join(parts))
-        if total > 1:
+        if multi:
             lines.append(
-                f'if ($LASTEXITCODE -ne 0) {{ Write-Host "== benchmark {i}/{total} '
+                f'if ($LASTEXITCODE -ne 0) {{ $_benchRc = 1; Write-Host "== benchmark {i}/{total} '
                 f'FAILED (exit $LASTEXITCODE) ==" }}'
             )
+        lines.append("")
+    if multi:
+        lines.append("exit $_benchRc")
         lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
 

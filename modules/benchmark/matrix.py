@@ -341,6 +341,20 @@ def _extra_tokens(extra_args: str | list[str] | None) -> list[str]:
     return tokens
 
 
+# Within-vector device separator for llama-bench. Upstream llama-bench parses a
+# ``-ts`` argument by splitting on ',' into separate benchmark CASES and on ';'
+# or '/' into the devices WITHIN one vector (unlike llama-server, which uses ','
+# for devices). So a KIND_VEC value like "0.6,0.4" must have its internal commas
+# rewritten to this separator BEFORE we comma-join the swept cases, otherwise
+# llama-bench reads each device as its own 1-GPU benchmark case.
+_LLAMA_BENCH_VEC_DEVICE_SEP = "/"
+
+
+def _vec_for_llama_bench(value: str) -> str:
+    """Rewrite a KIND_VEC value's internal device commas for llama-bench."""
+    return value.replace(",", _LLAMA_BENCH_VEC_DEVICE_SEP)
+
+
 def _render_fa_values(values: list[str], backend: str) -> list[str]:
     """Map canonical ``on``/``off`` flash-attn values for a llama-bench backend.
 
@@ -382,6 +396,11 @@ def llama_bench_command(
     for axis in applicable:
         if axis.kind == KIND_FA:
             values = _render_fa_values(axis.values, backend)
+        elif axis.kind == KIND_VEC:
+            # A vector value's commas separate DEVICES, not sweep cases, so
+            # rewrite them to llama-bench's within-vector separator before the
+            # comma-join across swept vectors turns comma into the case delimiter.
+            values = [_vec_for_llama_bench(v) for v in axis.values]
         else:
             values = axis.values
         # Custom flags render as a native comma-list too; they only sweep on
@@ -414,8 +433,11 @@ def sweep_bench_commands(
 
     Returns ``(command, combo)`` pairs, where ``combo`` maps lever key to the
     value used — the UI tags each result row with it. Flash-attn is rendered
-    as a bare flag (``-fa`` present for ``on``, absent for ``off``) because
-    sweep-bench takes server-style boolean flags.
+    with an EXPLICIT value for both states (``-fa on`` / ``-fa off``), mirroring
+    the server launch path (``modules/launch.py``): sweep-bench uses ik_llama's
+    server-style flags, which require a value after ``--flash-attn`` (a bare flag
+    errors), and an explicit ``off`` is needed to override ik_llama's ``on``
+    default rather than silently benchmarking it.
     """
     if not exe:
         raise SweepError("no llama-sweep-bench executable")
@@ -440,12 +462,11 @@ def sweep_bench_commands(
         cmd: list[str] = [exe, "-m", model]
         for axis in applicable:
             value = combo[axis.key]
-            if axis.kind == KIND_FA:
-                if value == "on":
-                    cmd.append(axis.flag)
-                # "off" => omit the flag entirely (server-style default off)
-            else:
-                cmd += [axis.flag, value]
+            # Flash-attn renders like any other flag/value pair: ik_llama's
+            # server-style --flash-attn requires an explicit on/off token (a
+            # bare flag errors, and "off" must be explicit to override the
+            # binary's default), matching modules/launch.py.
+            cmd += [axis.flag, value]
         cmd += extra
         out.append((cmd, combo))
     return out

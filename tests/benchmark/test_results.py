@@ -58,6 +58,16 @@ def test_parse_llama_bench_json_tolerates_noise():
     assert len(rows) == 1
 
 
+def test_parse_llama_bench_json_bracketed_banner_before_array():
+    # A log line containing brackets (e.g. "[INFO] ...") before the JSON array
+    # must not defeat extraction: first-'[' .. last-']' would span the banner
+    # and fail to parse. The scanner tries each '[' and returns the first array.
+    stdout = '[INFO] loading model\n[{"test":"pp","avg_ts":1.0}]\n'
+    rows = results.parse_llama_bench_json(stdout)
+    assert len(rows) == 1
+    assert rows[0].get("test") == "pp"
+
+
 def test_parse_llama_bench_json_empty():
     assert results.parse_llama_bench_json("") == []
     assert results.parse_llama_bench_json("not json") == []

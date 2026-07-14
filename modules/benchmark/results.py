@@ -122,15 +122,21 @@ def _extract_json_array(text: str):
         return parsed if isinstance(parsed, list) else None
     except json.JSONDecodeError:
         pass
-    start = text.find("[")
-    end = text.rfind("]")
-    if start < 0 or end <= start:
-        return None
-    try:
-        parsed = json.loads(text[start : end + 1])
-        return parsed if isinstance(parsed, list) else None
-    except json.JSONDecodeError:
-        return None
+    # A backend may print a bracketed banner (e.g. "[INFO] loading model")
+    # before the results array, so a first-'[' .. last-']' span won't parse.
+    # Try to decode an array starting at each '[' and return the first that
+    # yields a list, ignoring '[' positions that don't begin valid JSON.
+    decoder = json.JSONDecoder()
+    idx = text.find("[")
+    while idx >= 0:
+        try:
+            parsed, _ = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return parsed
+        idx = text.find("[", idx + 1)
+    return None
 
 
 def _order_columns(cols: dict[str, str], preferred: tuple[str, ...]) -> dict[str, str]:

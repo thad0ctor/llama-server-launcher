@@ -191,6 +191,57 @@ def test_save_load_roundtrips_extra_args_and_custom_axes(bench_tab):
     assert bool(row["include"].get()) is True
 
 
+def test_gpu_env_overrides_carries_cuda_visible_devices(bench_tab):
+    # Finding 1: a plan built with a known GPU selection must carry the same
+    # CUDA_VISIBLE_DEVICES the server launch would export, so the benchmark
+    # child sees the user's logical GPU subset/order (not all physical GPUs).
+    bench_tab.launcher.launch_manager = SimpleNamespace(
+        _resolve_cuda_visible_devices_action=lambda: ("export", "2,0,1")
+    )
+    env = bench_tab._gpu_env_overrides()
+    assert env == {"CUDA_VISIBLE_DEVICES": "2,0,1"}
+
+
+def test_gpu_env_overrides_unset_leaves_var_unset(bench_tab):
+    # 'unset'/'skip' actions intentionally add no override (child sees all GPUs,
+    # matching server-launch behaviour in manual / all-deselected modes).
+    bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("unset", None))
+    assert bench_tab._gpu_env_overrides() == {}
+
+
+def test_gpu_env_overrides_defensive_without_launch_manager(bench_tab):
+    # A launcher without a usable launch_manager must not raise and yields no
+    # override. (The fixture's fake launcher has no launch_manager attribute.)
+    assert bench_tab._gpu_env_overrides() == {}
+
+
+def test_start_blocks_when_no_axis_applies_to_tool(bench_tab, monkeypatch, tmp_path):
+    # Finding 2: ticking a llama-bench-only lever then selecting sweep-bench must
+    # block with a clear message instead of building one unswept default command.
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    model = tmp_path / "m.gguf"
+    model.write_text("x")
+    bench_tab.model_var.set(str(model))
+    # -p (Prompt tokens) applies ONLY to llama-bench.
+    bench_tab.lever_vars["n_prompt"]["include"].set(True)
+    bench_tab.lever_vars["n_prompt"]["mode"].set("list")
+    bench_tab.lever_vars["n_prompt"]["values"].set("128")
+
+    monkeypatch.setattr(bench_tab, "_current_exe", lambda: str(tmp_path / "llama-sweep-bench"))
+    errors = []
+    monkeypatch.setattr(bench_tab_mod.messagebox, "showerror", lambda title, msg: errors.append(msg))
+    started = {"n": 0}
+    monkeypatch.setattr(bench_tab.runner, "start", lambda plan: started.__setitem__("n", started["n"] + 1) or True)
+
+    bench_tab.start()
+
+    assert started["n"] == 0
+    assert errors and "apply to" in errors[0]
+
+
 def test_stop_polling_on_teardown_cancels_running_worker(bench_tab, monkeypatch):
     calls = {"cancel": 0}
     monkeypatch.setattr(type(bench_tab.runner), "is_running", property(lambda self: True))
