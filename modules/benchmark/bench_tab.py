@@ -217,6 +217,9 @@ class BenchmarkTab:
         canvas.bind("<Configure>", _on_canvas_config)
 
         self._build_source_section(body)
+        # Saved sweep configs sit near the top (above the sweep parameters) so a
+        # saved config can be loaded before/while editing the sweep.
+        self._build_configs_section(body)
         self._build_sweep_section(body)
         self._build_mtp_section(body)
         self._build_custom_flags_section(body)
@@ -224,7 +227,6 @@ class BenchmarkTab:
         self._build_preview_section(body)
         self._build_run_section(body)
         self._build_results_section(body)
-        self._build_configs_section(body)
 
         self.rescan_builds()
         self._on_tool_changed()
