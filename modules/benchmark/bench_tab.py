@@ -501,8 +501,11 @@ class BenchmarkTab:
         box = ttk.Frame(sec)
         box.pack(fill="both", expand=True, padx=6, pady=3)
         # Taller grid with BOTH scrollbars: sweeps can have many rows and many
-        # wide columns, so vertical + horizontal scrolling is needed.
-        self._results_tree = ttk.Treeview(box, show="headings", height=16)
+        # wide columns, so vertical + horizontal scrolling is needed. A derived
+        # style lets us set a font-aware rowheight (the theme sets none, so a
+        # scaled UI font would otherwise clip rows vertically) without touching
+        # other Treeviews in the app.
+        self._results_tree = ttk.Treeview(box, show="headings", height=16, style="Benchmark.Treeview")
         yscroll = ttk.Scrollbar(box, orient="vertical", command=self._results_tree.yview)
         xscroll = ttk.Scrollbar(box, orient="horizontal", command=self._results_tree.xview)
         self._results_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
@@ -1562,30 +1565,72 @@ class BenchmarkTab:
             self._console.configure(state="disabled")
 
     # ------------------------------------------------------------------ results grid
+    def _result_grid_fonts(self):
+        """Candidate (heading_fonts, cell_fonts) for measuring the results grid.
+
+        The ttk theme sets no explicit Treeview font, so the actual font depends
+        on the theme AND the launcher's UI-font scaling. Rather than guess one
+        name, gather every plausible font (the style-configured one plus the
+        scaled named fonts) and measure against the WIDEST — over-sizing a
+        column slightly is fine (horizontal scroll), truncating text is not.
+        """
+        import tkinter.font as tkfont
+
+        style = ttk.Style()
+
+        def _collect(style_key, names):
+            fonts = []
+            spec = style.lookup(style_key, "font")
+            if spec:
+                # The style font is normally a NAMED font (e.g. "TkDefaultFont");
+                # resolve it via nametofont so we get the real live font (its
+                # metrics), not an independent Font() copy whose linespace can
+                # differ. Only fall back to Font() for a non-named spec.
+                try:
+                    fonts.append(tkfont.nametofont(spec))
+                except tk.TclError:
+                    try:
+                        fonts.append(tkfont.Font(font=spec))
+                    except tk.TclError:
+                        pass
+            for name in names:
+                try:
+                    fonts.append(tkfont.nametofont(name))
+                except tk.TclError:
+                    pass
+            return fonts
+
+        head = _collect("Treeview.Heading", ("TkHeadingFont", "TkDefaultFont"))
+        cell = _collect("Treeview", ("TkDefaultFont", "TkTextFont"))
+        return head, cell
+
     def _refresh_results_grid(self) -> None:
         tree = self._results_tree
         if tree is None:
             return
-        import tkinter.font as tkfont
+        head_fonts, cell_fonts = self._result_grid_fonts()
 
-        # Measure real pixel widths with the actual widget fonts (headings are
-        # bold, so a fixed px-per-char estimate under-sizes them and clips e.g.
-        # "n_gpu_layers" to "n_gpu_l"). The heading font is usually bold/larger.
+        def _wmax(fonts, text):
+            return max((f.measure(text) for f in fonts), default=len(text) * 10)
+
+        # Rowheight from the tallest cell font so a scaled UI font isn't clipped
+        # vertically. Applied to the derived style used only by this grid.
         try:
-            head_font = tkfont.nametofont("TkHeadingFont")
+            line = max((f.metrics("linespace") for f in cell_fonts), default=18)
+            ttk.Style().configure("Benchmark.Treeview", rowheight=line + 8)
         except tk.TclError:
-            head_font = tkfont.nametofont("TkDefaultFont")
-        cell_font = tkfont.nametofont("TkDefaultFont")
+            pass
+
         cols = results.collect_columns(self._result_rows)
         tree.configure(columns=cols)
         for c in cols:
             # Widest of the header and any cell value, measured in pixels; don't
             # stretch, so the horizontal scrollbar reaches anything wider than
-            # the viewport. +28px covers cell padding + the heading indicator.
-            w = head_font.measure(str(c))
+            # the viewport. +30px covers cell padding + the heading indicator.
+            w = _wmax(head_fonts, str(c))
             for row in self._result_rows:
-                w = max(w, cell_font.measure(row.get(c)))
-            width = max(64, min(500, w + 28))
+                w = max(w, _wmax(cell_fonts, row.get(c)))
+            width = max(64, min(500, w + 30))
             tree.heading(c, text=c)
             tree.column(c, width=width, minwidth=48, anchor="w", stretch=False)
         tree.delete(*tree.get_children())
