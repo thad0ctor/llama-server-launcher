@@ -447,6 +447,88 @@ def test_rtr_still_native_comma_sweep_on_llama_bench():
     assert cmd[idx + 1] == "0,1"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MTP / speculative-decoding levers (llama-sweep-bench + ik_llama only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_mtp_applies_only_to_sweep_bench_on_ik_backend():
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    mtp = LEVERS_BY_KEY["mtp"]
+    # MTP is supported ONLY by ik_llama's llama-sweep-bench.
+    assert mtp.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    # ik llama-bench REJECTS -mtp/--draft-*/-mtprot; llama.cpp lacks them.
+    assert not mtp.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert not mtp.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
+    assert not mtp.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    # -mtp is a BARE on/off flag on sweep-bench (the embedded-head shortcut).
+    assert mtp.sweep_bare is True
+
+
+def test_all_mtp_levers_scoped_to_sweep_bench_ik():
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    for key in ("mtp", "draft_max", "draft_min", "draft_p_min", "mtprot"):
+        lever = LEVERS_BY_KEY[key]
+        assert lever.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+        assert not lever.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+        assert not lever.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
+
+
+def test_mtp_sweep_on_off_toggles_bare_flag():
+    # Sweeping -mtp 0/1 yields two commands: one WITH the bare -mtp flag present
+    # (value "1") and one WITHOUT it (value "0"), so MTP's speedup is measurable.
+    axes = [Axis("mtp", ["0", "1"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    on_cmd = next(cmd for cmd, combo in pairs if combo["mtp"] == "1")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["mtp"] == "0")
+    assert "-mtp" in on_cmd
+    # Bare flag: no value token follows it.
+    assert on_cmd[on_cmd.index("-mtp") + 1 :] == []
+    assert "-mtp" not in off_cmd
+
+
+def test_mtp_draft_max_renders_flag_value_per_combo():
+    axes = [Axis("draft_max", ["4", "8"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    four = next(cmd for cmd, combo in pairs if combo["draft_max"] == "4")
+    eight = next(cmd for cmd, combo in pairs if combo["draft_max"] == "8")
+    assert four[four.index("--draft-max") + 1] == "4"
+    assert eight[eight.index("--draft-max") + 1] == "8"
+
+
+def test_mtp_full_combo_builds_expected_command():
+    # The verified-accepted combination:
+    #   -mtp --draft-max 4 --draft-min 1 --draft-p-min 0.5 -mtprot q8_0
+    axes = [
+        Axis("mtp", ["1"]),
+        Axis("draft_max", ["4"]),
+        Axis("draft_min", ["1"]),
+        Axis("draft_p_min", ["0.5"]),
+        Axis("mtprot", ["q8_0"]),
+    ]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd = pairs[0][0]
+    assert cmd == [
+        "/b/llama-sweep-bench",
+        "-m",
+        "/m.gguf",
+        "-mtp",
+        "--draft-max",
+        "4",
+        "--draft-min",
+        "1",
+        "--draft-p-min",
+        "0.5",
+        "-mtprot",
+        "q8_0",
+    ]
+
+
 def test_fmoe_still_not_applicable_to_sweep_bench():
     # -fmoe remains llama-bench-only; it must NOT leak onto sweep-bench.
     from modules.benchmark.matrix import LEVERS_BY_KEY

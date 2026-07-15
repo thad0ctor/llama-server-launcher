@@ -39,6 +39,7 @@ from .matrix import (
     KIND_INT,
     KIND_STR,
     LEVERS,
+    LEVERS_BY_KEY,
     Axis,
     SweepError,
     build_commands,
@@ -52,6 +53,12 @@ CONSOLE_MAX_LINES = 5000
 RUNNER_POLL_MS = 60
 RUNNER_CATCHUP_POLL_MS = 5
 RUNNER_MAX_EVENTS_PER_POLL = 200
+
+# MTP / speculative-decoding levers get their own labelled subsection below the
+# main sweep grid (they apply only to ik_llama's llama-sweep-bench). Their rows
+# are created into ``_lever_rows`` like any other lever, so the shared
+# applicability-driven visibility pass hides them off sweep-bench automatically.
+MTP_LEVER_KEYS = ("mtp", "draft_max", "draft_min", "draft_p_min", "mtprot")
 
 _TOOL_LABELS = {
     TOOL_LLAMA_BENCH: "llama-bench",
@@ -183,6 +190,7 @@ class BenchmarkTab:
 
         self._build_source_section(body)
         self._build_sweep_section(body)
+        self._build_mtp_section(body)
         self._build_custom_flags_section(body)
         self._build_options_section(body)
         self._build_preview_section(body)
@@ -269,32 +277,64 @@ class BenchmarkTab:
         for c, text in enumerate(headers):
             ttk.Label(grid, text=text, foreground="#444").grid(row=0, column=c, sticky="w", padx=3)
 
-        for r, lever in enumerate(LEVERS, start=1):
-            v = self.lever_vars[lever.key]
-            widgets: dict = {}
-            chk = ttk.Checkbutton(grid, variable=v["include"], command=self.refresh_preview)
-            chk.grid(row=r, column=0, sticky="w", padx=3)
-            lbl = ttk.Label(grid, text=lever.label)
-            lbl.grid(row=r, column=1, sticky="w", padx=3)
-            mode = ttk.Combobox(grid, textvariable=v["mode"], state="readonly", values=["list", "range"], width=6)
-            mode.grid(row=r, column=2, sticky="w", padx=3)
-            mode.bind("<<ComboboxSelected>>", lambda e, k=lever.key: self._on_mode_changed(k))
-            vals = ttk.Entry(grid, textvariable=v["values"], width=22)
-            vals.grid(row=r, column=3, sticky="we", padx=3)
-            vals.bind("<FocusOut>", lambda e: self.refresh_preview())
-            emin = ttk.Entry(grid, textvariable=v["vmin"], width=6)
-            emin.grid(row=r, column=4, padx=2)
-            emax = ttk.Entry(grid, textvariable=v["vmax"], width=6)
-            emax.grid(row=r, column=5, padx=2)
-            estep = ttk.Entry(grid, textvariable=v["vstep"], width=6)
-            estep.grid(row=r, column=6, padx=2)
-            for e in (emin, emax, estep):
-                e.bind("<FocusOut>", lambda ev: self.refresh_preview())
-            widgets.update(
-                row=r, chk=chk, lbl=lbl, mode=mode, vals=vals, emin=emin, emax=emax, estep=estep, lever=lever
-            )
-            self._lever_rows[lever.key] = widgets
+        # The MTP / speculative levers live in their own subsection (built next),
+        # so skip them here even though they share the LEVERS catalogue.
+        r = 1
+        for lever in LEVERS:
+            if lever.key in MTP_LEVER_KEYS:
+                continue
+            self._build_lever_row(grid, r, lever)
+            r += 1
         grid.columnconfigure(3, weight=1)
+
+    def _build_mtp_section(self, parent) -> None:
+        sec = self._section(parent, "MTP / speculative (llama-sweep-bench only)")
+        ttk.Label(
+            sec,
+            text="MTP uses the model's embedded head (no draft model). " "Sweep MTP enable = 0,1 to measure speedup.",
+            foreground="#666",
+            wraplength=680,
+            justify="left",
+        ).pack(fill="x", padx=6, pady=(2, 4))
+
+        grid = ttk.Frame(sec)
+        grid.pack(fill="x", padx=6, pady=2)
+        headers = ["", "Parameter", "Mode", "List values", "Min", "Max", "Step"]
+        for c, text in enumerate(headers):
+            ttk.Label(grid, text=text, foreground="#444").grid(row=0, column=c, sticky="w", padx=3)
+        for r, key in enumerate(MTP_LEVER_KEYS, start=1):
+            self._build_lever_row(grid, r, LEVERS_BY_KEY[key])
+        grid.columnconfigure(3, weight=1)
+
+    def _build_lever_row(self, grid, r: int, lever) -> None:
+        """Create one lever row's widgets into ``grid`` at row ``r``.
+
+        Shared by the main sweep grid and the MTP subsection so both render
+        identical rows and register into ``self._lever_rows`` keyed by lever key
+        (which is all the applicability-driven visibility pass needs).
+        """
+        v = self.lever_vars[lever.key]
+        widgets: dict = {}
+        chk = ttk.Checkbutton(grid, variable=v["include"], command=self.refresh_preview)
+        chk.grid(row=r, column=0, sticky="w", padx=3)
+        lbl = ttk.Label(grid, text=lever.label)
+        lbl.grid(row=r, column=1, sticky="w", padx=3)
+        mode = ttk.Combobox(grid, textvariable=v["mode"], state="readonly", values=["list", "range"], width=6)
+        mode.grid(row=r, column=2, sticky="w", padx=3)
+        mode.bind("<<ComboboxSelected>>", lambda e, k=lever.key: self._on_mode_changed(k))
+        vals = ttk.Entry(grid, textvariable=v["values"], width=22)
+        vals.grid(row=r, column=3, sticky="we", padx=3)
+        vals.bind("<FocusOut>", lambda e: self.refresh_preview())
+        emin = ttk.Entry(grid, textvariable=v["vmin"], width=6)
+        emin.grid(row=r, column=4, padx=2)
+        emax = ttk.Entry(grid, textvariable=v["vmax"], width=6)
+        emax.grid(row=r, column=5, padx=2)
+        estep = ttk.Entry(grid, textvariable=v["vstep"], width=6)
+        estep.grid(row=r, column=6, padx=2)
+        for e in (emin, emax, estep):
+            e.bind("<FocusOut>", lambda ev: self.refresh_preview())
+        widgets.update(row=r, chk=chk, lbl=lbl, mode=mode, vals=vals, emin=emin, emax=emax, estep=estep, lever=lever)
+        self._lever_rows[lever.key] = widgets
 
     def _build_custom_flags_section(self, parent) -> None:
         sec = self._section(parent, "Custom sweep flags")
@@ -576,26 +616,26 @@ class BenchmarkTab:
         tool = self.tool_var.get()
         backend = self._current_backend()
         build = self._selected_build()
-        # Show/hide lever rows by applicability to the current tool AND backend.
+        # Row visibility is purely applicability-driven: a lever row is shown iff
+        # it applies to the CURRENT tool AND backend. This single rule hides the
+        # ik_llama-only levers on a llama.cpp backend, hides llama-bench-only ik
+        # levers (e.g. -fmoe) when the tool is llama-sweep-bench, and hides the
+        # MTP levers on llama-bench — all from the levers' own tools/backends.
         for key, widgets in self._lever_rows.items():
             lever = widgets["lever"]
-            # ik_llama-only levers are grid_removed entirely on a llama.cpp
-            # backend (they are noise there); other levers are only enabled or
-            # greyed out by per-tool applicability, exactly as before.
-            if self._is_ik_lever(lever) and backend != "ik_llama":
-                self._set_lever_row_visible(widgets, False)
-                continue
-            self._set_lever_row_visible(widgets, True)
             applies = lever.applies_to(tool, backend)
-            state = "normal" if applies else "disabled"
+            self._set_lever_row_visible(widgets, applies)
+            if not applies:
+                continue
+            # A visible (applicable) row is fully enabled; the mode toggle then
+            # governs which of the list vs min/max/step entries stay active.
             for w in ("chk", "mode", "vals", "emin", "emax", "estep"):
                 try:
-                    widgets[w].configure(state=state)
+                    widgets[w].configure(state="normal")
                 except Exception:
                     pass
-            fg = "#000" if applies else "#999"
             try:
-                widgets["lbl"].configure(foreground=fg)
+                widgets["lbl"].configure(foreground="#000")
             except Exception:
                 pass
             self._apply_mode_state(key)

@@ -94,6 +94,31 @@ def test_extra_args_rows_and_custom_axes_roundtrip(tmp_path):
     assert loaded.custom_axes[0]["mode"] == "list"
 
 
+def test_mtp_axes_roundtrip(tmp_path):
+    # MTP levers persist through the existing per-lever ``axes`` mechanism — no
+    # dedicated BenchConfig field is needed.
+    store = BenchConfigStore(tmp_path)
+    cfg = BenchConfig(
+        name="mtp",
+        tool="llama-sweep-bench",
+        backend="ik_llama",
+        build_root="/opt/ik_llama",
+        model_path="/m/model.gguf",
+        axes={
+            "mtp": {"enabled": True, "mode": "list", "raw": "0,1", "min": 0, "max": 0, "step": 1},
+            "draft_max": {"enabled": True, "mode": "list", "raw": "4", "min": 0, "max": 0, "step": 1},
+        },
+    )
+    assert store.save(cfg)
+    loaded = store.get("mtp")
+    assert loaded is not None
+    assert loaded.tool == "llama-sweep-bench"
+    assert loaded.backend == "ik_llama"
+    assert loaded.axes["mtp"]["raw"] == "0,1"
+    assert loaded.axes["mtp"]["enabled"] is True
+    assert loaded.axes["draft_max"]["raw"] == "4"
+
+
 def test_legacy_scalar_extra_args_migrates_to_single_row(tmp_path):
     path = tmp_path / "bench_configs.json"
     path.write_text(

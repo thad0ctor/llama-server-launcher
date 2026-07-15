@@ -437,6 +437,83 @@ def test_save_script_exports_gpu_env_line(bench_tab, monkeypatch, tmp_path):
     assert "2,0,1" in content
 
 
+def test_mtp_rows_visible_only_on_sweep_bench(bench_tab):
+    # The MTP levers apply only to ik_llama's llama-sweep-bench: their rows are
+    # shown there and hidden (grid_removed) on llama-bench, where the
+    # llama-bench-only ik levers (e.g. -fmoe) are the ones visible instead.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab._on_tool_changed()
+    for key in ("mtp", "draft_max", "draft_min", "draft_p_min", "mtprot"):
+        assert bench_tab._lever_rows[key]["chk"].grid_info() != {}, key
+    # -fmoe is llama-bench-only, so it is hidden on sweep-bench.
+    assert bench_tab._lever_rows["fmoe"]["chk"].grid_info() == {}
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab._on_tool_changed()
+    for key in ("mtp", "draft_max", "draft_min", "draft_p_min", "mtprot"):
+        assert bench_tab._lever_rows[key]["chk"].grid_info() == {}, key
+    # -fmoe now applies (ik_llama + llama-bench) and is visible.
+    assert bench_tab._lever_rows["fmoe"]["chk"].grid_info() != {}
+
+
+def test_mtp_command_renders_bare_flag_and_draft_max(bench_tab):
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    bench_tab.lever_vars["mtp"]["include"].set(True)
+    bench_tab.lever_vars["mtp"]["mode"].set("list")
+    bench_tab.lever_vars["mtp"]["values"].set("1")
+    bench_tab.lever_vars["draft_max"]["include"].set(True)
+    bench_tab.lever_vars["draft_max"]["mode"].set("list")
+    bench_tab.lever_vars["draft_max"]["values"].set("4")
+
+    commands, _ = bench_tab._build_command_list()
+    assert len(commands) == 1
+    cmd = commands[0]
+    # Bare -mtp present, and --draft-max 4 rendered as a flag/value pair.
+    assert "-mtp" in cmd
+    assert cmd[cmd.index("--draft-max") + 1] == "4"
+
+
+def test_mtp_sweep_roundtrips_through_save_load(bench_tab):
+    # MTP levers persist via the axes mechanism by their lever key (no new field).
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    bench_tab.model_var.set("/m.gguf")
+    bench_tab.lever_vars["mtp"]["include"].set(True)
+    bench_tab.lever_vars["mtp"]["mode"].set("list")
+    bench_tab.lever_vars["mtp"]["values"].set("0,1")
+    bench_tab.lever_vars["draft_max"]["include"].set(True)
+    bench_tab.lever_vars["draft_max"]["mode"].set("list")
+    bench_tab.lever_vars["draft_max"]["values"].set("4")
+
+    bench_tab.config_name_var.set("mtpcfg")
+    bench_tab._save_config()
+
+    # Wipe live state, then load it back.
+    bench_tab.lever_vars["mtp"]["include"].set(False)
+    bench_tab.lever_vars["mtp"]["values"].set("")
+    bench_tab.lever_vars["draft_max"]["include"].set(False)
+    bench_tab.lever_vars["draft_max"]["values"].set("")
+    bench_tab._load_config()
+
+    assert bool(bench_tab.lever_vars["mtp"]["include"].get()) is True
+    assert bench_tab.lever_vars["mtp"]["values"].get() == "0,1"
+    assert bool(bench_tab.lever_vars["draft_max"]["include"].get()) is True
+    assert bench_tab.lever_vars["draft_max"]["values"].get() == "4"
+
+
 def test_repetitions_field_disabled_for_sweep_bench(bench_tab):
     # Finding F: llama-sweep-bench has no -r flag; the Repetitions entry must be
     # greyed for it and re-enabled for llama-bench.

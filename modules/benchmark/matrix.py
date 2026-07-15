@@ -243,6 +243,62 @@ LEVERS: tuple[Lever, ...] = (
         backends=_IK_BACKEND,
         help='A tensor-override pattern is ONE value; sweep several with ";".',
     ),
+    # ── MTP / speculative-decoding levers (llama-sweep-bench + ik_llama only) ─
+    # ik_llama's llama-sweep-bench supports embedded-head multi-token prediction:
+    # the bare ``-mtp`` legacy shortcut (the embedded head — NO draft model) plus
+    # the ``--draft-*`` controls and the ``-mtprot`` requant-output knob. ik
+    # llama-bench REJECTS all of these ("invalid parameter for argument"), so they
+    # are scoped to sweep-bench only. ``-mtp`` is itself a BARE on/off flag on
+    # sweep-bench (present when enabled, absent otherwise), so it renders via the
+    # same ``sweep_bare`` path as -rtr/-mqkv and can sweep 0/1 to measure MTP's
+    # speedup. ``-mtp`` cannot be combined with ``--spec-stage``, so only the
+    # shortcut + ``--draft-*`` controls are exposed (no --spec-stage lever).
+    Lever(
+        "mtp",
+        "MTP enable (-mtp)",
+        "-mtp",
+        KIND_INT,
+        _SWEEP_ONLY,
+        backends=_IK_BACKEND,
+        sweep_bare=True,
+        help="ik_llama embedded-head multi-token prediction (0/1); no draft model.",
+    ),
+    Lever(
+        "draft_max",
+        "MTP draft max (--draft-max)",
+        "--draft-max",
+        KIND_INT,
+        _SWEEP_ONLY,
+        backends=_IK_BACKEND,
+        help="Max speculative draft tokens per step.",
+    ),
+    Lever(
+        "draft_min",
+        "MTP draft min (--draft-min)",
+        "--draft-min",
+        KIND_INT,
+        _SWEEP_ONLY,
+        backends=_IK_BACKEND,
+        help="Min speculative draft tokens per step.",
+    ),
+    Lever(
+        "draft_p_min",
+        "MTP draft p-min (--draft-p-min)",
+        "--draft-p-min",
+        KIND_STR,
+        _SWEEP_ONLY,
+        backends=_IK_BACKEND,
+        help="Min draft acceptance probability, a float like 0.5.",
+    ),
+    Lever(
+        "mtprot",
+        "MTP requant output (-mtprot)",
+        "-mtprot",
+        KIND_STR,
+        _SWEEP_ONLY,
+        backends=_IK_BACKEND,
+        help="MTP requantize-output-tensor type, e.g. q8_0.",
+    ),
 )
 
 LEVERS_BY_KEY: dict[str, Lever] = {lever.key: lever for lever in LEVERS}
