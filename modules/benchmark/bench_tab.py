@@ -155,6 +155,8 @@ class BenchmarkTab:
         self._cancel_btn: ttk.Button | None = None
         self._build_combo: ttk.Combobox | None = None
         self._tool_combo: ttk.Combobox | None = None
+        self._tool_row = None  # the "Tool:" row frame; hidden for llama.cpp
+        self._tool_row_anchor = None  # frame to re-pack the tool row before
         self._config_combo: ttk.Combobox | None = None
         self._repetitions_entry: ttk.Entry | None = None
         self._repetitions_note: ttk.Label | None = None
@@ -256,8 +258,12 @@ class BenchmarkTab:
         self._build_combo.bind("<<ComboboxSelected>>", lambda e: self._on_build_changed())
         ttk.Button(row, text="Rescan", command=self.rescan_builds).pack(side="left", padx=4)
 
+        # Tool row. Only ik_llama ships two bench tools (llama-bench +
+        # llama-sweep-bench); llama.cpp has just llama-bench, so this row is
+        # hidden there (see _apply_tool_row_visibility) — nothing to choose.
         row2 = ttk.Frame(sec)
         row2.pack(fill="x", padx=6, pady=3)
+        self._tool_row = row2
         ttk.Label(row2, text="Tool:", width=12).pack(side="left")
         self._tool_combo = ttk.Combobox(
             row2,
@@ -270,6 +276,8 @@ class BenchmarkTab:
 
         row3 = ttk.Frame(sec)
         row3.pack(fill="x", padx=6, pady=3)
+        # Anchor for re-showing the tool row in its original position.
+        self._tool_row_anchor = row3
         ttk.Label(row3, text="Model:", width=12).pack(side="left")
         ttk.Entry(row3, textvariable=self.model_var).pack(side="left", fill="x", expand=True)
         ttk.Button(row3, text="Browse…", command=self._browse_model).pack(side="left", padx=4)
@@ -417,6 +425,12 @@ class BenchmarkTab:
         ttk.Label(sec, text="Extra args (appended to every run):", foreground="#444").pack(
             anchor="w", padx=6, pady=(3, 0)
         )
+        ttk.Label(
+            sec,
+            text="e.g.  --numa distribute   --no-mmap   -ot exps=CPU   "
+            '(space-separated flags; quote paths with spaces: --lora "/path/a b.gguf")',
+            foreground="#888",
+        ).pack(anchor="w", padx=6, pady=(0, 2))
         self._extra_args_container = ttk.Frame(sec)
         self._extra_args_container.pack(fill="x", padx=6, pady=1)
         ttk.Button(sec, text="Add extra-args row", command=self._add_extra_args_row).pack(
@@ -551,8 +565,16 @@ class BenchmarkTab:
                         pass
                 finally:
                     self._syncing_backend = False
-        # Constrain the tool list to what this build actually ships.
-        available = build.available_tools() if build else list(ALL_TOOLS)
+        # Constrain the tool list to what this build ships AND to what the
+        # backend can offer at all: llama.cpp has no llama-sweep-bench, so even
+        # with no concrete build selected it must resolve to llama-bench only
+        # (its tool row is hidden, so the value can't be corrected by hand).
+        if build is not None:
+            available = build.available_tools()
+        elif self._current_backend() == "ik_llama":
+            available = list(ALL_TOOLS)
+        else:
+            available = [TOOL_LLAMA_BENCH]
         if self._tool_combo is not None:
             self._tool_combo.configure(
                 values=[_TOOL_LABELS[t] for t in available] or [_TOOL_LABELS[t] for t in ALL_TOOLS]
@@ -657,10 +679,44 @@ class BenchmarkTab:
             self.build_var.set("")
         self._on_build_changed()
 
+    @staticmethod
+    def _is_packed(widget) -> bool:
+        """Whether ``widget`` is currently in its parent's pack layout.
+
+        Uses pack state (not ``winfo_ismapped``, which is False whenever the tab
+        isn't the active notebook page) so visibility toggling is correct even
+        when the benchmark tab isn't on screen.
+        """
+        try:
+            return bool(widget.pack_info())
+        except tk.TclError:
+            return False
+
+    def _apply_tool_row_visibility(self) -> None:
+        """Show the Tool dropdown only for ik_llama (its two bench tools);
+        hide it for llama.cpp, whose sole tool (llama-bench) is auto-selected."""
+        row = self._tool_row
+        if row is None:
+            return
+        show = self._current_backend() == "ik_llama"
+        packed = self._is_packed(row)
+        try:
+            if show and not packed:
+                anchor = self._tool_row_anchor
+                if anchor is not None and self._is_packed(anchor):
+                    row.pack(fill="x", padx=6, pady=3, before=anchor)
+                else:
+                    row.pack(fill="x", padx=6, pady=3)
+            elif not show and packed:
+                row.pack_forget()
+        except tk.TclError:
+            pass
+
     def _on_tool_changed(self) -> None:
         tool = self.tool_var.get()
         backend = self._current_backend()
         build = self._selected_build()
+        self._apply_tool_row_visibility()
         # Row visibility is purely applicability-driven: a lever row is shown iff
         # it applies to the CURRENT tool AND backend. This single rule hides the
         # ik_llama-only levers on a llama.cpp backend, hides llama-bench-only ik

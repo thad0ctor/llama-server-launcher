@@ -583,6 +583,26 @@ def test_backend_switch_with_no_matching_build_keeps_choice(bench_tab, monkeypat
     assert bench_tab.launcher.backend_selection.get() == "ik_llama"
 
 
+def test_tool_row_hidden_for_llama_cpp_shown_for_ik(bench_tab):
+    # Only ik_llama has two bench tools; the Tool dropdown is hidden for
+    # llama.cpp (which resolves to llama-bench automatically) and shown for ik.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab.backend_var.set("llama.cpp")
+    bench_tab._on_backend_radio_changed()
+    assert bench_tab.tool_var.get() == TOOL_LLAMA_BENCH
+    assert bench_tab._is_packed(bench_tab._tool_row) is False
+
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+    assert bench_tab._is_packed(bench_tab._tool_row) is True
+
+    bench_tab.backend_var.set("llama.cpp")
+    bench_tab._on_backend_radio_changed()
+    assert bench_tab._is_packed(bench_tab._tool_row) is False
+    assert bench_tab.tool_var.get() == TOOL_LLAMA_BENCH
+
+
 def test_model_follows_main_tab_selection(bench_tab):
     # The benchmark model field defaults to and follows the Main tab's model_path.
     bench_tab.launcher.model_path.set("/models/first.gguf")
