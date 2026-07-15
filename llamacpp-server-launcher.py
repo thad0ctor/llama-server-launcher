@@ -104,6 +104,9 @@ from modules.spec_tab import SpecTab
 # Import the Build tab (clone + cmake configure + build for llama.cpp / ik_llama)
 from modules.build import BuildTab
 
+# Import the Benchmark tab (llama-bench / llama-sweep-bench parameter sweeps)
+from modules.benchmark import BenchmarkTab
+
 # Import the launch functionality module
 from modules.launch import LaunchManager
 
@@ -1107,7 +1110,7 @@ class LlamaCppLauncher:
         # Store notebook reference for tab visibility management
         self.notebook = nb
 
-        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); hf_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
+        main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); bench_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); hf_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main")
         nb.add(adv_frame,  text="Advanced")
         nb.add(chat_frame, text="Chat") # Add the new tab
@@ -1124,6 +1127,9 @@ class LlamaCppLauncher:
         # Positioned 2nd-to-last; About is always last.
         nb.add(build_frame, text="Build (beta)")
         self.build_frame = build_frame
+        # Benchmark tab (llama-bench / llama-sweep-bench sweeps); before About.
+        nb.add(bench_frame, text="Benchmark")
+        self.benchmark_frame = bench_frame
         nb.add(about_frame, text="About") # Add the about tab
 
 
@@ -1134,6 +1140,7 @@ class LlamaCppLauncher:
         self._setup_mtp_spec_tab(mtp_spec_frame) # Setup the MTP / Spec tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_build_tab(build_frame) # Setup the Build tab
+        self._setup_benchmark_tab(bench_frame) # Setup the Benchmark tab
         self._setup_config_tab(cfg_frame)
         self._setup_settings_tab(settings_frame) # UI settings tab
         self._setup_hf_downloader_tab(hf_frame)
@@ -2843,6 +2850,19 @@ class LlamaCppLauncher:
         self.build_tab = BuildTab(self)
         self.build_tab.register_with_notebook(self.notebook, "Build (beta)")
         self._register_lazy_tab(parent, self.build_tab.setup_tab, "Build tab")
+        self._ensure_lazy_tab_binding()
+
+    def _setup_benchmark_tab(self, parent):
+        """Set up the Benchmark tab (llama-bench / llama-sweep-bench sweeps).
+
+        Like the Build tab, the instance is created eagerly (cheap Tk vars +
+        a persistence/runner handle) but the heavy widget tree — the lever
+        sweep grid, command preview, console, and results grid — is deferred
+        until the user first selects the tab.
+        """
+        self.benchmark_tab = BenchmarkTab(self)
+        self.benchmark_tab.register_with_notebook(self.notebook, "Benchmark")
+        self._register_lazy_tab(parent, self.benchmark_tab.setup_tab, "Benchmark tab")
         self._ensure_lazy_tab_binding()
 
     def _setup_about_tab(self, parent):
@@ -5068,6 +5088,35 @@ class LlamaCppLauncher:
         # need the flag, but a worker that wakes up during the save+destroy
         # window would otherwise race into a half-torn-down interpreter.
         self._mark_tk_dead()
+        # Cancel a running benchmark so its detached process group (spawned with
+        # start_new_session=True) doesn't outlive the app and keep pegging the
+        # GPU/CPU after the window closes.
+        try:
+            bench_tab = getattr(self, "benchmark_tab", None)
+            runner = getattr(bench_tab, "runner", None) if bench_tab is not None else None
+            if runner is not None and getattr(runner, "is_running", False):
+                runner.cancel()
+                # cancel() only *signals* SIGTERM (non-blocking); its
+                # SIGTERM->SIGKILL escalation runs on the runner's daemon worker
+                # thread. The os._exit(0) below can fire before that completes,
+                # leaving the benchmark's detached process group alive. Wait a
+                # bounded time for the worker to finish; if it's still alive,
+                # kill the child process group directly so nothing outlives us.
+                thread = getattr(runner, "_thread", None)
+                if thread is not None:
+                    try:
+                        thread.join(timeout=5.0)
+                    except Exception:
+                        pass
+                if getattr(runner, "is_running", False):
+                    proc = getattr(runner, "_proc", None)
+                    if proc is not None:
+                        try:
+                            type(runner)._signal_kill(proc)
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"on_exit: benchmark cancel failed: {e}", file=sys.stderr)
         try:
             self._save_configs()
         except Exception as e:

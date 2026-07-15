@@ -1,0 +1,630 @@
+"""Tests for the sweep-matrix engine (value expansion + command building)."""
+
+from __future__ import annotations
+
+import pytest
+
+from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
+from modules.benchmark.matrix import (
+    KIND_VEC,
+    MAX_SWEEP_COMBOS,
+    Axis,
+    SweepError,
+    build_commands,
+    expand_range,
+    llama_bench_command,
+    matrix_size,
+    parse_list,
+    split_axes_for_tool,
+    sweep_bench_commands,
+)
+
+
+def test_tensor_split_is_one_value_not_comma_split():
+    # A split vector like "0.6,0.4" is a single --tensor-split argument; commas
+    # are internal, so it must NOT expand into separate sweep points.
+    assert parse_list("0.6,0.4", KIND_VEC) == ["0.6,0.4"]
+    assert parse_list("1,1", KIND_VEC) == ["1,1"]  # not deduped to "1"
+    # Multiple splits sweep on ';'.
+    assert parse_list("0.6,0.4;0.7,0.3", KIND_VEC) == ["0.6,0.4", "0.7,0.3"]
+
+
+def test_tensor_split_sweep_bench_command_keeps_vector():
+    axes = [Axis("tensor_split", ["0.6,0.4"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    assert len(pairs) == 1
+    # sweep-bench uses server-style params: devices stay comma-separated (raw
+    # vector), unchanged.
+    assert pairs[0][0] == ["/b/llama-sweep-bench", "-m", "/m.gguf", "-ts", "0.6,0.4"]
+
+
+def test_tensor_split_llama_bench_uses_device_separator():
+    # llama-bench splits -ts on ',' into separate benchmark CASES and on '/'
+    # (or ';') into devices WITHIN a vector, so a single 2-GPU split must render
+    # as ONE device-separated token, not two 1-GPU cases.
+    axes = [Axis("tensor_split", ["0.6,0.4"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4"
+
+
+def test_tensor_split_llama_bench_multiple_vectors():
+    # Two swept splits: devices joined by '/' within each vector, vectors joined
+    # by ',' as separate benchmark cases.
+    axes = [Axis("tensor_split", ["0.6,0.4", "0.7,0.3"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4,0.7/0.3"
+
+
+def test_sweep_bench_matrix_cap_rejects_explosion():
+    # Two big axes whose product exceeds the cap must raise before materialising.
+    big = [str(i) for i in range(200)]
+    axes = [Axis("n_gpu_layers", big), Axis("threads", big)]  # 200*200 = 40000
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) > MAX_SWEEP_COMBOS
+    with pytest.raises(SweepError):
+        sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+
+
+def test_malformed_extra_args_raises_sweep_error():
+    # Unmatched quote -> shlex ValueError -> surfaced as SweepError, not a raw
+    # exception escaping the Tk callback.
+    with pytest.raises(SweepError):
+        llama_bench_command("/b/llama-bench", "/m.gguf", [Axis("threads", ["8"])], extra_args='--numa "distribute')
+
+
+def test_extra_args_simple_roundtrip():
+    # A simple extra-args row round-trips into command tokens on this platform.
+    axes = [Axis("threads", ["8"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args="--numa distribute")
+    assert cmd[-2:] == ["--numa", "distribute"]
+
+
+def test_extra_args_preserves_backslashes_on_windows(monkeypatch):
+    # Exercise the production _extra_tokens path through llama_bench_command
+    # under BOTH os.name values, so the real `posix=(os.name != "nt")`
+    # conditional is covered (an inverted condition would be caught) rather
+    # than just asserting stdlib shlex semantics.
+    from modules.benchmark import matrix as _matrix
+
+    axes = [Axis("threads", ["8"])]
+    win = r"--lora C:\models\a.gguf"
+
+    monkeypatch.setattr(_matrix.os, "name", "nt")
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args=win)
+    assert cmd[-2:] == ["--lora", r"C:\models\a.gguf"]
+
+    monkeypatch.setattr(_matrix.os, "name", "posix")
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args=win)
+    assert cmd[-2:] == ["--lora", "C:modelsa.gguf"]
+
+
+def test_extra_args_strips_windows_grouping_quotes(monkeypatch):
+    # On Windows a spaced path is quoted: `--lora "C:\a b.gguf"`. posix=False
+    # keeps backslashes but RETAINS the grouping quotes; they must be stripped so
+    # the tool doesn't receive a literal-quoted filename.
+    from modules.benchmark import matrix as _matrix
+
+    monkeypatch.setattr(_matrix.os, "name", "nt")
+    axes = [Axis("threads", ["8"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args=r'--lora "C:\models\a b.gguf"')
+    assert cmd[-2:] == ["--lora", r"C:\models\a b.gguf"]
+
+
+def test_parse_list_int_normalises_and_dedupes():
+    assert parse_list("0, 08, 20, 20", "int") == ["0", "8", "20"]
+
+
+def test_parse_list_str_preserves():
+    assert parse_list("f16, q8_0", "str") == ["f16", "q8_0"]
+
+
+def test_parse_list_fa_normalises():
+    assert parse_list("on, 0, true, off", "fa") == ["on", "off"]
+
+
+def test_parse_list_bad_int_raises():
+    with pytest.raises(SweepError):
+        parse_list("abc", "int")
+
+
+def test_parse_list_int_rejects_float():
+    # A non-integer token must not be coerced to float (FIX 2).
+    with pytest.raises(SweepError):
+        parse_list("0.5,2", "int")
+
+
+def test_parse_list_int_allows_negative():
+    assert parse_list("-1, 0, 8", "int") == ["-1", "0", "8"]
+
+
+def test_expand_range_inclusive():
+    assert expand_range(0, 33, 11, "int") == ["0", "11", "22", "33"]
+
+
+def test_expand_range_zero_step_raises():
+    with pytest.raises(SweepError):
+        expand_range(0, 10, 0, "int")
+
+
+def test_expand_range_runaway_guard():
+    with pytest.raises(SweepError):
+        expand_range(0, 100000, 1, "int")
+
+
+def test_expand_range_contradictory_step_raises():
+    # Step sign disagrees with min→max direction (FIX 3).
+    with pytest.raises(SweepError):
+        expand_range(0, 10, -2, "int")
+
+
+def test_expand_range_positive_step_still_works():
+    assert expand_range(0, 10, 2, "int") == ["0", "2", "4", "6", "8", "10"]
+
+
+def test_llama_bench_single_command_with_lists():
+    axes = [Axis("n_gpu_layers", ["0", "11", "22"]), Axis("threads", ["8", "16"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    assert cmd == [
+        "/b/llama-bench",
+        "-m",
+        "/m.gguf",
+        "-ngl",
+        "0,11,22",
+        "-t",
+        "8,16",
+        "-o",
+        "json",
+    ]
+
+
+def test_llama_bench_repetitions_and_extra():
+    axes = [Axis("threads", ["8"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, repetitions=3, extra_args="--numa distribute")
+    assert "-r" in cmd and "3" in cmd
+    assert cmd[-2:] == ["--numa", "distribute"]
+
+
+def test_n_gen_applies_to_both_tools():
+    # -n (generation tokens) is a TG option on BOTH llama-bench (--n-gen) and
+    # llama-sweep-bench (-n), taking a value on each.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    n_gen = LEVERS_BY_KEY["n_gen"]
+    assert n_gen.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    assert n_gen.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    # Renders per-combo on sweep-bench as a flag/value pair.
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", [Axis("n_gen", ["64", "128"])])
+    assert len(pairs) == 2
+    for cmd, combo in pairs:
+        assert cmd[cmd.index("-n") + 1] == combo["n_gen"]
+
+
+def test_llama_bench_ignores_sweep_only_lever():
+    # ctx_size (-c) is sweep-bench-only; llama-bench must skip it.
+    axes = [Axis("ctx_size", ["4096"]), Axis("threads", ["8"])]
+    applicable, ignored = split_axes_for_tool(axes, TOOL_LLAMA_BENCH)
+    assert [a.key for a in applicable] == ["threads"]
+    assert [a.key for a in ignored] == ["ctx_size"]
+
+
+def test_sweep_bench_cartesian_product():
+    axes = [Axis("n_gpu_layers", ["0", "10"]), Axis("threads", ["8", "16"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    assert len(pairs) == 4
+    combos = [combo for _, combo in pairs]
+    assert {"n_gpu_layers": "0", "threads": "8"} in combos
+    assert {"n_gpu_layers": "10", "threads": "16"} in combos
+
+
+def test_sweep_bench_flash_attn_explicit_value():
+    # sweep-bench uses ik_llama's server-style --flash-attn, which requires an
+    # explicit on/off token (a bare flag errors, and "off" must be explicit to
+    # override the binary default), mirroring modules/launch.py.
+    axes = [Axis("flash_attn", ["on", "off"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    assert len(pairs) == 2
+    on_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "on")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "off")
+    assert on_cmd[on_cmd.index("-fa") + 1] == "on"
+    assert off_cmd[off_cmd.index("-fa") + 1] == "off"
+
+
+def _fa_arg(cmd):
+    """Return the value rendered after the ``-fa`` flag in a llama-bench cmd."""
+    idx = cmd.index("-fa")
+    return cmd[idx + 1]
+
+
+def test_llama_bench_fa_default_backend_literal():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    assert _fa_arg(cmd) == "on,off"
+
+
+def test_llama_bench_fa_llama_cpp_backend_literal():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="llama.cpp")
+    assert _fa_arg(cmd) == "on,off"
+
+
+def test_llama_bench_fa_ik_llama_backend_numeric():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert _fa_arg(cmd) == "1,0"
+
+
+def test_build_commands_forwards_backend_to_fa_rendering():
+    axes = [Axis("flash_attn", ["on", "off"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    assert _fa_arg(pairs[0][0]) == "1,0"
+
+
+def test_sweep_bench_fa_explicit_value_no_backend_param():
+    # sweep-bench renders FA with an explicit on/off value and takes no backend
+    # parameter (unlike llama-bench, it never maps to numeric 1/0).
+    axes = [Axis("flash_attn", ["on", "off"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    on_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "on")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["flash_attn"] == "off")
+    assert on_cmd[on_cmd.index("-fa") + 1] == "on"
+    assert off_cmd[off_cmd.index("-fa") + 1] == "off"
+    assert "1" not in on_cmd and "0" not in off_cmd
+
+
+def test_matrix_size():
+    axes = [Axis("n_gpu_layers", ["0", "11", "22"]), Axis("threads", ["8", "16"]), Axis("ctx_size", ["4096"])]
+    # ctx_size ignored for llama-bench -> 3 * 2 = 6
+    assert matrix_size(axes, TOOL_LLAMA_BENCH) == 6
+    # all three apply to sweep-bench -> 3 * 2 * 1 = 6
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) == 6
+
+
+def test_build_commands_llama_bench_returns_single_pair():
+    axes = [Axis("threads", ["8", "16"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes)
+    assert len(pairs) == 1
+    assert pairs[0][1] == {}
+
+
+def test_build_commands_unknown_tool():
+    with pytest.raises(SweepError):
+        build_commands("nope", "/b/x", "/m.gguf", [Axis("threads", ["8"])])
+
+
+def test_missing_model_raises():
+    with pytest.raises(SweepError):
+        llama_bench_command("/b/llama-bench", "", [Axis("threads", ["8"])])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom-flag axes
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _custom_axis(flag, values, kind=None):
+    from modules.benchmark.matrix import KIND_STR
+
+    return Axis(key=flag, values=values, custom_flag=flag, custom_kind=kind or KIND_STR)
+
+
+def test_builtin_axis_still_exposes_lever_and_uniform_accessors():
+    # Regression: the built-in construction and the ``lever`` property must keep
+    # working, and the new uniform accessors must delegate to the lever.
+    axis = Axis("threads", ["8", "16"])
+    assert axis.is_custom is False
+    assert axis.lever.key == "threads"
+    assert axis.flag == "-t"
+    assert axis.label == "Threads (-t)"
+    assert axis.applies_to(TOOL_LLAMA_BENCH)
+    assert axis.applies_to(TOOL_SWEEP_BENCH)
+
+
+def test_custom_axis_sweep_bench_renders_flag_value_per_combo():
+    axes = [_custom_axis("-ot", ["exps=CPU", "attn=CPU"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+    assert len(pairs) == 2
+    # Each combo renders ``<flag> <value>`` and is tagged with the flag as key.
+    for cmd, combo in pairs:
+        val = combo["-ot"]
+        idx = cmd.index("-ot")
+        assert cmd[idx + 1] == val
+    assert {combo["-ot"] for _, combo in pairs} == {"exps=CPU", "attn=CPU"}
+
+
+def test_custom_axis_llama_bench_renders_comma_list():
+    axes = [_custom_axis("--cache-reuse", ["0", "256"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("--cache-reuse")
+    assert cmd[idx + 1] == "0,256"
+
+
+def test_custom_axis_applies_to_both_tools():
+    axis = _custom_axis("-ot", ["exps=CPU"])
+    assert axis.is_custom is True
+    assert axis.applies_to(TOOL_LLAMA_BENCH)
+    assert axis.applies_to(TOOL_SWEEP_BENCH)
+
+
+def test_custom_flag_without_dash_raises():
+    with pytest.raises(SweepError):
+        Axis(key="ot", values=["exps=CPU"], custom_flag="ot")
+
+
+def test_custom_axis_counts_toward_sweep_cap():
+    # A custom axis applies to sweep-bench, so the MAX_SWEEP_COMBOS guard must
+    # include it in the product.
+    big = [str(i) for i in range(200)]
+    axes = [Axis("n_gpu_layers", big), _custom_axis("-ot", big)]  # 200*200 = 40000
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) > MAX_SWEEP_COMBOS
+    with pytest.raises(SweepError):
+        sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes)
+
+
+def test_custom_axis_matrix_size_both_tools():
+    axes = [_custom_axis("-ot", ["a", "b", "c"]), Axis("threads", ["8", "16"])]
+    assert matrix_size(axes, TOOL_LLAMA_BENCH) == 6
+    assert matrix_size(axes, TOOL_SWEEP_BENCH) == 6
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ik_llama-only levers (backend-gated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_ik_lever_applies_only_to_ik_backend():
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    rtr = LEVERS_BY_KEY["rtr"]
+    # Applies on the ik_llama backend for BOTH tools (as a native comma sweep on
+    # llama-bench, as a bare flag on llama-sweep-bench).
+    assert rtr.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert rtr.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    # NOT on the llama.cpp backend for either tool (the flag doesn't exist
+    # upstream).
+    assert not rtr.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    assert not rtr.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
+
+
+def test_ik_lever_renders_native_comma_sweep_on_llama_bench():
+    axes = [Axis("rtr", ["0", "1"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd = pairs[0][0]
+    idx = cmd.index("-rtr")
+    assert cmd[idx + 1] == "0,1"
+
+
+def test_mqkv_is_value_lever_on_llama_bench_bare_on_sweep():
+    # -mqkv takes a <0|1> value on llama-bench (native comma-sweepable) but is a
+    # BARE flag on sweep-bench; it is dropped on the llama.cpp backend entirely.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    mqkv = LEVERS_BY_KEY["mqkv"]
+    assert mqkv.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert not mqkv.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    assert mqkv.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    assert mqkv.sweep_bare is True
+
+    axes = [Axis("mqkv", ["0", "1"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    cmd = pairs[0][0]
+    idx = cmd.index("-mqkv")
+    assert cmd[idx + 1] == "0,1"
+    # Dropped entirely on the llama.cpp backend.
+    applicable, ignored = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "llama.cpp")
+    assert applicable == []
+    assert [a.key for a in ignored] == ["mqkv"]
+
+
+def test_ik_lever_dropped_for_llama_cpp_backend():
+    # The same axes on the llama.cpp backend must drop the ik-only axis.
+    axes = [Axis("rtr", ["0", "1"]), Axis("threads", ["8"])]
+    applicable, ignored = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "llama.cpp")
+    assert [a.key for a in applicable] == ["threads"]
+    assert [a.key for a in ignored] == ["rtr"]
+    # And it applies under ik_llama.
+    applicable_ik, ignored_ik = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "ik_llama")
+    assert {a.key for a in applicable_ik} == {"rtr", "threads"}
+    assert ignored_ik == []
+
+
+def test_ser_vec_not_device_separated_on_llama_bench():
+    # -ser's value is literally "i,f" (e.g. 7,1) — a single token that must NOT
+    # have its comma rewritten to the tensor-split device separator.
+    axes = [Axis("ser", ["7,1"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-ser")
+    assert cmd[idx + 1] == "7,1"
+
+
+def test_llama_bench_rejects_multi_value_ser_vec():
+    # Multiple -ser vector values can't be comma-swept on llama-bench: its own
+    # comma matrix-splitter would read "-ser 7,1,8,0" as four scalars, losing the
+    # "i,f" pair boundaries. It must raise rather than emit an ambiguous command.
+    axes = [Axis("ser", ["7,1", "8,0"])]
+    with pytest.raises(SweepError):
+        llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+
+
+def test_llama_bench_single_ser_vec_passes_through():
+    # A single -ser value is unambiguous and parses on the real binary.
+    axes = [Axis("ser", ["7,1"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-ser")
+    assert cmd[idx + 1] == "7,1"
+
+
+def test_sweep_bench_multi_value_ser_yields_separate_commands():
+    # sweep-bench runs one process per value, so several -ser values are fine.
+    axes = [Axis("ser", ["7,1", "8,0"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    assert {combo["ser"] for _, combo in pairs} == {"7,1", "8,0"}
+
+
+def test_llama_bench_multi_value_tensor_split_still_renders():
+    # Regression: tensor_split is the ONE KIND_VEC lever whose commas ARE device
+    # separators, so multiple values are legal (rewritten to '/') and must NOT
+    # trip the multi-value guard above.
+    axes = [Axis("tensor_split", ["0.6,0.4", "0.7,0.3"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4,0.7/0.3"
+
+
+def test_ot_vec_pattern_passes_through_on_llama_bench():
+    # -ot patterns use '=' and ',' literally; no device-separator conversion.
+    axes = [Axis("ot", ["exps=CPU"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-ot")
+    assert cmd[idx + 1] == "exps=CPU"
+
+
+def test_tensor_split_still_device_separated_after_gating():
+    # Regression: gating the vec conversion to tensor_split must leave -ts's
+    # 0.6,0.4 -> 0.6/0.4 rewrite intact.
+    axes = [Axis("tensor_split", ["0.6,0.4"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ik_llama levers enabled on llama-sweep-bench (value + bare-flag rendering)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_ik_value_lever_applies_to_sweep_bench():
+    # An ik value lever (e.g. -mla) also works on sweep-bench with the same
+    # ``<flag> <value>`` rendering, under the ik_llama backend.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    mla = LEVERS_BY_KEY["mla"]
+    assert mla.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    assert mla.sweep_bare is False
+    axes = [Axis("mla", ["2"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd = pairs[0][0]
+    idx = cmd.index("-mla")
+    assert cmd[idx + 1] == "2"
+
+
+def test_rtr_renders_bare_flag_on_sweep_bench():
+    # -rtr is a BARE flag on sweep-bench: present for a truthy value, absent
+    # otherwise (never "-rtr 1", which errors). The combo dict still records the
+    # value so both rows stay labelled.
+    axes = [Axis("rtr", ["0", "1"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    on_cmd = next(cmd for cmd, combo in pairs if combo["rtr"] == "1")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["rtr"] == "0")
+    assert "-rtr" in on_cmd
+    # Bare flag: no value token follows it.
+    assert on_cmd[on_cmd.index("-rtr") + 1 :] == []
+    assert "-rtr" not in off_cmd
+
+
+def test_rtr_still_native_comma_sweep_on_llama_bench():
+    # On llama-bench the same lever keeps its native "<flag> 0,1" value form.
+    axes = [Axis("rtr", ["0", "1"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-rtr")
+    assert cmd[idx + 1] == "0,1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MTP / speculative-decoding levers (llama-sweep-bench + ik_llama only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_mtp_applies_only_to_sweep_bench_on_ik_backend():
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    mtp = LEVERS_BY_KEY["mtp"]
+    # MTP is supported ONLY by ik_llama's llama-sweep-bench.
+    assert mtp.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    # ik llama-bench REJECTS -mtp/--draft-*/-mtprot; llama.cpp lacks them.
+    assert not mtp.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert not mtp.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
+    assert not mtp.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    # -mtp is a BARE on/off flag on sweep-bench (the embedded-head shortcut).
+    assert mtp.sweep_bare is True
+
+
+def test_all_mtp_levers_scoped_to_sweep_bench_ik():
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    for key in ("mtp", "draft_max", "draft_min", "draft_p_min", "mtprot"):
+        lever = LEVERS_BY_KEY[key]
+        assert lever.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+        assert not lever.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+        assert not lever.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
+
+
+def test_mtp_sweep_on_off_toggles_bare_flag():
+    # Sweeping -mtp 0/1 yields two commands: one WITH the bare -mtp flag present
+    # (value "1") and one WITHOUT it (value "0"), so MTP's speedup is measurable.
+    axes = [Axis("mtp", ["0", "1"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    on_cmd = next(cmd for cmd, combo in pairs if combo["mtp"] == "1")
+    off_cmd = next(cmd for cmd, combo in pairs if combo["mtp"] == "0")
+    assert "-mtp" in on_cmd
+    # Bare flag: no value token follows it.
+    assert on_cmd[on_cmd.index("-mtp") + 1 :] == []
+    assert "-mtp" not in off_cmd
+
+
+def test_mtp_draft_max_renders_flag_value_per_combo():
+    axes = [Axis("draft_max", ["4", "8"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    four = next(cmd for cmd, combo in pairs if combo["draft_max"] == "4")
+    eight = next(cmd for cmd, combo in pairs if combo["draft_max"] == "8")
+    assert four[four.index("--draft-max") + 1] == "4"
+    assert eight[eight.index("--draft-max") + 1] == "8"
+
+
+def test_mtp_full_combo_builds_expected_command():
+    # The verified-accepted combination:
+    #   -mtp --draft-max 4 --draft-min 1 --draft-p-min 0.5 -mtprot q8_0
+    axes = [
+        Axis("mtp", ["1"]),
+        Axis("draft_max", ["4"]),
+        Axis("draft_min", ["1"]),
+        Axis("draft_p_min", ["0.5"]),
+        Axis("mtprot", ["q8_0"]),
+    ]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd = pairs[0][0]
+    assert cmd == [
+        "/b/llama-sweep-bench",
+        "-m",
+        "/m.gguf",
+        "-mtp",
+        "--draft-max",
+        "4",
+        "--draft-min",
+        "1",
+        "--draft-p-min",
+        "0.5",
+        "-mtprot",
+        "q8_0",
+    ]
+
+
+def test_fmoe_still_not_applicable_to_sweep_bench():
+    # -fmoe remains llama-bench-only; it must NOT leak onto sweep-bench.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    fmoe = LEVERS_BY_KEY["fmoe"]
+    assert fmoe.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
+    assert not fmoe.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    axes = [Axis("fmoe", ["0", "1"]), Axis("threads", ["8"])]
+    applicable, ignored = split_axes_for_tool(axes, TOOL_SWEEP_BENCH, "ik_llama")
+    assert [a.key for a in applicable] == ["threads"]
+    assert [a.key for a in ignored] == ["fmoe"]
