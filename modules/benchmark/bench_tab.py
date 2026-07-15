@@ -505,7 +505,7 @@ class BenchmarkTab:
         # style lets us set a font-aware rowheight (the theme sets none, so a
         # scaled UI font would otherwise clip rows vertically) without touching
         # other Treeviews in the app.
-        self._results_tree = ttk.Treeview(box, show="headings", height=16, style="Benchmark.Treeview")
+        self._results_tree = ttk.Treeview(box, show="headings", height=10, style="Benchmark.Treeview")
         yscroll = ttk.Scrollbar(box, orient="vertical", command=self._results_tree.yview)
         xscroll = ttk.Scrollbar(box, orient="horizontal", command=self._results_tree.xview)
         self._results_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
