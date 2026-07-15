@@ -336,7 +336,7 @@ class BenchmarkTab:
             sec,
             text="MTP uses the model's embedded head (no draft model). " "Sweep MTP enable = 0,1 to measure speedup.",
             foreground="#666",
-            wraplength=680,
+            wraplength=1020,
             justify="left",
         ).pack(fill="x", padx=6, pady=(2, 4))
 
@@ -388,7 +388,7 @@ class BenchmarkTab:
             "Each value becomes its own matrix combo on llama-sweep-bench; on llama-bench the values are "
             "passed as one comma-list, so a custom flag only sweeps there if it accepts comma-separated values.",
             foreground="#666",
-            wraplength=680,
+            wraplength=1020,
             justify="left",
         ).pack(fill="x", padx=6, pady=(2, 4))
 
