@@ -1566,15 +1566,26 @@ class BenchmarkTab:
         tree = self._results_tree
         if tree is None:
             return
+        import tkinter.font as tkfont
+
+        # Measure real pixel widths with the actual widget fonts (headings are
+        # bold, so a fixed px-per-char estimate under-sizes them and clips e.g.
+        # "n_gpu_layers" to "n_gpu_l"). The heading font is usually bold/larger.
+        try:
+            head_font = tkfont.nametofont("TkHeadingFont")
+        except tk.TclError:
+            head_font = tkfont.nametofont("TkDefaultFont")
+        cell_font = tkfont.nametofont("TkDefaultFont")
         cols = results.collect_columns(self._result_rows)
         tree.configure(columns=cols)
         for c in cols:
-            # Size each column to the widest of its header and its cell values so
-            # text isn't clipped; cap generously and don't stretch, so the
-            # horizontal scrollbar reaches anything wider than the viewport.
-            content_len = max((len(row.get(c)) for row in self._result_rows), default=0)
-            chars = max(len(str(c)), content_len)
-            width = max(64, min(420, chars * 8 + 18))
+            # Widest of the header and any cell value, measured in pixels; don't
+            # stretch, so the horizontal scrollbar reaches anything wider than
+            # the viewport. +28px covers cell padding + the heading indicator.
+            w = head_font.measure(str(c))
+            for row in self._result_rows:
+                w = max(w, cell_font.measure(row.get(c)))
+            width = max(64, min(500, w + 28))
             tree.heading(c, text=c)
             tree.column(c, width=width, minwidth=48, anchor="w", stretch=False)
         tree.delete(*tree.get_children())
