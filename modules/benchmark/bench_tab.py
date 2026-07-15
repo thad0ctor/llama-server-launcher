@@ -548,11 +548,6 @@ class BenchmarkTab:
         self._on_tool_changed()
 
     @staticmethod
-    def _is_ik_lever(lever) -> bool:
-        """True for levers that exist only in ik_llama's tool build."""
-        return "llama.cpp" not in lever.backends
-
-    @staticmethod
     def _set_lever_row_visible(widgets: dict, visible: bool) -> None:
         """Grid-show or grid-remove a whole lever row (position preserved)."""
         for w in ("chk", "lbl", "mode", "vals", "emin", "emax", "estep"):
@@ -865,26 +860,36 @@ class BenchmarkTab:
         """
         axes: list[Axis] = []
         backend = self._current_backend()
+        tool = self.tool_var.get()
         for lever in LEVERS:
             v = self.lever_vars[lever.key]
             if not v["include"].get():
                 continue
-            # ik_llama-only levers must not produce axes on a llama.cpp backend
-            # (their rows are hidden there, but a stale ``include`` could linger).
-            if self._is_ik_lever(lever) and backend != "ik_llama":
-                continue
+            # A lever that doesn't apply to the current tool+backend has a hidden,
+            # uneditable row. Its contents must NEVER raise a validation error
+            # (the user can't fix an empty/bad value they can't see). But if it
+            # DOES hold usable values, still collect it so the downstream
+            # "none of the selected parameters apply to <tool>" guard can report
+            # it as ignored rather than silently dropping the user's choice.
+            applicable = lever.applies_to(tool, backend)
             mode = v["mode"].get()
-            if mode == "range":
-                try:
+            try:
+                if mode == "range":
                     vmin = float(v["vmin"].get())
                     vmax = float(v["vmax"].get())
                     vstep = float(v["vstep"].get())
-                except ValueError as exc:
-                    raise SweepError(f"{lever.label}: min/max/step must be numeric") from exc
-                values = expand_range(vmin, vmax, vstep, lever.kind)
-            else:
-                values = parse_list(v["values"].get(), lever.kind)
+                    values = expand_range(vmin, vmax, vstep, lever.kind)
+                else:
+                    values = parse_list(v["values"].get(), lever.kind)
+            except (ValueError, SweepError) as exc:
+                if not applicable:
+                    continue  # hidden row with stale/invalid contents — ignore
+                if isinstance(exc, SweepError):
+                    raise
+                raise SweepError(f"{lever.label}: min/max/step must be numeric") from exc
             if not values:
+                if not applicable:
+                    continue  # hidden empty row — ignore
                 raise SweepError(f"{lever.label} is ticked but has no values.")
             axes.append(Axis(lever.key, values))
         axes.extend(self._collect_custom_axes())
@@ -1606,7 +1611,16 @@ class BenchmarkTab:
         if not name:
             messagebox.showerror("Save config", "Enter a name for the sweep config.")
             return
-        if self.store.save(self._current_config(name)):
+        # _current_config() parses the Repetitions field (via _repetitions),
+        # which raises SweepError on a malformed value. Surface it as a dialog
+        # like Start/preview/script-export do, rather than letting it escape the
+        # Tk callback.
+        try:
+            cfg = self._current_config(name)
+        except SweepError as exc:
+            messagebox.showerror("Save config", str(exc))
+            return
+        if self.store.save(cfg):
             self.status_var.set(f"Saved sweep config '{name}'.")
             self._refresh_config_list()
         else:

@@ -593,6 +593,43 @@ def test_stale_repetitions_do_not_block_sweep_bench(bench_tab):
     assert bench_tab._repetitions() is None  # ignored, no SweepError
 
 
+def test_collect_axes_skips_ticked_empty_lever_not_applicable_to_tool(bench_tab):
+    # Codex: tick a llama-bench-only lever (-p) with NO values, then switch to
+    # sweep-bench where its row is hidden. _collect_axes must skip it rather than
+    # raise "... is ticked but has no values" for an uneditable hidden row.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.lever_vars["n_prompt"]["include"].set(True)
+    bench_tab.lever_vars["n_prompt"]["values"].set("")  # ticked but empty
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)  # -p is n/a here and its row is hidden
+    # Also tick an applicable lever so the result is a valid, non-empty sweep.
+    bench_tab.lever_vars["ctx_size"]["include"].set(True)
+    bench_tab.lever_vars["ctx_size"]["values"].set("4096")
+    axes = bench_tab._collect_axes()  # must NOT raise
+    assert [a.key for a in axes] == ["ctx_size"]
+
+
+def test_save_config_reports_malformed_repetitions(bench_tab, monkeypatch):
+    # Codex: Save must surface a SweepError (malformed -r) as a dialog, not let
+    # it escape the Tk callback.
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.repetitions_var.set("five")
+    bench_tab.config_name_var.set("cfg")
+    errors = []
+    monkeypatch.setattr(bench_tab_mod.messagebox, "showerror", lambda title, msg: errors.append((title, msg)))
+    saved = []
+    monkeypatch.setattr(bench_tab.store, "save", lambda cfg: saved.append(cfg) or True)
+
+    bench_tab._save_config()  # must not raise
+
+    assert errors and "Repetitions" in errors[0][1]
+    assert saved == []  # never reached store.save
+
+
 def test_start_blocks_on_malformed_repetitions(bench_tab, monkeypatch, tmp_path):
     # Finding C: a non-integer Repetitions value must surface as a validation
     # error and never start the runner (rather than silently omitting -r while
