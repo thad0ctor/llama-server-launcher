@@ -288,7 +288,6 @@ class BenchmarkTab:
 
         row4 = ttk.Frame(sec)
         row4.pack(fill="x", padx=6, pady=3)
-        ttk.Button(row4, text="Seed from current config", command=self.seed_from_config).pack(side="left")
         ttk.Label(row4, textvariable=self._tool_note_var()).pack(side="left", padx=8)
 
     _tool_note = None
@@ -300,14 +299,20 @@ class BenchmarkTab:
 
     def _build_sweep_section(self, parent) -> None:
         sec = self._section(parent, "Sweep parameters")
+        header = ttk.Frame(sec)
+        header.pack(fill="x", padx=6, pady=(2, 4))
+        # Seed button in the top-right corner of the Sweep parameters box.
+        ttk.Button(header, text="Seed from current config", command=self.seed_from_config).pack(
+            side="right", anchor="ne"
+        )
         ttk.Label(
-            sec,
+            header,
             text="Tick a parameter to include it. 'list' = comma-separated values (e.g. 0,10,20); "
             "'range' = min/max/step. Multiple values sweep the matrix.",
             foreground="#666",
-            wraplength=680,
+            wraplength=560,
             justify="left",
-        ).pack(fill="x", padx=6, pady=(2, 4))
+        ).pack(side="left", fill="x", expand=True)
 
         grid = ttk.Frame(sec)
         grid.pack(fill="x", padx=6, pady=2)
