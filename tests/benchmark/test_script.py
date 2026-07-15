@@ -53,9 +53,11 @@ def test_ps1_continues_but_exits_nonzero_on_failure():
     assert "'Stop'" not in ps
     assert "$LASTEXITCODE" in ps
     # Each command's success is captured via $? (a native exe that fails to
-    # launch leaves $LASTEXITCODE stale), and the failure check honours both.
+    # launch leaves $LASTEXITCODE stale), and launch failure is a distinct
+    # branch from a nonzero exit so a stale $LASTEXITCODE isn't reported.
     assert "$_benchSucceeded = $?" in ps
-    assert "if (-not $_benchSucceeded -or $LASTEXITCODE -ne 0)" in ps
+    assert "if (-not $_benchSucceeded) { $_benchRc = 1;" in ps
+    assert "elseif ($LASTEXITCODE -ne 0)" in ps
     # Failures are recorded and the script exits nonzero at the end, but each
     # combo still runs (continue, not fail-fast).
     assert "$_benchRc = 1" in ps
@@ -139,3 +141,23 @@ def test_render_forwards_env():
     assert "export CUDA_VISIBLE_DEVICES='0'" in sh
     ps = bench_script.render([["/b/x.exe"]], "ps1", env={"CUDA_VISIBLE_DEVICES": "0"})
     assert "$env:CUDA_VISIBLE_DEVICES = '0'" in ps
+
+
+def test_env_unset_emits_removal():
+    # The resolver's "unset" action must actively REMOVE an inherited stale var.
+    sh = bench_script.to_sh([["/b/x"]], env_unset=["CUDA_VISIBLE_DEVICES"])
+    assert "unset CUDA_VISIBLE_DEVICES" in sh
+    ps = bench_script.to_ps1([["/b/x.exe"]], env_unset=["CUDA_VISIBLE_DEVICES"])
+    assert "Remove-Item -Path Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue" in ps
+    # Illegal names are dropped from the unset prelude too.
+    assert "BAD;x" not in bench_script.to_sh([["/b/x"]], env_unset=["BAD;x"])
+
+
+def test_ps1_multi_command_splits_launch_from_exit_failure():
+    ps = bench_script.to_ps1([["/b/x.exe", "-c", "1"], ["/b/x.exe", "-c", "2"]])
+    # Launch failure ($? false) is reported WITHOUT the stale $LASTEXITCODE.
+    assert "if (-not $_benchSucceeded) { $_benchRc = 1;" in ps
+    assert "FAILED (launch error)" in ps
+    # A nonzero exit is a distinct, elseif branch that does print $LASTEXITCODE.
+    assert "elseif ($LASTEXITCODE -ne 0)" in ps
+    assert "FAILED (exit $LASTEXITCODE)" in ps

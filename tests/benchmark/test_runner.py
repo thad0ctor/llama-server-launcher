@@ -211,3 +211,19 @@ def test_emit_event_delivers_when_space_frees_up():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_env_unset_removes_inherited_var(tmp_path, monkeypatch):
+    # env_unset must drop an inherited variable from the child's environment
+    # (the resolver's "unset CUDA_VISIBLE_DEVICES" action).
+    monkeypatch.setenv("BENCH_TEST_UNSET", "INHERITED")
+    code = "import os,sys;sys.stdout.write('VAL=' + os.environ.get('BENCH_TEST_UNSET','<absent>'))"
+    step = BenchStep(cmd=[sys.executable, "-c", code])
+    plan = BenchPlan(tool=STUB_TOOL, steps=[step], cwd=str(tmp_path), env_unset=["BENCH_TEST_UNSET"])
+
+    runner = BenchRunner()
+    assert runner.start(plan) is True
+    events = _drain_until_terminal(runner)
+
+    results = [p for k, p in events if k == EVENT_STEP_RESULT]
+    assert results and results[0].stdout.strip() == "VAL=<absent>"

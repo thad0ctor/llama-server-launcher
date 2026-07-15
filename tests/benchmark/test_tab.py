@@ -480,8 +480,10 @@ def test_mtp_command_renders_bare_flag_and_draft_max(bench_tab):
     commands, _ = bench_tab._build_command_list()
     assert len(commands) == 1
     cmd = commands[0]
-    # Bare -mtp present, and --draft-max 4 rendered as a flag/value pair.
+    # -mtp is a BARE flag: the token immediately after it must be the next flag,
+    # not a value (guards against a regression that renders `-mtp 1`).
     assert "-mtp" in cmd
+    assert cmd[cmd.index("-mtp") + 1] == "--draft-max"
     assert cmd[cmd.index("--draft-max") + 1] == "4"
 
 
@@ -542,6 +544,53 @@ def test_plan_env_pins_cuda_device_order_with_visibility(bench_tab):
     # 'unset'/'skip' leaves visibility unset, so device order must not be pinned.
     bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("unset", None))
     assert "CUDA_DEVICE_ORDER" not in bench_tab._plan_env()
+
+
+def test_plan_env_unset_honors_resolver_unset_action(bench_tab):
+    # The resolver's explicit "unset" must remove an inherited CUDA_VISIBLE_DEVICES
+    # (distinct from "skip"), carried through to the runner/script.
+    bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("unset", None))
+    assert bench_tab._plan_env_unset() == ["CUDA_VISIBLE_DEVICES"]
+    bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("export", "0,1"))
+    assert bench_tab._plan_env_unset() == []
+    bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("skip", None))
+    assert bench_tab._plan_env_unset() == []
+
+
+def test_backend_switch_with_no_matching_build_keeps_choice(bench_tab, monkeypatch):
+    # Codex: clicking ik_llama when ONLY a llama.cpp build is detected must keep
+    # the requested backend, not revert the launcher via a stale build's mirror.
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, BuildEntry
+
+    llama_build = BuildEntry(
+        label="llama.cpp (main)",
+        backend="llama.cpp",
+        root_dir="/lcpp",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/lcpp/llama-bench"},
+    )
+    monkeypatch.setattr(bench_tab_mod, "discover_builds", lambda launcher: [llama_build])
+    bench_tab.rescan_builds()  # selects the only (llama.cpp) build
+    assert bench_tab._current_backend() == "llama.cpp"
+
+    # Now the user clicks the ik_llama radio; no ik build exists.
+    bench_tab.backend_var.set("ik_llama")
+    bench_tab._on_backend_radio_changed()
+
+    assert bench_tab.backend_var.get() == "ik_llama"
+    assert bench_tab._current_backend() == "ik_llama"
+    assert bench_tab.launcher.backend_selection.get() == "ik_llama"
+
+
+def test_stale_repetitions_do_not_block_sweep_bench(bench_tab):
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    # A malformed value left over from llama-bench must not raise for sweep-bench,
+    # whose field is disabled and which renders no -r.
+    bench_tab.repetitions_var.set("five")
+    bench_tab._set_tool(TOOL_SWEEP_BENCH)
+    assert bench_tab._repetitions() is None  # ignored, no SweepError
 
 
 def test_start_blocks_on_malformed_repetitions(bench_tab, monkeypatch, tmp_path):

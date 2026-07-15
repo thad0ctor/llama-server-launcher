@@ -80,14 +80,35 @@ def test_extra_args_simple_roundtrip():
     assert cmd[-2:] == ["--numa", "distribute"]
 
 
-def test_extra_args_shlex_posix_flag_preserves_backslashes():
-    # _extra_tokens splits with posix=(os.name != "nt"); prove the semantics
-    # directly (os.name is fixed in CI): posix=True eats backslashes so a Windows
-    # path collapses, posix=False keeps them so the path survives.
-    import shlex
+def test_extra_args_preserves_backslashes_on_windows(monkeypatch):
+    # Exercise the production _extra_tokens path through llama_bench_command
+    # under BOTH os.name values, so the real `posix=(os.name != "nt")`
+    # conditional is covered (an inverted condition would be caught) rather
+    # than just asserting stdlib shlex semantics.
+    from modules.benchmark import matrix as _matrix
 
-    assert shlex.split(r"--lora C:\models\a.gguf", posix=True) == ["--lora", "C:modelsa.gguf"]
-    assert shlex.split(r"--lora C:\models\a.gguf", posix=False) == ["--lora", r"C:\models\a.gguf"]
+    axes = [Axis("threads", ["8"])]
+    win = r"--lora C:\models\a.gguf"
+
+    monkeypatch.setattr(_matrix.os, "name", "nt")
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args=win)
+    assert cmd[-2:] == ["--lora", r"C:\models\a.gguf"]
+
+    monkeypatch.setattr(_matrix.os, "name", "posix")
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args=win)
+    assert cmd[-2:] == ["--lora", "C:modelsa.gguf"]
+
+
+def test_extra_args_strips_windows_grouping_quotes(monkeypatch):
+    # On Windows a spaced path is quoted: `--lora "C:\a b.gguf"`. posix=False
+    # keeps backslashes but RETAINS the grouping quotes; they must be stripped so
+    # the tool doesn't receive a literal-quoted filename.
+    from modules.benchmark import matrix as _matrix
+
+    monkeypatch.setattr(_matrix.os, "name", "nt")
+    axes = [Axis("threads", ["8"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args=r'--lora "C:\models\a b.gguf"')
+    assert cmd[-2:] == ["--lora", r"C:\models\a b.gguf"]
 
 
 def test_parse_list_int_normalises_and_dedupes():

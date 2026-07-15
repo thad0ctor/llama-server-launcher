@@ -54,6 +54,10 @@ class BenchPlan:
     steps: list[BenchStep]
     cwd: str = ""
     env: dict[str, str] = field(default_factory=dict)
+    # Variables to REMOVE from the inherited environment (e.g. the resolver's
+    # explicit "unset CUDA_VISIBLE_DEVICES" action, so a stale inherited value
+    # can't leak into the benchmark child).
+    env_unset: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -209,6 +213,10 @@ class BenchRunner:
                     env[str(k)] = "" if v is None else str(v)
                 except Exception:
                     continue
+            # Honor explicit removals (resolver "unset" action) so an inherited
+            # stale value (e.g. CUDA_VISIBLE_DEVICES) doesn't leak into the child.
+            for k in plan.env_unset or []:
+                env.pop(str(k), None)
             cwd = plan.cwd or None
             if cwd and not Path(cwd).is_dir():
                 cwd = None

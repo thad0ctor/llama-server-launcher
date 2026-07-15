@@ -626,8 +626,15 @@ class BenchmarkTab:
                     self.build_var.set(b.label)
                 self._on_build_changed()
                 return
-        # No build of this backend — still refresh tool/lever state so ik levers
-        # appear/disappear even without a concrete build selected.
+        # No build of this backend. Clear a stale (other-backend) build
+        # selection FIRST, otherwise _on_build_changed would mirror that
+        # mismatched build's backend back over the user's just-made choice
+        # (e.g. clicking ik_llama with only a llama.cpp build detected would
+        # flip the launcher back to llama.cpp). Then refresh tool/lever state so
+        # ik levers appear/disappear even without a concrete build selected.
+        current = self._selected_build()
+        if current is not None and getattr(current, "backend", "") != backend:
+            self.build_var.set("")
         self._on_build_changed()
 
     def _on_tool_changed(self) -> None:
@@ -946,6 +953,11 @@ class BenchmarkTab:
         the UI still shows the user's value. refresh_preview/start/_save_script
         all funnel this through their SweepError handling.
         """
+        # Repetitions (-r) applies ONLY to llama-bench; llama-sweep-bench has no
+        # such flag and disables the field. A stale value left from a prior
+        # llama-bench selection must NOT be validated or block a sweep-bench run.
+        if self.tool_var.get() != TOOL_LLAMA_BENCH:
+            return None
         raw = self.repetitions_var.get().strip()
         if not raw:
             return None
@@ -1173,6 +1185,26 @@ class BenchmarkTab:
             pass
         return env
 
+    def _plan_env_unset(self) -> list[str]:
+        """Variables to actively REMOVE from the benchmark environment.
+
+        The GPU resolver's ``unset`` action means "drop any inherited
+        CUDA_VISIBLE_DEVICES" (distinct from ``skip`` = leave as-is). Without
+        honoring it, a saved script run in a shell that already exports
+        CUDA_VISIBLE_DEVICES would benchmark the wrong devices, and the in-app
+        child would inherit a stale filter. Returns the keys to unset.
+        """
+        try:
+            launch_manager = getattr(self.launcher, "launch_manager", None)
+            resolver = getattr(launch_manager, "_resolve_cuda_visible_devices_action", None)
+            if resolver is not None:
+                action, _value = resolver()
+                if action == "unset":
+                    return ["CUDA_VISIBLE_DEVICES"]
+        except Exception:
+            pass
+        return []
+
     _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
     def _is_valid_env_var_name(self, name) -> bool:
@@ -1244,7 +1276,7 @@ class BenchmarkTab:
             return
         steps = [BenchStep(cmd=cmd, combo=combo, label=self._combo_label(combo)) for cmd, combo in pairs]
         cwd = str(Path(exe).parent)
-        plan = BenchPlan(tool=tool, steps=steps, cwd=cwd, env=self._plan_env())
+        plan = BenchPlan(tool=tool, steps=steps, cwd=cwd, env=self._plan_env(), env_unset=self._plan_env_unset())
 
         self._clear_console()
         self._append_console(f"Running {len(steps)} benchmark invocation(s) with {tool}…", tag="stage")
@@ -1490,7 +1522,9 @@ class BenchmarkTab:
             # Same merged GPU + enabled-env-vars environment as the in-app run,
             # so the exported script exports CUDA_VISIBLE_DEVICES and the enabled
             # env vars the server launch would apply.
-            script = bench_script.render(commands, fmt, header=header, env=self._plan_env())
+            script = bench_script.render(
+                commands, fmt, header=header, env=self._plan_env(), env_unset=self._plan_env_unset()
+            )
             Path(path).write_text(script, encoding="utf-8")
             if fmt == "sh":
                 try:

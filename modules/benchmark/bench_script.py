@@ -47,12 +47,20 @@ def _sh_env_quote(value: str) -> str:
     return "'" + str(value).replace("'", "'\\''") + "'"
 
 
-def to_sh(commands: list[Command], *, header: str = "", env: dict[str, str] | None = None) -> str:
+def to_sh(
+    commands: list[Command],
+    *,
+    header: str = "",
+    env: dict[str, str] | None = None,
+    env_unset: list[str] | None = None,
+) -> str:
     """Render ``commands`` as a self-contained bash script.
 
     When ``env`` is given, an ``export KEY='value'`` prelude (sorted keys) is
     emitted before the commands so a saved script sees the same environment the
-    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``).
+    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``). ``env_unset`` names
+    variables to actively ``unset`` (e.g. removing an inherited stale
+    ``CUDA_VISIBLE_DEVICES`` when the resolver asked for ``unset``).
     """
     lines: list[str] = ["#!/usr/bin/env bash"]
     if header:
@@ -66,13 +74,16 @@ def to_sh(commands: list[Command], *, header: str = "", env: dict[str, str] | No
     # count rather than fail-fast. Close stdin so no tool blocks on input.
     lines.append("exec </dev/null")
     lines.append("")
-    if env:
-        for key in sorted(env):
+    if env or env_unset:
+        for key in sorted(env or {}):
             if not _ENV_KEY_RE.match(key):
                 # A key with shell-active characters would inject script syntax
                 # into the prelude; drop it rather than emit executable garbage.
                 continue
             lines.append(f"export {key}={_sh_env_quote(env[key])}")
+        for key in sorted(env_unset or []):
+            if _ENV_KEY_RE.match(key):
+                lines.append(f"unset {key}")
         lines.append("")
     total = len(commands)
     multi = total > 1
@@ -103,12 +114,20 @@ def to_sh(commands: list[Command], *, header: str = "", env: dict[str, str] | No
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | None = None) -> str:
+def to_ps1(
+    commands: list[Command],
+    *,
+    header: str = "",
+    env: dict[str, str] | None = None,
+    env_unset: list[str] | None = None,
+) -> str:
     """Render ``commands`` as a self-contained PowerShell script.
 
     When ``env`` is given, a ``$env:KEY = 'value'`` prelude (sorted keys) is
     emitted before the commands so a saved script sees the same environment the
-    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``).
+    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``). ``env_unset`` names
+    variables to remove (``Remove-Item Env:KEY``) so an inherited stale value
+    can't leak into the run.
     """
     lines: list[str] = []
     if header:
@@ -121,13 +140,16 @@ def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | N
     # throw in PowerShell anyway; this also covers any cmdlet errors.)
     lines.append("$ErrorActionPreference = 'Continue'")
     lines.append("")
-    if env:
-        for key in sorted(env):
+    if env or env_unset:
+        for key in sorted(env or {}):
             if not _ENV_KEY_RE.match(key):
                 # A key with shell-active characters would inject script syntax
                 # into the prelude; drop it rather than emit executable garbage.
                 continue
             lines.append(f"$env:{key} = {_ps_quote(env[key])}")
+        for key in sorted(env_unset or []):
+            if _ENV_KEY_RE.match(key):
+                lines.append(f"Remove-Item -Path Env:{key} -ErrorAction SilentlyContinue")
         lines.append("")
     total = len(commands)
     multi = total > 1
@@ -150,8 +172,15 @@ def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | N
         # $? is the reliable signal.
         lines.append("$_benchSucceeded = $?")
         if multi:
+            # Split launch failure from a nonzero exit code: on a launch failure
+            # $LASTEXITCODE is stale (could be 0 from a prior command), so don't
+            # print it — report the launch error distinctly.
             lines.append(
-                f"if (-not $_benchSucceeded -or $LASTEXITCODE -ne 0) {{ $_benchRc = 1; "
+                f"if (-not $_benchSucceeded) {{ $_benchRc = 1; "
+                f'Write-Host "== benchmark {i}/{total} FAILED (launch error) ==" }}'
+            )
+            lines.append(
+                f"elseif ($LASTEXITCODE -ne 0) {{ $_benchRc = 1; "
                 f'Write-Host "== benchmark {i}/{total} FAILED (exit $LASTEXITCODE) ==" }}'
             )
         else:
@@ -166,9 +195,16 @@ def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | N
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def render(commands: list[Command], fmt: str, *, header: str = "", env: dict[str, str] | None = None) -> str:
+def render(
+    commands: list[Command],
+    fmt: str,
+    *,
+    header: str = "",
+    env: dict[str, str] | None = None,
+    env_unset: list[str] | None = None,
+) -> str:
     if fmt == "sh":
-        return to_sh(commands, header=header, env=env)
+        return to_sh(commands, header=header, env=env, env_unset=env_unset)
     if fmt == "ps1":
-        return to_ps1(commands, header=header, env=env)
+        return to_ps1(commands, header=header, env=env, env_unset=env_unset)
     raise ValueError(f"unknown script format {fmt!r}")

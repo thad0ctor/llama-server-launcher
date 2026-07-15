@@ -531,10 +531,19 @@ def _extra_tokens(extra_args: str | list[str] | None) -> list[str]:
         if not text:
             continue
         try:
-            # posix=False on Windows so a backslash path in an Extra-args row
-            # (e.g. ``--lora C:\models\a.gguf``) survives instead of having its
-            # backslashes eaten. Mirrors modules/build/cmake_flags.py.
-            tokens.extend(shlex.split(text, posix=(os.name != "nt")))
+            if os.name == "nt":
+                # posix=False keeps a backslash path (e.g. ``C:\models\a.gguf``)
+                # intact instead of eating the backslashes — but it also RETAINS
+                # the grouping quotes around a spaced path (``"C:\a b.gguf"`` ->
+                # ``'"C:\\a b.gguf"'``), which would reach the tool as a literal
+                # quoted filename. Strip a single matched surrounding quote pair
+                # from each token to recover the intended value.
+                for tok in shlex.split(text, posix=False):
+                    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in ('"', "'"):
+                        tok = tok[1:-1]
+                    tokens.append(tok)
+            else:
+                tokens.extend(shlex.split(text, posix=True))
         except ValueError as exc:
             # e.g. an unmatched quote in an Extra-args row. Surface it as a
             # SweepError so the UI's validation path reports it instead of
