@@ -1236,6 +1236,7 @@ class BenchmarkTab:
         except Exception:
             initial = ""
         path = filedialog.askopenfilename(
+            parent=self.root,
             title="Select model",
             initialdir=initial or str(Path.home()),
             filetypes=[("GGUF models", "*.gguf"), ("All files", "*.*")],
@@ -1585,6 +1586,7 @@ class BenchmarkTab:
             return
         _exporter, ext = results.EXPORTERS[fmt]
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title=f"Export results as {fmt}",
             defaultextension=ext,
             filetypes=[(fmt.upper(), f"*{ext}"), ("All files", "*.*")],
@@ -1636,6 +1638,7 @@ class BenchmarkTab:
                 return
         ext = ".sh" if fmt == "sh" else ".ps1"
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title=f"Save benchmark {fmt} script",
             defaultextension=ext,
             filetypes=[(fmt, f"*{ext}"), ("All files", "*.*")],
