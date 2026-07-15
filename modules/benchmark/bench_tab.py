@@ -120,7 +120,9 @@ class BenchmarkTab:
         except Exception:
             pass
         self.output_format_var = tk.StringVar(value="json")
-        self.repetitions_var = tk.StringVar(value="")
+        # Default to llama-bench's own default of 5 so the sample count is
+        # visible; blank also means "tool default (5)".
+        self.repetitions_var = tk.StringVar(value="5")
         self.config_name_var = tk.StringVar()
         self.autoscroll_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Idle.")
@@ -751,14 +753,16 @@ class BenchmarkTab:
                 except Exception:
                     pass
                 if self._repetitions_note is not None:
-                    self._repetitions_note.configure(text="(n/a for llama-sweep-bench)")
+                    self._repetitions_note.configure(text="(n/a — llama-sweep-bench samples each context depth once)")
             else:
                 try:
                     self._repetitions_entry.configure(state="normal")
                 except Exception:
                     pass
                 if self._repetitions_note is not None:
-                    self._repetitions_note.configure(text="")
+                    self._repetitions_note.configure(
+                        text="(each row runs this many times, averaged; t/s_stddev shows the spread. default 5)"
+                    )
         # Tool availability note
         note = ""
         if build is not None and tool not in build.available_tools():
