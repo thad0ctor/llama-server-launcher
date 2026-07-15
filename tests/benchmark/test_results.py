@@ -117,6 +117,26 @@ def test_parse_sweep_bench_table_with_combo():
     assert rows[1].get("S_TG t/s") == "60.00"
 
 
+def test_parse_sweep_bench_whitespace_table():
+    # Some ik_llama builds print a WHITESPACE-delimited table (no pipes). It must
+    # parse into the same shape as the markdown table, splitting on 2+ spaces so
+    # multi-word columns like "S_PP t/s" stay intact, and prefixing the combo.
+    table = (
+        "loading model ...\n"
+        "   PP    TG   N_KV    S_PP t/s    S_TG t/s\n"
+        "  ----  ----  ----   --------    --------\n"
+        "  512   128      0     1024.00       64.00\n"
+        "  512   128    512      980.00       60.00\n"
+        "done\n"
+    )
+    rows = results.parse_sweep_bench_table(table, {"n_gpu_layers": "10"})
+    assert len(rows) == 2
+    assert rows[0].get("[n_gpu_layers]") == "10"
+    assert rows[0].get("N_KV") == "0"
+    assert rows[0].get("S_PP t/s") == "1024.00"
+    assert rows[1].get("S_TG t/s") == "60.00"
+
+
 def test_collect_columns_union_first_seen():
     rows = [
         results.ResultRow(columns={"a": "1", "b": "2"}),

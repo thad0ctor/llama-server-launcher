@@ -183,18 +183,31 @@ def _order_columns(cols: dict[str, str], preferred: tuple[str, ...]) -> dict[str
 
 
 def parse_sweep_bench_table(stdout: str, combo: dict[str, str] | None = None) -> list[ResultRow]:
-    """Parse llama-sweep-bench's pipe-delimited table into rows.
+    """Parse llama-sweep-bench's result table into rows.
+
+    Two on-disk shapes exist: a markdown pipe-delimited table (``| PP | TG |
+    ...``, most builds) and a plain WHITESPACE-delimited one (``PP  TG  N_KV
+    S_PP t/s ...`` with no pipes, printed by some ik_llama builds). This
+    dispatches on whether any line is pipe-delimited and parses accordingly.
 
     Each swept-parameter value in ``combo`` is prefixed as its own column so
     rows from different combinations remain distinguishable after merging.
     Lines that aren't table rows are ignored; the header row supplies column
-    names and the ``|---|`` separator is skipped.
+    names and dashed separator rows are skipped.
     """
     combo = combo or {}
     prefix_cols = {f"[{k}]": v for k, v in combo.items()}
+    lines = (stdout or "").splitlines()
+    if any(line.strip().startswith("|") for line in lines):
+        return _parse_pipe_sweep_table(lines, prefix_cols)
+    return _parse_ws_sweep_table(lines, prefix_cols)
+
+
+def _parse_pipe_sweep_table(lines: list[str], prefix_cols: dict[str, str]) -> list[ResultRow]:
+    """Parse the markdown pipe-delimited sweep-bench table."""
     rows: list[ResultRow] = []
     header: list[str] | None = None
-    for line in (stdout or "").splitlines():
+    for line in lines:
         stripped = line.strip()
         if not stripped.startswith("|"):
             continue
@@ -206,6 +219,52 @@ def parse_sweep_bench_table(stdout: str, combo: dict[str, str] | None = None) ->
             continue
         if header is None:
             header = cells
+            continue
+        cols: dict[str, str] = dict(prefix_cols)
+        for name, value in zip(header, cells, strict=False):
+            if name:
+                cols[name] = value
+        rows.append(ResultRow(columns=cols))
+    return rows
+
+
+def _ws_split(text: str) -> list[str]:
+    """Split a whitespace-delimited table row into cells.
+
+    Column names like ``S_PP t/s`` contain a single internal space, so split on
+    runs of 2+ spaces to keep them intact; fall back to a plain whitespace split
+    when that yields a single column (a run of single-space-separated cells).
+    """
+    parts = re.split(r"\s{2,}", text.strip())
+    if len(parts) <= 1:
+        parts = text.split()
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _parse_ws_sweep_table(lines: list[str], prefix_cols: dict[str, str]) -> list[ResultRow]:
+    """Parse the whitespace-delimited sweep-bench table.
+
+    The header is the row naming ``PP``/``TG``/``N_KV`` (case-insensitive);
+    dashed separator rows and any trailing log lines (whose column count differs
+    from the header) are ignored.
+    """
+    rows: list[ResultRow] = []
+    header: list[str] | None = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if set(stripped) <= set("-: "):
+            # Dashed separator row like "----  ----  ----".
+            continue
+        cells = _ws_split(stripped)
+        if header is None:
+            upper = {c.upper() for c in cells}
+            if {"PP", "TG", "N_KV"} <= upper:
+                header = cells
+            continue
+        if len(cells) != len(header):
+            # A trailing log line, not a data row.
             continue
         cols: dict[str, str] = dict(prefix_cols)
         for name, value in zip(header, cells, strict=False):

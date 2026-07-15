@@ -73,6 +73,23 @@ def test_malformed_extra_args_raises_sweep_error():
         llama_bench_command("/b/llama-bench", "/m.gguf", [Axis("threads", ["8"])], extra_args='--numa "distribute')
 
 
+def test_extra_args_simple_roundtrip():
+    # A simple extra-args row round-trips into command tokens on this platform.
+    axes = [Axis("threads", ["8"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, extra_args="--numa distribute")
+    assert cmd[-2:] == ["--numa", "distribute"]
+
+
+def test_extra_args_shlex_posix_flag_preserves_backslashes():
+    # _extra_tokens splits with posix=(os.name != "nt"); prove the semantics
+    # directly (os.name is fixed in CI): posix=True eats backslashes so a Windows
+    # path collapses, posix=False keeps them so the path survives.
+    import shlex
+
+    assert shlex.split(r"--lora C:\models\a.gguf", posix=True) == ["--lora", "C:modelsa.gguf"]
+    assert shlex.split(r"--lora C:\models\a.gguf", posix=False) == ["--lora", r"C:\models\a.gguf"]
+
+
 def test_parse_list_int_normalises_and_dedupes():
     assert parse_list("0, 08, 20, 20", "int") == ["0", "8", "20"]
 
@@ -384,6 +401,41 @@ def test_ser_vec_not_device_separated_on_llama_bench():
     cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
     idx = cmd.index("-ser")
     assert cmd[idx + 1] == "7,1"
+
+
+def test_llama_bench_rejects_multi_value_ser_vec():
+    # Multiple -ser vector values can't be comma-swept on llama-bench: its own
+    # comma matrix-splitter would read "-ser 7,1,8,0" as four scalars, losing the
+    # "i,f" pair boundaries. It must raise rather than emit an ambiguous command.
+    axes = [Axis("ser", ["7,1", "8,0"])]
+    with pytest.raises(SweepError):
+        llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+
+
+def test_llama_bench_single_ser_vec_passes_through():
+    # A single -ser value is unambiguous and parses on the real binary.
+    axes = [Axis("ser", ["7,1"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    idx = cmd.index("-ser")
+    assert cmd[idx + 1] == "7,1"
+
+
+def test_sweep_bench_multi_value_ser_yields_separate_commands():
+    # sweep-bench runs one process per value, so several -ser values are fine.
+    axes = [Axis("ser", ["7,1", "8,0"])]
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    assert {combo["ser"] for _, combo in pairs} == {"7,1", "8,0"}
+
+
+def test_llama_bench_multi_value_tensor_split_still_renders():
+    # Regression: tensor_split is the ONE KIND_VEC lever whose commas ARE device
+    # separators, so multiple values are legal (rewritten to '/') and must NOT
+    # trip the multi-value guard above.
+    axes = [Axis("tensor_split", ["0.6,0.4", "0.7,0.3"])]
+    cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes)
+    idx = cmd.index("-ts")
+    assert cmd[idx + 1] == "0.6/0.4,0.7/0.3"
 
 
 def test_ot_vec_pattern_passes_through_on_llama_bench():

@@ -12,6 +12,7 @@ only cheap Tk vars are created in ``__init__``.
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 import traceback
@@ -465,10 +466,27 @@ class BenchmarkTab:
             self._build_combo.configure(values=self._build_labels)
             if self._build_labels:
                 if self.build_var.get() not in self._build_labels:
-                    self.build_var.set(self._build_labels[0])
+                    self.build_var.set(self._default_build_label())
             else:
                 self.build_var.set("")
         self._on_build_changed()
+
+    def _default_build_label(self) -> str:
+        """Label of the build to auto-select when the current selection is empty
+        or stale.
+
+        Prefer a discovered build whose backend matches the current backend
+        selection: _on_build_changed() mirrors the chosen build's backend into
+        launcher.backend_selection, so defaulting to the FIRST discovered build
+        (discovery probes llama.cpp before ik_llama) would otherwise flip an
+        ik_llama launcher back to llama.cpp just by opening the tab. Fall back to
+        the first label when no build matches.
+        """
+        backend = self._current_backend()
+        for b in self._builds:
+            if getattr(b, "backend", "") == backend:
+                return b.label
+        return self._build_labels[0] if self._build_labels else ""
 
     def _selected_build(self):
         label = self.build_var.get()
@@ -920,14 +938,24 @@ class BenchmarkTab:
             return "llama.cpp"
 
     def _repetitions(self) -> int | None:
+        """Parse the Repetitions (-r) field.
+
+        Returns None for an empty field (tool default), but raises SweepError on
+        a NON-EMPTY malformed value so a typo (``five``) or a non-positive count
+        surfaces as a validation error rather than silently omitting ``-r`` while
+        the UI still shows the user's value. refresh_preview/start/_save_script
+        all funnel this through their SweepError handling.
+        """
         raw = self.repetitions_var.get().strip()
         if not raw:
             return None
         try:
             n = int(raw)
-            return n if n > 0 else None
-        except ValueError:
-            return None
+        except ValueError as exc:
+            raise SweepError(f"Repetitions (-r) must be a positive integer, got {raw!r}.") from exc
+        if n <= 0:
+            raise SweepError(f"Repetitions (-r) must be a positive integer, got {raw!r}.")
+        return n
 
     def _build_command_list(self) -> tuple[list[list[str]], list[dict]]:
         """Return (commands, combos) for the current settings, exe-agnostic
@@ -1113,11 +1141,17 @@ class BenchmarkTab:
         """
         env: dict[str, str] = {}
         # 1) Enabled environment variables (same accessor the server launch uses).
+        #    Drop any illegal name (e.g. "BAD=NAME", "BAD;touch x"): the server
+        #    paths filter these with LaunchManager._is_valid_env_var_name, and an
+        #    unchecked name would break subprocess env or inject into a saved
+        #    script. The GPU keys below are fixed identifiers and always pass.
         try:
             manager = getattr(self.launcher, "env_vars_manager", None)
             getter = getattr(manager, "get_enabled_env_vars", None)
             if getter is not None:
                 for key, value in (getter() or {}).items():
+                    if not self._is_valid_env_var_name(key):
+                        continue
                     env[str(key)] = str(value)
         except Exception:
             pass
@@ -1129,9 +1163,33 @@ class BenchmarkTab:
                 action, value = resolver()
                 if action == "export" and value not in (None, ""):
                     env["CUDA_VISIBLE_DEVICES"] = str(value)
+                    # Pin the device ordering the server launch + scripts force
+                    # (system.py). Without it a saved script run in a fresh shell
+                    # could map CUDA_VISIBLE_DEVICES indices to different physical
+                    # cards. Only set alongside a concrete visibility override, so
+                    # unset/skip leaves it unset (matching server behaviour).
+                    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         except Exception:
             pass
         return env
+
+    _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    def _is_valid_env_var_name(self, name) -> bool:
+        """Conservative env-var name check, mirroring the server launch path.
+
+        Prefer the launcher's own validator
+        (``LaunchManager._is_valid_env_var_name``) so both paths stay in lockstep;
+        fall back to the same regex when the launcher doesn't expose it.
+        """
+        launch_manager = getattr(self.launcher, "launch_manager", None)
+        validator = getattr(launch_manager, "_is_valid_env_var_name", None)
+        if validator is not None:
+            try:
+                return bool(validator(name))
+            except Exception:
+                pass
+        return isinstance(name, str) and bool(self._ENV_VAR_NAME_RE.match(name))
 
     def start(self) -> None:
         if self.runner.is_running:
@@ -1570,8 +1628,15 @@ class BenchmarkTab:
 
         # Pick a build that actually offers the saved tool so the trailing
         # _on_build_changed() doesn't silently revert the tool. Prefer the
-        # config's own build_root; otherwise any build providing the tool.
+        # config's own build_root; then a build whose backend matches cfg.backend
+        # (so _on_build_changed doesn't flip backend away from the config's and
+        # hide the ik-only axes it restores); otherwise any build providing it.
         target = next((b for b in self._builds if _root_matches(b) and _offers_tool(b)), None)
+        if target is None:
+            target = next(
+                (b for b in self._builds if _offers_tool(b) and getattr(b, "backend", "") == cfg.backend),
+                None,
+            )
         if target is None:
             target = next((b for b in self._builds if _offers_tool(b)), None)
         if target is not None:

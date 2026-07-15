@@ -52,6 +52,10 @@ def test_ps1_continues_but_exits_nonzero_on_failure():
     assert "$ErrorActionPreference = 'Continue'" in ps
     assert "'Stop'" not in ps
     assert "$LASTEXITCODE" in ps
+    # Each command's success is captured via $? (a native exe that fails to
+    # launch leaves $LASTEXITCODE stale), and the failure check honours both.
+    assert "$_benchSucceeded = $?" in ps
+    assert "if (-not $_benchSucceeded -or $LASTEXITCODE -ne 0)" in ps
     # Failures are recorded and the script exits nonzero at the end, but each
     # combo still runs (continue, not fail-fast).
     assert "$_benchRc = 1" in ps
@@ -59,9 +63,15 @@ def test_ps1_continues_but_exits_nonzero_on_failure():
     assert "exit $_benchRc" in ps
 
 
-def test_ps1_single_command_no_exit():
+def test_ps1_single_command_propagates_failure():
+    # A single-command -File script must reflect the native command's failure in
+    # its own exit status (otherwise a failing exe reports success). It captures
+    # $? and exits 1 when the command never ran, else propagates $LASTEXITCODE.
     ps = bench_script.to_ps1([["/b/x.exe", "-c", "4096"]])
-    assert "exit" not in ps
+    assert "$_benchSucceeded = $?" in ps
+    assert "if (-not $_benchSucceeded) { exit 1 }" in ps
+    assert "exit $LASTEXITCODE" in ps
+    # No aggregate rc bookkeeping for a single command.
     assert "$_benchRc" not in ps
 
 
@@ -110,6 +120,18 @@ def test_no_env_prelude_when_none_or_empty():
     assert "export " not in bench_script.to_sh([["/b/x", "-c", "1"]], env={})
     assert "$env:" not in bench_script.to_ps1([["/b/x.exe"]], env=None)
     assert "$env:" not in bench_script.to_ps1([["/b/x.exe"]], env={})
+
+
+def test_env_prelude_skips_shell_active_keys():
+    # A KEY with shell-active characters would inject script syntax into the
+    # prelude; it must be dropped (valid keys still emitted) for both formats.
+    env = {"CUDA_VISIBLE_DEVICES": "0", "BAD;touch": "x"}
+    sh = bench_script.to_sh([["/b/x"]], env=env)
+    assert "export CUDA_VISIBLE_DEVICES='0'" in sh
+    assert "BAD" not in sh
+    ps = bench_script.to_ps1([["/b/x.exe"]], env=env)
+    assert "$env:CUDA_VISIBLE_DEVICES = '0'" in ps
+    assert "BAD" not in ps
 
 
 def test_render_forwards_env():

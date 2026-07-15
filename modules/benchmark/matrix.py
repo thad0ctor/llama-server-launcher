@@ -20,6 +20,7 @@ headless.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from .detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
@@ -530,7 +531,10 @@ def _extra_tokens(extra_args: str | list[str] | None) -> list[str]:
         if not text:
             continue
         try:
-            tokens.extend(shlex.split(text))
+            # posix=False on Windows so a backslash path in an Extra-args row
+            # (e.g. ``--lora C:\models\a.gguf``) survives instead of having its
+            # backslashes eaten. Mirrors modules/build/cmake_flags.py.
+            tokens.extend(shlex.split(text, posix=(os.name != "nt")))
         except ValueError as exc:
             # e.g. an unmatched quote in an Extra-args row. Surface it as a
             # SweepError so the UI's validation path reports it instead of
@@ -606,6 +610,20 @@ def llama_bench_command(
             # levers (ik_llama's -ser "i,f" and -ot patterns) use commas/'='
             # literally, so they must pass through UNCHANGED.
             values = [_vec_for_llama_bench(v) for v in axis.values]
+        elif axis.kind == KIND_VEC:
+            # Non-tensor-split vector levers (ik_llama's -ser "i,f", -ot patterns)
+            # keep their commas LITERAL. Comma-joining several swept values here
+            # would collide with llama-bench's own comma matrix-splitter and lose
+            # the pair boundaries (e.g. -ser ["7,1","8,0"] -> "-ser 7,1,8,0",
+            # read as four scalars). A single value is unambiguous and parses on
+            # the real binary; more than one simply can't be expressed here.
+            if len(axis.values) > 1:
+                raise SweepError(
+                    f"cannot sweep multiple {axis.flag!r} vector values on llama-bench "
+                    f"(its commas collide with the matrix separator); use a single value, "
+                    f"or llama-sweep-bench"
+                )
+            values = axis.values
         else:
             values = axis.values
         # Custom flags render as a native comma-list too; they only sweep on

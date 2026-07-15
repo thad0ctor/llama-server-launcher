@@ -14,9 +14,19 @@ model path can't be interpreted before the native exe sees them.
 
 from __future__ import annotations
 
+import re
 import shlex
 
 Command = list[str]
+
+# A valid POSIX/PowerShell environment-variable name. An env KEY is emitted
+# verbatim into the prelude (``export KEY=...`` / ``$env:KEY = ...``), so a key
+# containing whitespace, newlines, ``;`` or ``$(...)`` would become executable
+# script syntax rather than an assignment. Keys that don't match are dropped
+# from the prelude (values are always quoted); the saved script is still
+# produced. The source that builds ``env`` also filters, so this is defence in
+# depth.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _sh_quote(token: str) -> str:
@@ -58,6 +68,10 @@ def to_sh(commands: list[Command], *, header: str = "", env: dict[str, str] | No
     lines.append("")
     if env:
         for key in sorted(env):
+            if not _ENV_KEY_RE.match(key):
+                # A key with shell-active characters would inject script syntax
+                # into the prelude; drop it rather than emit executable garbage.
+                continue
             lines.append(f"export {key}={_sh_env_quote(env[key])}")
         lines.append("")
     total = len(commands)
@@ -109,6 +123,10 @@ def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | N
     lines.append("")
     if env:
         for key in sorted(env):
+            if not _ENV_KEY_RE.match(key):
+                # A key with shell-active characters would inject script syntax
+                # into the prelude; drop it rather than emit executable garbage.
+                continue
             lines.append(f"$env:{key} = {_ps_quote(env[key])}")
         lines.append("")
     total = len(commands)
@@ -127,11 +145,20 @@ def to_ps1(commands: list[Command], *, header: str = "", env: dict[str, str] | N
         parts = ["& " + _ps_quote(cmd[0])]
         parts += [_ps_quote(tok) for tok in cmd[1:]]
         lines.append(" ".join(parts))
+        # Capture $? (the last command's success) BEFORE anything else can reset
+        # it: a native exe that fails to launch leaves $LASTEXITCODE stale, so
+        # $? is the reliable signal.
+        lines.append("$_benchSucceeded = $?")
         if multi:
             lines.append(
-                f'if ($LASTEXITCODE -ne 0) {{ $_benchRc = 1; Write-Host "== benchmark {i}/{total} '
-                f'FAILED (exit $LASTEXITCODE) ==" }}'
+                f"if (-not $_benchSucceeded -or $LASTEXITCODE -ne 0) {{ $_benchRc = 1; "
+                f'Write-Host "== benchmark {i}/{total} FAILED (exit $LASTEXITCODE) ==" }}'
             )
+        else:
+            # A single command's status is the script's status. If it failed to
+            # even run ($? is false) exit nonzero; otherwise propagate its code.
+            lines.append("if (-not $_benchSucceeded) { exit 1 }")
+            lines.append("exit $LASTEXITCODE")
         lines.append("")
     if multi:
         lines.append("exit $_benchRc")

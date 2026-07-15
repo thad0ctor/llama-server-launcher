@@ -199,7 +199,9 @@ def test_gpu_env_overrides_carries_cuda_visible_devices(bench_tab):
         _resolve_cuda_visible_devices_action=lambda: ("export", "2,0,1")
     )
     env = bench_tab._plan_env()
-    assert env == {"CUDA_VISIBLE_DEVICES": "2,0,1"}
+    # CUDA_DEVICE_ORDER is pinned alongside the visibility override (see the
+    # dedicated Finding B test); the visibility value itself is the key thing.
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,0,1"
 
 
 def test_gpu_env_overrides_unset_leaves_var_unset(bench_tab):
@@ -512,6 +514,166 @@ def test_mtp_sweep_roundtrips_through_save_load(bench_tab):
     assert bench_tab.lever_vars["mtp"]["values"].get() == "0,1"
     assert bool(bench_tab.lever_vars["draft_max"]["include"].get()) is True
     assert bench_tab.lever_vars["draft_max"]["values"].get() == "4"
+
+
+def test_plan_env_filters_invalid_env_var_names(bench_tab):
+    # Finding A: an enabled env var with an illegal name (injection-y
+    # "BAD;touch x") must be dropped from the plan env — matching the server
+    # launch path (LaunchManager._is_valid_env_var_name) — while valid names
+    # pass through unchanged.
+    bench_tab.launcher.env_vars_manager = SimpleNamespace(
+        get_enabled_env_vars=lambda: {"GGML_CUDA_FORCE_MMQ": "1", "BAD;touch /tmp/x": "1"}
+    )
+    env = bench_tab._plan_env()
+    assert env == {"GGML_CUDA_FORCE_MMQ": "1"}
+
+
+def test_plan_env_pins_cuda_device_order_with_visibility(bench_tab):
+    # Finding B: a concrete CUDA_VISIBLE_DEVICES override must also pin
+    # CUDA_DEVICE_ORDER=PCI_BUS_ID (as the server launch + scripts do) so a saved
+    # script run in a fresh shell maps the indices to the same physical cards.
+    bench_tab.launcher.launch_manager = SimpleNamespace(
+        _resolve_cuda_visible_devices_action=lambda: ("export", "2,0,1")
+    )
+    env = bench_tab._plan_env()
+    assert env["CUDA_VISIBLE_DEVICES"] == "2,0,1"
+    assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+    # 'unset'/'skip' leaves visibility unset, so device order must not be pinned.
+    bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("unset", None))
+    assert "CUDA_DEVICE_ORDER" not in bench_tab._plan_env()
+
+
+def test_start_blocks_on_malformed_repetitions(bench_tab, monkeypatch, tmp_path):
+    # Finding C: a non-integer Repetitions value must surface as a validation
+    # error and never start the runner (rather than silently omitting -r while
+    # the UI still shows the typed value).
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    model = tmp_path / "m.gguf"
+    model.write_text("x")
+    bench_tab.model_var.set(str(model))
+    bench_tab.lever_vars["threads"]["include"].set(True)
+    bench_tab.lever_vars["threads"]["mode"].set("list")
+    bench_tab.lever_vars["threads"]["values"].set("8")
+    bench_tab.repetitions_var.set("five")
+
+    monkeypatch.setattr(bench_tab, "_current_exe", lambda: str(tmp_path / "llama-bench"))
+    errors = []
+    monkeypatch.setattr(bench_tab_mod.messagebox, "showerror", lambda title, msg: errors.append(msg))
+    started = {"n": 0}
+    monkeypatch.setattr(bench_tab.runner, "start", lambda plan: started.__setitem__("n", started["n"] + 1) or True)
+
+    bench_tab.start()
+
+    assert started["n"] == 0
+    assert errors and "Repetitions" in errors[0]
+
+
+def test_empty_repetitions_still_runs(bench_tab, monkeypatch, tmp_path):
+    # Finding C: an EMPTY Repetitions field means "tool default" and must not be
+    # treated as an error — the run proceeds.
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    model = tmp_path / "m.gguf"
+    model.write_text("x")
+    bench_tab.model_var.set(str(model))
+    bench_tab.lever_vars["threads"]["include"].set(True)
+    bench_tab.lever_vars["threads"]["mode"].set("list")
+    bench_tab.lever_vars["threads"]["values"].set("8")
+    bench_tab.repetitions_var.set("")
+
+    monkeypatch.setattr(bench_tab, "_current_exe", lambda: str(tmp_path / "llama-bench"))
+    monkeypatch.setattr(bench_tab, "_poll_runner", lambda: None)
+    started = {"n": 0}
+    monkeypatch.setattr(bench_tab.runner, "start", lambda plan: started.__setitem__("n", started["n"] + 1) or True)
+
+    bench_tab.start()
+
+    assert started["n"] == 1
+
+
+def test_rescan_prefers_active_backend_build(bench_tab, monkeypatch):
+    # Finding D: with builds for both backends discovered and the launcher on
+    # ik_llama, opening/rescanning must select the ik_llama build and must NOT
+    # flip the launcher back to llama.cpp (discovery probes llama.cpp first, and
+    # _on_build_changed mirrors the chosen build's backend into the launcher).
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH, BuildEntry
+
+    llama_build = BuildEntry(
+        label="llama.cpp (main)",
+        backend="llama.cpp",
+        root_dir="/lcpp",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/lcpp/llama-bench"},
+    )
+    ik_build = BuildEntry(
+        label="ik (backend dir)",
+        backend="ik_llama",
+        root_dir="/ik",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/ik/llama-bench", TOOL_SWEEP_BENCH: "/ik/llama-sweep-bench"},
+    )
+    # Discovery returns the llama.cpp build first (probes llama_cpp_dir first).
+    monkeypatch.setattr(bench_tab_mod, "discover_builds", lambda launcher: [llama_build, ik_build])
+
+    bench_tab.launcher.backend_selection.set("ik_llama")
+    assert bench_tab.backend_var.get() == "ik_llama"
+    # Stale/empty selection so the default-selection path runs.
+    bench_tab.build_var.set("")
+    bench_tab.rescan_builds()
+
+    assert bench_tab.build_var.get() == ik_build.label
+    assert bench_tab._current_backend() == "ik_llama"
+    assert bench_tab.launcher.backend_selection.get() == "ik_llama"
+
+
+def test_load_config_stale_root_prefers_saved_backend_build(bench_tab):
+    # Finding E: loading an ik_llama config whose build_root is stale must select
+    # an ik_llama build that offers the saved tool (not the llama.cpp build that
+    # also offers llama-bench), so _current_backend stays ik_llama and the ik
+    # axes the config restores are applied.
+    from modules.benchmark.bench_persistence import BenchConfig
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH, BuildEntry
+
+    llama_build = BuildEntry(
+        label="llama.cpp (main)",
+        backend="llama.cpp",
+        root_dir="/lcpp",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/lcpp/llama-bench"},
+    )
+    ik_build = BuildEntry(
+        label="ik (backend dir)",
+        backend="ik_llama",
+        root_dir="/ik",
+        source="backend",
+        tools={TOOL_LLAMA_BENCH: "/ik/llama-bench", TOOL_SWEEP_BENCH: "/ik/llama-sweep-bench"},
+    )
+    bench_tab._builds = [llama_build, ik_build]
+    bench_tab._build_labels = [llama_build.label, ik_build.label]
+    bench_tab._build_combo.configure(values=bench_tab._build_labels)
+
+    bench_tab.store.save(
+        BenchConfig(
+            name="ik-stale",
+            tool=TOOL_LLAMA_BENCH,
+            backend="ik_llama",
+            build_root="/gone",  # stale: matches no discovered build
+            model_path="/m.gguf",
+            axes={"rtr": {"enabled": True, "mode": "list", "raw": "0,1", "min": 0, "max": 0, "step": 1}},
+        )
+    )
+    bench_tab.config_name_var.set("ik-stale")
+    bench_tab._load_config()
+
+    assert bench_tab._selected_build() is ik_build
+    assert bench_tab._current_backend() == "ik_llama"
+    assert bool(bench_tab.lever_vars["rtr"]["include"].get()) is True
 
 
 def test_repetitions_field_disabled_for_sweep_bench(bench_tab):
