@@ -557,6 +557,39 @@ def test_plan_env_unset_honors_resolver_unset_action(bench_tab):
     assert bench_tab._plan_env_unset() == []
 
 
+def test_plan_env_unset_respects_explicit_cuda_env_var(bench_tab):
+    # Codex: when the resolver says "unset" BUT the Env Vars tab explicitly
+    # enables CUDA_VISIBLE_DEVICES, _plan_env carries that value and it must NOT
+    # be removed (the server would keep it), else the benchmark diverges.
+    bench_tab.launcher.launch_manager = SimpleNamespace(_resolve_cuda_visible_devices_action=lambda: ("unset", None))
+    bench_tab.launcher.env_vars_manager = SimpleNamespace(get_enabled_env_vars=lambda: {"CUDA_VISIBLE_DEVICES": "1,0"})
+    assert bench_tab._plan_env().get("CUDA_VISIBLE_DEVICES") == "1,0"
+    assert bench_tab._plan_env_unset() == []  # not removed — explicit value present
+    # Without the explicit env var, unset still applies.
+    bench_tab.launcher.env_vars_manager = SimpleNamespace(get_enabled_env_vars=lambda: {})
+    assert bench_tab._plan_env_unset() == ["CUDA_VISIBLE_DEVICES"]
+
+
+def test_save_config_rejects_malformed_range(bench_tab, monkeypatch):
+    # Codex: a malformed range value must be reported (not silently coerced to 0
+    # and stored) so a loaded config matches the UI.
+    from modules.benchmark import bench_tab as bench_tab_mod
+    from modules.benchmark.detection import TOOL_LLAMA_BENCH
+
+    bench_tab._set_tool(TOOL_LLAMA_BENCH)
+    bench_tab.lever_vars["threads"]["include"].set(True)
+    bench_tab.lever_vars["threads"]["mode"].set("range")
+    bench_tab.lever_vars["threads"]["vmin"].set("ten")  # malformed
+    bench_tab.lever_vars["threads"]["vmax"].set("24")
+    bench_tab.lever_vars["threads"]["vstep"].set("4")
+    bench_tab.config_name_var.set("cfg")
+    errors, saved = [], []
+    monkeypatch.setattr(bench_tab_mod.messagebox, "showerror", lambda t, m: errors.append(m))
+    monkeypatch.setattr(bench_tab.store, "save", lambda cfg: saved.append(cfg) or True)
+    bench_tab._save_config()
+    assert errors and saved == []  # reported, never stored
+
+
 def test_backend_switch_with_no_matching_build_keeps_choice(bench_tab, monkeypatch):
     # Codex: clicking ik_llama when ONLY a llama.cpp build is detected must keep
     # the requested backend, not revert the launcher via a stale build's mirror.

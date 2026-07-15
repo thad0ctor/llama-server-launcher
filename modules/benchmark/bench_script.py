@@ -51,16 +51,19 @@ def to_sh(
     commands: list[Command],
     *,
     header: str = "",
+    cwd: str = "",
     env: dict[str, str] | None = None,
     env_unset: list[str] | None = None,
 ) -> str:
     """Render ``commands`` as a self-contained bash script.
 
-    When ``env`` is given, an ``export KEY='value'`` prelude (sorted keys) is
-    emitted before the commands so a saved script sees the same environment the
-    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``). ``env_unset`` names
-    variables to actively ``unset`` (e.g. removing an inherited stale
-    ``CUDA_VISIBLE_DEVICES`` when the resolver asked for ``unset``).
+    ``cwd`` (if given) is entered first (``cd``), matching the in-app run which
+    executes from the bench binary's directory, so a relative path in the
+    command (e.g. ``--lora adapter.gguf``) resolves the same way. When ``env``
+    is given, an ``export KEY='value'`` prelude (sorted keys) is emitted so a
+    saved script sees the same environment the in-app run set up (e.g.
+    ``CUDA_VISIBLE_DEVICES``). ``env_unset`` names variables to actively
+    ``unset`` (e.g. removing an inherited stale ``CUDA_VISIBLE_DEVICES``).
     """
     lines: list[str] = ["#!/usr/bin/env bash"]
     if header:
@@ -73,6 +76,9 @@ def to_sh(
     # mirrors the in-app BenchRunner, which continues and reports a failed
     # count rather than fail-fast. Close stdin so no tool blocks on input.
     lines.append("exec </dev/null")
+    if cwd:
+        # Match the runner's cwd so relative paths resolve identically.
+        lines.append(f"cd -- {_sh_env_quote(cwd)} || exit 1")
     lines.append("")
     if env or env_unset:
         for key in sorted(env or {}):
@@ -118,16 +124,19 @@ def to_ps1(
     commands: list[Command],
     *,
     header: str = "",
+    cwd: str = "",
     env: dict[str, str] | None = None,
     env_unset: list[str] | None = None,
 ) -> str:
     """Render ``commands`` as a self-contained PowerShell script.
 
-    When ``env`` is given, a ``$env:KEY = 'value'`` prelude (sorted keys) is
-    emitted before the commands so a saved script sees the same environment the
-    in-app run set up (e.g. ``CUDA_VISIBLE_DEVICES``). ``env_unset`` names
-    variables to remove (``Remove-Item Env:KEY``) so an inherited stale value
-    can't leak into the run.
+    ``cwd`` (if given) is entered first (``Set-Location``), matching the in-app
+    run which executes from the bench binary's directory, so a relative path in
+    the command resolves the same way. When ``env`` is given, a
+    ``$env:KEY = 'value'`` prelude (sorted keys) is emitted so a saved script
+    sees the same environment the in-app run set up (e.g.
+    ``CUDA_VISIBLE_DEVICES``). ``env_unset`` names variables to remove
+    (``Remove-Item Env:KEY``) so an inherited stale value can't leak in.
     """
     lines: list[str] = []
     if header:
@@ -139,6 +148,9 @@ def to_ps1(
     # the matrix — mirrors the in-app BenchRunner. (Native exe failures don't
     # throw in PowerShell anyway; this also covers any cmdlet errors.)
     lines.append("$ErrorActionPreference = 'Continue'")
+    if cwd:
+        # Match the runner's cwd so relative paths resolve identically.
+        lines.append(f"Set-Location -LiteralPath {_ps_quote(cwd)}")
     lines.append("")
     if env or env_unset:
         for key in sorted(env or {}):
@@ -200,11 +212,12 @@ def render(
     fmt: str,
     *,
     header: str = "",
+    cwd: str = "",
     env: dict[str, str] | None = None,
     env_unset: list[str] | None = None,
 ) -> str:
     if fmt == "sh":
-        return to_sh(commands, header=header, env=env, env_unset=env_unset)
+        return to_sh(commands, header=header, cwd=cwd, env=env, env_unset=env_unset)
     if fmt == "ps1":
-        return to_ps1(commands, header=header, env=env, env_unset=env_unset)
+        return to_ps1(commands, header=header, cwd=cwd, env=env, env_unset=env_unset)
     raise ValueError(f"unknown script format {fmt!r}")

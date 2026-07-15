@@ -1320,14 +1320,20 @@ class BenchmarkTab:
         CUDA_VISIBLE_DEVICES" (distinct from ``skip`` = leave as-is). Without
         honoring it, a saved script run in a shell that already exports
         CUDA_VISIBLE_DEVICES would benchmark the wrong devices, and the in-app
-        child would inherit a stale filter. Returns the keys to unset.
+        child would inherit a stale filter.
+
+        Exception: if the user ALSO explicitly enabled ``CUDA_VISIBLE_DEVICES``
+        as an Env Var, ``_plan_env`` already carries that value — the server
+        launch clears the inherited value then applies enabled env vars, so the
+        explicit filter wins there. Don't unset it here in that case, or the
+        benchmark would run with different GPU visibility than the server.
         """
         try:
             launch_manager = getattr(self.launcher, "launch_manager", None)
             resolver = getattr(launch_manager, "_resolve_cuda_visible_devices_action", None)
             if resolver is not None:
                 action, _value = resolver()
-                if action == "unset":
+                if action == "unset" and "CUDA_VISIBLE_DEVICES" not in self._plan_env():
                     return ["CUDA_VISIBLE_DEVICES"]
         except Exception:
             pass
@@ -1707,12 +1713,16 @@ class BenchmarkTab:
         if not path:
             return
         header = f"Benchmark: {self.tool_var.get()} — {len(commands)} invocation(s)"
+        # Reproduce the runner's working directory (the bench binary's dir) so a
+        # relative path in the command resolves the same in the saved script.
+        exe = self._current_exe()
+        cwd = str(Path(exe).parent) if exe else ""
         try:
             # Same merged GPU + enabled-env-vars environment as the in-app run,
             # so the exported script exports CUDA_VISIBLE_DEVICES and the enabled
             # env vars the server launch would apply.
             script = bench_script.render(
-                commands, fmt, header=header, env=self._plan_env(), env_unset=self._plan_env_unset()
+                commands, fmt, header=header, cwd=cwd, env=self._plan_env(), env_unset=self._plan_env_unset()
             )
             Path(path).write_text(script, encoding="utf-8")
             if fmt == "sh":
@@ -1795,11 +1805,14 @@ class BenchmarkTab:
         if not name:
             messagebox.showerror("Save config", "Enter a name for the sweep config.")
             return
-        # _current_config() parses the Repetitions field (via _repetitions),
-        # which raises SweepError on a malformed value. Surface it as a dialog
-        # like Start/preview/script-export do, rather than letting it escape the
-        # Tk callback.
+        # Validate the sweep the same way Start/preview do BEFORE persisting, so
+        # a malformed range value (e.g. min="ten") is reported rather than
+        # silently coerced to 0 and stored — a loaded config would otherwise run
+        # a different sweep than the UI showed. _collect_axes raises SweepError
+        # on bad ranges/values; _current_config also parses Repetitions (which
+        # raises on a malformed value). Surface either as a dialog.
         try:
+            self._collect_axes()
             cfg = self._current_config(name)
         except SweepError as exc:
             messagebox.showerror("Save config", str(exc))

@@ -25,6 +25,18 @@ def test_csv_does_not_escape_negative_or_plain_numbers():
     assert parsed[1] == ["-1", "-5", "3.14", "+2"]
 
 
+def test_csv_escapes_whitespace_prefixed_formula():
+    # Spreadsheets strip leading whitespace/control chars, so "\t=CMD()" and
+    # " +SUM(1)" are still formula candidates and must be neutralised.
+    rows = [results.ResultRow(columns={"a": "\t=CMD()", "b": " +SUM(1)", "c": "-5", "d": "3.14"})]
+    parsed = list(csv.reader(io.StringIO(results.to_csv(rows))))
+    assert parsed[1][0] == "'\t=CMD()"
+    assert parsed[1][1] == "' +SUM(1)"
+    # A leading-whitespace bare number is not a formula.
+    assert parsed[1][2] == "-5"
+    assert parsed[1][3] == "3.14"
+
+
 def test_csv_still_escapes_formulas_and_nonnumeric_dash():
     rows = [results.ResultRow(columns={"a": "=CMD()", "b": "-cmd", "c": "@x", "d": "+SUM(1)"})]
     parsed = list(csv.reader(io.StringIO(results.to_csv(rows))))

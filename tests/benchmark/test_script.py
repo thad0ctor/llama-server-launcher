@@ -161,3 +161,15 @@ def test_ps1_multi_command_splits_launch_from_exit_failure():
     # A nonzero exit is a distinct, elseif branch that does print $LASTEXITCODE.
     assert "elseif ($LASTEXITCODE -ne 0)" in ps
     assert "FAILED (exit $LASTEXITCODE)" in ps
+
+
+def test_cwd_prelude_sh_and_ps1():
+    # Saved scripts must cd into the runner's working directory so relative
+    # paths (e.g. --lora adapter.gguf) resolve identically to the in-app run.
+    sh = bench_script.to_sh([["/b/x", "-m", "m"]], cwd="/opt/ik/build/bin")
+    assert "cd -- '/opt/ik/build/bin' || exit 1" in sh
+    ps = bench_script.to_ps1([["x.exe"]], cwd="C:/ik/bin")
+    assert "Set-Location -LiteralPath 'C:/ik/bin'" in ps
+    # No cd/Set-Location when cwd is empty.
+    assert "cd --" not in bench_script.to_sh([["/b/x"]])
+    assert "Set-Location" not in bench_script.to_ps1([["x.exe"]])

@@ -303,7 +303,12 @@ _NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 def _csv_safe(value: str) -> str:
     text = "" if value is None else str(value)
-    if text[:1] in _CSV_FORMULA_PREFIXES and not _NUMERIC_RE.fullmatch(text):
+    # Spreadsheets strip leading whitespace/control chars before evaluating a
+    # cell, so a value like "\t=CMD()" or " -2+3" is still a formula candidate.
+    # Test the first NON-whitespace character, and the numeric-passthrough check
+    # against the stripped value (a bare signed number is never a formula).
+    stripped = text.lstrip("\t\r\n\v\f ")
+    if stripped[:1] in _CSV_FORMULA_PREFIXES and not _NUMERIC_RE.fullmatch(stripped):
         return "'" + text
     return text
 
