@@ -90,7 +90,7 @@ LEVERS: tuple[Lever, ...] = (
         "Generation tokens (-n)",
         "-n",
         KIND_INT,
-        _BENCH_ONLY,
+        _BOTH,  # llama-bench --n-gen AND llama-sweep-bench -n (TG tokens); both take a value.
         help="Tokens generated for text-generation throughput.",
     ),
     Lever(

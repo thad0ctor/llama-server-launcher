@@ -185,6 +185,21 @@ def test_llama_bench_repetitions_and_extra():
     assert cmd[-2:] == ["--numa", "distribute"]
 
 
+def test_n_gen_applies_to_both_tools():
+    # -n (generation tokens) is a TG option on BOTH llama-bench (--n-gen) and
+    # llama-sweep-bench (-n), taking a value on each.
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    n_gen = LEVERS_BY_KEY["n_gen"]
+    assert n_gen.applies_to(TOOL_LLAMA_BENCH, "llama.cpp")
+    assert n_gen.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
+    # Renders per-combo on sweep-bench as a flag/value pair.
+    pairs = sweep_bench_commands("/b/llama-sweep-bench", "/m.gguf", [Axis("n_gen", ["64", "128"])])
+    assert len(pairs) == 2
+    for cmd, combo in pairs:
+        assert cmd[cmd.index("-n") + 1] == combo["n_gen"]
+
+
 def test_llama_bench_ignores_sweep_only_lever():
     # ctx_size (-c) is sweep-bench-only; llama-bench must skip it.
     axes = [Axis("ctx_size", ["4096"]), Axis("threads", ["8"])]
