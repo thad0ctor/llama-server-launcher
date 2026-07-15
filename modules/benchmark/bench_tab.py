@@ -110,6 +110,15 @@ class BenchmarkTab:
         self.tool_var = tk.StringVar(value=TOOL_LLAMA_BENCH)
         self._tool_display_var = tk.StringVar(value=_TOOL_LABELS[TOOL_LLAMA_BENCH])
         self.model_var = tk.StringVar(value=self._launcher_model_path())
+        # Keep the benchmark model defaulted to — and following — the Main tab's
+        # selection: seeded above, then a trace mirrors any later Main-tab change
+        # (picking a new model there updates this field). The Browse button still
+        # lets you point at a different model for a one-off run; the next Main-tab
+        # selection re-syncs. One-way (Main -> Benchmark), so no feedback loop.
+        try:
+            self.launcher.model_path.trace_add("write", self._on_launcher_model_changed)
+        except Exception:
+            pass
         self.output_format_var = tk.StringVar(value="json")
         self.repetitions_var = tk.StringVar(value="")
         self.config_name_var = tk.StringVar()
@@ -162,6 +171,22 @@ class BenchmarkTab:
             return self.launcher.model_path.get()
         except Exception:
             return ""
+
+    def _on_launcher_model_changed(self, *_args) -> None:
+        """Mirror a Main-tab model change into the benchmark model field.
+
+        Only a non-empty new selection overwrites the field (clearing the Main
+        model shouldn't wipe a benchmark choice), and only when it actually
+        differs. Refreshes the preview if the UI is built.
+        """
+        new_model = self._launcher_model_path()
+        if not new_model or new_model == self.model_var.get():
+            return
+        self.model_var.set(new_model)
+        try:
+            self.refresh_preview()
+        except Exception:
+            pass
 
     def register_with_notebook(self, notebook, tab_text: str) -> None:
         self._notebook = notebook

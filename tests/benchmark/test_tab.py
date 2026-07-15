@@ -583,6 +583,18 @@ def test_backend_switch_with_no_matching_build_keeps_choice(bench_tab, monkeypat
     assert bench_tab.launcher.backend_selection.get() == "ik_llama"
 
 
+def test_model_follows_main_tab_selection(bench_tab):
+    # The benchmark model field defaults to and follows the Main tab's model_path.
+    bench_tab.launcher.model_path.set("/models/first.gguf")
+    assert bench_tab.model_var.get() == "/models/first.gguf"
+    # Picking a new model on the Main tab updates the benchmark field.
+    bench_tab.launcher.model_path.set("/models/second.gguf")
+    assert bench_tab.model_var.get() == "/models/second.gguf"
+    # Clearing the Main model does NOT wipe the benchmark field.
+    bench_tab.launcher.model_path.set("")
+    assert bench_tab.model_var.get() == "/models/second.gguf"
+
+
 def test_stale_repetitions_do_not_block_sweep_bench(bench_tab):
     from modules.benchmark.detection import TOOL_SWEEP_BENCH
 
