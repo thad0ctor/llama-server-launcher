@@ -447,8 +447,17 @@ class BenchmarkTab:
 
     def _build_preview_section(self, parent) -> None:
         sec = self._section(parent, "Command preview")
-        self._preview = tk.Text(sec, height=6, wrap="none")
-        self._preview.pack(fill="x", padx=6, pady=3)
+        box = ttk.Frame(sec)
+        box.pack(fill="both", expand=True, padx=6, pady=3)
+        self._preview = tk.Text(box, height=3, wrap="none")
+        yscroll = ttk.Scrollbar(box, orient="vertical", command=self._preview.yview)
+        xscroll = ttk.Scrollbar(box, orient="horizontal", command=self._preview.xview)
+        self._preview.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self._preview.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
         self._preview.configure(state="disabled")
         row = ttk.Frame(sec)
         row.pack(fill="x", padx=6, pady=3)
@@ -468,8 +477,15 @@ class BenchmarkTab:
         ttk.Checkbutton(row, text="Auto-scroll", variable=self.autoscroll_var).pack(side="left", padx=8)
         ttk.Label(row, textvariable=self.status_var, foreground="#333").pack(side="left", padx=8)
 
-        self._console = tk.Text(sec, height=12, wrap="word")
-        self._console.pack(fill="both", expand=True, padx=6, pady=3)
+        box = ttk.Frame(sec)
+        box.pack(fill="both", expand=True, padx=6, pady=3)
+        self._console = tk.Text(box, height=6, wrap="word")
+        cscroll = ttk.Scrollbar(box, orient="vertical", command=self._console.yview)
+        self._console.configure(yscrollcommand=cscroll.set)
+        self._console.grid(row=0, column=0, sticky="nsew")
+        cscroll.grid(row=0, column=1, sticky="ns")
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
         self._console.tag_configure("stage", foreground="#1a7f37")
         self._console.tag_configure("error", foreground="#cf222e")
         self._console.tag_configure("result", foreground="#0969da")
@@ -477,8 +493,19 @@ class BenchmarkTab:
 
     def _build_results_section(self, parent) -> None:
         sec = self._section(parent, "Results")
-        self._results_tree = ttk.Treeview(sec, show="headings", height=8)
-        self._results_tree.pack(fill="both", expand=True, padx=6, pady=3)
+        box = ttk.Frame(sec)
+        box.pack(fill="both", expand=True, padx=6, pady=3)
+        # Taller grid with BOTH scrollbars: sweeps can have many rows and many
+        # wide columns, so vertical + horizontal scrolling is needed.
+        self._results_tree = ttk.Treeview(box, show="headings", height=16)
+        yscroll = ttk.Scrollbar(box, orient="vertical", command=self._results_tree.yview)
+        xscroll = ttk.Scrollbar(box, orient="horizontal", command=self._results_tree.xview)
+        self._results_tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self._results_tree.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
         row = ttk.Frame(sec)
         row.pack(fill="x", padx=6, pady=3)
         ttk.Button(row, text="Export CSV…", command=lambda: self._export_results("csv")).pack(side="left")
@@ -1536,8 +1563,14 @@ class BenchmarkTab:
         cols = results.collect_columns(self._result_rows)
         tree.configure(columns=cols)
         for c in cols:
+            # Size each column to the widest of its header and its cell values so
+            # text isn't clipped; cap generously and don't stretch, so the
+            # horizontal scrollbar reaches anything wider than the viewport.
+            content_len = max((len(row.get(c)) for row in self._result_rows), default=0)
+            chars = max(len(str(c)), content_len)
+            width = max(64, min(420, chars * 8 + 18))
             tree.heading(c, text=c)
-            tree.column(c, width=max(60, min(200, len(c) * 10)), anchor="w", stretch=False)
+            tree.column(c, width=width, minwidth=48, anchor="w", stretch=False)
         tree.delete(*tree.get_children())
         for row in self._result_rows:
             tree.insert("", "end", values=[row.get(c) for c in cols])
