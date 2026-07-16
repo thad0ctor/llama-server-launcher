@@ -203,7 +203,7 @@ jobs:
           fi
 
       - name: Audit launcher flags against latest ik_llama llama-server --help
-        run: python scripts/check_llama_cpp_args.py --backend ik_llama --binary "$IK_LLAMA_SERVER"
+        run: python scripts/check_llama_cpp_args.py --backend ik_llama --binary "$IK_LLAMA_SERVER" --upstream-source-dir ik_llama.cpp
 
       - name: Upload ik_llama compatibility inputs
         if: always()

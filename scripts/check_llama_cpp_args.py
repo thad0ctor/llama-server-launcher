@@ -42,6 +42,7 @@ class BackendSpec:
     name: str
     flag_inputs: dict[str, FlagInput]
     known_non_backend_flags: frozenset[str]
+    help_hidden_flags: frozenset[str] = frozenset()
 
 
 # Flags emitted by the launcher when the active backend is llama.cpp.
@@ -247,6 +248,11 @@ IK_LLAMA_FLAG_INPUTS = {
 IK_LLAMA_FLAGS = frozenset(IK_LLAMA_FLAG_INPUTS)
 
 
+# ik_llama hides some GPU-only flags from --help when compiled without GPU
+# offload, even though the parser still accepts them in GPU-enabled builds.
+IK_LLAMA_HELP_HIDDEN_FLAGS = frozenset({"--tensor-split"})
+
+
 # Option tokens present in the same emission modules but intentionally excluded
 # from llama.cpp upstream comparison.
 SOURCE_KNOWN_NON_LLAMA_CPP_FLAGS = frozenset(
@@ -376,7 +382,12 @@ SOURCE_KNOWN_NON_IK_LLAMA_FLAGS = frozenset(
 
 BACKENDS = {
     "llama.cpp": BackendSpec("llama.cpp", LLAMA_CPP_FLAG_INPUTS, SOURCE_KNOWN_NON_LLAMA_CPP_FLAGS),
-    "ik_llama": BackendSpec("ik_llama", IK_LLAMA_FLAG_INPUTS, SOURCE_KNOWN_NON_IK_LLAMA_FLAGS),
+    "ik_llama": BackendSpec(
+        "ik_llama",
+        IK_LLAMA_FLAG_INPUTS,
+        SOURCE_KNOWN_NON_IK_LLAMA_FLAGS,
+        IK_LLAMA_HELP_HIDDEN_FLAGS,
+    ),
 }
 
 
@@ -463,6 +474,26 @@ def extract_source_flags(paths: list[Path]) -> set[str]:
             elif isinstance(node, ast.For):
                 flags.update(_extract_for_loop_flag_values(node))
     return flags
+
+
+def extract_text_flags(paths: list[Path]) -> set[str]:
+    """Extract option-looking tokens from arbitrary upstream source text."""
+    flags: set[str] = set()
+    for path in paths:
+        flags.update(extract_flags(path.read_text(encoding="utf-8", errors="ignore")))
+    return flags
+
+
+def upstream_source_files(paths: list[Path]) -> list[Path]:
+    """Expand upstream source files or directories for hidden-flag checks."""
+    files: list[Path] = []
+    suffixes = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+    for path in paths:
+        if path.is_dir():
+            files.extend(candidate for candidate in path.rglob("*") if candidate.suffix in suffixes)
+        else:
+            files.append(path)
+    return files
 
 
 def validate_flag_input_manifest(
@@ -628,6 +659,8 @@ def audit(
     flag_inputs: dict[str, FlagInput] = LLAMA_CPP_FLAG_INPUTS,
     backend_name: str = "llama.cpp",
     probe_binary: Path | None = None,
+    help_hidden_flags: set[str] | frozenset[str] = frozenset(),
+    upstream_source_paths: list[Path] | None = None,
 ) -> list[str]:
     """Return human-readable audit failures."""
     failures: list[str] = []
@@ -639,6 +672,10 @@ def audit(
         missing_upstream = {
             flag for flag in missing_upstream if not binary_accepts_flag(probe_binary, flag, flag_inputs[flag])
         }
+    hidden_missing = missing_upstream & set(help_hidden_flags)
+    if hidden_missing and upstream_source_paths:
+        upstream_flags = extract_text_flags(upstream_source_files(upstream_source_paths))
+        missing_upstream -= hidden_missing & upstream_flags
     if missing_upstream:
         failures.append(
             f"launcher {backend_name} flags missing from upstream llama-server --help:\n"
@@ -710,6 +747,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Python source file to scan for option-like literals; repeatable",
     )
     parser.add_argument(
+        "--upstream-source-dir",
+        action="append",
+        default=[],
+        type=Path,
+        help="Upstream source directory/file to scan for tracked flags hidden from CPU-only --help",
+    )
+    parser.add_argument(
         "--skip-source-scan",
         action="store_true",
         help="Only compare tracked flags against upstream help text",
@@ -735,6 +779,8 @@ def main(argv: list[str] | None = None) -> int:
             flag_inputs=backend.flag_inputs,
             backend_name=backend.name,
             probe_binary=args.binary,
+            help_hidden_flags=backend.help_hidden_flags,
+            upstream_source_paths=args.upstream_source_dir,
         )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -746,7 +792,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"OK: {len(backend.flag_inputs)} tracked {backend.name} launcher flags are advertised "
-        "by upstream help or accepted by the binary with expected input shapes."
+        "by upstream help, accepted by the binary, or present as CPU-hidden upstream flags "
+        "with expected input shapes."
     )
     return 0
 

@@ -226,6 +226,47 @@ def test_binary_probe_does_not_accept_version_short_circuit(monkeypatch):
     assert len(calls) == 2
 
 
+def test_audit_accepts_cpu_hidden_flag_when_present_in_upstream_source(tmp_path):
+    upstream = tmp_path / "common.cpp"
+    upstream.write_text('if (arg == "--tensor-split" || arg == "-ts") return true;\n', encoding="utf-8")
+
+    failures = check_llama_cpp_args.audit(
+        help_text="--threads N\n",
+        source_paths=[],
+        expected_flags={"--threads", "--tensor-split"},
+        known_non_llama_cpp_flags=set(),
+        flag_inputs={
+            "--threads": check_llama_cpp_args.FlagInput("integer", True, "thread count"),
+            "--tensor-split": check_llama_cpp_args.FlagInput("csv", True, "tensor split"),
+        },
+        help_hidden_flags={"--tensor-split"},
+        upstream_source_paths=[upstream],
+    )
+
+    assert failures == []
+
+
+def test_audit_reports_cpu_hidden_flag_when_absent_from_upstream_source(tmp_path):
+    upstream = tmp_path / "common.cpp"
+    upstream.write_text('if (arg == "--threads") return true;\n', encoding="utf-8")
+
+    failures = check_llama_cpp_args.audit(
+        help_text="--threads N\n",
+        source_paths=[],
+        expected_flags={"--threads", "--tensor-split"},
+        known_non_llama_cpp_flags=set(),
+        flag_inputs={
+            "--threads": check_llama_cpp_args.FlagInput("integer", True, "thread count"),
+            "--tensor-split": check_llama_cpp_args.FlagInput("csv", True, "tensor split"),
+        },
+        help_hidden_flags={"--tensor-split"},
+        upstream_source_paths=[upstream],
+    )
+
+    assert len(failures) == 1
+    assert "--tensor-split" in failures[0]
+
+
 def test_llama_cpp_manifest_source_scan_passes_when_all_tracked_flags_are_advertised():
     failures = check_llama_cpp_args.audit(
         help_text=_synthetic_help_for(),
