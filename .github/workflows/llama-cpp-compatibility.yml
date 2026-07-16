@@ -1,15 +1,9 @@
 name: Server Flag Compatibility
 
 on:
+  push: {}
   pull_request:
     branches: [main]
-    paths:
-      - '.github/workflows/llama-cpp-compatibility.yml'
-      - 'modules/launch.py'
-      - 'modules/spec_launch.py'
-      - 'modules/ik_llama.py'
-      - 'scripts/check_llama_cpp_args.py'
-      - 'tests/ci/test_check_llama_cpp_args.py'
   workflow_dispatch:
   schedule:
     # Weekly, early Sunday UTC. This tracks upstream release drift separately
