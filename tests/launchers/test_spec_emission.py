@@ -767,7 +767,7 @@ class TestSpecEmissionIkLlama:
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
-        assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=16,n_min=2,p_min=0.5"
+        assert cmd[cmd.index("--spec-type") + 1] == "draft:n_max=16,n_min=2,p_min=0.5"
         assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
         assert cmd[cmd.index("-ngld") + 1] == "24"
         assert cmd[cmd.index("-devd") + 1] == "CUDA1"
@@ -2598,6 +2598,24 @@ class TestMainDeviceEmittedOnDraftUnion:
         # --tensor-split should still be present.
         assert "--tensor-split" in cmd
 
+    def test_ik_llama_ignored_tensor_split_still_emits_device(self, manager, union_launcher, capsys):
+        """ik_llama rejects --tensor-split, so ignoring it must not also
+        suppress the --device main-model guard when draft GPUs are unioned."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set("mtp")
+        union_launcher.spec_use_draft_model.set(True)
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        union_launcher.tensor_split.set("1,1")
+
+        cmd = manager.build_cmd()
+        err = capsys.readouterr().err
+
+        assert "--tensor-split" not in cmd
+        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
+        assert "not supported by current ik_llama" in err
+
     def test_no_device_when_manual_gpu_mode(self, manager, union_launcher):
         """Manual GPU mode uses synthetic indices that don't correspond to
         real CUDA devices — emitting --device CUDA<i> would refer to wrong
@@ -2673,6 +2691,7 @@ class TestMainDeviceEmittedOnDraftUnion:
         assert value == "1,7,2,5"
 
         cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1].startswith("draft")
         assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
         assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
         assert "--spec-draft-device" not in cmd

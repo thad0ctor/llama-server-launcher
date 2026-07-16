@@ -21,6 +21,7 @@ from textwrap import indent
 
 
 HELP_TIMEOUT_SECONDS = 20
+BINARY_PROBE_UNKNOWN_FLAG = "--llama-launcher-compat-probe-unknown-option"
 
 FLAG_RE = re.compile(r"(?<![\w./])--[A-Za-z0-9][A-Za-z0-9-]*|(?<![\w./])-[A-Za-z][A-Za-z0-9]*(?![\w-])")
 FLAG_LINE_RE = re.compile(r"(?<![\w./])(--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z][A-Za-z0-9]*)(?![\w-])")
@@ -384,14 +385,83 @@ def extract_flags(text: str) -> set[str]:
     return set(FLAG_RE.findall(text))
 
 
+COMMAND_ARG_NAMES = frozenset({"cmd", "flags"})
+
+
+def _is_command_arg_collection(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id in COMMAND_ARG_NAMES
+
+
+def _call_attr_name(call: ast.Call) -> str:
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    return ""
+
+
+def _flag_strings_in_node(node: ast.AST) -> set[str]:
+    flags: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, str):
+            flags.update(extract_flags(child.value))
+    return flags
+
+
+def _command_call_uses_name(call: ast.Call, name: str) -> bool:
+    method = _call_attr_name(call)
+    if method not in {"append", "extend"}:
+        return False
+    if not isinstance(call.func, ast.Attribute) or not _is_command_arg_collection(call.func.value):
+        return False
+    return any(isinstance(child, ast.Name) and child.id == name for arg in call.args for child in ast.walk(arg))
+
+
+def _extract_for_loop_flag_values(node: ast.For) -> set[str]:
+    if isinstance(node.target, ast.Name):
+        target_names = [node.target.id]
+    elif isinstance(node.target, (ast.Tuple, ast.List)):
+        target_names = [elt.id for elt in node.target.elts if isinstance(elt, ast.Name)]
+    else:
+        target_names = []
+
+    used_command_names = {
+        name
+        for name in target_names
+        if any(isinstance(child, ast.Call) and _command_call_uses_name(child, name) for child in ast.walk(node))
+    }
+    if not used_command_names:
+        return set()
+
+    flags: set[str] = set()
+    if isinstance(node.iter, (ast.List, ast.Tuple)):
+        for item in node.iter.elts:
+            if isinstance(item, (ast.List, ast.Tuple)):
+                for index, elt in enumerate(item.elts):
+                    if index < len(target_names) and target_names[index] in used_command_names:
+                        flags.update(_flag_strings_in_node(elt))
+            elif len(target_names) == 1 and target_names[0] in used_command_names:
+                flags.update(_flag_strings_in_node(item))
+    return flags
+
+
 def extract_source_flags(paths: list[Path]) -> set[str]:
-    """Extract option-looking string constants from Python source files."""
+    """Extract option tokens from launcher argument-building call sites."""
     flags: set[str] = set()
     for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                flags.update(extract_flags(node.value))
+            if isinstance(node, ast.Call):
+                method = _call_attr_name(node)
+                if method in {"append", "extend"}:
+                    if isinstance(node.func, ast.Attribute) and _is_command_arg_collection(node.func.value):
+                        for arg in node.args:
+                            flags.update(_flag_strings_in_node(arg))
+                elif method == "add_arg" and node.args and _is_command_arg_collection(node.args[0]):
+                    for arg in node.args[1:]:
+                        flags.update(_flag_strings_in_node(arg))
+            elif isinstance(node, ast.For):
+                flags.update(_extract_for_loop_flag_values(node))
     return flags
 
 
@@ -509,7 +579,7 @@ def binary_accepts_flag(binary: Path, flag: str, spec: FlagInput) -> bool:
     cmd = [str(binary), flag]
     if spec.takes_value:
         cmd.append(sample_value_for(spec))
-    cmd.append("--version")
+    cmd.append(BINARY_PROBE_UNKNOWN_FLAG)
     try:
         result = subprocess.run(
             cmd,
@@ -520,7 +590,8 @@ def binary_accepts_flag(binary: Path, flag: str, spec: FlagInput) -> bool:
         )
     except Exception:
         return False
-    return result.returncode == 0
+    output = (result.stdout or "") + (result.stderr or "")
+    return result.returncode != 0 and BINARY_PROBE_UNKNOWN_FLAG in output
 
 
 def read_help_text(binary: Path | None, help_file: Path | None) -> str:

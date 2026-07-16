@@ -25,7 +25,6 @@ class IkLlamaTab:
         
         # ik_llama specific flags as BooleanVar
         self.rtr_enabled = tk.BooleanVar(value=False)
-        self.fmoe_enabled = tk.BooleanVar(value=False)
         
         # New ik_llama configuration options
         self.ser_value = tk.StringVar(value="")  # Smart Expert Reduction
@@ -35,7 +34,6 @@ class IkLlamaTab:
         
         # Set up trace bindings for config saving
         self.rtr_enabled.trace_add("write", lambda *args: self.launcher._save_configs())
-        self.fmoe_enabled.trace_add("write", lambda *args: self.launcher._save_configs())
         self.ser_value.trace_add("write", lambda *args: self.launcher._save_configs())
         self.amb_value.trace_add("write", lambda *args: self.launcher._save_configs())
         self.ctk_value.trace_add("write", lambda *args: self.launcher._save_configs())
@@ -43,7 +41,6 @@ class IkLlamaTab:
         
         # Also trigger default config name updates
         self.rtr_enabled.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
-        self.fmoe_enabled.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.ser_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.amb_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.ctk_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
@@ -116,13 +113,9 @@ class IkLlamaTab:
             column=1, row=row, sticky="w", padx=5, pady=5, columnspan=2)
         row += 1
         
-        # FMoE (FusedMixture of Experts) option
-        self.fmoe_checkbox = ttk.Checkbutton(
-            scrollable_frame, 
-            text="FMoE enabled by default", 
-            variable=self.fmoe_enabled
-        )
-        self.fmoe_checkbox.grid(column=0, row=row, sticky="w", padx=10, pady=5)
+        # FMoE (Fused Mixture of Experts) status
+        ttk.Label(scrollable_frame, text="FMoE enabled by default").grid(
+            column=0, row=row, sticky="w", padx=10, pady=5)
         
         ttk.Label(scrollable_frame, text="Fused MoE - optimized for CUDA and some CPU configs", 
                  font=("TkSmallCaptionFont",)).grid(
@@ -236,10 +229,6 @@ class IkLlamaTab:
         if self.rtr_enabled.get():
             flags.append("--run-time-repack")
         
-        # Current ik_llama enables fused MoE by default and exposes only the
-        # negative --no-fused-moe / -no-fmoe toggle. The launcher has no
-        # "disable FMoE" control, so this positive checkbox is now a no-op.
-        
         # Smart Expert Reduction
         ser_val = self.ser_value.get().strip()
         if ser_val:
@@ -271,7 +260,6 @@ class IkLlamaTab:
         """
         return {
             "ik_llama_rtr_enabled": self.rtr_enabled.get(),
-            "ik_llama_fmoe_enabled": self.fmoe_enabled.get(),
             "ik_llama_ser_value": self.ser_value.get(),
             "ik_llama_amb_value": self.amb_value.get(),
             "ik_llama_ctk_value": self.ctk_value.get(),
@@ -286,7 +274,6 @@ class IkLlamaTab:
             config_data: Dictionary containing configuration data
         """
         self.rtr_enabled.set(config_data.get("ik_llama_rtr_enabled", False))
-        self.fmoe_enabled.set(config_data.get("ik_llama_fmoe_enabled", False))
         self.ser_value.set(config_data.get("ik_llama_ser_value", ""))
         self.amb_value.set(config_data.get("ik_llama_amb_value", ""))
         self.ctk_value.set(config_data.get("ik_llama_ctk_value", "f16"))

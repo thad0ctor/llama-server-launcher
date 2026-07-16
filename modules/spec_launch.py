@@ -435,15 +435,15 @@ def emit_main_device_arg(launcher, backend, cmd):
     single emission path covers both backends.
     """
     try:
-        # Tensor-split takes precedence over per-device restrictions —
-        # don't double-constrain and don't risk a backend rejecting both
-        # together. The advisory in build_cmd already tells the user
-        # tensor-split is in charge.
+        # Tensor-split takes precedence over per-device restrictions for
+        # backends that will actually receive it. Current ik_llama rejects
+        # --tensor-split, so build_cmd suppresses that flag and this helper must
+        # still emit --device when draft GPUs were unioned into the visible set.
         try:
             ts_val = launcher.tensor_split.get().strip()
         except Exception:
             ts_val = ""
-        if ts_val:
+        if ts_val and backend != "ik_llama":
             return
         dev_val = _resolve_main_device_value(launcher)
         if dev_val:
@@ -729,6 +729,7 @@ def emit_spec_args(launcher, backend, cmd):
                     # those modes, so emission would silently violate
                     # the grayed-field contract.
                     is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
+                    emit_spec_type = spec_type
                     if is_draft_capable:
                         # Current ik_llama takes draft tuning in the canonical
                         # --spec-type mtp:n_max=...,n_min=...,p_min=... payload.
@@ -778,6 +779,7 @@ def emit_spec_args(launcher, backend, cmd):
                                     draft_path = None
                                 if is_valid_file and draft_path is not None:
                                     cmd.extend(["--model-draft", str(draft_path.resolve())])
+                                    emit_spec_type = "draft"
                                 elif draft_path is not None:
                                     print(
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
@@ -819,7 +821,7 @@ def emit_spec_args(launcher, backend, cmd):
                             v = _safe_var_str(launcher, var_name)
                             if v:
                                 spec_type_pairs.append((key, v))
-                    _append_ik_spec_type(cmd, spec_type, spec_type_pairs)
+                    _append_ik_spec_type(cmd, emit_spec_type, spec_type_pairs)
                     # ik_llama extras.
                     autotune_var = getattr(launcher, "spec_autotune", None)
                     if autotune_var is not None and autotune_var.get():

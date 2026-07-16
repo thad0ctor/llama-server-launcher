@@ -564,6 +564,9 @@ class LaunchManager:
 
         # --- Handle GPU arguments: Now ADDING BOTH if set ---
         tensor_split_val = self.launcher.tensor_split.get().strip()
+        effective_tensor_split_val = tensor_split_val
+        if backend == "ik_llama" and tensor_split_val:
+            effective_tensor_split_val = ""
         n_gpu_layers_val = self.launcher.n_gpu_layers.get().strip()
 
         # Add --tensor-split if the value is non-empty
@@ -574,7 +577,7 @@ class LaunchManager:
                 file=sys.stderr,
             )
         else:
-            self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
+            self.add_arg(cmd, "--tensor-split", effective_tensor_split_val, "")  # Add if non-empty string is provided by user
 
         # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
         # This argument will now be added regardless of the --tensor-split value
@@ -719,7 +722,7 @@ class LaunchManager:
             and detected_gpu_count > 0
             and len(effective_gpus) > 0
             and len(effective_gpus) < detected_gpu_count
-            and not tensor_split_val
+            and not effective_tensor_split_val
         ):
             # Only warn if the user explicitly selected a *subset* of GPUs using the checkboxes AND didn't use tensor-split
             print(
@@ -762,9 +765,9 @@ class LaunchManager:
             pass
 
         # Keep the info message about precedence if tensor-split is present, as the server will likely still follow it.
-        if tensor_split_val:
+        if effective_tensor_split_val:
             print(
-                f"INFO: --tensor-split is set ('{tensor_split_val}'), this usually takes precedence over --n-gpu-layers for layer distribution.",
+                f"INFO: --tensor-split is set ('{effective_tensor_split_val}'), this usually takes precedence over --n-gpu-layers for layer distribution.",
                 file=sys.stderr,
             )
 

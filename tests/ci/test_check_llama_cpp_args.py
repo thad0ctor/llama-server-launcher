@@ -140,6 +140,36 @@ def test_audit_requires_new_source_flags_to_be_categorized(tmp_path):
     assert "--new-upstream-flag" in failures[0]
 
 
+def test_source_scan_ignores_labels_and_help_text(tmp_path):
+    source = tmp_path / "launch_like.py"
+    source.write_text(
+        "def emit(cmd):\n"
+        "    label = 'Removed flag --old-label-only'\n"
+        "    cmd.extend(['--threads', '4'])\n",
+        encoding="utf-8",
+    )
+
+    flags = check_llama_cpp_args.extract_source_flags([source])
+
+    assert flags == {"--threads"}
+
+
+def test_source_scan_follows_loop_flag_values_used_by_cmd_extend(tmp_path):
+    source = tmp_path / "launch_like.py"
+    source.write_text(
+        "def emit(cmd):\n"
+        "    for var_name, flag in [('threads', '--threads'), ('ctx', '--ctx-size')]:\n"
+        "        value = getattr(config, var_name, '')\n"
+        "        if value:\n"
+        "            cmd.extend([flag, value])\n",
+        encoding="utf-8",
+    )
+
+    flags = check_llama_cpp_args.extract_source_flags([source])
+
+    assert flags == {"--threads", "--ctx-size"}
+
+
 def test_audit_accepts_categorized_non_llama_cpp_source_flags(tmp_path):
     source = tmp_path / "launch_like.py"
     source.write_text(
@@ -158,6 +188,37 @@ def test_audit_accepts_categorized_non_llama_cpp_source_flags(tmp_path):
     )
 
     assert failures == []
+
+
+def test_binary_probe_does_not_accept_version_short_circuit(tmp_path):
+    binary = tmp_path / "fake-server"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"sentinel = {check_llama_cpp_args.BINARY_PROBE_UNKNOWN_FLAG!r}\n"
+        "args = sys.argv[1:]\n"
+        "if '--version' in args:\n"
+        "    raise SystemExit(0)\n"
+        "if args[:2] == ['--known', '1'] and sentinel in args:\n"
+        "    print(f'unknown option: {sentinel}', file=sys.stderr)\n"
+        "    raise SystemExit(2)\n"
+        "bad = args[0] if args else '<none>'\n"
+        "print(f'unknown option: {bad}', file=sys.stderr)\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+    binary.chmod(binary.stat().st_mode | 0o111)
+
+    assert check_llama_cpp_args.binary_accepts_flag(
+        binary,
+        "--known",
+        check_llama_cpp_args.FlagInput("integer", True, "known flag"),
+    )
+    assert not check_llama_cpp_args.binary_accepts_flag(
+        binary,
+        "--missing",
+        check_llama_cpp_args.FlagInput("integer", True, "missing flag"),
+    )
 
 
 def test_llama_cpp_manifest_source_scan_passes_when_all_tracked_flags_are_advertised():
