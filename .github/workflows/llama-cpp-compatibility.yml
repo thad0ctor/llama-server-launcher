@@ -127,7 +127,13 @@ jobs:
         run: '"$LLAMA_SERVER" --help > llama-server-help.txt 2>&1'
 
       - name: Audit launcher flags against latest llama-server --help
-        run: python scripts/check_llama_cpp_args.py --backend llama.cpp --binary "$LLAMA_SERVER"
+        run: |
+          python scripts/check_llama_cpp_args.py \
+            --backend llama.cpp \
+            --binary "$LLAMA_SERVER" \
+            --report-file reports/llama-cpp-drift.md \
+            --upstream-ref "${LLAMA_CPP_TAG}/${LLAMA_CPP_ASSET}" \
+            --launcher-ref "$GITHUB_SHA"
 
       - name: Upload llama.cpp compatibility inputs
         if: always()
@@ -137,6 +143,7 @@ jobs:
           path: |
             llama-cpp-release.txt
             llama-server-help.txt
+            reports/llama-cpp-drift.md
           if-no-files-found: ignore
           retention-days: 7
 
@@ -206,7 +213,14 @@ jobs:
           fi
 
       - name: Audit launcher flags against latest ik_llama llama-server --help
-        run: python scripts/check_llama_cpp_args.py --backend ik_llama --binary "$IK_LLAMA_SERVER" --upstream-source-dir ik_llama.cpp
+        run: |
+          python scripts/check_llama_cpp_args.py \
+            --backend ik_llama \
+            --binary "$IK_LLAMA_SERVER" \
+            --upstream-source-dir ik_llama.cpp \
+            --report-file reports/ik-llama-drift.md \
+            --upstream-ref "ikawrakow/ik_llama.cpp@$(cat ik-llama-commit.txt)" \
+            --launcher-ref "$GITHUB_SHA"
 
       - name: Upload ik_llama compatibility inputs
         if: always()
@@ -216,5 +230,93 @@ jobs:
           path: |
             ik-llama-build.txt
             ik-llama-server-help.txt
+            reports/ik-llama-drift.md
           if-no-files-found: ignore
           retention-days: 7
+
+  publish-drift-report:
+    name: Publish weekly upstream drift report
+    needs: [latest-llama-cpp-help, latest-ik-llama-help]
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download compatibility artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: drift-artifacts
+          merge-multiple: true
+
+      - name: Build combined drift report
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+
+          marker = "<!-- upstream-drift-report -->"
+          report_paths = sorted(Path("drift-artifacts").glob("*-drift.md"))
+          parts = [
+              marker,
+              "# Weekly upstream server flag drift report",
+              "",
+              f"- Workflow run: {os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
+              f"- Launcher ref: `{os.environ.get('GITHUB_SHA')}`",
+              "",
+          ]
+          if report_paths:
+              for path in report_paths:
+                  parts.append(path.read_text(encoding="utf-8").strip())
+                  parts.append("")
+          else:
+              parts.extend(
+                  [
+                      "No backend drift report artifacts were found.",
+                      "",
+                      "Check the compatibility jobs in the linked workflow run.",
+                      "",
+                  ]
+              )
+
+          report = "\n".join(parts).rstrip() + "\n"
+          Path("combined-drift-report.md").write_text(report, encoding="utf-8")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with Path(summary).open("a", encoding="utf-8") as handle:
+                  handle.write(report)
+          PY
+
+      - name: Update issue #23 sticky drift report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const issue_number = 23;
+            const marker = '<!-- upstream-drift-report -->';
+            const body = fs.readFileSync('combined-drift-report.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) =>
+              comment.body && comment.body.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body,
+              });
+            }

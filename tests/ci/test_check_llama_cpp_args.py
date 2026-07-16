@@ -190,6 +190,80 @@ def test_audit_accepts_categorized_non_llama_cpp_source_flags(tmp_path):
     assert failures == []
 
 
+def test_audit_result_reports_untracked_upstream_flags_without_failing():
+    result = check_llama_cpp_args.audit_result(
+        help_text="--threads N\n--new-upstream-flag VALUE\n",
+        source_paths=[],
+        expected_flags={"--threads"},
+        known_non_llama_cpp_flags=set(),
+        flag_inputs={"--threads": check_llama_cpp_args.FlagInput("integer", True, "thread count")},
+    )
+
+    assert result.failures == ()
+    assert result.missing_upstream_flags == ()
+    assert result.untracked_upstream_flags == ("--new-upstream-flag",)
+    assert check_llama_cpp_args._format_failures_from_result(result) == []
+
+
+def test_report_file_contains_untracked_upstream_flags(tmp_path):
+    help_file = tmp_path / "help.txt"
+    report_file = tmp_path / "report.md"
+    help_file.write_text(
+        _synthetic_help_for() + "\n--new-upstream-flag VALUE\n",
+        encoding="utf-8",
+    )
+
+    status = check_llama_cpp_args.main(
+        [
+            "--backend",
+            "llama.cpp",
+            "--help-file",
+            str(help_file),
+            "--skip-source-scan",
+            "--report-file",
+            str(report_file),
+            "--upstream-ref",
+            "upstream-test",
+            "--launcher-ref",
+            "launcher-test",
+        ]
+    )
+
+    assert status == 0
+    report = report_file.read_text(encoding="utf-8")
+    assert "## llama.cpp upstream drift" in report
+    assert "Triage needed for new upstream flags" in report
+    assert "`--new-upstream-flag`" in report
+    assert "`upstream-test`" in report
+    assert "`launcher-test`" in report
+
+
+def test_fail_on_untracked_upstream_flags(tmp_path, capsys):
+    help_file = tmp_path / "help.txt"
+    report_file = tmp_path / "report.md"
+    help_file.write_text(
+        _synthetic_help_for() + "\n--new-upstream-flag VALUE\n",
+        encoding="utf-8",
+    )
+
+    status = check_llama_cpp_args.main(
+        [
+            "--backend",
+            "llama.cpp",
+            "--help-file",
+            str(help_file),
+            "--skip-source-scan",
+            "--report-file",
+            str(report_file),
+            "--fail-on-untracked-upstream",
+        ]
+    )
+
+    assert status == 1
+    assert report_file.exists()
+    assert "--new-upstream-flag" in capsys.readouterr().err
+
+
 def test_binary_probe_does_not_accept_version_short_circuit(monkeypatch):
     calls = []
 

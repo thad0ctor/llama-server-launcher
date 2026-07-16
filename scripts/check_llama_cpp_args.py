@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import re
 import subprocess
 import sys
@@ -43,6 +44,22 @@ class BackendSpec:
     flag_inputs: dict[str, FlagInput]
     known_non_backend_flags: frozenset[str]
     help_hidden_flags: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class AuditResult:
+    """Structured backend compatibility and drift findings."""
+
+    backend_name: str
+    tracked_flags: frozenset[str]
+    upstream_flags: frozenset[str]
+    accepted_or_hidden_flags: frozenset[str]
+    missing_upstream_flags: tuple[str, ...]
+    input_shape_mismatches: tuple[str, ...]
+    uncategorized_source_flags: tuple[str, ...]
+    unused_tracked_flags: tuple[str, ...]
+    untracked_upstream_flags: tuple[str, ...]
+    failures: tuple[str, ...]
 
 
 # Flags emitted by the launcher when the active backend is llama.cpp.
@@ -707,7 +724,38 @@ def format_list(values: set[str]) -> str:
     return "\n".join(f"- {value}" for value in sorted(values))
 
 
-def audit(
+def _format_failures_from_result(result: AuditResult) -> list[str]:
+    failures: list[str] = []
+    failures.extend(result.failures)
+
+    if result.missing_upstream_flags:
+        failures.append(
+            f"launcher {result.backend_name} flags missing from upstream llama-server --help:\n"
+            + indent(format_list(set(result.missing_upstream_flags)), "  ")
+        )
+
+    if result.input_shape_mismatches:
+        failures.append(
+            f"launcher {result.backend_name} flag input shapes diverge from upstream help:\n"
+            + indent("\n".join(result.input_shape_mismatches), "  ")
+        )
+
+    if result.uncategorized_source_flags:
+        failures.append(
+            "option-like source literals are not categorized in scripts/check_llama_cpp_args.py:\n"
+            + indent(format_list(set(result.uncategorized_source_flags)), "  ")
+        )
+
+    if result.unused_tracked_flags:
+        failures.append(
+            f"tracked {result.backend_name} flags were not found in the scanned source files:\n"
+            + indent(format_list(set(result.unused_tracked_flags)), "  ")
+        )
+
+    return failures
+
+
+def audit_result(
     *,
     help_text: str,
     source_paths: list[Path],
@@ -718,26 +766,28 @@ def audit(
     probe_binary: Path | None = None,
     help_hidden_flags: set[str] | frozenset[str] = frozenset(),
     upstream_source_paths: list[Path] | None = None,
-) -> list[str]:
-    """Return human-readable audit failures."""
+) -> AuditResult:
+    """Return structured compatibility and upstream drift findings."""
     failures: list[str] = []
     failures.extend(validate_flag_input_manifest(expected_flags, flag_inputs, backend_name=backend_name))
 
     upstream_flags = extract_flags(help_text)
+    accepted_or_hidden_flags: set[str] = set()
     missing_upstream = set(expected_flags) - upstream_flags
     if probe_binary is not None and missing_upstream:
-        missing_upstream = {
-            flag for flag in missing_upstream if not binary_accepts_flag(probe_binary, flag, flag_inputs[flag])
-        }
+        binary_missing = set()
+        for flag in missing_upstream:
+            if binary_accepts_flag(probe_binary, flag, flag_inputs[flag]):
+                accepted_or_hidden_flags.add(flag)
+            else:
+                binary_missing.add(flag)
+        missing_upstream = binary_missing
     hidden_missing = missing_upstream & set(help_hidden_flags)
     if hidden_missing and upstream_source_paths:
-        upstream_flags = extract_text_flags(upstream_source_files(upstream_source_paths))
-        missing_upstream -= hidden_missing & upstream_flags
-    if missing_upstream:
-        failures.append(
-            f"launcher {backend_name} flags missing from upstream llama-server --help:\n"
-            + indent(format_list(missing_upstream), "  ")
-        )
+        source_flags = extract_text_flags(upstream_source_files(upstream_source_paths))
+        source_hidden = hidden_missing & source_flags
+        accepted_or_hidden_flags.update(source_hidden)
+        missing_upstream -= source_hidden
 
     shape_mismatches = detect_input_shape_mismatches(help_text, flag_inputs)
     if probe_binary is not None and shape_mismatches:
@@ -756,29 +806,119 @@ def audit(
                 f"- {flag}: launcher expects {expected} ({flag_inputs[flag].intended_input}); "
                 f"upstream help looks like {actual}: {rendered_help}"
             )
-        failures.append(
-            f"launcher {backend_name} flag input shapes diverge from upstream help:\n"
-            + indent("\n".join(lines), "  ")
-        )
+        shape_mismatch_lines = lines
+    else:
+        shape_mismatch_lines = []
 
+    uncategorized: set[str] = set()
+    unused_tracked: set[str] = set()
     if source_paths:
         source_flags = extract_source_flags(source_paths)
         categorized = set(expected_flags) | set(known_non_llama_cpp_flags)
         uncategorized = source_flags - categorized
-        if uncategorized:
-            failures.append(
-                "option-like source literals are not categorized in scripts/check_llama_cpp_args.py:\n"
-                + indent(format_list(uncategorized), "  ")
-            )
 
         unused_tracked = set(expected_flags) - source_flags
-        if unused_tracked:
-            failures.append(
-                f"tracked {backend_name} flags were not found in the scanned source files:\n"
-                + indent(format_list(unused_tracked), "  ")
-            )
 
-    return failures
+    known_upstream = set(expected_flags) | set(known_non_llama_cpp_flags)
+    known_upstream.update(accepted_or_hidden_flags)
+    untracked_upstream = upstream_flags - known_upstream
+    untracked_upstream = {
+        flag
+        for flag in untracked_upstream
+        if flag.startswith("--") or not re.fullmatch(r"-[A-Z]", flag)
+    }
+
+    result = AuditResult(
+        backend_name=backend_name,
+        tracked_flags=frozenset(expected_flags),
+        upstream_flags=frozenset(upstream_flags),
+        accepted_or_hidden_flags=frozenset(accepted_or_hidden_flags),
+        missing_upstream_flags=tuple(sorted(missing_upstream)),
+        input_shape_mismatches=tuple(shape_mismatch_lines),
+        uncategorized_source_flags=tuple(sorted(uncategorized)),
+        unused_tracked_flags=tuple(sorted(unused_tracked)),
+        untracked_upstream_flags=tuple(sorted(untracked_upstream)),
+        failures=tuple(failures),
+    )
+    return result
+
+
+def audit(
+    *,
+    help_text: str,
+    source_paths: list[Path],
+    expected_flags: set[str] | frozenset[str] = LLAMA_CPP_FLAGS,
+    known_non_llama_cpp_flags: set[str] | frozenset[str] = SOURCE_KNOWN_NON_LLAMA_CPP_FLAGS,
+    flag_inputs: dict[str, FlagInput] = LLAMA_CPP_FLAG_INPUTS,
+    backend_name: str = "llama.cpp",
+    probe_binary: Path | None = None,
+    help_hidden_flags: set[str] | frozenset[str] = frozenset(),
+    upstream_source_paths: list[Path] | None = None,
+) -> list[str]:
+    """Return human-readable audit failures."""
+    result = audit_result(
+        help_text=help_text,
+        source_paths=source_paths,
+        expected_flags=expected_flags,
+        known_non_llama_cpp_flags=known_non_llama_cpp_flags,
+        flag_inputs=flag_inputs,
+        backend_name=backend_name,
+        probe_binary=probe_binary,
+        help_hidden_flags=help_hidden_flags,
+        upstream_source_paths=upstream_source_paths,
+    )
+    return _format_failures_from_result(result)
+
+
+def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launcher_ref: str = "") -> str:
+    """Render a backend drift report suitable for artifacts, summaries, or issues."""
+    lines = [
+        f"## {result.backend_name} upstream drift",
+        "",
+        f"- Checked at: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+    ]
+    if upstream_ref:
+        lines.append(f"- Upstream: `{upstream_ref}`")
+    if launcher_ref:
+        lines.append(f"- Launcher: `{launcher_ref}`")
+    lines.extend(
+        [
+            f"- Tracked launcher flags: {len(result.tracked_flags)}",
+            f"- Upstream advertised flags: {len(result.upstream_flags)}",
+            f"- Tracked flags accepted despite missing from help: {len(result.accepted_or_hidden_flags)}",
+            "",
+        ]
+    )
+
+    if result.failures or result.missing_upstream_flags or result.input_shape_mismatches:
+        status = "Breaking compatibility issue detected"
+    elif result.untracked_upstream_flags:
+        status = "Triage needed for new upstream flags"
+    else:
+        status = "No upstream drift requiring action"
+    lines.extend(["### Status", "", status, ""])
+
+    sections = [
+        ("Compatibility failures", result.failures),
+        ("Missing tracked flags", result.missing_upstream_flags),
+        ("Input shape mismatches", result.input_shape_mismatches),
+        ("Uncategorized launcher source flags", result.uncategorized_source_flags),
+        ("Tracked flags not found in source scan", result.unused_tracked_flags),
+        ("New upstream flags not classified", result.untracked_upstream_flags),
+        ("Accepted or CPU-hidden tracked flags", result.accepted_or_hidden_flags),
+    ]
+    for title, values in sections:
+        lines.extend([f"### {title}", ""])
+        if values:
+            for value in values:
+                if "\n" not in value and re.fullmatch(r"-{1,2}[A-Za-z0-9][A-Za-z0-9-]*", value):
+                    lines.append(f"- `{value}`")
+                else:
+                    lines.append(f"- {value}")
+        else:
+            lines.append("None.")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -815,6 +955,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Only compare tracked flags against upstream help text",
     )
+    parser.add_argument(
+        "--report-file",
+        type=Path,
+        help="Write a markdown upstream drift report to this path",
+    )
+    parser.add_argument(
+        "--upstream-ref",
+        default="",
+        help="Upstream release tag, commit, or other identifier to include in the markdown report",
+    )
+    parser.add_argument(
+        "--launcher-ref",
+        default="",
+        help="Launcher commit or other identifier to include in the markdown report",
+    )
+    parser.add_argument(
+        "--fail-on-untracked-upstream",
+        action="store_true",
+        help="Treat newly advertised upstream flags not classified by the launcher as a failure",
+    )
     args = parser.parse_args(argv)
     if args.skip_source_scan:
         args.source = []
@@ -828,7 +988,7 @@ def main(argv: list[str] | None = None) -> int:
     backend = BACKENDS[args.backend]
     try:
         help_text = read_help_text(args.binary, args.help_file)
-        failures = audit(
+        result = audit_result(
             help_text=help_text,
             source_paths=args.source,
             expected_flags=set(backend.flag_inputs),
@@ -839,6 +999,18 @@ def main(argv: list[str] | None = None) -> int:
             help_hidden_flags=backend.help_hidden_flags,
             upstream_source_paths=args.upstream_source_dir,
         )
+        if args.report_file is not None:
+            args.report_file.parent.mkdir(parents=True, exist_ok=True)
+            args.report_file.write_text(
+                render_markdown_report(result, upstream_ref=args.upstream_ref, launcher_ref=args.launcher_ref),
+                encoding="utf-8",
+            )
+        failures = _format_failures_from_result(result)
+        if args.fail_on_untracked_upstream and result.untracked_upstream_flags:
+            failures.append(
+                f"{backend.name} upstream flags are not classified by the launcher:\n"
+                + indent(format_list(set(result.untracked_upstream_flags)), "  ")
+            )
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
