@@ -450,11 +450,7 @@ class TestEmissionParity:
                 },
                 [
                     "--spec-type",
-                    "suffix",
-                    "--suffix-pattern-len",
-                    "8",
-                    "--suffix-max-depth",
-                    "3",
+                    "suffix:suffix_min_match_len=8,suffix_max_depth=3",
                 ],
             ),
             # ik_llama mtp draft-capable case.
@@ -462,7 +458,7 @@ class TestEmissionParity:
                 "ik_llama",
                 "mtp",
                 {"spec_draft_n_max": "5"},
-                ["--spec-type", "mtp", "--draft-max", "5"],
+                ["--spec-type", "mtp:n_max=5"],
             ),
         ],
     )

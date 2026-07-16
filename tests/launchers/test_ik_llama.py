@@ -64,7 +64,6 @@ def tab(tk_root, launcher_mock):
 class TestDefaults:
     def test_initial_flag_values(self, tab):
         assert tab.rtr_enabled.get() is False
-        assert tab.fmoe_enabled.get() is False
         assert tab.ser_value.get() == ""
         assert tab.amb_value.get() == ""
         assert tab.ctk_value.get() == "f16"
@@ -80,17 +79,7 @@ class TestDefaults:
 class TestGetFlags:
     def test_rtr_only(self, tab):
         tab.rtr_enabled.set(True)
-        assert tab.get_ik_llama_flags() == ["-rtr"]
-
-    def test_fmoe_only(self, tab):
-        tab.fmoe_enabled.set(True)
-        assert tab.get_ik_llama_flags() == ["-fmoe"]
-
-    def test_both_booleans(self, tab):
-        tab.rtr_enabled.set(True)
-        tab.fmoe_enabled.set(True)
-        flags = tab.get_ik_llama_flags()
-        assert flags == ["-rtr", "-fmoe"]
+        assert tab.get_ik_llama_flags() == ["--run-time-repack"]
 
     def test_ser_value(self, tab):
         tab.ser_value.set("7,1")
@@ -151,17 +140,15 @@ class TestGetFlags:
         assert ["-ctk", kv] == flags[:2]
 
     def test_full_combo_ordering(self, tab):
-        # The module emits flags in a fixed order: rtr, fmoe, ser, amb, ctk, ctv.
+        # The module emits flags in a fixed order: rtr, ser, amb, ctk, ctv.
         tab.rtr_enabled.set(True)
-        tab.fmoe_enabled.set(True)
         tab.ser_value.set("6,1")
         tab.amb_value.set("512")
         tab.ctk_value.set("q8_0")
         tab.ctv_value.set("q4_0")
 
         assert tab.get_ik_llama_flags() == [
-            "-rtr",
-            "-fmoe",
+            "--run-time-repack",
             "-ser", "6,1",
             "-amb", "512",
             "-ctk", "q8_0",
@@ -193,7 +180,6 @@ class TestSaveLoadConfig:
         saved = tab.save_to_config()
         assert set(saved) == {
             "ik_llama_rtr_enabled",
-            "ik_llama_fmoe_enabled",
             "ik_llama_ser_value",
             "ik_llama_amb_value",
             "ik_llama_ctk_value",
@@ -203,7 +189,6 @@ class TestSaveLoadConfig:
     def test_save_defaults(self, tab):
         saved = tab.save_to_config()
         assert saved["ik_llama_rtr_enabled"] is False
-        assert saved["ik_llama_fmoe_enabled"] is False
         assert saved["ik_llama_ser_value"] == ""
         assert saved["ik_llama_amb_value"] == ""
         assert saved["ik_llama_ctk_value"] == "f16"
@@ -211,7 +196,6 @@ class TestSaveLoadConfig:
 
     def test_save_reflects_mutations(self, tab):
         tab.rtr_enabled.set(True)
-        tab.fmoe_enabled.set(True)
         tab.ser_value.set("7,1")
         tab.amb_value.set("256")
         tab.ctk_value.set("q8_0")
@@ -219,7 +203,6 @@ class TestSaveLoadConfig:
         saved = tab.save_to_config()
         assert saved == {
             "ik_llama_rtr_enabled": True,
-            "ik_llama_fmoe_enabled": True,
             "ik_llama_ser_value": "7,1",
             "ik_llama_amb_value": "256",
             "ik_llama_ctk_value": "q8_0",
@@ -236,12 +219,13 @@ class TestSaveLoadConfig:
             "ik_llama_ctv_value": "iq4_nl",
         }
         tab.load_from_config(payload)
-        assert tab.save_to_config() == payload
+        expected = dict(payload)
+        expected.pop("ik_llama_fmoe_enabled")
+        assert tab.save_to_config() == expected
 
     def test_load_falls_back_to_defaults_for_missing_keys(self, tab):
         tab.load_from_config({})
         assert tab.rtr_enabled.get() is False
-        assert tab.fmoe_enabled.get() is False
         assert tab.ser_value.get() == ""
         assert tab.amb_value.get() == ""
         assert tab.ctk_value.get() == "f16"
@@ -252,7 +236,6 @@ class TestSaveLoadConfig:
         assert tab.rtr_enabled.get() is True
         assert tab.ser_value.get() == "5,1"
         # Unset keys should fall back to defaults
-        assert tab.fmoe_enabled.get() is False
         assert tab.ctk_value.get() == "f16"
         assert tab.ctv_value.get() == "f16"
 
@@ -267,7 +250,6 @@ class TestTraceWiring:
         "attr, value",
         [
             ("rtr_enabled", True),
-            ("fmoe_enabled", True),
             ("ser_value", "7,1"),
             ("amb_value", "512"),
             ("ctk_value", "q8_0"),

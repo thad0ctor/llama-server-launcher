@@ -25,7 +25,6 @@ class IkLlamaTab:
         
         # ik_llama specific flags as BooleanVar
         self.rtr_enabled = tk.BooleanVar(value=False)
-        self.fmoe_enabled = tk.BooleanVar(value=False)
         
         # New ik_llama configuration options
         self.ser_value = tk.StringVar(value="")  # Smart Expert Reduction
@@ -35,7 +34,6 @@ class IkLlamaTab:
         
         # Set up trace bindings for config saving
         self.rtr_enabled.trace_add("write", lambda *args: self.launcher._save_configs())
-        self.fmoe_enabled.trace_add("write", lambda *args: self.launcher._save_configs())
         self.ser_value.trace_add("write", lambda *args: self.launcher._save_configs())
         self.amb_value.trace_add("write", lambda *args: self.launcher._save_configs())
         self.ctk_value.trace_add("write", lambda *args: self.launcher._save_configs())
@@ -43,7 +41,6 @@ class IkLlamaTab:
         
         # Also trigger default config name updates
         self.rtr_enabled.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
-        self.fmoe_enabled.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.ser_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.amb_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
         self.ctk_value.trace_add("write", lambda *args: self.launcher._update_default_config_name_if_needed())
@@ -106,7 +103,7 @@ class IkLlamaTab:
         # RTR (Real-Time Reasoning) option
         self.rtr_checkbox = ttk.Checkbutton(
             scrollable_frame, 
-            text="Enable RTR (-rtr)", 
+            text="Enable RTR (--run-time-repack)", 
             variable=self.rtr_enabled
         )
         self.rtr_checkbox.grid(column=0, row=row, sticky="w", padx=10, pady=5)
@@ -116,13 +113,9 @@ class IkLlamaTab:
             column=1, row=row, sticky="w", padx=5, pady=5, columnspan=2)
         row += 1
         
-        # FMoE (FusedMixture of Experts) option
-        self.fmoe_checkbox = ttk.Checkbutton(
-            scrollable_frame, 
-            text="Enable FMoE (-fmoe)", 
-            variable=self.fmoe_enabled
-        )
-        self.fmoe_checkbox.grid(column=0, row=row, sticky="w", padx=10, pady=5)
+        # FMoE (Fused Mixture of Experts) status
+        ttk.Label(scrollable_frame, text="FMoE enabled by default").grid(
+            column=0, row=row, sticky="w", padx=10, pady=5)
         
         ttk.Label(scrollable_frame, text="Fused MoE - optimized for CUDA and some CPU configs", 
                  font=("TkSmallCaptionFont",)).grid(
@@ -211,9 +204,9 @@ class IkLlamaTab:
             column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=5)
         row += 1
         
-        help_text = ("• RTR (-rtr): Run Time Repack - repacks quants for improved performance on certain hardware configs\n"
+        help_text = ("• RTR (--run-time-repack): Run Time Repack - repacks quants for improved performance on certain hardware configs\n"
                     "  NOTE: Disables mmap, requires enough RAM to malloc all repacked quants (good for hybrid GPU+CPU)\n"
-                    "• FMoE (-fmoe): Fused MoE - optimized mixture of experts for CUDA and some CPU configurations\n"
+                    "• FMoE: current ik_llama enables fused MoE by default\n"
                     "• SER (-ser): Smart expert reduction trades quality for speed (format: experts,factor)\n"
                     "• AMB (-amb): Sets K*Q tensor compute buffer size in MiB for memory optimization\n"
                     "• CTK (-ctk): Sets KV cache type for K tensor (f16/f32/bf16/q4_0/q4_1/q5_0/q5_1/q6_0/q8_0/iq4_nl/q8_KV)\n"
@@ -234,10 +227,7 @@ class IkLlamaTab:
         flags = []
         
         if self.rtr_enabled.get():
-            flags.append("-rtr")
-        
-        if self.fmoe_enabled.get():
-            flags.append("-fmoe")
+            flags.append("--run-time-repack")
         
         # Smart Expert Reduction
         ser_val = self.ser_value.get().strip()
@@ -270,7 +260,6 @@ class IkLlamaTab:
         """
         return {
             "ik_llama_rtr_enabled": self.rtr_enabled.get(),
-            "ik_llama_fmoe_enabled": self.fmoe_enabled.get(),
             "ik_llama_ser_value": self.ser_value.get(),
             "ik_llama_amb_value": self.amb_value.get(),
             "ik_llama_ctk_value": self.ctk_value.get(),
@@ -285,7 +274,6 @@ class IkLlamaTab:
             config_data: Dictionary containing configuration data
         """
         self.rtr_enabled.set(config_data.get("ik_llama_rtr_enabled", False))
-        self.fmoe_enabled.set(config_data.get("ik_llama_fmoe_enabled", False))
         self.ser_value.set(config_data.get("ik_llama_ser_value", ""))
         self.amb_value.set(config_data.get("ik_llama_amb_value", ""))
         self.ctk_value.set(config_data.get("ik_llama_ctk_value", "f16"))

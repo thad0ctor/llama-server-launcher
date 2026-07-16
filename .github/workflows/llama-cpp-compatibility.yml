@@ -1,0 +1,220 @@
+name: Server Flag Compatibility
+
+on:
+  push:
+    branches: [main]
+  # `pull_request` fires on synchronize when a new commit is pushed to an
+  # open PR branch, so PR iteration is covered without duplicate push runs.
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly, early Sunday UTC. This tracks upstream release drift separately
+    # from the broad project CI workflow.
+    - cron: "17 6 * * 0"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  checker-tests:
+    name: Compatibility checker tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test tooling
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Unit test compatibility checker
+        run: python -m pytest tests/ci/test_check_llama_cpp_args.py -q
+
+  latest-llama-cpp-help:
+    name: Latest llama.cpp llama-server flags
+    needs: [checker-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download latest Ubuntu x64 llama.cpp release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import tarfile
+          import urllib.request
+          from pathlib import Path
+
+          token = os.environ.get("GITHUB_TOKEN", "")
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "llama-server-launcher-compat-ci",
+          }
+          if token:
+              headers["Authorization"] = f"Bearer {token}"
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+              headers=headers,
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              release = json.load(response)
+
+          asset_pattern = re.compile(r"^llama-b\d+-bin-ubuntu-x64\.tar\.gz$")
+          asset = next(
+              (candidate for candidate in release.get("assets", []) if asset_pattern.match(candidate.get("name", ""))),
+              None,
+          )
+          if asset is None:
+              names = "\n".join(candidate.get("name", "") for candidate in release.get("assets", []))
+              raise SystemExit(f"No Ubuntu x64 CPU asset found in {release.get('tag_name')}:\n{names}")
+
+          archive_path = Path(asset["name"])
+          download = urllib.request.Request(asset["browser_download_url"], headers=headers)
+          with urllib.request.urlopen(download, timeout=120) as response:
+              archive_path.write_bytes(response.read())
+
+          out_dir = Path("llama-cpp-latest")
+          out_dir.mkdir(exist_ok=True)
+          with tarfile.open(archive_path) as archive:
+              archive.extractall(out_dir, filter="data")
+
+          server = next(out_dir.rglob("llama-server"), None)
+          if server is None:
+              raise SystemExit("Downloaded llama.cpp asset did not contain llama-server")
+          server.chmod(server.stat().st_mode | 0o111)
+
+          print(f"LLAMA_CPP_TAG={release.get('tag_name')}")
+          print(f"LLAMA_CPP_ASSET={asset['name']}")
+          print(f"LLAMA_SERVER={server}")
+          Path("llama-cpp-release.txt").write_text(
+              f"tag={release.get('tag_name')}\n"
+              f"asset={asset['name']}\n"
+              f"server={server}\n",
+              encoding="utf-8",
+          )
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"LLAMA_CPP_TAG={release.get('tag_name')}\n")
+              env_file.write(f"LLAMA_CPP_ASSET={asset['name']}\n")
+              env_file.write(f"LLAMA_SERVER={server}\n")
+          PY
+
+      - name: Capture upstream llama-server help
+        run: '"$LLAMA_SERVER" --help > llama-server-help.txt 2>&1'
+
+      - name: Audit launcher flags against latest llama-server --help
+        run: python scripts/check_llama_cpp_args.py --backend llama.cpp --binary "$LLAMA_SERVER"
+
+      - name: Upload llama.cpp compatibility inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-cpp-compatibility-${{ env.LLAMA_CPP_TAG }}
+          path: |
+            llama-cpp-release.txt
+            llama-server-help.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  latest-ik-llama-help:
+    name: Latest ik_llama llama-server flags
+    needs: [checker-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake git
+
+      - name: Clone latest ik_llama.cpp
+        run: |
+          git clone --depth 1 https://github.com/ikawrakow/ik_llama.cpp.git ik_llama.cpp
+          git -C ik_llama.cpp rev-parse HEAD > ik-llama-commit.txt
+
+      - name: Build ik_llama llama-server
+        run: |
+          cmake -S ik_llama.cpp -B ik-llama-build \
+            -DGGML_NATIVE=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_VULKAN=OFF \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build ik-llama-build --target llama-server -j2
+
+      - name: Locate ik_llama llama-server
+        run: |
+          server="$(find ik-llama-build -type f -name llama-server -perm -111 | head -n 1)"
+          if [ -z "$server" ]; then
+            echo "::error::ik_llama build did not produce llama-server"
+            find ik-llama-build -maxdepth 4 -type f -name '*server*' -print
+            exit 1
+          fi
+          echo "IK_LLAMA_SERVER=$server" >> "$GITHUB_ENV"
+          {
+            echo "repo=https://github.com/ikawrakow/ik_llama.cpp"
+            echo "commit=$(cat ik-llama-commit.txt)"
+            echo "server=$server"
+          } > ik-llama-build.txt
+
+      - name: Capture ik_llama llama-server help
+        run: |
+          set +e
+          "$IK_LLAMA_SERVER" --help > ik-llama-server-help.txt 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && ! grep -qi "usage:" ik-llama-server-help.txt; then
+            cat ik-llama-server-help.txt
+            exit "$status"
+          fi
+
+      - name: Audit launcher flags against latest ik_llama llama-server --help
+        run: python scripts/check_llama_cpp_args.py --backend ik_llama --binary "$IK_LLAMA_SERVER" --upstream-source-dir ik_llama.cpp
+
+      - name: Upload ik_llama compatibility inputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ik-llama-compatibility-${{ hashFiles('ik-llama-commit.txt') }}
+          path: |
+            ik-llama-build.txt
+            ik-llama-server-help.txt
+          if-no-files-found: ignore
+          retention-days: 7

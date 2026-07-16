@@ -612,7 +612,12 @@ class LaunchManager:
         self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get())  # Omit if False (default)
 
         # Performance options
-        self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0")  # Omit if 0 (default)
+        if backend == "ik_llama":
+            prio_val = str(self.launcher.prio.get()).strip()
+            if prio_val and prio_val != "0":
+                print("WARNING: --prio is not supported by ik_llama; ignoring.", file=sys.stderr)
+        else:
+            self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0")  # Omit if 0 (default)
 
         # MTP enforces single-slot operation (-np 1). resolve_effective_parallel
         # applies the override + stderr warning when MTP is active; see

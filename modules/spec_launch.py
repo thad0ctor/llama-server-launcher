@@ -207,6 +207,21 @@ def _is_draft_capable_for_backend(spec_type, backend):
     return spec_type in _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP
 
 
+def _append_ik_spec_type(cmd, spec_type, pairs):
+    """Append ik_llama's canonical speculative-stage argument.
+
+    Current ik_llama rejects the old ``--draft-*``, ``--spec-ngram-*`` and
+    ``--suffix-*`` flags. Those values now live in the repeated
+    ``--spec-type TYPE:key=value,...`` payload.
+    """
+    payload = []
+    for key, value in pairs:
+        if value:
+            payload.append(f"{key}={value}")
+    value = spec_type if not payload else f"{spec_type}:{','.join(payload)}"
+    cmd.extend(["--spec-type", value])
+
+
 def get_effective_visible_gpu_indices(launcher):
     """Return the ordered list of physical GPU indices that should appear in
     ``CUDA_VISIBLE_DEVICES`` — the union of the user's main GPU selection
@@ -420,10 +435,8 @@ def emit_main_device_arg(launcher, backend, cmd):
     single emission path covers both backends.
     """
     try:
-        # Tensor-split takes precedence over per-device restrictions —
-        # don't double-constrain and don't risk a backend rejecting both
-        # together. The advisory in build_cmd already tells the user
-        # tensor-split is in charge.
+        # Tensor-split takes precedence over per-device restrictions, so don't
+        # double-constrain the main model when tensor split is configured.
         try:
             ts_val = launcher.tensor_split.get().strip()
         except Exception:
@@ -705,7 +718,7 @@ def emit_spec_args(launcher, backend, cmd):
                     spec_type = "none"
             if spec_type and spec_type != "none":
                 if backend == "ik_llama":
-                    cmd.extend(["--spec-type", spec_type])
+                    spec_type_pairs = []
                     # Only draft-capable spec_types (ik_llama: "mtp")
                     # use a separate draft model + the matching
                     # tuning/offload knobs. For ngram-*/suffix, the
@@ -714,19 +727,18 @@ def emit_spec_args(launcher, backend, cmd):
                     # those modes, so emission would silently violate
                     # the grayed-field contract.
                     is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
+                    emit_spec_type = spec_type
                     if is_draft_capable:
-                        # ik_llama draft tuning flags use --draft-max/--draft-min/--draft-p-min.
-                        # These tune draft generation for both the embedded MTP head
-                        # and a separate draft model, so emit regardless of the
-                        # ``spec_use_draft_model`` opt-in.
-                        for var_name, flag in [
-                            ("spec_draft_n_max", "--draft-max"),
-                            ("spec_draft_n_min", "--draft-min"),
-                            ("spec_draft_p_min", "--draft-p-min"),
+                        # Current ik_llama takes draft tuning in the canonical
+                        # --spec-type mtp:n_max=...,n_min=...,p_min=... payload.
+                        for var_name, key in [
+                            ("spec_draft_n_max", "n_max"),
+                            ("spec_draft_n_min", "n_min"),
+                            ("spec_draft_p_min", "p_min"),
                         ]:
                             v = _safe_var_str(launcher, var_name)
                             if v:
-                                cmd.extend([flag, v])
+                                spec_type_pairs.append((key, v))
                         # ik_llama+mtp opt-in for a SEPARATE draft model: when the
                         # user hasn't checked "Use a separate draft model", suppress
                         # --model-draft AND the per-draft offload flags. Embedded
@@ -765,6 +777,7 @@ def emit_spec_args(launcher, backend, cmd):
                                     draft_path = None
                                 if is_valid_file and draft_path is not None:
                                     cmd.extend(["--model-draft", str(draft_path.resolve())])
+                                    emit_spec_type = "draft"
                                 elif draft_path is not None:
                                     print(
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
@@ -789,23 +802,24 @@ def emit_spec_args(launcher, backend, cmd):
                                 cmd.extend(["-devd", devd_val])
                     # ngram: ik_llama has a single shared --spec-ngram-* set.
                     if spec_type.startswith("ngram-"):
-                        for var_name, flag in [
-                            ("spec_ngram_size_n", "--spec-ngram-size-n"),
-                            ("spec_ngram_size_m", "--spec-ngram-size-m"),
-                            ("spec_ngram_min_hits", "--spec-ngram-min-hits"),
+                        for var_name, key in [
+                            ("spec_ngram_size_n", "ngram_size_n"),
+                            ("spec_ngram_size_m", "ngram_size_m"),
+                            ("spec_ngram_min_hits", "ngram_min_hits"),
                         ]:
                             v = _safe_var_str(launcher, var_name)
                             if v:
-                                cmd.extend([flag, v])
+                                spec_type_pairs.append((key, v))
                     # suffix
                     if spec_type == "suffix":
-                        for var_name, flag in [
-                            ("spec_suffix_pattern_len", "--suffix-pattern-len"),
-                            ("spec_suffix_max_depth", "--suffix-max-depth"),
+                        for var_name, key in [
+                            ("spec_suffix_pattern_len", "suffix_min_match_len"),
+                            ("spec_suffix_max_depth", "suffix_max_depth"),
                         ]:
                             v = _safe_var_str(launcher, var_name)
                             if v:
-                                cmd.extend([flag, v])
+                                spec_type_pairs.append((key, v))
+                    _append_ik_spec_type(cmd, emit_spec_type, spec_type_pairs)
                     # ik_llama extras.
                     autotune_var = getattr(launcher, "spec_autotune", None)
                     if autotune_var is not None and autotune_var.get():
