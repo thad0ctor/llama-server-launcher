@@ -192,7 +192,15 @@ jobs:
           } > ik-llama-build.txt
 
       - name: Capture ik_llama llama-server help
-        run: '"$IK_LLAMA_SERVER" --help > ik-llama-server-help.txt 2>&1'
+        run: |
+          set +e
+          "$IK_LLAMA_SERVER" --help > ik-llama-server-help.txt 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && ! grep -qi "usage:" ik-llama-server-help.txt; then
+            cat ik-llama-server-help.txt
+            exit "$status"
+          fi
 
       - name: Audit launcher flags against latest ik_llama llama-server --help
         run: python scripts/check_llama_cpp_args.py --backend ik_llama --binary "$IK_LLAMA_SERVER"

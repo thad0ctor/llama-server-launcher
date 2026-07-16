@@ -238,6 +238,7 @@ IK_LLAMA_FLAG_INPUTS = {
     "--spec-autotune": FlagInput("switch", False, "enable ik_llama speculative autotune"),
     "--spec-type": FlagInput("enum", True, "ik_llama speculative decoding type", "mtp:n_max=1,p_min=0.0"),
     "--temp": FlagInput("float", True, "sampling temperature"),
+    "--tensor-split": FlagInput("csv", True, "comma-separated tensor split values"),
     "--threads": FlagInput("integer", True, "CPU generation thread count"),
     "--threads-batch": FlagInput("integer", True, "CPU batch/prompt processing thread count"),
     "--ubatch-size": FlagInput("integer", True, "physical micro-batch size"),
@@ -369,7 +370,6 @@ SOURCE_KNOWN_NON_IK_LLAMA_FLAGS = frozenset(
         "--suffix-max-depth",
         "--suffix-pattern-len",
         "--suffix-",
-        "--tensor-split",
     }
 )
 

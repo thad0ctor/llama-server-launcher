@@ -2598,9 +2598,9 @@ class TestMainDeviceEmittedOnDraftUnion:
         # --tensor-split should still be present.
         assert "--tensor-split" in cmd
 
-    def test_ik_llama_ignored_tensor_split_still_emits_device(self, manager, union_launcher, capsys):
-        """ik_llama rejects --tensor-split, so ignoring it must not also
-        suppress the --device main-model guard when draft GPUs are unioned."""
+    def test_ik_llama_tensor_split_takes_precedence_over_device(self, manager, union_launcher, capsys):
+        """Current ik_llama supports --tensor-split, so keep it and avoid
+        emitting a redundant main-model --device restriction."""
         union_launcher.backend_selection.set("ik_llama")
         union_launcher.spec_type.set("mtp")
         union_launcher.spec_use_draft_model.set(True)
@@ -2612,9 +2612,9 @@ class TestMainDeviceEmittedOnDraftUnion:
         cmd = manager.build_cmd()
         err = capsys.readouterr().err
 
-        assert "--tensor-split" not in cmd
-        assert cmd[cmd.index("--device") + 1] == "CUDA0,CUDA1"
-        assert "not supported by current ik_llama" in err
+        assert cmd[cmd.index("--tensor-split") + 1] == "1,1"
+        assert "--device" not in cmd
+        assert "not supported by current ik_llama" not in err
 
     def test_no_device_when_manual_gpu_mode(self, manager, union_launcher):
         """Manual GPU mode uses synthetic indices that don't correspond to

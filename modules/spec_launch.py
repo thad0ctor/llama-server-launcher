@@ -435,15 +435,13 @@ def emit_main_device_arg(launcher, backend, cmd):
     single emission path covers both backends.
     """
     try:
-        # Tensor-split takes precedence over per-device restrictions for
-        # backends that will actually receive it. Current ik_llama rejects
-        # --tensor-split, so build_cmd suppresses that flag and this helper must
-        # still emit --device when draft GPUs were unioned into the visible set.
+        # Tensor-split takes precedence over per-device restrictions, so don't
+        # double-constrain the main model when tensor split is configured.
         try:
             ts_val = launcher.tensor_split.get().strip()
         except Exception:
             ts_val = ""
-        if ts_val and backend != "ik_llama":
+        if ts_val:
             return
         dev_val = _resolve_main_device_value(launcher)
         if dev_val:
