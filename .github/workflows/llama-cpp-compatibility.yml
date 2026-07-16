@@ -256,7 +256,7 @@ jobs:
           import os
 
           marker = "<!-- upstream-drift-report -->"
-          report_paths = sorted(Path("drift-artifacts").glob("*-drift.md"))
+          report_paths = sorted(Path("drift-artifacts").rglob("*-drift.md"))
           parts = [
               marker,
               "# Weekly upstream server flag drift report",
