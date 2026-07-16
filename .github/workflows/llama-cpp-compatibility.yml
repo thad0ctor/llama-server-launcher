@@ -1,7 +1,10 @@
 name: Server Flag Compatibility
 
 on:
-  push: {}
+  push:
+    branches: [main]
+  # `pull_request` fires on synchronize when a new commit is pushed to an
+  # open PR branch, so PR iteration is covered without duplicate push runs.
   pull_request:
     branches: [main]
   workflow_dispatch:
