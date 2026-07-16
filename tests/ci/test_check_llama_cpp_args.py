@@ -226,6 +226,38 @@ def test_binary_probe_does_not_accept_version_short_circuit(monkeypatch):
     assert len(calls) == 2
 
 
+def test_binary_probe_rejects_when_both_options_are_unknown(monkeypatch):
+    sentinel = check_llama_cpp_args.BINARY_PROBE_UNKNOWN_FLAG
+
+    def fake_run(cmd, **kwargs):
+        return check_llama_cpp_args.subprocess.CompletedProcess(
+            cmd,
+            2,
+            stdout="",
+            stderr=f"unknown option: {cmd[1]}\nunknown option: {sentinel}\n",
+        )
+
+    monkeypatch.setattr(check_llama_cpp_args.subprocess, "run", fake_run)
+
+    assert not check_llama_cpp_args.binary_accepts_flag(
+        Path("fake-server"),
+        "--removed",
+        check_llama_cpp_args.FlagInput("integer", True, "removed flag"),
+    )
+
+
+def test_extract_text_flags_ignores_c_like_comments(tmp_path):
+    upstream = tmp_path / "common.cpp"
+    upstream.write_text(
+        'if (arg == "--active-flag") return true;\n'
+        "// if (arg == \"--line-commented\") return true;\n"
+        "/* if (arg == \"--block-commented\") return true; */\n",
+        encoding="utf-8",
+    )
+
+    assert check_llama_cpp_args.extract_text_flags([upstream]) == {"--active-flag"}
+
+
 def test_audit_accepts_cpu_hidden_flag_when_present_in_upstream_source(tmp_path):
     upstream = tmp_path / "common.cpp"
     upstream.write_text('if (arg == "--tensor-split" || arg == "-ts") return true;\n', encoding="utf-8")

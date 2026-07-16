@@ -476,11 +476,61 @@ def extract_source_flags(paths: list[Path]) -> set[str]:
     return flags
 
 
+def strip_c_like_comments(text: str) -> str:
+    """Remove C/C++ comments while preserving string and character literals."""
+    result: list[str] = []
+    index = 0
+    state = "code"
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+
+        if state == "code":
+            if char == "/" and next_char == "/":
+                state = "line_comment"
+                result.append(" ")
+                index += 2
+                continue
+            if char == "/" and next_char == "*":
+                state = "block_comment"
+                result.append(" ")
+                index += 2
+                continue
+            if char == '"':
+                state = "string"
+            elif char == "'":
+                state = "char"
+            result.append(char)
+        elif state == "line_comment":
+            if char == "\n":
+                state = "code"
+                result.append(char)
+        elif state == "block_comment":
+            if char == "\n":
+                result.append(char)
+            if char == "*" and next_char == "/":
+                state = "code"
+                result.append(" ")
+                index += 2
+                continue
+        elif state in {"string", "char"}:
+            result.append(char)
+            if char == "\\" and next_char:
+                result.append(next_char)
+                index += 2
+                continue
+            if (state == "string" and char == '"') or (state == "char" and char == "'"):
+                state = "code"
+        index += 1
+    return "".join(result)
+
+
 def extract_text_flags(paths: list[Path]) -> set[str]:
     """Extract option-looking tokens from arbitrary upstream source text."""
     flags: set[str] = set()
     for path in paths:
-        flags.update(extract_flags(path.read_text(encoding="utf-8", errors="ignore")))
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        flags.update(extract_flags(strip_c_like_comments(text)))
     return flags
 
 
@@ -622,6 +672,10 @@ def binary_accepts_flag(binary: Path, flag: str, spec: FlagInput) -> bool:
     except Exception:
         return False
     output = (result.stdout or "") + (result.stderr or "")
+    unknown_line = re.compile(r"\b(?:unknown|unrecognized|invalid)\b.*\b(?:option|argument|flag)\b", re.IGNORECASE)
+    flag_pattern = re.compile(rf"(?<![\w./]){re.escape(flag)}(?![\w-])")
+    if any(unknown_line.search(line) and flag_pattern.search(line) for line in output.splitlines()):
+        return False
     return result.returncode != 0 and BINARY_PROBE_UNKNOWN_FLAG in output
 
 
