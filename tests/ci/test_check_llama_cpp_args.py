@@ -35,11 +35,25 @@ def test_extract_flags_handles_long_and_short_tokens():
       -m, --model FNAME
       --threads N
       --ctx-size N
+      -no-kvu, --no-kv-unified
       default value: -1
       path: ./not-a-flag
     """
 
-    assert check_llama_cpp_args.extract_flags(text) == {"-m", "--model", "--threads", "--ctx-size"}
+    assert check_llama_cpp_args.extract_flags(text) == {
+        "-m",
+        "--model",
+        "--threads",
+        "--ctx-size",
+        "-no-kvu",
+        "--no-kv-unified",
+    }
+
+
+def test_extract_flags_ignores_wildcard_flag_prose():
+    text = "use --spec-ngram-*-size-n or --draft-* family settings"
+
+    assert check_llama_cpp_args.extract_flags(text) == set()
 
 
 def test_every_tracked_llama_cpp_flag_has_intended_input_metadata():
@@ -81,6 +95,12 @@ def test_alias_group_takes_value_when_value_marker_is_on_an_alias():
 
     assert not check_llama_cpp_args.help_line_takes_value(line, "--spec-draft-device")
     assert check_llama_cpp_args.help_alias_group_takes_value(line)
+
+
+def test_help_alias_flags_classifies_same_line_aliases():
+    help_text = "  -m, --model FNAME\n  --threads, -t N\n  --unrelated VALUE\n"
+
+    assert check_llama_cpp_args.help_alias_flags(help_text, {"-m", "--threads"}) == {"--model", "-t"}
 
 
 def test_audit_reports_missing_upstream_flags_without_source_scan():
@@ -192,7 +212,7 @@ def test_audit_accepts_categorized_non_llama_cpp_source_flags(tmp_path):
 
 def test_audit_result_reports_untracked_upstream_flags_without_failing():
     result = check_llama_cpp_args.audit_result(
-        help_text="--threads N\n--new-upstream-flag VALUE\n",
+        help_text="--threads, -t N\n--new-upstream-flag VALUE\n",
         source_paths=[],
         expected_flags={"--threads"},
         known_non_llama_cpp_flags=set(),
@@ -201,8 +221,25 @@ def test_audit_result_reports_untracked_upstream_flags_without_failing():
 
     assert result.failures == ()
     assert result.missing_upstream_flags == ()
+    assert result.tracked_alias_flags == frozenset({"-t"})
     assert result.untracked_upstream_flags == ("--new-upstream-flag",)
     assert check_llama_cpp_args._format_failures_from_result(result) == []
+
+
+def test_audit_result_does_not_report_aliases_as_untracked_upstream_flags():
+    result = check_llama_cpp_args.audit_result(
+        help_text="-h, --help, --usage\n--version\n-m, --model FNAME\n--n-gpu-layers, --gpu-layers N\n--predict N\n",
+        source_paths=[],
+        expected_flags={"-m", "--n-gpu-layers"},
+        known_non_llama_cpp_flags=set(),
+        flag_inputs={
+            "-m": check_llama_cpp_args.FlagInput("path", True, "model path"),
+            "--n-gpu-layers": check_llama_cpp_args.FlagInput("integer", True, "GPU layers"),
+        },
+    )
+
+    assert result.tracked_alias_flags == frozenset({"--model", "--gpu-layers"})
+    assert result.untracked_upstream_flags == ("--predict",)
 
 
 def test_report_file_contains_untracked_upstream_flags(tmp_path):
@@ -232,7 +269,9 @@ def test_report_file_contains_untracked_upstream_flags(tmp_path):
     assert status == 0
     report = report_file.read_text(encoding="utf-8")
     assert "## llama.cpp upstream drift" in report
-    assert "Triage needed for new upstream flags" in report
+    assert "No compatibility failures; upstream classification backlog present" in report
+    assert "### Upstream flags not currently classified" in report
+    assert "This is feature inventory, not a launch compatibility failure." in report
     assert "`--new-upstream-flag`" in report
     assert "`upstream-test`" in report
     assert "`launcher-test`" in report

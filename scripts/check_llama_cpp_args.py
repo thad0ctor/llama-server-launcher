@@ -24,8 +24,23 @@ from textwrap import indent
 HELP_TIMEOUT_SECONDS = 20
 BINARY_PROBE_UNKNOWN_FLAG = "--llama-launcher-compat-probe-unknown-option"
 
-FLAG_RE = re.compile(r"(?<![\w./])--[A-Za-z0-9][A-Za-z0-9-]*|(?<![\w./])-[A-Za-z][A-Za-z0-9]*(?![\w-])")
-FLAG_LINE_RE = re.compile(r"(?<![\w./])(--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z][A-Za-z0-9]*)(?![\w-])")
+FLAG_RE = re.compile(
+    r"(?<![\w./*])--[A-Za-z0-9][A-Za-z0-9-]*(?![\w*\-])"
+    r"|(?<![\w./*])-[A-Za-z][A-Za-z0-9-]*(?![\w*\-])"
+)
+FLAG_LINE_RE = re.compile(
+    r"(?<![\w./*])(--[A-Za-z0-9][A-Za-z0-9-]*|-[A-Za-z][A-Za-z0-9-]*)(?![\w*\-])"
+)
+
+GENERIC_UPSTREAM_NON_LAUNCH_FLAGS = frozenset(
+    {
+        "-h",
+        "--completion-bash",
+        "--help",
+        "--usage",
+        "--version",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,7 @@ class AuditResult:
     tracked_flags: frozenset[str]
     upstream_flags: frozenset[str]
     accepted_or_hidden_flags: frozenset[str]
+    tracked_alias_flags: frozenset[str]
     missing_upstream_flags: tuple[str, ...]
     input_shape_mismatches: tuple[str, ...]
     uncategorized_source_flags: tuple[str, ...]
@@ -602,6 +618,23 @@ def help_flag_lines(help_text: str) -> dict[str, list[str]]:
     return lines
 
 
+def help_alias_flags(help_text: str, canonical_flags: set[str] | frozenset[str]) -> set[str]:
+    """Return same-line aliases for any advertised canonical flag.
+
+    llama-server commonly documents aliases on one line, for example
+    ``-m, --model`` or ``--n-gpu-layers, --gpu-layers``. If the launcher
+    tracks one spelling, the sibling spellings are classified too; they are
+    not separate untracked upstream features.
+    """
+    aliases: set[str] = set()
+    canonical = set(canonical_flags)
+    for raw_line in help_text.splitlines():
+        flags = {match.group(1) for match in FLAG_LINE_RE.finditer(raw_line)}
+        if flags & canonical:
+            aliases.update(flags - canonical)
+    return aliases
+
+
 def _next_word_after_flag(line: str, flag: str) -> str:
     match = re.search(rf"(?<![\w./]){re.escape(flag)}(?![\w-])", line)
     if match is None:
@@ -819,7 +852,8 @@ def audit_result(
 
         unused_tracked = set(expected_flags) - source_flags
 
-    known_upstream = set(expected_flags) | set(known_non_llama_cpp_flags)
+    tracked_aliases = help_alias_flags(help_text, expected_flags)
+    known_upstream = set(expected_flags) | tracked_aliases | set(GENERIC_UPSTREAM_NON_LAUNCH_FLAGS)
     known_upstream.update(accepted_or_hidden_flags)
     untracked_upstream = upstream_flags - known_upstream
     untracked_upstream = {
@@ -833,6 +867,7 @@ def audit_result(
         tracked_flags=frozenset(expected_flags),
         upstream_flags=frozenset(upstream_flags),
         accepted_or_hidden_flags=frozenset(accepted_or_hidden_flags),
+        tracked_alias_flags=frozenset(tracked_aliases),
         missing_upstream_flags=tuple(sorted(missing_upstream)),
         input_shape_mismatches=tuple(shape_mismatch_lines),
         uncategorized_source_flags=tuple(sorted(uncategorized)),
@@ -893,7 +928,7 @@ def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launc
     if result.failures or result.missing_upstream_flags or result.input_shape_mismatches:
         status = "Breaking compatibility issue detected"
     elif result.untracked_upstream_flags:
-        status = "Triage needed for new upstream flags"
+        status = "No compatibility failures; upstream classification backlog present"
     else:
         status = "No upstream drift requiring action"
     lines.extend(["### Status", "", status, ""])
@@ -903,12 +938,41 @@ def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launc
         ("Missing tracked flags", result.missing_upstream_flags),
         ("Input shape mismatches", result.input_shape_mismatches),
         ("Uncategorized launcher source flags", result.uncategorized_source_flags),
-        ("Tracked flags not found in source scan", result.unused_tracked_flags),
-        ("New upstream flags not classified", result.untracked_upstream_flags),
-        ("Accepted or CPU-hidden tracked flags", result.accepted_or_hidden_flags),
+        ("Launcher manifest flags not seen by static source scan", result.unused_tracked_flags),
+        ("Upstream flags not currently classified", result.untracked_upstream_flags),
+        ("Upstream aliases of tracked launcher flags", result.tracked_alias_flags),
+        ("Tracked flags accepted or source-confirmed despite absent help", result.accepted_or_hidden_flags),
     ]
+    section_notes = {
+        "Compatibility failures": "Internal manifest validation problems. These fail the checker.",
+        "Missing tracked flags": (
+            "Launcher-tracked flags that upstream no longer advertises, accepts, or exposes in source."
+        ),
+        "Input shape mismatches": "Launcher value/switch expectations that disagree with upstream help.",
+        "Uncategorized launcher source flags": (
+            "Option-looking tokens emitted by scanned launcher source but not assigned to this backend manifest "
+            "or its source-scan ignore list."
+        ),
+        "Launcher manifest flags not seen by static source scan": (
+            "Tracked backend manifest entries that the static source scan did not see. Review non-empty results; "
+            "dynamic emission can require explicit manifest coverage."
+        ),
+        "Upstream flags not currently classified": (
+            "Advertised upstream flags that are not launcher-tracked flags or aliases of tracked flags. "
+            "This is feature inventory, not a launch compatibility failure."
+        ),
+        "Upstream aliases of tracked launcher flags": (
+            "Alternative upstream spellings found on the same help line as a launcher-tracked flag."
+        ),
+        "Tracked flags accepted or source-confirmed despite absent help": (
+            "Tracked flags hidden from help but accepted by the binary or confirmed in upstream source."
+        ),
+    }
     for title, values in sections:
         lines.extend([f"### {title}", ""])
+        note = section_notes.get(title, "")
+        if note:
+            lines.extend([note, ""])
         if values:
             for value in values:
                 if "\n" not in value and re.fullmatch(r"-{1,2}[A-Za-z0-9][A-Za-z0-9-]*", value):
@@ -973,7 +1037,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--fail-on-untracked-upstream",
         action="store_true",
-        help="Treat newly advertised upstream flags not classified by the launcher as a failure",
+        help="Treat upstream flags not classified by the launcher as a failure",
     )
     args = parser.parse_args(argv)
     if args.skip_source_scan:
