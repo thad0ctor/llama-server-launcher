@@ -190,35 +190,40 @@ def test_audit_accepts_categorized_non_llama_cpp_source_flags(tmp_path):
     assert failures == []
 
 
-def test_binary_probe_does_not_accept_version_short_circuit(tmp_path):
-    binary = tmp_path / "fake-server"
-    binary.write_text(
-        "#!/usr/bin/env python3\n"
-        "import sys\n"
-        f"sentinel = {check_llama_cpp_args.BINARY_PROBE_UNKNOWN_FLAG!r}\n"
-        "args = sys.argv[1:]\n"
-        "if '--version' in args:\n"
-        "    raise SystemExit(0)\n"
-        "if args[:2] == ['--known', '1'] and sentinel in args:\n"
-        "    print(f'unknown option: {sentinel}', file=sys.stderr)\n"
-        "    raise SystemExit(2)\n"
-        "bad = args[0] if args else '<none>'\n"
-        "print(f'unknown option: {bad}', file=sys.stderr)\n"
-        "raise SystemExit(2)\n",
-        encoding="utf-8",
-    )
-    binary.chmod(binary.stat().st_mode | 0o111)
+def test_binary_probe_does_not_accept_version_short_circuit(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        assert "--version" not in cmd
+        sentinel = check_llama_cpp_args.BINARY_PROBE_UNKNOWN_FLAG
+        if cmd[1:3] == ["--known", "1"] and sentinel in cmd:
+            return check_llama_cpp_args.subprocess.CompletedProcess(
+                cmd,
+                2,
+                stdout="",
+                stderr=f"unknown option: {sentinel}",
+            )
+        return check_llama_cpp_args.subprocess.CompletedProcess(
+            cmd,
+            2,
+            stdout="",
+            stderr=f"unknown option: {cmd[1]}",
+        )
+
+    monkeypatch.setattr(check_llama_cpp_args.subprocess, "run", fake_run)
 
     assert check_llama_cpp_args.binary_accepts_flag(
-        binary,
+        Path("fake-server"),
         "--known",
         check_llama_cpp_args.FlagInput("integer", True, "known flag"),
     )
     assert not check_llama_cpp_args.binary_accepts_flag(
-        binary,
+        Path("fake-server"),
         "--missing",
         check_llama_cpp_args.FlagInput("integer", True, "missing flag"),
     )
+    assert len(calls) == 2
 
 
 def test_llama_cpp_manifest_source_scan_passes_when_all_tracked_flags_are_advertised():
