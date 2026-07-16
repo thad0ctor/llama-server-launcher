@@ -258,6 +258,18 @@ def test_extract_text_flags_ignores_c_like_comments(tmp_path):
     assert check_llama_cpp_args.extract_text_flags([upstream]) == {"--active-flag"}
 
 
+def test_extract_text_flags_ignores_backslash_continued_line_comments(tmp_path):
+    upstream = tmp_path / "common.cpp"
+    upstream.write_text(
+        "// removed parser branch \\\n"
+        'if (arg == "--continued-commented") return true;\n'
+        'if (arg == "--active-flag") return true;\n',
+        encoding="utf-8",
+    )
+
+    assert check_llama_cpp_args.extract_text_flags([upstream]) == {"--active-flag"}
+
+
 def test_audit_accepts_cpu_hidden_flag_when_present_in_upstream_source(tmp_path):
     upstream = tmp_path / "common.cpp"
     upstream.write_text('if (arg == "--tensor-split" || arg == "-ts") return true;\n', encoding="utf-8")

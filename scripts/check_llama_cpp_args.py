@@ -502,6 +502,9 @@ def strip_c_like_comments(text: str) -> str:
                 state = "char"
             result.append(char)
         elif state == "line_comment":
+            if char == "\\" and next_char == "\n":
+                index += 2
+                continue
             if char == "\n":
                 state = "code"
                 result.append(char)
