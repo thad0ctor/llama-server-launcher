@@ -430,10 +430,7 @@ LLAMA_CPP_DRAFT_MTP_FLAGS_EXPECTED = [
 
 IK_LLAMA_MTP_FLAGS_EXPECTED = [
     "--spec-type",
-    # ik_llama uses short-form translations.
-    "--draft-max",
-    "--draft-min",
-    "--draft-p-min",
+    # ik_llama now carries draft tuning in the --spec-type payload.
     "--model-draft",
     "-ngld",
     # NOTE: -devd is intentionally NOT in this list — ik_llama's only

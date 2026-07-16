@@ -634,7 +634,7 @@ class TestSpecCrossBackendWarningsLlamaCpp:
 
 class TestSpecEmissionIkLlama:
     """Happy-path emission under ik_llama, with emphasis on the flag-name
-    translations: ``--draft-max`` not ``--spec-draft-n-max``,
+    translations: draft tuning inside ``--spec-type`` not ``--spec-draft-n-max``,
     ``--model-draft`` not ``--spec-draft-model``, short-form offload flags."""
 
     @pytest.mark.parametrize("spec_type", IK_LLAMA_SPEC_TYPES)
@@ -646,10 +646,9 @@ class TestSpecEmissionIkLlama:
         assert "--spec-type" in cmd
         assert cmd[cmd.index("--spec-type") + 1] == spec_type
 
-    def test_draft_tuning_uses_short_form_names(self, manager, launcher_mock):
-        """The headline ik_llama translation: ``--draft-max`` /
-        ``--draft-min`` / ``--draft-p-min`` instead of
-        ``--spec-draft-n-max`` / etc."""
+    def test_draft_tuning_uses_canonical_spec_type_payload(self, manager, launcher_mock):
+        """Current ik_llama takes draft tuning inside the --spec-type payload,
+        not as legacy --draft-* or llama.cpp --spec-draft-* flags."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
@@ -657,14 +656,9 @@ class TestSpecEmissionIkLlama:
         launcher_mock.spec_draft_n_min.set("2")
         launcher_mock.spec_draft_p_min.set("0.5")
         cmd = manager.build_cmd()
-        # ik_llama short forms ARE present...
-        assert "--draft-max" in cmd
-        assert cmd[cmd.index("--draft-max") + 1] == "16"
-        assert "--draft-min" in cmd
-        assert cmd[cmd.index("--draft-min") + 1] == "2"
-        assert "--draft-p-min" in cmd
-        assert cmd[cmd.index("--draft-p-min") + 1] == "0.5"
-        # ...and the llama.cpp long forms are NOT.
+        assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=16,n_min=2,p_min=0.5"
+        for absent in ("--draft-max", "--draft-min", "--draft-p-min"):
+            assert absent not in cmd
         assert "--spec-draft-n-max" not in cmd
         assert "--spec-draft-n-min" not in cmd
         assert "--spec-draft-p-min" not in cmd
@@ -740,8 +734,9 @@ class TestSpecEmissionIkLlama:
         # Only n_max set.
         launcher_mock.spec_draft_n_max.set("7")
         cmd = manager.build_cmd()
-        assert "--draft-max" in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=7"
         for absent in (
+            "--draft-max",
             "--draft-min",
             "--draft-p-min",
             "--model-draft",
@@ -772,10 +767,7 @@ class TestSpecEmissionIkLlama:
         launcher_mock.spec_draft_ctk.set("q4_0")
         launcher_mock.spec_draft_ctv.set("q4_0")
         cmd = manager.build_cmd()
-        assert cmd[cmd.index("--spec-type") + 1] == "mtp"
-        assert cmd[cmd.index("--draft-max") + 1] == "16"
-        assert cmd[cmd.index("--draft-min") + 1] == "2"
-        assert cmd[cmd.index("--draft-p-min") + 1] == "0.5"
+        assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=16,n_min=2,p_min=0.5"
         assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
         assert cmd[cmd.index("-ngld") + 1] == "24"
         assert cmd[cmd.index("-devd") + 1] == "CUDA1"
@@ -783,6 +775,9 @@ class TestSpecEmissionIkLlama:
         assert cmd[cmd.index("-ctvd") + 1] == "q4_0"
         # Long forms still absent.
         for absent in (
+            "--draft-max",
+            "--draft-min",
+            "--draft-p-min",
             "--spec-draft-n-max",
             "--spec-draft-n-min",
             "--spec-draft-p-min",
@@ -801,9 +796,9 @@ class TestSpecEmissionIkLlama:
 
 
 class TestSpecNgramKnobsIkLlama:
-    """ik_llama uses one shared trio of ngram knobs regardless of which
-    ``ngram-*`` variant is active. The per-variant llama.cpp knobs are
-    silently ignored under ik_llama."""
+    """ik_llama uses one shared trio of ngram keys inside --spec-type
+    regardless of which ``ngram-*`` variant is active. The per-variant
+    llama.cpp knobs are silently ignored under ik_llama."""
 
     @pytest.mark.parametrize(
         "spec_type",
@@ -817,9 +812,13 @@ class TestSpecNgramKnobsIkLlama:
         launcher_mock.spec_ngram_size_m.set("5")
         launcher_mock.spec_ngram_min_hits.set("2")
         cmd = manager.build_cmd()
-        assert cmd[cmd.index("--spec-ngram-size-n") + 1] == "3"
-        assert cmd[cmd.index("--spec-ngram-size-m") + 1] == "5"
-        assert cmd[cmd.index("--spec-ngram-min-hits") + 1] == "2"
+        assert (
+            cmd[cmd.index("--spec-type") + 1]
+            == f"{spec_type}:ngram_size_n=3,ngram_size_m=5,ngram_min_hits=2"
+        )
+        assert "--spec-ngram-size-n" not in cmd
+        assert "--spec-ngram-size-m" not in cmd
+        assert "--spec-ngram-min-hits" not in cmd
 
     def test_ngram_shared_set_does_not_emit_for_non_ngram_spec_type(self, manager, launcher_mock):
         """Outside an ``ngram-*`` spec_type, the shared set must stay
@@ -868,7 +867,7 @@ class TestSpecNgramKnobsIkLlama:
 
 
 class TestSpecSuffixIkLlama:
-    """``--suffix-pattern-len`` / ``--suffix-max-depth`` emit ONLY when
+    """Suffix tuning emits inside --spec-type ONLY when
     ``spec_type == "suffix"`` under ik_llama."""
 
     def test_suffix_flags_emit_when_spec_type_is_suffix(self, manager, launcher_mock):
@@ -878,8 +877,9 @@ class TestSpecSuffixIkLlama:
         launcher_mock.spec_suffix_pattern_len.set("4")
         launcher_mock.spec_suffix_max_depth.set("12")
         cmd = manager.build_cmd()
-        assert cmd[cmd.index("--suffix-pattern-len") + 1] == "4"
-        assert cmd[cmd.index("--suffix-max-depth") + 1] == "12"
+        assert cmd[cmd.index("--spec-type") + 1] == "suffix:suffix_min_match_len=4,suffix_max_depth=12"
+        assert "--suffix-pattern-len" not in cmd
+        assert "--suffix-max-depth" not in cmd
 
     def test_suffix_flags_omitted_for_non_suffix_spec_type(self, manager, launcher_mock):
         """Populate suffix vars but pick spec_type=mtp; nothing emits."""
@@ -1362,9 +1362,9 @@ class TestSpecDraftFlagsGatedByType:
         launcher_mock.spec_suffix_pattern_len.set("8")
         cmd = manager.build_cmd()
         assert "--spec-type" in cmd
-        # Suffix knobs ARE emitted...
-        assert "--suffix-pattern-len" in cmd
-        assert cmd[cmd.index("--suffix-pattern-len") + 1] == "8"
+        # Suffix knobs are encoded in the canonical spec-type payload...
+        assert cmd[cmd.index("--spec-type") + 1] == "suffix:suffix_min_match_len=8"
+        assert "--suffix-pattern-len" not in cmd
         # ...but the draft model is NOT (suffix has no separate draft model).
         assert "--model-draft" not in cmd
 
@@ -1398,16 +1398,16 @@ class TestSpecDraftFlagsGatedByType:
         assert "--spec-draft-n-max" in cmd
         assert cmd[cmd.index("--spec-draft-n-max") + 1] == "3"
 
-    def test_ik_llama_mtp_still_emits_draft_max(self, manager, launcher_mock):
+    def test_ik_llama_mtp_still_emits_draft_tuning(self, manager, launcher_mock):
         """Regression: ik_llama's only draft-capable spec_type (``mtp``)
-        still forwards ``--draft-max``."""
+        still forwards draft tuning."""
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set("mtp")
         launcher_mock.spec_draft_n_max.set("7")
         cmd = manager.build_cmd()
-        assert "--draft-max" in cmd
-        assert cmd[cmd.index("--draft-max") + 1] == "7"
+        assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=7"
+        assert "--draft-max" not in cmd
 
     def test_llamacpp_switch_from_draft_mtp_to_ngram_drops_all_draft(self, manager, launcher_mock, tmp_path):
         """The exact scenario from the CR prompt: a user who set up

@@ -80,17 +80,17 @@ class TestDefaults:
 class TestGetFlags:
     def test_rtr_only(self, tab):
         tab.rtr_enabled.set(True)
-        assert tab.get_ik_llama_flags() == ["-rtr"]
+        assert tab.get_ik_llama_flags() == ["--run-time-repack"]
 
     def test_fmoe_only(self, tab):
         tab.fmoe_enabled.set(True)
-        assert tab.get_ik_llama_flags() == ["-fmoe"]
+        assert tab.get_ik_llama_flags() == []
 
     def test_both_booleans(self, tab):
         tab.rtr_enabled.set(True)
         tab.fmoe_enabled.set(True)
         flags = tab.get_ik_llama_flags()
-        assert flags == ["-rtr", "-fmoe"]
+        assert flags == ["--run-time-repack"]
 
     def test_ser_value(self, tab):
         tab.ser_value.set("7,1")
@@ -151,7 +151,7 @@ class TestGetFlags:
         assert ["-ctk", kv] == flags[:2]
 
     def test_full_combo_ordering(self, tab):
-        # The module emits flags in a fixed order: rtr, fmoe, ser, amb, ctk, ctv.
+        # The module emits flags in a fixed order: rtr, ser, amb, ctk, ctv.
         tab.rtr_enabled.set(True)
         tab.fmoe_enabled.set(True)
         tab.ser_value.set("6,1")
@@ -160,8 +160,7 @@ class TestGetFlags:
         tab.ctv_value.set("q4_0")
 
         assert tab.get_ik_llama_flags() == [
-            "-rtr",
-            "-fmoe",
+            "--run-time-repack",
             "-ser", "6,1",
             "-amb", "512",
             "-ctk", "q8_0",

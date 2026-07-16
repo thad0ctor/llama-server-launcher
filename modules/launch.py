@@ -568,7 +568,13 @@ class LaunchManager:
 
         # Add --tensor-split if the value is non-empty
         # Use add_arg which handles the non-empty check
-        self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
+        if backend == "ik_llama" and tensor_split_val:
+            print(
+                "WARNING: --tensor-split is not supported by current ik_llama server builds; ignoring.",
+                file=sys.stderr,
+            )
+        else:
+            self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
 
         # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
         # This argument will now be added regardless of the --tensor-split value
@@ -612,7 +618,12 @@ class LaunchManager:
         self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get())  # Omit if False (default)
 
         # Performance options
-        self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0")  # Omit if 0 (default)
+        if backend == "ik_llama":
+            prio_val = str(self.launcher.prio.get()).strip()
+            if prio_val and prio_val != "0":
+                print("WARNING: --prio is not supported by ik_llama; ignoring.", file=sys.stderr)
+        else:
+            self.add_arg(cmd, "--prio", self.launcher.prio.get(), "0")  # Omit if 0 (default)
 
         # MTP enforces single-slot operation (-np 1). resolve_effective_parallel
         # applies the override + stderr warning when MTP is active; see

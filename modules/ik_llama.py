@@ -106,7 +106,7 @@ class IkLlamaTab:
         # RTR (Real-Time Reasoning) option
         self.rtr_checkbox = ttk.Checkbutton(
             scrollable_frame, 
-            text="Enable RTR (-rtr)", 
+            text="Enable RTR (--run-time-repack)", 
             variable=self.rtr_enabled
         )
         self.rtr_checkbox.grid(column=0, row=row, sticky="w", padx=10, pady=5)
@@ -119,7 +119,7 @@ class IkLlamaTab:
         # FMoE (FusedMixture of Experts) option
         self.fmoe_checkbox = ttk.Checkbutton(
             scrollable_frame, 
-            text="Enable FMoE (-fmoe)", 
+            text="FMoE enabled by default", 
             variable=self.fmoe_enabled
         )
         self.fmoe_checkbox.grid(column=0, row=row, sticky="w", padx=10, pady=5)
@@ -211,9 +211,9 @@ class IkLlamaTab:
             column=0, row=row, columnspan=3, sticky="ew", padx=10, pady=5)
         row += 1
         
-        help_text = ("• RTR (-rtr): Run Time Repack - repacks quants for improved performance on certain hardware configs\n"
+        help_text = ("• RTR (--run-time-repack): Run Time Repack - repacks quants for improved performance on certain hardware configs\n"
                     "  NOTE: Disables mmap, requires enough RAM to malloc all repacked quants (good for hybrid GPU+CPU)\n"
-                    "• FMoE (-fmoe): Fused MoE - optimized mixture of experts for CUDA and some CPU configurations\n"
+                    "• FMoE: current ik_llama enables fused MoE by default\n"
                     "• SER (-ser): Smart expert reduction trades quality for speed (format: experts,factor)\n"
                     "• AMB (-amb): Sets K*Q tensor compute buffer size in MiB for memory optimization\n"
                     "• CTK (-ctk): Sets KV cache type for K tensor (f16/f32/bf16/q4_0/q4_1/q5_0/q5_1/q6_0/q8_0/iq4_nl/q8_KV)\n"
@@ -234,10 +234,11 @@ class IkLlamaTab:
         flags = []
         
         if self.rtr_enabled.get():
-            flags.append("-rtr")
+            flags.append("--run-time-repack")
         
-        if self.fmoe_enabled.get():
-            flags.append("-fmoe")
+        # Current ik_llama enables fused MoE by default and exposes only the
+        # negative --no-fused-moe / -no-fmoe toggle. The launcher has no
+        # "disable FMoE" control, so this positive checkbox is now a no-op.
         
         # Smart Expert Reduction
         ser_val = self.ser_value.get().strip()
