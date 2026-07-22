@@ -249,7 +249,12 @@ class LlamaCppLauncher:
             screen_h = self.root.winfo_screenheight()
         except Exception:
             screen_h = 1000
-        initial_h = max(600, min(1000, screen_h - 80))
+        # Floor tracks the ``minsize`` height below so that on very short
+        # screens (netbooks/kiosks < ~680px) the initial height doesn't get
+        # forced back above the display by a fixed floor. 400 is the hard
+        # minimum the window can shrink to anyway, so it never exceeds what
+        # the user can then resize down to.
+        initial_h = max(400, min(1000, screen_h - 80))
         self.root.geometry(f"900x{initial_h}")
         # Low minimum height so the window can shrink below the content's
         # natural height on small monitors; the scroller covers the rest.
@@ -1171,8 +1176,14 @@ class LlamaCppLauncher:
         self._setup_settings_tab(self._scrollable_page(settings_frame)) # UI settings tab
         self._setup_hf_downloader_tab(hf_frame)
         self._setup_about_tab(self._scrollable_page(about_frame)) # Setup the about tab
+        # Adopt the self-scrolling tabs' own canvases into the wheel router so
+        # the mouse wheel works there too (the lazy ones are adopted at build
+        # time in ``_on_notebook_tab_changed``).
+        self._adopt_page_scroll_canvas(main_frame)
+        self._adopt_page_scroll_canvas(adv_frame)
+        self._adopt_page_scroll_canvas(cfg_frame)
         # One wheel handler for the whole app, routed to the visible tab's
-        # scroll canvas (only the wrapped tabs register one).
+        # scroll canvas.
         self._install_global_mousewheel()
 
         # Update ik_llama tab visibility based on current backend selection
@@ -2923,9 +2934,16 @@ class LlamaCppLauncher:
             # Tabs that build their own scroll canvas are left unwrapped to
             # avoid a second slider; only ``scroll_wrap`` tabs get the
             # page-level vertical scroller.
-            target = self._scrollable_page(parent) if entry.get("scroll_wrap") else parent
+            if entry.get("scroll_wrap"):
+                target = self._scrollable_page(parent)
+            else:
+                target = parent
             entry["builder"](target)
             entry["initialized"] = True
+            # Self-scrolling tabs build their canvas during the builder call;
+            # adopt it now so the global wheel router covers them. (No-op for
+            # ``scroll_wrap`` tabs — ``_scrollable_page`` already registered.)
+            self._adopt_page_scroll_canvas(parent)
         except Exception as exc:
             print(
                 f"ERROR: lazy tab setup for {entry['label']!r} failed: {exc}",
@@ -2976,6 +2994,29 @@ class LlamaCppLauncher:
         # global wheel handler can find the visible tab's canvas.
         self._tab_scroll_canvases[str(page)] = canvas
         return inner
+
+    def _adopt_page_scroll_canvas(self, page):
+        """Register a self-scrolling tab's own ``tk.Canvas`` with the global
+        wheel router so the mouse wheel scrolls it too.
+
+        The heavy tabs (Main, Advanced, Config, Env Vars, MTP-Spec, ik_llama,
+        Build, Benchmark) build their own full-tab scroll canvas instead of
+        going through ``_scrollable_page``, so without this the global wheel
+        handler would find no canvas for them and fall back to scrollbar-drag
+        only. Each such tab contains exactly one ``tk.Canvas``; a breadth-first
+        walk finds that outermost canvas (it sits above any inner content
+        canvas). No-op if the page already has a registered canvas (e.g. a
+        ``_scrollable_page``-wrapped tab) or none is found.
+        """
+        if str(page) in self._tab_scroll_canvases:
+            return
+        pending = list(page.winfo_children())
+        while pending:
+            widget = pending.pop(0)
+            if isinstance(widget, tk.Canvas):
+                self._tab_scroll_canvases[str(page)] = widget
+                return
+            pending.extend(widget.winfo_children())
 
     def _install_global_mousewheel(self):
         """Bind the mouse wheel once, app-wide, routed to the visible tab.

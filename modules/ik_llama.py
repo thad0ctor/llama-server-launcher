@@ -65,15 +65,12 @@ class IkLlamaTab:
         
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-        
-        # Enable mouse wheel scrolling
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        canvas.bind("<MouseWheel>", _on_mousewheel)  # Windows
-        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))  # Linux
-        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))   # Linux
-        
+
+        # Mouse-wheel scrolling is handled app-wide by the launcher's global
+        # wheel router (``_on_global_mousewheel``), which adopts this canvas
+        # via ``_adopt_page_scroll_canvas``. A local ``canvas.bind`` here
+        # would fire in addition to the global handler and double-scroll.
+
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         

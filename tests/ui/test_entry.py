@@ -272,6 +272,37 @@ class TestScrollablePage:
         ) is False
         page.destroy()
 
+    def test_adopt_finds_nested_canvas(self, entry_module, tk_root):
+        # Self-scrolling tabs (Build/Benchmark) nest their scroll canvas
+        # inside an outer frame; adoption must find it via a tree walk.
+        page = ttk.Frame(tk_root)
+        outer = ttk.Frame(page)
+        outer.pack()
+        canvas = tk.Canvas(outer)
+        canvas.pack()
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={})
+        entry_module.LlamaCppLauncher._adopt_page_scroll_canvas(launcher, page)
+        assert launcher._tab_scroll_canvases == {str(page): canvas}
+        page.destroy()
+
+    def test_adopt_is_noop_when_already_registered(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        tk.Canvas(page).pack()
+        sentinel = object()
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={str(page): sentinel})
+        entry_module.LlamaCppLauncher._adopt_page_scroll_canvas(launcher, page)
+        # Existing registration (e.g. a _scrollable_page wrap) is preserved.
+        assert launcher._tab_scroll_canvases[str(page)] is sentinel
+        page.destroy()
+
+    def test_adopt_is_noop_without_a_canvas(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        ttk.Label(page, text="no canvas here").pack()
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={})
+        entry_module.LlamaCppLauncher._adopt_page_scroll_canvas(launcher, page)
+        assert launcher._tab_scroll_canvases == {}
+        page.destroy()
+
     def test_wheel_direction_mapping(self, entry_module):
         d = entry_module.LlamaCppLauncher._wheel_direction
         assert d(types.SimpleNamespace(num=4, delta=0)) == -1
