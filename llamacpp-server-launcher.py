@@ -239,8 +239,21 @@ class LlamaCppLauncher:
         """
         self.root = root
         self.root.title("LLaMa.cpp Server Launcher")
-        self.root.geometry("900x1000")
-        self.root.minsize(800, 750)
+        # Clamp the initial height to what the monitor can actually show
+        # (minus a margin for the taskbar/title bar) so the window never
+        # opens taller than the screen. Each tab's content is wrapped in a
+        # vertical scroller (see ``_scrollable_page``), so anything that no
+        # longer fits is reachable by scrolling rather than being clipped
+        # off the bottom edge with no way to get to it.
+        try:
+            screen_h = self.root.winfo_screenheight()
+        except Exception:
+            screen_h = 1000
+        initial_h = max(600, min(1000, screen_h - 80))
+        self.root.geometry(f"900x{initial_h}")
+        # Low minimum height so the window can shrink below the content's
+        # natural height on small monitors; the scroller covers the rest.
+        self.root.minsize(800, 400)
 
         # Worker-thread lifecycle flag: background detection / version-check
         # threads consult this Event before touching any Tk API on
@@ -1109,6 +1122,10 @@ class LlamaCppLauncher:
 
         # Store notebook reference for tab visibility management
         self.notebook = nb
+        # Maps a notebook page's widget path (the value ``notebook.select()``
+        # returns) to the scroll Canvas wrapping that page's content, so the
+        # global mouse-wheel handler can scroll whichever tab is showing.
+        self._tab_scroll_canvases = {}
 
         main_frame = ttk.Frame(nb); adv_frame = ttk.Frame(nb); cfg_frame = ttk.Frame(nb); chat_frame = ttk.Frame(nb); env_frame = ttk.Frame(nb); mtp_spec_frame = ttk.Frame(nb); ik_llama_frame = ttk.Frame(nb); build_frame = ttk.Frame(nb); bench_frame = ttk.Frame(nb); settings_frame = ttk.Frame(nb); hf_frame = ttk.Frame(nb); about_frame = ttk.Frame(nb)
         nb.add(main_frame, text="Main")
@@ -1133,18 +1150,30 @@ class LlamaCppLauncher:
         nb.add(about_frame, text="About") # Add the about tab
 
 
+        # Vertical scrolling: most heavy tabs (Main, Advanced, Config, Env
+        # Vars, MTP-Spec, ik_llama, Build, Benchmark) already build their
+        # content inside their OWN scroll canvas, so they're passed through
+        # unwrapped — double-wrapping them produced two side-by-side sliders
+        # (and dead space where an inner console couldn't expand). Only the
+        # tabs WITHOUT an internal scroller (Chat, Settings, About, Hugging
+        # Face) get wrapped in ``_scrollable_page``. The window-height clamp
+        # in ``__init__`` is what actually lets these self-scrolling tabs fit
+        # a small monitor; the wrapper just covers the few that lacked one.
         self._setup_main_tab(main_frame)
         self._setup_advanced_tab(adv_frame)
-        self._setup_chat_template_tab(chat_frame) # Setup the new tab
+        self._setup_chat_template_tab(self._scrollable_page(chat_frame)) # Setup the new tab
         self._setup_env_vars_tab(env_frame) # Setup the environmental variables tab
         self._setup_mtp_spec_tab(mtp_spec_frame) # Setup the MTP / Spec tab
         self._setup_ik_llama_tab(ik_llama_frame) # Setup the ik_llama tab
         self._setup_build_tab(build_frame) # Setup the Build tab
         self._setup_benchmark_tab(bench_frame) # Setup the Benchmark tab
         self._setup_config_tab(cfg_frame)
-        self._setup_settings_tab(settings_frame) # UI settings tab
+        self._setup_settings_tab(self._scrollable_page(settings_frame)) # UI settings tab
         self._setup_hf_downloader_tab(hf_frame)
-        self._setup_about_tab(about_frame) # Setup the about tab
+        self._setup_about_tab(self._scrollable_page(about_frame)) # Setup the about tab
+        # One wheel handler for the whole app, routed to the visible tab's
+        # scroll canvas (only the wrapped tabs register one).
+        self._install_global_mousewheel()
 
         # Update ik_llama tab visibility based on current backend selection
         self._update_ik_llama_tab_visibility()
@@ -1262,14 +1291,19 @@ class LlamaCppLauncher:
         # short-circuit and the buttons stay clickable during a scan.
         self.dir_btn_frame = ttk.Frame(inner)
         self.dir_btn_frame.grid(column=2, row=r-1, sticky="n", padx=5, pady=3)
+        # Lay the four directory buttons out in a 2x2 grid. Equal-weight
+        # columns + ``sticky="ew"`` keep the two columns the same width so
+        # the block reads as a tidy grid rather than ragged buttons.
+        self.dir_btn_frame.columnconfigure(0, weight=1, uniform="dir_btns")
+        self.dir_btn_frame.columnconfigure(1, weight=1, uniform="dir_btns")
         ttk.Button(self.dir_btn_frame, text="Add Dir…", width=10, command=self._add_model_dir)\
-           .pack(side=tk.TOP, pady=2, fill=tk.X)
+           .grid(column=0, row=0, padx=2, pady=2, sticky="ew")
         ttk.Button(self.dir_btn_frame, text="Remove Dir", width=10, command=self._remove_model_dir)\
-           .pack(side=tk.TOP, pady=2, fill=tk.X)
-
-        # Add scan button next to directory buttons
-        scan_btn = ttk.Button(self.dir_btn_frame, text="Scan Models", command=self._trigger_scan)
-        scan_btn.pack(side=tk.TOP, pady=2, fill=tk.X)
+           .grid(column=1, row=0, padx=2, pady=2, sticky="ew")
+        ttk.Button(self.dir_btn_frame, text="Open Dir", width=10, command=self._open_model_dir)\
+           .grid(column=0, row=1, padx=2, pady=2, sticky="ew")
+        ttk.Button(self.dir_btn_frame, text="Scan Models", width=10, command=self._trigger_scan)\
+           .grid(column=1, row=1, padx=2, pady=2, sticky="ew")
 
         # Add some vertical space between directory section and model selection
         r += 1
@@ -2765,10 +2799,43 @@ class LlamaCppLauncher:
     def _setup_hf_downloader_tab(self, parent):
         """Set up the Hugging Face downloader tab (deferred build)."""
         self.hf_downloader_tab = create_hf_downloader_tab(self)
-        self._register_lazy_tab(parent, self.hf_downloader_tab.setup_tab, "Hugging Face tab")
+        # ``on_visible`` re-runs the tab's runtime-state probe every time the
+        # tab is reselected. The button-enable verdict (Load repo / Download /
+        # Install) is otherwise only recomputed on a write to a traced field,
+        # so a venv created — or huggingface_hub installed — in an external
+        # terminal AFTER the tab was first built would leave the buttons
+        # frozen at their startup "no venv / deps missing" state until an
+        # unrelated field happened to change. Re-probing on tab entry picks
+        # those environment changes up.
+        self._register_lazy_tab(
+            parent,
+            self.hf_downloader_tab.setup_tab,
+            "Hugging Face tab",
+            on_visible=self._refresh_hf_downloader_runtime_state,
+            # HF tab builds no scroll canvas of its own, so wrap it.
+            scroll_wrap=True,
+        )
         self._ensure_lazy_tab_binding()
 
-    def _register_lazy_tab(self, parent, builder, label):
+    def _refresh_hf_downloader_runtime_state(self):
+        """Re-probe the HF downloader tab's venv/dependency state.
+
+        Called when the tab is reselected (see ``_on_notebook_tab_changed``).
+        Guarded because the tab may not have finished building — or may have
+        been torn down — and ``_refresh_runtime_state`` pokes live widgets.
+        """
+        tab = getattr(self, "hf_downloader_tab", None)
+        if tab is None:
+            return
+        try:
+            tab._refresh_runtime_state()
+        except Exception as exc:
+            print(
+                f"WARNING: HF downloader runtime-state refresh failed: {exc}",
+                file=sys.stderr,
+            )
+
+    def _register_lazy_tab(self, parent, builder, label, on_visible=None, scroll_wrap=False):
         """Register a tab whose heavy widget tree is built on first
         selection. ``builder`` is a callable taking ``parent`` that
         creates the real widgets; it runs at most once. A "Loading …"
@@ -2790,6 +2857,15 @@ class LlamaCppLauncher:
             "builder": builder,
             "label": label,
             "initialized": False,
+            # Optional callable invoked every time the tab is reselected
+            # AFTER it has been built, so it can refresh state that may have
+            # changed while it was hidden. ``None`` = nothing to do.
+            "on_visible": on_visible,
+            # Whether to wrap the built content in a ``_scrollable_page``
+            # vertical scroller. Only tabs that DON'T build their own scroll
+            # canvas should set this — the rest self-scroll (see
+            # ``_create_widgets``).
+            "scroll_wrap": scroll_wrap,
         }
         ttk.Label(
             parent,
@@ -2820,7 +2896,21 @@ class LlamaCppLauncher:
         if not registry:
             return
         entry = registry.get(current)
-        if entry is None or entry["initialized"]:
+        if entry is None:
+            return
+        if entry["initialized"]:
+            # Tab already built. Let it refresh any state that may have
+            # gone stale while it was hidden (e.g. an externally-created
+            # venv or a mid-session dependency install).
+            on_visible = entry.get("on_visible")
+            if on_visible is not None:
+                try:
+                    on_visible()
+                except Exception as exc:
+                    print(
+                        f"ERROR: on_visible for {entry['label']!r} failed: {exc}",
+                        file=sys.stderr,
+                    )
             return
         parent = entry["parent"]
         # Tear down the placeholder and build the real UI.
@@ -2830,7 +2920,11 @@ class LlamaCppLauncher:
             except Exception:
                 pass
         try:
-            entry["builder"](parent)
+            # Tabs that build their own scroll canvas are left unwrapped to
+            # avoid a second slider; only ``scroll_wrap`` tabs get the
+            # page-level vertical scroller.
+            target = self._scrollable_page(parent) if entry.get("scroll_wrap") else parent
+            entry["builder"](target)
             entry["initialized"] = True
         except Exception as exc:
             print(
@@ -2838,6 +2932,137 @@ class LlamaCppLauncher:
                 file=sys.stderr,
             )
             traceback.print_exc(file=sys.stderr)
+
+    # ═════════════════════════════════════════════════════════════════
+    #  Per-tab vertical scrolling
+    # ═════════════════════════════════════════════════════════════════
+    def _scrollable_page(self, page):
+        """Wrap a notebook ``page`` in a vertical scroll Canvas and return
+        the inner frame that tab content should be built into.
+
+        The notebook tab strip stays fixed; only the page's content scrolls.
+        A far-right scrollbar plus mouse-wheel (see ``_install_global_mousewheel``)
+        move the content top-to-bottom, so a tab taller than the window is
+        fully reachable on a small monitor instead of being clipped.
+        """
+        canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0)
+        vbar = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        # Gap between the page scrollbar and the tab content. Without it, a
+        # tab whose own content ends in a scrollbar (e.g. a listbox) would
+        # butt that inner scrollbar right up against this page scrollbar and
+        # render as two sliders with no separation.
+        _PAGE_SB_GAP = 8
+        vbar.pack(side="right", fill="y", padx=(_PAGE_SB_GAP, 0))
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync_scrollregion(_event=None):
+            # The scrollable area is exactly the inner frame's bounding box.
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _match_width(event):
+            # Force the inner frame to the canvas width so horizontal layout
+            # (``sticky="ew"``, ``expand=True``) behaves as in an unwrapped
+            # tab and no horizontal scrolling is needed.
+            canvas.itemconfigure(window_id, width=event.width)
+
+        inner.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _match_width)
+
+        # Key by the PAGE path (what ``notebook.select()`` returns) so the
+        # global wheel handler can find the visible tab's canvas.
+        self._tab_scroll_canvases[str(page)] = canvas
+        return inner
+
+    def _install_global_mousewheel(self):
+        """Bind the mouse wheel once, app-wide, routed to the visible tab.
+
+        Idempotent. Uses ``bind_all`` so the wheel works regardless of which
+        widget the pointer is over; the handler forwards to whichever tab's
+        canvas is currently showing, and yields to inner scrollable widgets
+        (listboxes, text panes) that can still move in the wheel's direction.
+        """
+        if getattr(self, "_global_wheel_bound", False):
+            return
+        # Windows / macOS deliver ``<MouseWheel>`` with ``event.delta``; X11
+        # delivers Button-4 (up) / Button-5 (down).
+        self.root.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
+        self.root.bind_all("<Button-4>", self._on_global_mousewheel, add="+")
+        self.root.bind_all("<Button-5>", self._on_global_mousewheel, add="+")
+        self._global_wheel_bound = True
+
+    def _current_tab_scroll_canvas(self):
+        try:
+            current = self.notebook.select()
+        except Exception:
+            return None
+        return self._tab_scroll_canvases.get(current)
+
+    @staticmethod
+    def _wheel_direction(event):
+        """Return -1 (up), +1 (down), or 0 (indeterminate) for a wheel event."""
+        num = getattr(event, "num", None)
+        if num == 4:
+            return -1
+        if num == 5:
+            return 1
+        delta = getattr(event, "delta", 0)
+        if delta > 0:
+            return -1
+        if delta < 0:
+            return 1
+        return 0
+
+    def _inner_widget_consumes_wheel(self, widget, direction):
+        """True if ``widget`` (or an ancestor below the page canvas) is an
+        independently-scrollable widget that can still move in ``direction``.
+
+        Lets a listbox / text pane under the pointer keep its own wheel
+        scrolling until it hits an edge, at which point the page takes over.
+        """
+        page_canvases = set(self._tab_scroll_canvases.values())
+        node = widget
+        while node is not None:
+            if node in page_canvases:
+                return False  # reached the page scroller; nothing inner claimed it
+            try:
+                cls = node.winfo_class()
+            except Exception:
+                cls = ""
+            if cls in ("Listbox", "Text", "Treeview"):
+                try:
+                    first, last = node.yview()
+                except Exception:
+                    return False
+                if direction < 0 and first > 0.0:
+                    return True
+                if direction > 0 and last < 1.0:
+                    return True
+                return False  # at the edge → let the page scroll instead
+            node = getattr(node, "master", None)
+        return False
+
+    def _on_global_mousewheel(self, event):
+        direction = self._wheel_direction(event)
+        if direction == 0:
+            return
+        # Defer to an inner scrollable widget under the pointer when it can
+        # still move; otherwise scroll the current tab's page.
+        if self._inner_widget_consumes_wheel(getattr(event, "widget", None), direction):
+            return
+        canvas = self._current_tab_scroll_canvas()
+        if canvas is None:
+            return
+        try:
+            first, last = canvas.yview()
+        except Exception:
+            return
+        if first <= 0.0 and last >= 1.0:
+            return  # content fits; nothing to scroll
+        canvas.yview_scroll(direction, "units")
 
     def _setup_build_tab(self, parent):
         """Set up the Build tab (clone + cmake configure + build).
@@ -2973,6 +3198,44 @@ class LlamaCppLauncher:
         except Exception as e:
              messagebox.showerror("Error", f"An error occurred removing directory:\n{e}")
 
+    def _open_model_dir(self):
+        """Open the selected model directory in the OS file explorer."""
+        selection = self.model_dirs_listbox.curselection()
+        if not selection:
+            messagebox.showerror("Error", "Select a directory to open.")
+            return
+        dir_str = self.model_dirs_listbox.get(selection[0])
+        # Unresolvable entries are shown with this marker (see
+        # ``_update_model_dirs_listbox``) and don't map to a real path.
+        if dir_str.startswith("[UNRESOLVABLE] "):
+            messagebox.showerror("Error", f"Cannot open unresolvable path:\n{dir_str}")
+            return
+        target = Path(dir_str)
+        if not target.is_dir():
+            messagebox.showerror(
+                "Error",
+                f"Directory no longer exists or is not a folder:\n{dir_str}",
+            )
+            return
+        try:
+            if sys.platform.startswith("win"):
+                # os.startfile is Windows-only; guarded by the platform check.
+                os.startfile(str(target))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(target)])
+            else:
+                # Linux / BSD — the freedesktop opener resolves the user's
+                # configured default file manager.
+                subprocess.Popen(["xdg-open", str(target)])
+        except FileNotFoundError:
+            # The opener binary (xdg-open / open) isn't installed.
+            messagebox.showerror(
+                "Error",
+                "No file-explorer opener available on this system "
+                "(xdg-open / open not found).",
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open directory:\n{e}")
 
     def _update_model_dirs_listbox(self):
         current_selection = self.model_dirs_listbox.curselection()

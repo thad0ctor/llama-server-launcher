@@ -84,6 +84,10 @@ class HuggingFaceDownloaderTab:
         self.venv_var = launcher.venv_dir
         self.venv_status_var = tk.StringVar(value="")
         self.progress_label_var = tk.StringVar(value="")
+        # Running total of the currently-selected files' sizes, shown on the
+        # right margin of the file-button row. Empty string when nothing is
+        # selected so the label simply disappears.
+        self.selection_summary_var = tk.StringVar(value="")
         self._selected_target_vars: dict[str, tk.BooleanVar] = {}
         # (var, trace_token) pairs so ``_refresh_target_rows`` can
         # ``trace_remove`` on the old vars before discarding them — without
@@ -333,8 +337,14 @@ class HuggingFaceDownloaderTab:
         scroll = ttk.Scrollbar(files, orient="vertical", command=self._files_listbox.yview)
         scroll.grid(column=1, row=0, sticky="ns", pady=6)
         self._files_listbox.config(yscrollcommand=scroll.set)
+        # Keep the selected-size total live as the user clicks around the
+        # listbox. ``<<ListboxSelect>>`` fires on every selection change,
+        # including shift/ctrl range edits.
+        self._files_listbox.bind("<<ListboxSelect>>", lambda _e: self._update_selection_summary())
         file_buttons = ttk.Frame(files)
-        file_buttons.grid(column=0, row=1, sticky="w", padx=6, pady=(0, 6))
+        # Fill the width so the summary label can sit on the right margin,
+        # opposite the selection buttons.
+        file_buttons.grid(column=0, row=1, sticky="ew", padx=6, pady=(0, 6))
         ttk.Button(file_buttons, text="Select defaults", command=self._select_default_files).pack(
             side="left", padx=(0, 6)
         )
@@ -344,6 +354,11 @@ class HuggingFaceDownloaderTab:
         ttk.Button(file_buttons, text="Clear selection", command=lambda: self._select_all_files(False)).pack(
             side="left"
         )
+        ttk.Label(
+            file_buttons,
+            textvariable=self.selection_summary_var,
+            font=("TkSmallCaptionFont",),
+        ).pack(side="right")
 
         self._options_toggle_btn = ttk.Button(
             main,
@@ -859,6 +874,7 @@ class HuggingFaceDownloaderTab:
             self._revision_combo.config(values=())
         if self._files_listbox is not None:
             self._files_listbox.delete(0, tk.END)
+        self._update_selection_summary()
         self._set_button_state(self._download_button, False)
         # Apply URL-derived revision hints UNCONDITIONALLY. The old guard
         # only set the hint when revision_var was blank/whitespace, so a
@@ -1070,6 +1086,9 @@ class HuggingFaceDownloaderTab:
         self._files_listbox.selection_clear(0, tk.END)
         if selected and self._file_path_by_index:
             self._files_listbox.selection_set(0, tk.END)
+        # ``<<ListboxSelect>>`` does NOT fire for programmatic
+        # ``selection_set`` / ``selection_clear`` — refresh the total here.
+        self._update_selection_summary()
 
     def _select_default_files(self):
         if self._files_listbox is None:
@@ -1078,6 +1097,35 @@ class HuggingFaceDownloaderTab:
         for index, row in enumerate(self._file_rows):
             if row.selected_by_default:
                 self._files_listbox.selection_set(index)
+        self._update_selection_summary()
+
+    def _update_selection_summary(self):
+        """Recompute the ``X.X GB of N file(s) selected`` summary label."""
+        if self._files_listbox is None:
+            self.selection_summary_var.set("")
+            return
+        total = 0
+        count = 0
+        unknown = 0
+        for index in self._files_listbox.curselection():
+            if not (0 <= index < len(self._file_rows)):
+                continue
+            count += 1
+            size = self._file_rows[index].size_bytes
+            if size is None:
+                unknown += 1
+            else:
+                total += size
+        if count == 0:
+            self.selection_summary_var.set("")
+            return
+        noun = "file" if count == 1 else "files"
+        text = f"{self._format_bytes(total)} of {count} {noun} selected"
+        # Some listings omit sizes; be honest that the total excludes them
+        # rather than silently under-reporting.
+        if unknown:
+            text += f" ({unknown} of unknown size)"
+        self.selection_summary_var.set(text)
 
     def _start_runner(self, action: str, payload: dict):
         python = self._current_venv_python()
