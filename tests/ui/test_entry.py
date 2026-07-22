@@ -16,8 +16,10 @@ import importlib.util
 import queue
 import sys
 import time
+import tkinter as tk
 import types
 from pathlib import Path
+from tkinter import ttk
 from unittest.mock import patch
 
 import pytest
@@ -115,6 +117,10 @@ class TestLauncherHelpers:
         launcher = types.SimpleNamespace(
             notebook=types.SimpleNamespace(select=lambda: selected_tab),
             _lazy_tab_registry={selected_tab: entry},
+            # The real method wraps the page in a scroll canvas and returns an
+            # inner frame; the stub passes the page straight through so the
+            # builder still receives it.
+            _scrollable_page=lambda page: page,
         )
         attempts = []
 
@@ -131,6 +137,249 @@ class TestLauncherHelpers:
         entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
         assert entry["initialized"] is True
         assert attempts == [parent, parent]
+
+    def test_on_visible_fires_when_built_tab_reselected(self, entry_module):
+        # An already-built tab should re-run its ``on_visible`` hook on every
+        # reselection (so e.g. the HF tab re-probes venv/dependency state that
+        # changed while it was hidden) WITHOUT rebuilding its widgets.
+        parent = types.SimpleNamespace(winfo_children=lambda: [])
+        calls = []
+        entry = {
+            "parent": parent,
+            "label": "Hugging Face tab",
+            "initialized": True,
+            "builder": lambda _p: calls.append("build"),
+            "on_visible": lambda: calls.append("visible"),
+        }
+        selected_tab = "tab-id"
+        launcher = types.SimpleNamespace(
+            notebook=types.SimpleNamespace(select=lambda: selected_tab),
+            _lazy_tab_registry={selected_tab: entry},
+        )
+
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+
+        # Hook fired each time; builder never re-ran on an initialized tab.
+        assert calls == ["visible", "visible"]
+
+    def test_on_visible_absent_is_safe(self, entry_module):
+        # Lazy tabs registered without an ``on_visible`` hook (Build, Env Vars,
+        # …) must not raise when reselected after being built.
+        parent = types.SimpleNamespace(winfo_children=lambda: [])
+        entry = {"parent": parent, "label": "Build", "initialized": True}
+        selected_tab = "tab-id"
+        launcher = types.SimpleNamespace(
+            notebook=types.SimpleNamespace(select=lambda: selected_tab),
+            _lazy_tab_registry={selected_tab: entry},
+        )
+
+        # Should be a no-op, not a KeyError.
+        entry_module.LlamaCppLauncher._on_notebook_tab_changed(launcher)
+
+
+class TestScrollablePage:
+    """The per-tab vertical scroller helpers used by ``_create_widgets``."""
+
+    def test_scrollable_page_wraps_and_registers(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={})
+        inner = entry_module.LlamaCppLauncher._scrollable_page(launcher, page)
+        # Returns an inner frame distinct from the page…
+        assert isinstance(inner, ttk.Frame)
+        assert inner is not page
+        # …and registers exactly one Canvas keyed by the page's widget path.
+        assert list(launcher._tab_scroll_canvases) == [str(page)]
+        assert isinstance(launcher._tab_scroll_canvases[str(page)], tk.Canvas)
+        # A scrollbar was packed alongside the canvas.
+        classes = {type(c).__name__ for c in page.winfo_children()}
+        assert "Canvas" in classes and "Scrollbar" in classes
+        page.destroy()
+
+    @staticmethod
+    def _wheel_capable_launcher(entry_module, tk_root, page):
+        """A stub carrying every sibling method ``_on_global_mousewheel``
+        reaches for via ``self``."""
+        cls = entry_module.LlamaCppLauncher
+        launcher = types.SimpleNamespace(
+            root=tk_root,
+            notebook=types.SimpleNamespace(select=lambda: str(page)),
+            _tab_scroll_canvases={},
+        )
+        launcher._wheel_direction = cls._wheel_direction  # staticmethod
+        launcher._inner_widget_consumes_wheel = (
+            lambda w, d: cls._inner_widget_consumes_wheel(launcher, w, d)
+        )
+        launcher._current_tab_scroll_canvas = (
+            lambda: cls._current_tab_scroll_canvas(launcher)
+        )
+        return launcher
+
+    def test_wheel_scrolls_current_tab_when_overflowing(self, entry_module, tk_root):
+        # Realized pixel geometry is flaky under a headless/unmapped root, so
+        # drive the handler off a reported-overflow ``yview`` and assert the
+        # routing (that it issues a one-unit scroll on the visible canvas).
+        page = ttk.Frame(tk_root)
+        launcher = self._wheel_capable_launcher(entry_module, tk_root, page)
+        inner = entry_module.LlamaCppLauncher._scrollable_page(launcher, page)
+        canvas = launcher._tab_scroll_canvases[str(page)]
+        canvas.yview = lambda: (0.0, 0.5)  # overflow: only top half visible
+        scrolled = []
+        canvas.yview_scroll = lambda amount, what: scrolled.append((amount, what))
+
+        down = types.SimpleNamespace(num=5, delta=0, widget=inner)
+        entry_module.LlamaCppLauncher._on_global_mousewheel(launcher, down)
+        assert scrolled == [(1, "units")]
+
+        up = types.SimpleNamespace(num=4, delta=0, widget=inner)
+        entry_module.LlamaCppLauncher._on_global_mousewheel(launcher, up)
+        assert scrolled[-1] == (-1, "units")
+        page.destroy()
+
+    def test_wheel_ignored_when_content_fits(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        launcher = self._wheel_capable_launcher(entry_module, tk_root, page)
+        inner = entry_module.LlamaCppLauncher._scrollable_page(launcher, page)
+        canvas = launcher._tab_scroll_canvases[str(page)]
+        canvas.yview = lambda: (0.0, 1.0)  # whole content fits
+        scrolled = []
+        canvas.yview_scroll = lambda amount, what: scrolled.append((amount, what))
+
+        down = types.SimpleNamespace(num=5, delta=0, widget=inner)
+        entry_module.LlamaCppLauncher._on_global_mousewheel(launcher, down)
+        assert scrolled == []  # nothing to scroll
+        page.destroy()
+
+    def test_inner_listbox_consumes_wheel_until_edge(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={})
+        inner = entry_module.LlamaCppLauncher._scrollable_page(launcher, page)
+        listbox = tk.Listbox(inner, height=3)
+        for i in range(30):
+            listbox.insert(tk.END, f"item {i}")
+        listbox.pack()
+        tk_root.update_idletasks()
+
+        # At the top, a downward wheel should be consumed by the listbox
+        # (it can still scroll down).
+        assert entry_module.LlamaCppLauncher._inner_widget_consumes_wheel(
+            launcher, listbox, 1
+        ) is True
+        # But an upward wheel at the very top is NOT consumed — the page
+        # takes over so you can keep scrolling up past the listbox.
+        assert entry_module.LlamaCppLauncher._inner_widget_consumes_wheel(
+            launcher, listbox, -1
+        ) is False
+        page.destroy()
+
+    def test_adopt_finds_nested_canvas(self, entry_module, tk_root):
+        # Self-scrolling tabs (Build/Benchmark) nest their scroll canvas
+        # inside an outer frame; adoption must find it via a tree walk.
+        page = ttk.Frame(tk_root)
+        outer = ttk.Frame(page)
+        outer.pack()
+        canvas = tk.Canvas(outer)
+        canvas.pack()
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={})
+        entry_module.LlamaCppLauncher._adopt_page_scroll_canvas(launcher, page)
+        assert launcher._tab_scroll_canvases == {str(page): canvas}
+        page.destroy()
+
+    def test_adopt_is_noop_when_already_registered(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        tk.Canvas(page).pack()
+        sentinel = object()
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={str(page): sentinel})
+        entry_module.LlamaCppLauncher._adopt_page_scroll_canvas(launcher, page)
+        # Existing registration (e.g. a _scrollable_page wrap) is preserved.
+        assert launcher._tab_scroll_canvases[str(page)] is sentinel
+        page.destroy()
+
+    def test_adopt_is_noop_without_a_canvas(self, entry_module, tk_root):
+        page = ttk.Frame(tk_root)
+        ttk.Label(page, text="no canvas here").pack()
+        launcher = types.SimpleNamespace(_tab_scroll_canvases={})
+        entry_module.LlamaCppLauncher._adopt_page_scroll_canvas(launcher, page)
+        assert launcher._tab_scroll_canvases == {}
+        page.destroy()
+
+    def test_wheel_direction_mapping(self, entry_module):
+        d = entry_module.LlamaCppLauncher._wheel_direction
+        assert d(types.SimpleNamespace(num=4, delta=0)) == -1
+        assert d(types.SimpleNamespace(num=5, delta=0)) == 1
+        assert d(types.SimpleNamespace(num=0, delta=120)) == -1
+        assert d(types.SimpleNamespace(num=0, delta=-120)) == 1
+        assert d(types.SimpleNamespace(num=0, delta=0)) == 0
+
+
+class TestOpenModelDir:
+    """``_open_model_dir`` opens the selected model dir in the OS explorer."""
+
+    def _make_launcher(self, selection, get_value):
+        return types.SimpleNamespace(
+            model_dirs_listbox=types.SimpleNamespace(
+                curselection=lambda: selection,
+                get=lambda _i: get_value,
+            ),
+        )
+
+    def test_opens_existing_dir_via_platform_opener(self, entry_module, tmp_path):
+        launcher = self._make_launcher((0,), str(tmp_path))
+        spawned = []
+        with patch.object(entry_module.sys, "platform", "linux"), patch.object(
+            entry_module.subprocess, "Popen", lambda argv: spawned.append(argv)
+        ):
+            entry_module.LlamaCppLauncher._open_model_dir(launcher)
+        assert spawned == [["xdg-open", str(tmp_path)]]
+
+    def test_macos_uses_open(self, entry_module, tmp_path):
+        launcher = self._make_launcher((0,), str(tmp_path))
+        spawned = []
+        with patch.object(entry_module.sys, "platform", "darwin"), patch.object(
+            entry_module.subprocess, "Popen", lambda argv: spawned.append(argv)
+        ):
+            entry_module.LlamaCppLauncher._open_model_dir(launcher)
+        assert spawned == [["open", str(tmp_path)]]
+
+    def test_no_selection_errors_and_does_not_spawn(self, entry_module):
+        launcher = self._make_launcher((), "")
+        errors = []
+        with patch.object(
+            entry_module.messagebox, "showerror", lambda *a, **k: errors.append(a)
+        ), patch.object(
+            entry_module.subprocess,
+            "Popen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+        ):
+            entry_module.LlamaCppLauncher._open_model_dir(launcher)
+        assert errors  # user was told to select something
+
+    def test_missing_dir_errors_and_does_not_spawn(self, entry_module, tmp_path):
+        missing = tmp_path / "gone"
+        launcher = self._make_launcher((0,), str(missing))
+        errors = []
+        with patch.object(
+            entry_module.messagebox, "showerror", lambda *a, **k: errors.append(a)
+        ), patch.object(
+            entry_module.subprocess,
+            "Popen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+        ):
+            entry_module.LlamaCppLauncher._open_model_dir(launcher)
+        assert errors
+
+    def test_unresolvable_marker_errors(self, entry_module):
+        launcher = self._make_launcher((0,), "[UNRESOLVABLE] /nope")
+        errors = []
+        with patch.object(
+            entry_module.messagebox, "showerror", lambda *a, **k: errors.append(a)
+        ), patch.object(
+            entry_module.subprocess,
+            "Popen",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not spawn")),
+        ):
+            entry_module.LlamaCppLauncher._open_model_dir(launcher)
+        assert errors
 
     def test_system_info_drain_discards_stale_generation(self, entry_module):
         class Alive:

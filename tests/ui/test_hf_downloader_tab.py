@@ -182,6 +182,88 @@ def test_listing_event_populates_files_and_selects_defaults(hf_launcher_stub, ac
     assert tab._refs == ["main"]
 
 
+def test_selection_summary_tracks_selected_sizes(hf_launcher_stub, active_venv, monkeypatch):
+    repo_dir, _python = active_venv
+    hf_launcher_stub.repo_dir = repo_dir
+    hf_launcher_stub.venv_dir.set("")
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=True,
+            version="1.0.0",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    parent = tk.Frame(hf_launcher_stub.root)
+    tab.setup_tab(parent)
+
+    tab._handle_event(
+        {
+            "event": "listing",
+            "repo_id": "TheBloke/Test",
+            "refs": [{"name": "main", "kind": "branch"}],
+            "files": [
+                {"path": "model.gguf", "size_bytes": 120, "kind": "gguf"},
+                {"path": "mmproj-f16.gguf", "size_bytes": 10, "kind": "mmproj"},
+                {"path": "README.md", "size_bytes": 2, "kind": "other"},
+            ],
+        }
+    )
+
+    # Defaults (the two GGUFs) are selected on load → 130 B, 2 files.
+    assert tab.selection_summary_var.get() == "130 B of 2 files selected"
+
+    # Selecting everything sums all three and reads as singular/plural
+    # correctly.
+    tab._select_all_files(True)
+    assert tab.selection_summary_var.get() == "132 B of 3 files selected"
+
+    # Clearing empties the label entirely.
+    tab._select_all_files(False)
+    assert tab.selection_summary_var.get() == ""
+
+
+def test_selection_summary_flags_unknown_sizes(hf_launcher_stub, active_venv, monkeypatch):
+    repo_dir, _python = active_venv
+    hf_launcher_stub.repo_dir = repo_dir
+    hf_launcher_stub.venv_dir.set("")
+    monkeypatch.setattr(
+        venv_manager,
+        "probe_dependency_status",
+        lambda *args, **kwargs: venv_manager.DependencyStatus(
+            dependency=next(dep for dep in venv_manager.MANAGED_DEPENDENCIES if dep.key == "huggingface_hub"),
+            available=True,
+            version="1.0.0",
+        ),
+    )
+    tab = HuggingFaceDownloaderTab(hf_launcher_stub)
+    parent = tk.Frame(hf_launcher_stub.root)
+    tab.setup_tab(parent)
+
+    tab._handle_event(
+        {
+            "event": "listing",
+            "repo_id": "TheBloke/Test",
+            "refs": [{"name": "main", "kind": "branch"}],
+            "files": [
+                {"path": "a.gguf", "size_bytes": 100, "kind": "gguf"},
+                {"path": "b.gguf", "size_bytes": None, "kind": "gguf"},
+            ],
+        }
+    )
+
+    tab._select_all_files(True)
+    assert tab.selection_summary_var.get() == "100 B of 2 files selected (1 of unknown size)"
+
+    # Single-file selection uses the singular noun.
+    tab._files_listbox.selection_clear(0, tk.END)
+    tab._files_listbox.selection_set(0)
+    tab._update_selection_summary()
+    assert tab.selection_summary_var.get() == "100 B of 1 file selected"
+
+
 def test_download_builds_payload_from_selected_files_and_targets(hf_launcher_stub, active_venv, monkeypatch):
     repo_dir, _python = active_venv
     target = repo_dir / "downloads"
