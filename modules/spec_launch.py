@@ -733,6 +733,8 @@ def emit_spec_args(launcher, backend, cmd):
                     # the grayed-field contract.
                     is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
                     emit_spec_type = spec_type
+                    stage_cmd_start = len(cmd)
+                    draft_model_emitted = False
                     if is_draft_capable:
                         # Current ik_llama takes draft tuning in the canonical
                         # --spec-type <type>:n_max=...,n_min=...,p_min=... payload.
@@ -758,12 +760,6 @@ def emit_spec_args(launcher, backend, cmd):
                             # the main -m behaviour of resolving + skipping with a
                             # stderr warning.
                             mp = _safe_var_str(launcher, "spec_draft_model")
-                            if not mp and requires_draft:
-                                print(
-                                    f"WARNING: spec_type={spec_type} requires a draft model "
-                                    f"(--model-draft); none is set.",
-                                    file=sys.stderr,
-                                )
                             if mp:
                                 # ``expanduser()`` so a saved/hand-edited
                                 # config with ``~/models/draft.gguf``
@@ -790,6 +786,7 @@ def emit_spec_args(launcher, backend, cmd):
                                     draft_path = None
                                 if is_valid_file and draft_path is not None:
                                     cmd.extend(["--model-draft", str(draft_path.resolve())])
+                                    draft_model_emitted = True
                                     if not requires_draft:
                                         emit_spec_type = "draft"
                                 elif draft_path is not None:
@@ -833,14 +830,29 @@ def emit_spec_args(launcher, backend, cmd):
                             v = _safe_var_str(launcher, var_name)
                             if v:
                                 spec_type_pairs.append((key, v))
-                    _append_ik_spec_type(cmd, emit_spec_type, spec_type_pairs)
-                    # ik_llama extras.
-                    autotune_var = getattr(launcher, "spec_autotune", None)
-                    if autotune_var is not None and autotune_var.get():
-                        cmd.append("--spec-autotune")
                     dp = _safe_var_str(launcher, "spec_draft_params")
-                    if dp:
-                        cmd.extend(["-draft", dp])
+                    # dflash/dspark stages need a draft model (or -draft params);
+                    # without one ik_llama refuses to start, so drop the stage and
+                    # its draft-only flags rather than emit a command that fails.
+                    if (
+                        spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA
+                        and not draft_model_emitted
+                        and not dp
+                    ):
+                        del cmd[stage_cmd_start:]
+                        print(
+                            f"WARNING: spec_type={spec_type} requires a draft model "
+                            f"(--model-draft) and none is usable; skipping speculative decoding.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        _append_ik_spec_type(cmd, emit_spec_type, spec_type_pairs)
+                        # ik_llama extras.
+                        autotune_var = getattr(launcher, "spec_autotune", None)
+                        if autotune_var is not None and autotune_var.get():
+                            cmd.append("--spec-autotune")
+                        if dp:
+                            cmd.extend(["-draft", dp])
                     # Warn (don't crash) if the user set llama.cpp-only knobs while ik_llama is active.
                     for var_name, label in [
                         ("spec_draft_p_split", "--spec-draft-p-split"),

@@ -99,7 +99,7 @@ from modules import terminal_launcher
 from modules.ik_llama import IkLlamaTab
 
 # Import the MTP / Speculative Decoding tab module
-from modules.spec_tab import SpecTab
+from modules.spec_tab import SpecTab, empty_draft_path_text
 
 # Import the Build tab (clone + cmake configure + build for llama.cpp / ik_llama)
 from modules.build import BuildTab
@@ -2808,7 +2808,7 @@ class LlamaCppLauncher:
         if hasattr(self, "spec_draft_path_display_var"):
             cur = (self.spec_draft_model.get() or "").strip()
             self.spec_draft_path_display_var.set(
-                cur or "(none — uses base GGUF for MTP)"
+                cur or empty_draft_path_text(self.spec_type.get())
             )
         if restored:
             try:
@@ -3561,7 +3561,7 @@ class LlamaCppLauncher:
             # stored draft model value.
             if hasattr(self, "spec_draft_path_display_var"):
                 cur = (self.spec_draft_model.get() or "").strip()
-                self.spec_draft_path_display_var.set(cur or "(none — uses base GGUF for MTP)")
+                self.spec_draft_path_display_var.set(cur or empty_draft_path_text(self.spec_type.get()))
             # ``selection_set`` does not fire the ``<<ListboxSelect>>``
             # binding, so the draft-layer analysis / slider state / status
             # label would otherwise stay stale until the user clicked the
@@ -5148,6 +5148,11 @@ class LlamaCppLauncher:
             elif target[0] > index:
                 self._custom_param_edit_target = (target[0] - 1, target[1])
         self._update_custom_parameters_listbox()
+        # Keep the selection on the removed row's position (the refresh
+        # re-selects by text, which can land on an earlier duplicate).
+        self.custom_parameters_listbox.selection_clear(0, tk.END)
+        if self.custom_parameters_list:
+            self._select_custom_parameter(min(index, len(self.custom_parameters_list) - 1))
         self._save_configs()
 
 

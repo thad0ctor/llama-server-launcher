@@ -551,7 +551,7 @@ class TestCustomParameterEditing:
         frame = ttk.Frame(tk_root)
         stub = types.SimpleNamespace(
             root=tk_root,
-            custom_parameters_list=["--tensor-split 33,10,75", "--no-warmup", "--no-warmup"],
+            custom_parameters_list=["--tensor-split 33,10,75", "--no-warmup", "--metrics", "--no-warmup"],
             custom_param_entry_var=tk.StringVar(tk_root),
             _custom_param_edit_target=None,
             saves=0,
@@ -593,7 +593,7 @@ class TestCustomParameterEditing:
         launcher.custom_param_entry_var.set("--tensor-split 35,10,75")
         launcher._add_custom_parameter()
 
-        assert launcher.custom_parameters_list == ["--tensor-split 35,10,75", "--no-warmup", "--no-warmup"]
+        assert launcher.custom_parameters_list == ["--tensor-split 35,10,75", "--no-warmup", "--metrics", "--no-warmup"]
         assert launcher.custom_parameters_listbox.get(0) == "--tensor-split 35,10,75"
         assert launcher.add_custom_param_button.cget("text") == "Add"
         assert launcher.custom_param_entry_var.get() == ""
@@ -632,18 +632,26 @@ class TestCustomParameterEditing:
         assert tk_root.clipboard_get() == "--tensor-split 33,10,75"
 
     def test_remove_uses_selected_row_among_duplicates(self, launcher):
-        self._select(launcher, 2)
+        self._select(launcher, 3)
         launcher._remove_custom_parameter()
-        assert launcher.custom_parameters_list == ["--tensor-split 33,10,75", "--no-warmup"]
+        assert launcher.custom_parameters_list == ["--tensor-split 33,10,75", "--no-warmup", "--metrics"]
+        # Selection stays at the removed position (clamped), not on the earlier duplicate.
+        assert launcher.custom_parameters_listbox.curselection() == (2,)
+
+    def test_remove_keeps_selection_at_position(self, launcher):
+        self._select(launcher, 1)
+        launcher._remove_custom_parameter()
+        assert launcher.custom_parameters_list == ["--tensor-split 33,10,75", "--metrics", "--no-warmup"]
+        assert launcher.custom_parameters_listbox.curselection() == (1,)
 
     def test_remove_above_edit_target_keeps_edit_pointing_at_same_entry(self, launcher):
-        self._select(launcher, 2)
+        self._select(launcher, 3)
         launcher._begin_custom_parameter_edit()
         self._select(launcher, 0)
         launcher._remove_custom_parameter()
         launcher.custom_param_entry_var.set("--warmup")
         launcher._add_custom_parameter()
-        assert launcher.custom_parameters_list == ["--no-warmup", "--warmup"]
+        assert launcher.custom_parameters_list == ["--no-warmup", "--metrics", "--warmup"]
 
     def test_edit_without_selection_warns(self, launcher, entry_module):
         warnings = []

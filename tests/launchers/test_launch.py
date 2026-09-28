@@ -925,13 +925,23 @@ class TestBuildCmdHappyPath:
         assert "--mlock" not in cmd
 
     def test_llama_cpp_memory_toggles_use_legacy_flags_on_old_binary(self, manager, launcher_mock, monkeypatch):
-        """A probed llama.cpp build that predates --load-mode keeps the legacy switches."""
-        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "usage: llama-server --no-mmap --mlock")
-        monkeypatch.setattr(manager, "_backend_supports_flag", lambda _exe, flag: flag != "--load-mode")
+        """A probed llama.cpp build that still advertises the legacy switches keeps them."""
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "--no-mmap --mlock")
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda _exe, flag: flag in ("--no-mmap", "--mlock"))
         launcher_mock.no_mmap.set(True)
         launcher_mock.mlock.set(True)
         cmd = manager.build_cmd(probe_backend=True)
         assert "--no-mmap" in cmd
+        assert "--mlock" in cmd
+        assert "--load-mode" not in cmd
+
+    def test_llama_cpp_transition_build_prefers_legacy_flags(self, manager, launcher_mock, monkeypatch):
+        """2026-07/08 builds advertise both; early --load-mode lacked mmap+mlock,
+        so the legacy switch is the exact match there."""
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "--load-mode --mlock --no-mmap")
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        launcher_mock.mlock.set(True)
+        cmd = manager.build_cmd(probe_backend=True)
         assert "--mlock" in cmd
         assert "--load-mode" not in cmd
 
@@ -945,12 +955,13 @@ class TestBuildCmdHappyPath:
         assert cmd[cmd.index("--load-mode") + 1] == "none"
         assert "--no-mmap" not in cmd
 
-    def test_llama_cpp_memory_toggles_use_load_mode_when_probe_confirms(self, manager, launcher_mock, monkeypatch):
+    def test_llama_cpp_uses_load_mode_when_legacy_flags_gone(self, manager, launcher_mock, monkeypatch):
         monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "--load-mode MODE")
-        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda _exe, flag: flag == "--load-mode")
         launcher_mock.mlock.set(True)
         cmd = manager.build_cmd(probe_backend=True)
         assert cmd[cmd.index("--load-mode") + 1] == "mmap+mlock"
+        assert "--mlock" not in cmd
 
     def test_ik_llama_keeps_legacy_memory_flags(self, manager, launcher_mock, built_tree):
         launcher_mock.backend_selection.set("ik_llama")

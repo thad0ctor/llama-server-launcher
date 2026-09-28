@@ -323,7 +323,7 @@ SOURCE_KNOWN_NON_LLAMA_CPP_FLAGS = frozenset(
         "--fit-margin",
         "--help",
         # Legacy loading switches, emitted for llama.cpp only when a probed
-        # binary predates --load-mode (and always for ik_llama).
+        # binary still advertises them (and always for ik_llama).
         "--mlock",
         "--model-draft",
         "--no-mmap",

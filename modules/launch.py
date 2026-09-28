@@ -239,9 +239,7 @@ class LaunchManager:
             cmd.extend(["--fit", "off"])
             print("DEBUG: Adding --fit off", file=sys.stderr)
 
-    # (no_mmap, mlock) -> llama.cpp ``--load-mode`` value. Upstream folded the
-    # old ``--no-mmap`` / ``--mlock`` switches into ``--load-mode`` and now
-    # rejects them as invalid arguments.
+    # (no_mmap, mlock) -> llama.cpp ``--load-mode`` value.
     _LLAMA_CPP_LOAD_MODES = {
         (True, False): "none",
         (False, True): "mmap+mlock",
@@ -251,23 +249,28 @@ class LaunchManager:
     def _build_memory_args(self, cmd, backend, exe_path, probe=False):
         """Append the model-loading memory flags for the active backend.
 
-        ik_llama still takes ``--no-mmap`` / ``--mlock``. llama.cpp takes
-        ``--load-mode`` instead; older llama.cpp builds that predate it are
-        detected when ``probe`` is True and get the legacy switches. A failed
-        probe proves nothing about the binary, so it keeps ``--load-mode``:
-        current upstream exits on the legacy switches.
+        ik_llama still takes ``--no-mmap`` / ``--mlock``. Current llama.cpp
+        only takes ``--load-mode`` and exits on the legacy switches, which it
+        dropped in 2026-09 (#28334). Builds from 2026-07 to 2026-09 accept
+        both, but their early ``--load-mode`` lacked ``mmap+mlock``, so the
+        legacy switches are the exact match wherever a probed binary still
+        advertises them. Unprobed (save-script) and failed probes target
+        current upstream.
         """
         no_mmap = bool(self.launcher.no_mmap.get())
         mlock = bool(self.launcher.mlock.get())
         if not (no_mmap or mlock):
             return
-        if backend != "ik_llama" and (
-            not probe
-            or self._get_help_text(exe_path) is None
-            or self._backend_supports_flag(exe_path, "--load-mode")
-        ):
-            cmd.extend(["--load-mode", self._LLAMA_CPP_LOAD_MODES[(no_mmap, mlock)]])
-            return
+        if backend != "ik_llama":
+            wanted = [flag for flag, on in (("--no-mmap", no_mmap), ("--mlock", mlock)) if on]
+            legacy_ok = (
+                probe
+                and self._get_help_text(exe_path) is not None
+                and all(self._backend_supports_flag(exe_path, flag) for flag in wanted)
+            )
+            if not legacy_ok:
+                cmd.extend(["--load-mode", self._LLAMA_CPP_LOAD_MODES[(no_mmap, mlock)]])
+                return
         self.add_arg(cmd, "--no-mmap", no_mmap)
         self.add_arg(cmd, "--mlock", mlock)
 

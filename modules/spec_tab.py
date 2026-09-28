@@ -43,6 +43,13 @@ SPEC_DRAFT_CACHE_TYPE_VALUES = (
 )
 
 
+def empty_draft_path_text(spec_type):
+    """Placeholder for the draft-model path label when no draft is selected."""
+    if (spec_type or "").strip() in ("mtp", "draft-mtp"):
+        return "(none — uses base GGUF for MTP)"
+    return "(none — a draft model is required for this type)"
+
+
 class SpecTab:
     """MTP / Speculative Decoding tab.
 
@@ -400,7 +407,7 @@ class SpecTab:
 
         ttk.Label(sec, text="Selected path:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_path_display_var = tk.StringVar(
-            value=self.spec_draft_model.get() or "(none — uses base GGUF for MTP)"
+            value=self.spec_draft_model.get() or empty_draft_path_text(self.spec_type.get())
         )
         path_lbl = ttk.Label(
             sec,
@@ -731,7 +738,7 @@ class SpecTab:
         """Reset the draft model selection (no -md / --model-draft will be emitted)."""
         self.spec_draft_model.set("")
         if hasattr(self, "spec_draft_path_display_var"):
-            self.spec_draft_path_display_var.set("(none — uses base GGUF for MTP)")
+            self.spec_draft_path_display_var.set(empty_draft_path_text(self.spec_type.get()))
         try:
             lb = getattr(self, "spec_draft_listbox", None)
             if lb is not None and lb.winfo_exists():
@@ -1505,6 +1512,12 @@ class SpecTab:
         # dflash/dspark are ik_llama-only; ik_llama needs -np 1 for any stage.
         if spec_type not in ("draft-mtp", "mtp", "dflash", "dspark"):
             return
+        # A type stored from the other backend is inactive; leave parallel alone.
+        backend_var = getattr(self, "backend_selection", None)
+        if backend_var is not None:
+            allowed = self._SPEC_TYPES_IK_LLAMA if backend_var.get() == "ik_llama" else self._SPEC_TYPES_LLAMA_CPP
+            if spec_type not in allowed:
+                return
         try:
             if self.parallel.get().strip() != "1":
                 self.parallel.set("1")
@@ -1565,6 +1578,9 @@ class SpecTab:
                 pass
         spec_type_is_valid_for_backend = spec_type in allowed
         effective_spec_type = spec_type if spec_type_is_valid_for_backend else "none"
+        display_var = getattr(self, "spec_draft_path_display_var", None)
+        if display_var is not None and not (self.spec_draft_model.get() or "").strip():
+            display_var.set(empty_draft_path_text(effective_spec_type))
 
         # 2) Master enable state: when off, everything except the master checkbox
         # is disabled. When on, all *visible* widgets default to enabled and the

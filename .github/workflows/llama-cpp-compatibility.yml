@@ -91,31 +91,31 @@ jobs:
                   None,
               )
 
-          # Semver releases (e.g. v0.5.0) carry no binaries, only a
-          # nightly-tag.txt naming the bNNNNN build they correspond to.
-          release = get(f"{api}/releases/latest")
-          asset = binary_asset(release)
+          # Nightly bNNNNN builds are published as prereleases and carry the
+          # binaries; audit the newest one so drift shows up as early as possible.
+          release, asset = None, None
+          for candidate in get(f"{api}/releases?per_page=30"):
+              if not candidate.get("draft"):
+                  asset = binary_asset(candidate)
+                  if asset is not None:
+                      release = candidate
+                      break
           if asset is None:
+              # Semver releases (e.g. v0.5.0) carry no binaries, only a
+              # nightly-tag.txt naming the bNNNNN build they correspond to.
+              release = get(f"{api}/releases/latest")
+              asset = binary_asset(release)
               pointer = next(
                   (a for a in release.get("assets", []) if a.get("name") == "nightly-tag.txt"),
                   None,
               )
-              if pointer is not None:
+              if asset is None and pointer is not None:
                   tag = get(pointer["browser_download_url"], raw=True).strip()
                   print(f"{release.get('tag_name')} points at build {tag}")
                   release = get(f"{api}/releases/tags/{tag}")
                   asset = binary_asset(release)
           if asset is None:
-              # Fall back to the newest build release that ships the asset.
-              # Nightly bNNNNN builds are published as prereleases.
-              for candidate in get(f"{api}/releases?per_page=30"):
-                  if not candidate.get("draft"):
-                      asset = binary_asset(candidate)
-                      if asset is not None:
-                          release = candidate
-                          break
-          if asset is None:
-              raise SystemExit(f"No Ubuntu x64 CPU asset found near release {release.get('tag_name')}")
+              raise SystemExit("No Ubuntu x64 CPU llama-server asset found in recent llama.cpp releases")
 
           archive_path = Path(asset["name"])
           download = urllib.request.Request(asset["browser_download_url"], headers=headers)
