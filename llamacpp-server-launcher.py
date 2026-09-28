@@ -99,7 +99,7 @@ from modules import terminal_launcher
 from modules.ik_llama import IkLlamaTab
 
 # Import the MTP / Speculative Decoding tab module
-from modules.spec_tab import SpecTab
+from modules.spec_tab import SpecTab, empty_draft_path_text
 
 # Import the Build tab (clone + cmake configure + build for llama.cpp / ik_llama)
 from modules.build import BuildTab
@@ -644,7 +644,7 @@ class LlamaCppLauncher:
         _SPEC_TAB_METHOD_REEXPORT = (
             "_apply_spec_defaults_if_blank", "_apply_mtp_parallel_default",
             "_reset_spec_defaults", "_on_spec_enabled_changed", "_on_spec_type_changed",
-            "_refresh_spec_tab_state", "_on_spec_draft_model_selected",
+            "_refresh_spec_tab_state", "_refresh_spec_status", "_on_spec_draft_model_selected",
             "_clear_spec_draft_model", "_set_spec_draft_gpu_layers",
             "_sync_spec_draft_gpu_layers_from_slider",
             "_sync_spec_draft_gpu_layers_from_entry",
@@ -685,6 +685,9 @@ class LlamaCppLauncher:
         # --- Custom Parameters Variables ---
         self.custom_param_entry_var = tk.StringVar() # For the entry field
         self.custom_parameters_listbox_var = tk.StringVar() # For the listbox display
+        # (index, original_text) of the entry being edited, or None when the
+        # entry field is in plain "Add" mode.
+        self._custom_param_edit_target = None
 
         # Widgets are created after __init__ finishes. Initial variable values
         # will populate the widgets when they are bound.
@@ -930,6 +933,9 @@ class LlamaCppLauncher:
         self.spec_enabled.trace_add("write", lambda *a: self._on_spec_enabled_changed())
         self.spec_type.trace_add("write", lambda *a: self._on_spec_type_changed())
         self.spec_use_draft_model.trace_add("write", lambda *a: self._refresh_spec_tab_state())
+        # dflash/dspark are only active with a usable draft model; keep the status current.
+        self.spec_draft_model.trace_add("write", lambda *a: self._refresh_spec_status())
+        self.spec_draft_params.trace_add("write", lambda *a: self._refresh_spec_status())
 
 
         # Populate model directories listbox
@@ -2036,9 +2042,16 @@ class LlamaCppLauncher:
         self.custom_param_entry = ttk.Entry(inner, textvariable=self.custom_param_entry_var, state=tk.NORMAL)
         self.custom_param_entry.grid(column=1, row=r, sticky="ew", padx=5, pady=3, columnspan=2)
         # Ensure button is explicitly NORMAL
-        self.add_custom_param_button = ttk.Button(inner, text="Add", command=self._add_custom_parameter, state=tk.NORMAL)
-        self.add_custom_param_button.grid(column=3, row=r, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="Enter full parameter string, e.g., '--my-flag true' or '--config-path /path/to/config'.", font=("TkSmallCaptionFont"))\
+        add_btn_frame = ttk.Frame(inner)
+        add_btn_frame.grid(column=3, row=r, sticky="w", padx=5, pady=3)
+        self.add_custom_param_button = ttk.Button(add_btn_frame, text="Add", command=self._add_custom_parameter, state=tk.NORMAL)
+        self.add_custom_param_button.pack(side=tk.LEFT)
+        # Shown only while editing an existing entry (see _begin_custom_parameter_edit).
+        self.cancel_custom_param_edit_button = ttk.Button(add_btn_frame, text="Cancel", command=self._cancel_custom_parameter_edit)
+        self.custom_param_entry.bind("<Return>", lambda e: self._add_custom_parameter())
+        self.custom_param_entry.bind("<Escape>", lambda e: self._cancel_custom_parameter_edit())
+        r += 1
+        ttk.Label(inner, text="Enter full parameter string, e.g., '--my-flag true' or '--config-path /path/to/config'. Double-click an added parameter to edit it.", font=("TkSmallCaptionFont"))\
              .grid(column=1, row=r, columnspan=3, sticky="w", padx=5, pady=(0,5)); r += 1
 
 
@@ -2059,9 +2072,16 @@ class LlamaCppLauncher:
         self.custom_parameters_listbox.bind("<MouseWheel>", self._on_custom_params_mousewheel)
         self.custom_parameters_listbox.bind("<Button-4>", self._on_custom_params_mousewheel)
         self.custom_parameters_listbox.bind("<Button-5>", self._on_custom_params_mousewheel)
+        self.custom_parameters_listbox.bind("<Double-Button-1>", lambda e: self._begin_custom_parameter_edit())
+        # <<Copy>> covers the platform copy shortcut (Ctrl+C, Cmd+C on macOS).
+        self.custom_parameters_listbox.bind("<<Copy>>", lambda e: self._copy_custom_parameter())
         r += 1 # Advance row after adding the listbox frame
 
         btn_frame = ttk.Frame(inner); btn_frame.grid(column=3, row=r-1, sticky="ew", padx=5, pady=3, rowspan=2)
+        self.edit_custom_param_button = ttk.Button(btn_frame, text="Edit Selected", command=self._begin_custom_parameter_edit)
+        self.edit_custom_param_button.pack(side=tk.TOP, pady=2, fill=tk.X)
+        self.copy_custom_param_button = ttk.Button(btn_frame, text="Copy Selected", command=self._copy_custom_parameter)
+        self.copy_custom_param_button.pack(side=tk.TOP, pady=2, fill=tk.X)
         # Ensure button is explicitly NORMAL
         self.remove_custom_param_button = ttk.Button(btn_frame, text="Remove Selected", command=self._remove_custom_parameter, state=tk.NORMAL)
         self.remove_custom_param_button.pack(side=tk.TOP, pady=2, fill=tk.X)
@@ -2791,7 +2811,7 @@ class LlamaCppLauncher:
         if hasattr(self, "spec_draft_path_display_var"):
             cur = (self.spec_draft_model.get() or "").strip()
             self.spec_draft_path_display_var.set(
-                cur or "(none — uses base GGUF for MTP)"
+                cur or empty_draft_path_text(self.spec_type.get())
             )
         if restored:
             try:
@@ -3544,7 +3564,7 @@ class LlamaCppLauncher:
             # stored draft model value.
             if hasattr(self, "spec_draft_path_display_var"):
                 cur = (self.spec_draft_model.get() or "").strip()
-                self.spec_draft_path_display_var.set(cur or "(none — uses base GGUF for MTP)")
+                self.spec_draft_path_display_var.set(cur or empty_draft_path_text(self.spec_type.get()))
             # ``selection_set`` does not fire the ``<<ListboxSelect>>``
             # binding, so the draft-layer analysis / slider state / status
             # label would otherwise stay stale until the user clicked the
@@ -5041,47 +5061,102 @@ class LlamaCppLauncher:
     #  Custom Parameter Logic (NEW)
     # ═════════════════════════════════════════════════════════════════
     def _add_custom_parameter(self):
-        """Adds the parameter string from the entry to the list."""
+        """Adds the entry text to the list, or saves it over the entry being edited."""
         param_string = self.custom_param_entry_var.get().strip()
         if not param_string:
             messagebox.showwarning("Warning", "Please enter a parameter string.")
             return
 
-        self.custom_parameters_list.append(param_string)
-        self._update_custom_parameters_listbox()
-        self.custom_param_entry_var.set("") # Clear the entry field
+        target = self._custom_param_edit_target
+        if target is not None:
+            index, original = target
+            # The list can be replaced underneath an edit (config load, reset);
+            # only overwrite when the slot still holds the text we started from.
+            if index >= len(self.custom_parameters_list) or self.custom_parameters_list[index] != original:
+                messagebox.showwarning("Warning", "The parameter being edited no longer exists; edit cancelled.")
+                self._cancel_custom_parameter_edit()
+                return
+            self.custom_parameters_list[index] = param_string
+            print(f"DEBUG: Updated custom parameter: '{original}' -> '{param_string}'", file=sys.stderr)
+            self._cancel_custom_parameter_edit()
+            self._update_custom_parameters_listbox()
+            self._select_custom_parameter(index)
+        else:
+            self.custom_parameters_list.append(param_string)
+            self._update_custom_parameters_listbox()
+            self.custom_param_entry_var.set("") # Clear the entry field
+            print(f"DEBUG: Added custom parameter: '{param_string}'", file=sys.stderr)
         self._save_configs()
-        print(f"DEBUG: Added custom parameter: '{param_string}'", file=sys.stderr)
 
+    def _selected_custom_parameter_index(self, action):
+        """Return the selected listbox index, or warn and return None."""
+        selection = self.custom_parameters_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Warning", f"Select a parameter to {action}.")
+            return None
+        index = selection[0]
+        if index >= len(self.custom_parameters_list):
+            return None
+        return index
+
+    def _select_custom_parameter(self, index):
+        self.custom_parameters_listbox.selection_clear(0, tk.END)
+        self.custom_parameters_listbox.selection_set(index)
+        self.custom_parameters_listbox.activate(index)
+        self.custom_parameters_listbox.see(index)
+
+    def _begin_custom_parameter_edit(self):
+        """Load the selected parameter into the entry field in Update mode."""
+        index = self._selected_custom_parameter_index("edit")
+        if index is None:
+            return
+        original = self.custom_parameters_list[index]
+        self._custom_param_edit_target = (index, original)
+        self.custom_param_entry_var.set(original)
+        self.add_custom_param_button.config(text="Update")
+        self.cancel_custom_param_edit_button.pack(side=tk.LEFT, padx=(5, 0))
+        self.custom_param_entry.focus_set()
+        self.custom_param_entry.icursor(tk.END)
+        self.custom_param_entry.select_range(0, tk.END)
+
+    def _cancel_custom_parameter_edit(self):
+        """Leave Update mode without changing the list."""
+        if self._custom_param_edit_target is None:
+            return
+        self._custom_param_edit_target = None
+        self.custom_param_entry_var.set("")
+        self.add_custom_param_button.config(text="Add")
+        self.cancel_custom_param_edit_button.pack_forget()
+
+    def _copy_custom_parameter(self):
+        """Copy the selected parameter text to the clipboard."""
+        index = self._selected_custom_parameter_index("copy")
+        if index is None:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.custom_parameters_list[index])
 
     def _remove_custom_parameter(self):
         """Removes the selected parameter from the list."""
-        selection = self.custom_parameters_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("Warning", "Select a parameter to remove.")
+        index = self._selected_custom_parameter_index("remove")
+        if index is None:
             return
-
-        # Get the index of the selected item
-        index = selection[0]
-        # Get the string representation displayed in the listbox
-        selected_param_display = self.custom_parameters_listbox.get(index)
-
-        # Find the actual string in our internal list (handle potential duplicates)
-        # It's safer to rebuild the list excluding the selected item
-        new_list = []
-        removed = False
-        for item in self.custom_parameters_list:
-             # Compare against the displayed string for removal
-             if not removed and item == selected_param_display:
-                 removed = True
-                 print(f"DEBUG: Removed custom parameter: '{item}'", file=sys.stderr)
-             else:
-                 new_list.append(item)
-
-        self.custom_parameters_list = new_list
+        # Remove by position so the selected row goes even when duplicates exist.
+        removed = self.custom_parameters_list.pop(index)
+        print(f"DEBUG: Removed custom parameter: '{removed}'", file=sys.stderr)
+        target = self._custom_param_edit_target
+        if target is not None:
+            if target[0] == index:
+                self._cancel_custom_parameter_edit()
+            elif target[0] > index:
+                self._custom_param_edit_target = (target[0] - 1, target[1])
         self._update_custom_parameters_listbox()
+        # Keep the selection on the removed row's position (the refresh
+        # re-selects by text, which can land on an earlier duplicate).
+        self.custom_parameters_listbox.selection_clear(0, tk.END)
+        if self.custom_parameters_list:
+            self._select_custom_parameter(min(index, len(self.custom_parameters_list) - 1))
         self._save_configs()
-        # If multiple identical items exist and user removes one, only the first one selected is removed
 
 
     def _update_custom_parameters_listbox(self):

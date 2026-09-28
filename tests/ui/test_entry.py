@@ -535,3 +535,127 @@ class TestCleanup:
         elapsed = time.perf_counter() - start
         assert elapsed >= 0.04  # allow a bit of slop
         assert not victim.exists()
+
+
+# ---------------------------------------------------------------------------
+# Custom parameters: edit / copy / remove (issue #31)
+# ---------------------------------------------------------------------------
+
+
+class TestCustomParameterEditing:
+    """Added custom parameters can be edited in place and copied."""
+
+    @pytest.fixture
+    def launcher(self, entry_module, tk_root):
+        cls = entry_module.LlamaCppLauncher
+        frame = ttk.Frame(tk_root)
+        stub = types.SimpleNamespace(
+            root=tk_root,
+            custom_parameters_list=["--tensor-split 33,10,75", "--no-warmup", "--metrics", "--no-warmup"],
+            custom_param_entry_var=tk.StringVar(tk_root),
+            _custom_param_edit_target=None,
+            saves=0,
+        )
+        stub.custom_param_entry = ttk.Entry(frame, textvariable=stub.custom_param_entry_var)
+        stub.custom_parameters_listbox = tk.Listbox(frame, exportselection=False)
+        stub.add_custom_param_button = ttk.Button(frame, text="Add")
+        stub.cancel_custom_param_edit_button = ttk.Button(frame, text="Cancel")
+
+        def _save_configs():
+            stub.saves += 1
+
+        stub._save_configs = _save_configs
+        for name in (
+            "_add_custom_parameter",
+            "_selected_custom_parameter_index",
+            "_select_custom_parameter",
+            "_begin_custom_parameter_edit",
+            "_cancel_custom_parameter_edit",
+            "_copy_custom_parameter",
+            "_remove_custom_parameter",
+            "_update_custom_parameters_listbox",
+        ):
+            setattr(stub, name, types.MethodType(getattr(cls, name), stub))
+        stub._update_custom_parameters_listbox()
+        yield stub
+        frame.destroy()
+
+    def _select(self, launcher, index):
+        launcher.custom_parameters_listbox.selection_clear(0, tk.END)
+        launcher.custom_parameters_listbox.selection_set(index)
+
+    def test_edit_updates_entry_in_place(self, launcher):
+        self._select(launcher, 0)
+        launcher._begin_custom_parameter_edit()
+        assert launcher.custom_param_entry_var.get() == "--tensor-split 33,10,75"
+        assert launcher.add_custom_param_button.cget("text") == "Update"
+
+        launcher.custom_param_entry_var.set("--tensor-split 35,10,75")
+        launcher._add_custom_parameter()
+
+        assert launcher.custom_parameters_list == ["--tensor-split 35,10,75", "--no-warmup", "--metrics", "--no-warmup"]
+        assert launcher.custom_parameters_listbox.get(0) == "--tensor-split 35,10,75"
+        assert launcher.add_custom_param_button.cget("text") == "Add"
+        assert launcher.custom_param_entry_var.get() == ""
+        assert launcher._custom_param_edit_target is None
+        assert launcher.saves == 1
+
+    def test_cancel_leaves_list_unchanged(self, launcher):
+        self._select(launcher, 0)
+        launcher._begin_custom_parameter_edit()
+        launcher.custom_param_entry_var.set("--something-else")
+        launcher._cancel_custom_parameter_edit()
+        assert launcher.custom_parameters_list[0] == "--tensor-split 33,10,75"
+        assert launcher.add_custom_param_button.cget("text") == "Add"
+        assert launcher.saves == 0
+
+    def test_edit_of_list_replaced_underneath_is_refused(self, launcher, entry_module):
+        self._select(launcher, 0)
+        launcher._begin_custom_parameter_edit()
+        launcher.custom_parameters_list = ["--from-loaded-config"]
+        launcher.custom_param_entry_var.set("--tensor-split 35,10,75")
+        warnings = []
+        with patch.object(entry_module.messagebox, "showwarning", lambda *a, **k: warnings.append(a)):
+            launcher._add_custom_parameter()
+        assert warnings
+        assert launcher.custom_parameters_list == ["--from-loaded-config"]
+        assert launcher._custom_param_edit_target is None
+
+    def test_add_mode_still_appends(self, launcher):
+        launcher.custom_param_entry_var.set("--metrics")
+        launcher._add_custom_parameter()
+        assert launcher.custom_parameters_list[-1] == "--metrics"
+
+    def test_copy_puts_text_on_clipboard(self, launcher, tk_root):
+        self._select(launcher, 0)
+        launcher._copy_custom_parameter()
+        assert tk_root.clipboard_get() == "--tensor-split 33,10,75"
+
+    def test_remove_uses_selected_row_among_duplicates(self, launcher):
+        self._select(launcher, 3)
+        launcher._remove_custom_parameter()
+        assert launcher.custom_parameters_list == ["--tensor-split 33,10,75", "--no-warmup", "--metrics"]
+        # Selection stays at the removed position (clamped), not on the earlier duplicate.
+        assert launcher.custom_parameters_listbox.curselection() == (2,)
+
+    def test_remove_keeps_selection_at_position(self, launcher):
+        self._select(launcher, 1)
+        launcher._remove_custom_parameter()
+        assert launcher.custom_parameters_list == ["--tensor-split 33,10,75", "--metrics", "--no-warmup"]
+        assert launcher.custom_parameters_listbox.curselection() == (1,)
+
+    def test_remove_above_edit_target_keeps_edit_pointing_at_same_entry(self, launcher):
+        self._select(launcher, 3)
+        launcher._begin_custom_parameter_edit()
+        self._select(launcher, 0)
+        launcher._remove_custom_parameter()
+        launcher.custom_param_entry_var.set("--warmup")
+        launcher._add_custom_parameter()
+        assert launcher.custom_parameters_list == ["--no-warmup", "--metrics", "--warmup"]
+
+    def test_edit_without_selection_warns(self, launcher, entry_module):
+        warnings = []
+        with patch.object(entry_module.messagebox, "showwarning", lambda *a, **k: warnings.append(a)):
+            launcher._begin_custom_parameter_edit()
+        assert warnings
+        assert launcher._custom_param_edit_target is None

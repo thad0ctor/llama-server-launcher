@@ -180,6 +180,8 @@ class TestLoadConfiguration:
         launcher._sync_ctx_display.assert_called_with(8192)
         launcher._update_fit_fields_state.assert_called()
         launcher._update_custom_parameters_listbox.assert_called()
+        # A custom-parameter edit in progress points at the replaced list.
+        launcher._cancel_custom_parameter_edit.assert_called()
 
     def test_missing_keys_apply_defaults(self, rich_launcher_factory, tmp_path):
         """Partial config dicts get default values on unknown fields."""

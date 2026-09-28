@@ -21,6 +21,7 @@ import tkinter as tk
 from threading import Event, Lock, Thread
 from tkinter import ttk
 
+from modules.spec_launch import _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA, _ik_required_draft_available
 from modules.system import parse_gguf_header_simple
 
 SPEC_DRAFT_ANALYSIS_POLL_MS = 80
@@ -41,6 +42,13 @@ SPEC_DRAFT_CACHE_TYPE_VALUES = (
     "q5_1",
     "q6_k",
 )
+
+
+def empty_draft_path_text(spec_type):
+    """Placeholder for the draft-model path label when no draft is selected."""
+    if (spec_type or "").strip() in ("mtp", "draft-mtp"):
+        return "(none — uses base GGUF for MTP)"
+    return "(none — a draft model is required for this type)"
 
 
 class SpecTab:
@@ -73,6 +81,8 @@ class SpecTab:
     _SPEC_TYPES_IK_LLAMA = (
         "none",
         "mtp",
+        "dflash",
+        "dspark",
         "ngram-cache",
         "ngram-simple",
         "ngram-map-k",
@@ -398,7 +408,7 @@ class SpecTab:
 
         ttk.Label(sec, text="Selected path:").grid(column=0, row=sr, sticky="w", padx=6, pady=2)
         self.spec_draft_path_display_var = tk.StringVar(
-            value=self.spec_draft_model.get() or "(none — uses base GGUF for MTP)"
+            value=self.spec_draft_model.get() or empty_draft_path_text(self.spec_type.get())
         )
         path_lbl = ttk.Label(
             sec,
@@ -622,7 +632,7 @@ class SpecTab:
         )
         ttk.Label(
             sec,
-            text='Free-form comma list, e.g. "k=v,k=v"',
+            text='Extra draft-model server args, e.g. "-m draft.gguf -ngl 99"',
             foreground="gray",
         ).grid(column=0, row=2, sticky="w", padx=6, pady=(0, 4), columnspan=3)
 
@@ -729,7 +739,7 @@ class SpecTab:
         """Reset the draft model selection (no -md / --model-draft will be emitted)."""
         self.spec_draft_model.set("")
         if hasattr(self, "spec_draft_path_display_var"):
-            self.spec_draft_path_display_var.set("(none — uses base GGUF for MTP)")
+            self.spec_draft_path_display_var.set(empty_draft_path_text(self.spec_type.get()))
         try:
             lb = getattr(self, "spec_draft_listbox", None)
             if lb is not None and lb.winfo_exists():
@@ -1500,8 +1510,18 @@ class SpecTab:
         except Exception:
             return
         spec_type = (self.spec_type.get() or "").strip()
+        # Other ik_llama types also need -np 1, but only once their stage is
+        # actually emitted (dflash/dspark need a draft model first), so
+        # resolve_effective_parallel enforces those at launch instead of
+        # mutating the user's setting here.
         if spec_type not in ("draft-mtp", "mtp"):
             return
+        # A type stored from the other backend is inactive; leave parallel alone.
+        backend_var = getattr(self, "backend_selection", None)
+        if backend_var is not None:
+            allowed = self._SPEC_TYPES_IK_LLAMA if backend_var.get() == "ik_llama" else self._SPEC_TYPES_LLAMA_CPP
+            if spec_type not in allowed:
+                return
         try:
             if self.parallel.get().strip() != "1":
                 self.parallel.set("1")
@@ -1562,6 +1582,9 @@ class SpecTab:
                 pass
         spec_type_is_valid_for_backend = spec_type in allowed
         effective_spec_type = spec_type if spec_type_is_valid_for_backend else "none"
+        display_var = getattr(self, "spec_draft_path_display_var", None)
+        if display_var is not None and not (self.spec_draft_model.get() or "").strip():
+            display_var.set(empty_draft_path_text(effective_spec_type))
 
         # 2) Master enable state: when off, everything except the master checkbox
         # is disabled. When on, all *visible* widgets default to enabled and the
@@ -1620,8 +1643,11 @@ class SpecTab:
             # Draft model section: shown for the spec_types that actually use
             # a separate draft model. On llama.cpp this means draft-simple /
             # draft-eagle3 (draft-mtp shares the base GGUF). On ik_llama, the
-            # legacy --model-draft FNAME flag is also supported for mtp mode.
-            if effective_spec_type in ("draft-simple", "draft-eagle3") or (is_ik and effective_spec_type == "mtp"):
+            # legacy --model-draft FNAME flag is also supported for mtp mode,
+            # and dflash/dspark always load their draft GGUF through --model-draft.
+            if effective_spec_type in ("draft-simple", "draft-eagle3") or (
+                is_ik and effective_spec_type in ("mtp", "dflash", "dspark")
+            ):
                 visible.add("draft_model")
             # Ngram sections - mainline has per-variant; ik_llama has shared.
             if effective_spec_type.startswith("ngram-"):
@@ -1674,7 +1700,12 @@ class SpecTab:
                 else:
                     self.spec_pmin_hint_var.set("")
                 # MTP constraint hint: surface the --parallel 1 requirement.
-                if effective_spec_type in ("draft-mtp", "mtp"):
+                if is_ik:
+                    self.spec_parallel_hint_var.set(
+                        "Note: ik_llama speculative decoding requires --parallel 1 "
+                        "(single-slot). The launcher enforces this at launch."
+                    )
+                elif effective_spec_type == "draft-mtp":
                     self.spec_parallel_hint_var.set(
                         "Note: MTP requires --parallel 1 (single-slot). The launcher "
                         "auto-sets and enforces this at launch — overrides from elsewhere "
@@ -1740,9 +1771,28 @@ class SpecTab:
             except (AttributeError, tk.TclError):
                 pass
 
-        # 5) Status label so users know what's emitted. Surface the
-        # "stored but inactive on this backend" case explicitly so a user
-        # who flipped backends knows their setting is preserved.
+        # 5) Status label so users know what's emitted. Called through the
+        # class so stub ``self`` objects in tests need no extra method.
+        SpecTab._refresh_spec_status(self)
+
+    def _refresh_spec_status(self):
+        """Update the status label describing what the launch will emit.
+
+        Split from ``_refresh_spec_tab_state`` so the draft-model / draft-params
+        traces can re-check a dflash/dspark draft without a full relayout.
+        Surfaces the "stored but inactive on this backend" case explicitly so
+        a user who flipped backends knows their setting is preserved.
+        """
+        status_var = getattr(self, "spec_status_var", None)
+        if status_var is None:
+            return
+        backend = self.backend_selection.get() if hasattr(self, "backend_selection") else "llama.cpp"
+        is_ik = backend == "ik_llama"
+        enabled = bool(self.spec_enabled.get())
+        spec_type = (self.spec_type.get() or "none").strip()
+        allowed = self._SPEC_TYPES_IK_LLAMA if is_ik else self._SPEC_TYPES_LLAMA_CPP
+        spec_type_is_valid_for_backend = spec_type in allowed
+        effective_spec_type = spec_type if spec_type_is_valid_for_backend else "none"
         backend_label = "ik_llama" if is_ik else "llama.cpp"
         if not enabled:
             self.spec_status_var.set("Disabled - no --spec-* / --draft-* flags will be emitted.")
@@ -1753,5 +1803,14 @@ class SpecTab:
             )
         elif effective_spec_type in ("", "none"):
             self.spec_status_var.set("Enabled, but type is 'none' - no spec flags will be emitted.")
+        elif (
+            is_ik
+            and effective_spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA
+            and not _ik_required_draft_available(self)
+        ):
+            self.spec_status_var.set(
+                f"Inactive: {effective_spec_type} needs a draft model - select one below or add "
+                f"'-m <path>' to Draft params. No spec flags will be emitted until then."
+            )
         else:
             self.spec_status_var.set(f"Active: type={effective_spec_type} (backend: {backend_label}).")

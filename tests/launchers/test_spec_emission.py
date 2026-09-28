@@ -37,6 +37,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from modules.spec_launch import _draft_params_name_model  # noqa: E402
+from modules.spec_tab import empty_draft_path_text  # noqa: E402
+
 
 # All 8 llama.cpp spec_types supported by the emission block.
 LLAMACPP_SPEC_TYPES = [
@@ -53,6 +56,8 @@ LLAMACPP_SPEC_TYPES = [
 # All 7 ik_llama spec_types supported by the emission block.
 IK_LLAMA_SPEC_TYPES = [
     "mtp",
+    "dflash",
+    "dspark",
     "ngram-cache",
     "ngram-simple",
     "ngram-map-k",
@@ -638,10 +643,14 @@ class TestSpecEmissionIkLlama:
     ``--model-draft`` not ``--spec-draft-model``, short-form offload flags."""
 
     @pytest.mark.parametrize("spec_type", IK_LLAMA_SPEC_TYPES)
-    def test_spec_type_flag_emits_for_each_valid_value(self, manager, launcher_mock, spec_type):
+    def test_spec_type_flag_emits_for_each_valid_value(self, manager, launcher_mock, tmp_path, spec_type):
+        # dflash/dspark need a draft model to emit their stage.
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.spec_enabled.set(True)
         launcher_mock.spec_type.set(spec_type)
+        launcher_mock.spec_draft_model.set(str(draft))
         cmd = manager.build_cmd()
         assert "--spec-type" in cmd
         assert cmd[cmd.index("--spec-type") + 1] == spec_type
@@ -788,6 +797,96 @@ class TestSpecEmissionIkLlama:
             "--spec-draft-type-v",
         ):
             assert absent not in cmd
+
+
+@pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+class TestSpecSeparateDraftTypesIkLlama:
+    """``dflash``/``dspark`` always draft from a separate GGUF via --model-draft,
+    with no opt-in checkbox, and keep their own name in the --spec-type stage."""
+
+    def _enable(self, launcher_mock, spec_type, draft=None):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        if draft is not None:
+            launcher_mock.spec_draft_model.set(str(draft))
+
+    def test_emits_model_draft_and_tuning_without_opt_in(self, manager, launcher_mock, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.spec_draft_n_max.set("8")
+        launcher_mock.spec_draft_p_min.set("0.5")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
+        assert cmd[cmd.index("--spec-type") + 1] == f"{spec_type}:n_max=8,p_min=0.5"
+
+    def test_emits_draft_offload_flags(self, manager, launcher_mock, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.spec_draft_ngl.set("99")
+        launcher_mock.spec_draft_device.set("CUDA1")
+        launcher_mock.spec_draft_ctk.set("q8_0")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("-ngld") + 1] == "99"
+        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
+        assert cmd[cmd.index("-ctkd") + 1] == "q8_0"
+
+    def test_without_draft_model_skips_stage(self, manager, launcher_mock, capsys, spec_type):
+        """ik_llama refuses to start a dflash/dspark stage with no draft model,
+        so the stage and its draft-only flags are dropped with a warning."""
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.spec_draft_ngl.set("99")
+        launcher_mock.spec_autotune.set(True)
+        cmd = manager.build_cmd()
+        for absent in ("--spec-type", "--model-draft", "-ngld", "--spec-autotune"):
+            assert absent not in cmd
+        assert "requires a draft model" in capsys.readouterr().err
+
+    def test_missing_draft_file_skips_stage(self, manager, launcher_mock, tmp_path, spec_type):
+        self._enable(launcher_mock, spec_type, tmp_path / "gone.gguf")
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+
+    def test_draft_params_naming_a_model_satisfy_requirement(self, manager, launcher_mock, spec_type):
+        """ik_llama parses -draft as llama-server args for the draft model, so
+        ``-m <path>`` there supplies the draft GGUF."""
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.spec_draft_params.set("-m /models/draft.gguf -ngl 99")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert cmd[cmd.index("-draft") + 1] == "-m /models/draft.gguf -ngl 99"
+
+    def test_tuning_only_draft_params_do_not_satisfy_requirement(self, manager, launcher_mock, capsys, spec_type):
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.spec_draft_params.set("-ngl 99")
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+        assert "-draft" not in cmd
+        assert "requires a draft model" in capsys.readouterr().err
+
+    def test_dropped_stage_does_not_force_single_slot(self, manager, launcher_mock, spec_type):
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "4"
+
+    def test_forces_single_slot(self, manager, launcher_mock, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--parallel" not in cmd or cmd[cmd.index("--parallel") + 1] == "1"
+
+    def test_rejected_on_llama_cpp(self, manager, launcher_mock, spec_type):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
 
 
 # ============================================================================
@@ -1886,6 +1985,30 @@ class TestMtpParallelDefault:
         entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "1"
 
+    @pytest.mark.parametrize("spec_type", ["mtp", "dflash", "dspark"])
+    def test_ik_llama_type_inactive_on_llama_cpp_leaves_parallel_alone(
+        self, mtp_parallel_stub, entry_module, tk_root, spec_type
+    ):
+        mtp_parallel_stub.backend_selection = tk.StringVar(master=tk_root, value="llama.cpp")
+        mtp_parallel_stub._SPEC_TYPES_IK_LLAMA = entry_module.SpecTab._SPEC_TYPES_IK_LLAMA
+        mtp_parallel_stub._SPEC_TYPES_LLAMA_CPP = entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP
+        mtp_parallel_stub.parallel.set("4")
+        mtp_parallel_stub.spec_type.set(spec_type)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "4"
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_ik_llama_draft_model_types_leave_parallel_to_launch_guard(
+        self, mtp_parallel_stub, entry_module, spec_type
+    ):
+        """dflash/dspark only need one slot once a draft model makes their stage
+        emit; resolve_effective_parallel enforces that at launch, so selecting
+        the type must not overwrite the user's parallel value."""
+        mtp_parallel_stub.parallel.set("4")
+        mtp_parallel_stub.spec_type.set(spec_type)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "4"
+
     def test_non_mtp_spec_type_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("8")
         mtp_parallel_stub.spec_type.set("ngram-simple")
@@ -1961,6 +2084,17 @@ class TestMtpParallelEmissionOverride:
         assert cmd[cmd.index("--parallel") + 1] == "8"
         captured = capsys.readouterr()
         assert "MTP requires --parallel" not in captured.err
+
+    def test_ik_llama_ngram_with_parallel_4_overrides(self, manager, launcher_mock, capsys):
+        """ik_llama's server refuses any --spec-type stage with --parallel > 1,
+        so non-MTP ik_llama types force a single slot too."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("ngram-simple")
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--parallel" not in cmd
+        assert "requires --parallel 1" in capsys.readouterr().err
 
     def test_ik_llama_mtp_with_parallel_4_also_overrides(self, manager, launcher_mock, capsys):
         """ik_llama's 'mtp' spec_type triggers the same override."""
@@ -2387,6 +2521,37 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         action, value = manager._resolve_cuda_visible_devices_action()
         assert action == "export"
         assert value == "1,7"
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_ik_llama_required_draft_type_unions_with_draft_model(self, manager, union_launcher, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set(spec_type)
+        union_launcher.spec_draft_model.set(str(draft))
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert value == "1,7,2,5"
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_ik_llama_dropped_required_draft_stage_does_not_union(self, manager, union_launcher, spec_type):
+        """No usable draft model → the stage is dropped, so the launch is
+        non-speculative and must keep the main-only GPU environment."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set(spec_type)
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7"
+        cmd = manager.build_cmd()
+        assert "-devd" not in cmd
+        assert "--device" not in cmd
 
     def test_ik_llama_mtp_does_NOT_union(self, manager, union_launcher):
         """ik_llama + mtp (MTP head embedded in main GGUF) → no union and
@@ -2826,3 +2991,89 @@ class TestMtpDoesNotUnionDraftGpus:
         mtp_launcher.spec_type.set("draft-eagle3")
         action, value = manager._resolve_cuda_visible_devices_action()
         assert value == "0,1,2,3"
+
+
+class TestDraftParamsNameModel:
+    """``-draft`` only supplies a dflash/dspark draft model when it names one."""
+
+    @pytest.mark.parametrize(
+        "params",
+        ["-m draft.gguf", "--model draft.gguf", "-ngl 99 -m /x/d.gguf", '-m "/a b/d.gguf"', "-m  draft.gguf"],
+    )
+    def test_model_with_operand(self, params):
+        assert _draft_params_name_model(params)
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            "",
+            "-ngl 99",
+            "-m",
+            "-ngl 99 -m",
+            "-m -ngl 99",
+            "-md draft.gguf",
+            "--model-draft d.gguf",
+            "-mg 1",
+            # ik_llama has no --model=PATH form.
+            "--model=draft.gguf",
+            # -m inside a quoted value belongs to that value.
+            '--chat-template "text -m draft.gguf"',
+        ],
+    )
+    def test_no_model_or_missing_operand(self, params):
+        assert not _draft_params_name_model(params)
+
+
+class TestEmptyDraftPathText:
+    """The draft path placeholder must not claim the base GGUF is used for
+    types that require a separate draft model."""
+
+    @pytest.mark.parametrize("spec_type", ["mtp", "draft-mtp"])
+    def test_mtp_types_use_base_gguf(self, spec_type):
+        assert "base GGUF" in empty_draft_path_text(spec_type)
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark", "draft-simple", "draft-eagle3"])
+    def test_required_draft_types_say_required(self, spec_type):
+        assert "required" in empty_draft_path_text(spec_type)
+
+
+class TestSpecStatusRequiredDraft:
+    """The Spec tab status must not call a dflash/dspark stage active when the
+    launch will drop it for lack of a draft model."""
+
+    @pytest.fixture
+    def status_stub(self, tk_root, entry_module):
+        stub = SimpleNamespace(
+            backend_selection=tk.StringVar(master=tk_root, value="ik_llama"),
+            spec_enabled=tk.BooleanVar(master=tk_root, value=True),
+            spec_type=tk.StringVar(master=tk_root, value="dspark"),
+            spec_draft_model=tk.StringVar(master=tk_root, value=""),
+            spec_draft_params=tk.StringVar(master=tk_root, value=""),
+            spec_status_var=tk.StringVar(master=tk_root, value=""),
+            _SPEC_TYPES_IK_LLAMA=entry_module.SpecTab._SPEC_TYPES_IK_LLAMA,
+            _SPEC_TYPES_LLAMA_CPP=entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP,
+        )
+        return stub
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_inactive_without_draft_model(self, status_stub, entry_module, spec_type):
+        status_stub.spec_type.set(spec_type)
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith(f"Inactive: {spec_type} needs a draft model")
+
+    def test_active_with_draft_file(self, status_stub, entry_module, tmp_path):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        status_stub.spec_draft_model.set(str(draft))
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith("Active: type=dspark")
+
+    def test_active_with_model_in_draft_params(self, status_stub, entry_module):
+        status_stub.spec_draft_params.set("-m /models/dspark.gguf")
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith("Active: type=dspark")
+
+    def test_mtp_active_without_draft_model(self, status_stub, entry_module):
+        status_stub.spec_type.set("mtp")
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith("Active: type=mtp")

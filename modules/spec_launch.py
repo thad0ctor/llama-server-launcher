@@ -59,6 +59,8 @@ _ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset(
     {
         "none",
         "mtp",
+        "dflash",
+        "dspark",
         "ngram-cache",
         "ngram-simple",
         "ngram-map-k",
@@ -74,7 +76,10 @@ _ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset(
 # emitting them anyway produces nonsensical CLI combos from saved configs
 # where the user toggled spec_type without clearing prior draft fields.
 _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3", "draft-mtp"})
-_DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
+_DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp", "dflash", "dspark"})
+# ik_llama spec_types that always load a separate ``--model-draft`` GGUF
+# (mtp only does so behind the ``spec_use_draft_model`` opt-in).
+_REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA = frozenset({"dflash", "dspark"})
 
 # Spec types that load a SEPARATE draft model on its own GPU subset.
 # MTP (both backends) is excluded because the MTP head is embedded in
@@ -85,7 +90,7 @@ _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp"})
 # draft-mtp. Only the explicit draft-model variants need separate GPU
 # handling.
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3"})
-_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA: frozenset[str] = frozenset()  # mtp uses main GPUs
+_SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA = _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA  # mtp uses main GPUs
 
 
 def _safe_var_str(launcher, name: str, *, context: str = "spec") -> str:
@@ -181,6 +186,64 @@ def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
             return True
         return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA
     return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
+
+
+def _split_ik_draft_params(draft_params):
+    """Tokenize ``-draft`` params the way ik_llama's ``parse_command_line``
+    does: split on spaces outside double quotes, dropping the quotes."""
+    tokens, current, in_quotes = [], "", False
+    for ch in draft_params:
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == " " and not in_quotes:
+            if current:
+                tokens.append(current)
+                current = ""
+        else:
+            current += ch
+    if current:
+        tokens.append(current)
+    return tokens
+
+
+def _draft_params_name_model(draft_params):
+    """True when ik_llama ``-draft`` params (llama-server args for the draft
+    model) contain a standalone ``-m``/``--model`` token followed by a
+    non-option operand. ik_llama has no ``--model=PATH`` form, and a ``-m``
+    inside a quoted value belongs to that value."""
+    if not draft_params:
+        return False
+    tokens = _split_ik_draft_params(draft_params)
+    for i, token in enumerate(tokens[:-1]):
+        if token in ("-m", "--model") and not tokens[i + 1].startswith("-"):
+            return True
+    return False
+
+
+def _ik_required_draft_available(launcher):
+    """True when a dflash/dspark stage has a draft model to load: a
+    ``spec_draft_model`` that is an existing file, or ``-draft`` params
+    that name one. Mirrors the stage gate in ``emit_spec_args``."""
+    if _draft_params_name_model(_safe_var_str(launcher, "spec_draft_params")):
+        return True
+    mp = _safe_var_str(launcher, "spec_draft_model")
+    if not mp:
+        return False
+    try:
+        return Path(mp).expanduser().is_file()
+    except Exception:
+        return False
+
+
+def _launcher_uses_separate_draft_gpus(launcher, spec_type, backend):
+    """``_uses_separate_draft_gpus`` for the launcher's current state. A
+    dflash/dspark stage with no usable draft model is dropped by
+    ``emit_spec_args``, so its draft GPUs must not widen the device set."""
+    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
+        return False
+    if backend == "ik_llama" and spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA:
+        return _ik_required_draft_available(launcher)
+    return True
 
 
 def _use_draft_model_opt_in(launcher):
@@ -281,7 +344,7 @@ def get_effective_visible_gpu_indices(launcher):
     # the visible-device set when the user is now on draft-mtp / mtp —
     # UNLESS the user has explicitly opted into a separate --model-draft
     # for ik_llama mtp via the "Use a separate draft model" checkbox.
-    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
+    if not _launcher_uses_separate_draft_gpus(launcher, spec_type, backend):
         return main_ordered
     try:
         raw_value = launcher.app_settings.get("spec_draft_selected_gpus", [])
@@ -502,7 +565,7 @@ def _resolve_draft_device_value(launcher):
         backend = launcher.backend_selection.get()
     except Exception:
         spec_type, backend = "", ""
-    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
+    if not _launcher_uses_separate_draft_gpus(launcher, spec_type, backend):
         return ""
 
     # Mirror the list/tuple gate from ``get_effective_visible_gpu_indices``:
@@ -719,7 +782,7 @@ def emit_spec_args(launcher, backend, cmd):
             if spec_type and spec_type != "none":
                 if backend == "ik_llama":
                     spec_type_pairs = []
-                    # Only draft-capable spec_types (ik_llama: "mtp")
+                    # Only draft-capable spec_types (ik_llama: mtp/dflash/dspark)
                     # use a separate draft model + the matching
                     # tuning/offload knobs. For ngram-*/suffix, the
                     # draft fields are stale state from a prior session
@@ -728,9 +791,11 @@ def emit_spec_args(launcher, backend, cmd):
                     # the grayed-field contract.
                     is_draft_capable = spec_type in _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA
                     emit_spec_type = spec_type
+                    stage_cmd_start = len(cmd)
+                    draft_model_emitted = False
                     if is_draft_capable:
                         # Current ik_llama takes draft tuning in the canonical
-                        # --spec-type mtp:n_max=...,n_min=...,p_min=... payload.
+                        # --spec-type <type>:n_max=...,n_min=...,p_min=... payload.
                         for var_name, key in [
                             ("spec_draft_n_max", "n_max"),
                             ("spec_draft_n_min", "n_min"),
@@ -743,8 +808,10 @@ def emit_spec_args(launcher, backend, cmd):
                         # user hasn't checked "Use a separate draft model", suppress
                         # --model-draft AND the per-draft offload flags. Embedded
                         # MTP head rides with the main model's GPU distribution.
+                        # dflash/dspark always run from a separate draft GGUF.
+                        requires_draft = spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA
                         udm_var = getattr(launcher, "spec_use_draft_model", None)
-                        use_separate_draft = bool(udm_var.get()) if udm_var is not None else False
+                        use_separate_draft = requires_draft or (bool(udm_var.get()) if udm_var is not None else False)
                         if use_separate_draft:
                             # Validate the path before emitting — a saved config can
                             # hold a stale path to a moved/deleted draft GGUF; mirror
@@ -777,7 +844,9 @@ def emit_spec_args(launcher, backend, cmd):
                                     draft_path = None
                                 if is_valid_file and draft_path is not None:
                                     cmd.extend(["--model-draft", str(draft_path.resolve())])
-                                    emit_spec_type = "draft"
+                                    draft_model_emitted = True
+                                    if not requires_draft:
+                                        emit_spec_type = "draft"
                                 elif draft_path is not None:
                                     print(
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
@@ -819,14 +888,30 @@ def emit_spec_args(launcher, backend, cmd):
                             v = _safe_var_str(launcher, var_name)
                             if v:
                                 spec_type_pairs.append((key, v))
-                    _append_ik_spec_type(cmd, emit_spec_type, spec_type_pairs)
-                    # ik_llama extras.
-                    autotune_var = getattr(launcher, "spec_autotune", None)
-                    if autotune_var is not None and autotune_var.get():
-                        cmd.append("--spec-autotune")
                     dp = _safe_var_str(launcher, "spec_draft_params")
-                    if dp:
-                        cmd.extend(["-draft", dp])
+                    # dflash/dspark stages need a draft model (--model-draft, or
+                    # -m inside the -draft server args); without one ik_llama
+                    # refuses to start, so drop the stage and its draft-only
+                    # flags rather than emit a command that fails.
+                    if (
+                        spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA
+                        and not draft_model_emitted
+                        and not _draft_params_name_model(dp)
+                    ):
+                        del cmd[stage_cmd_start:]
+                        print(
+                            f"WARNING: spec_type={spec_type} requires a draft model "
+                            f"(--model-draft) and none is usable; skipping speculative decoding.",
+                            file=sys.stderr,
+                        )
+                    else:
+                        _append_ik_spec_type(cmd, emit_spec_type, spec_type_pairs)
+                        # ik_llama extras.
+                        autotune_var = getattr(launcher, "spec_autotune", None)
+                        if autotune_var is not None and autotune_var.get():
+                            cmd.append("--spec-autotune")
+                        if dp:
+                            cmd.extend(["-draft", dp])
                     # Warn (don't crash) if the user set llama.cpp-only knobs while ik_llama is active.
                     for var_name, label in [
                         ("spec_draft_p_split", "--spec-draft-p-split"),
@@ -1179,22 +1264,32 @@ def resolve_effective_parallel(launcher, backend):
         - llama.cpp + spec_type=='draft-mtp' → MTP active
         - ik_llama  + spec_type=='mtp'       → MTP active
         - anything else                       → not MTP active
+
+    ik_llama goes further: its server refuses to start with ANY
+    ``--spec-type`` stage and ``--parallel`` > 1
+    (``server_speculative_requires_single_slot``), so every valid
+    non-"none" ik_llama spec_type forces a single slot.
     """
     parallel_val = launcher.parallel.get()
     try:
         spec_enabled_var = getattr(launcher, "spec_enabled", None)
         spec_type_var = getattr(launcher, "spec_type", None)
         spec_type = (spec_type_var.get() or "").strip() if spec_type_var is not None else ""
+        spec_on = spec_enabled_var is not None and bool(spec_enabled_var.get())
         if backend == "ik_llama":
-            mtp_type_for_backend = "mtp"
+            mtp_active = spec_on and spec_type in _ALLOWED_SPEC_TYPES_IK_LLAMA and spec_type != "none"
+            # A dflash/dspark stage without a draft model is dropped by
+            # emit_spec_args, so no stage remains to need a single slot.
+            if spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA and not _ik_required_draft_available(launcher):
+                mtp_active = False
         else:
-            mtp_type_for_backend = "draft-mtp"
-        mtp_active = spec_enabled_var is not None and spec_enabled_var.get() and spec_type == mtp_type_for_backend
+            mtp_active = spec_on and spec_type == "draft-mtp"
     except Exception:
         mtp_active = False
     if mtp_active and (parallel_val or "").strip() != "1":
+        label = "MTP" if spec_type in ("mtp", "draft-mtp") else f"ik_llama speculative decoding ({spec_type})"
         print(
-            f"WARNING: MTP requires --parallel 1; overriding '{parallel_val}' -> '1'.",
+            f"WARNING: {label} requires --parallel 1; overriding '{parallel_val}' -> '1'.",
             file=sys.stderr,
         )
         parallel_val = "1"

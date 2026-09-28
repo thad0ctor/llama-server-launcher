@@ -596,6 +596,8 @@ class ConfigManager:
             self.launcher.custom_parameters_list = list(raw_custom_params)
         else:
             self.launcher.custom_parameters_list = []
+        # An in-progress edit points at the old list; drop it.
+        self.launcher._cancel_custom_parameter_edit()
         self.launcher._update_custom_parameters_listbox()  # Update the GUI listbox
 
         # Load environmental variables configuration
