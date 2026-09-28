@@ -188,6 +188,30 @@ def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
     return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
 
 
+_DRAFT_PARAMS_MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:\s|=|$)")
+
+
+def _draft_params_name_model(draft_params):
+    """True when ik_llama ``-draft`` params (space-separated llama-server
+    args for the draft model) include ``-m``/``--model``."""
+    return bool(draft_params) and bool(_DRAFT_PARAMS_MODEL_RE.search(draft_params))
+
+
+def _ik_required_draft_available(launcher):
+    """True when a dflash/dspark stage has a draft model to load: a
+    ``spec_draft_model`` that is an existing file, or ``-draft`` params
+    that name one. Mirrors the stage gate in ``emit_spec_args``."""
+    if _draft_params_name_model(_safe_var_str(launcher, "spec_draft_params")):
+        return True
+    mp = _safe_var_str(launcher, "spec_draft_model")
+    if not mp:
+        return False
+    try:
+        return Path(mp).expanduser().is_file()
+    except Exception:
+        return False
+
+
 def _use_draft_model_opt_in(launcher):
     """Read the ``spec_use_draft_model`` Tk var safely. Returns False if
     the var is missing (defensive) or raises."""
@@ -831,13 +855,14 @@ def emit_spec_args(launcher, backend, cmd):
                             if v:
                                 spec_type_pairs.append((key, v))
                     dp = _safe_var_str(launcher, "spec_draft_params")
-                    # dflash/dspark stages need a draft model (or -draft params);
-                    # without one ik_llama refuses to start, so drop the stage and
-                    # its draft-only flags rather than emit a command that fails.
+                    # dflash/dspark stages need a draft model (--model-draft, or
+                    # -m inside the -draft server args); without one ik_llama
+                    # refuses to start, so drop the stage and its draft-only
+                    # flags rather than emit a command that fails.
                     if (
                         spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA
                         and not draft_model_emitted
-                        and not dp
+                        and not _draft_params_name_model(dp)
                     ):
                         del cmd[stage_cmd_start:]
                         print(
@@ -1219,6 +1244,10 @@ def resolve_effective_parallel(launcher, backend):
         spec_on = spec_enabled_var is not None and bool(spec_enabled_var.get())
         if backend == "ik_llama":
             mtp_active = spec_on and spec_type in _ALLOWED_SPEC_TYPES_IK_LLAMA and spec_type != "none"
+            # A dflash/dspark stage without a draft model is dropped by
+            # emit_spec_args, so no stage remains to need a single slot.
+            if spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA and not _ik_required_draft_available(launcher):
+                mtp_active = False
         else:
             mtp_active = spec_on and spec_type == "draft-mtp"
     except Exception:

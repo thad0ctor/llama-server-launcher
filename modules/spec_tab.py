@@ -631,7 +631,7 @@ class SpecTab:
         )
         ttk.Label(
             sec,
-            text='Free-form comma list, e.g. "k=v,k=v"',
+            text='Extra draft-model server args, e.g. "-m draft.gguf -ngl 99"',
             foreground="gray",
         ).grid(column=0, row=2, sticky="w", padx=6, pady=(0, 4), columnspan=3)
 

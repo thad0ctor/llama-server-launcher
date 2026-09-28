@@ -848,12 +848,29 @@ class TestSpecSeparateDraftTypesIkLlama:
         cmd = manager.build_cmd()
         assert "--spec-type" not in cmd
 
-    def test_draft_params_satisfy_requirement(self, manager, launcher_mock, spec_type):
+    def test_draft_params_naming_a_model_satisfy_requirement(self, manager, launcher_mock, spec_type):
+        """ik_llama parses -draft as llama-server args for the draft model, so
+        ``-m <path>`` there supplies the draft GGUF."""
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.spec_draft_params.set("-m /models/draft.gguf -ngl 99")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert cmd[cmd.index("-draft") + 1] == "-m /models/draft.gguf -ngl 99"
+
+    def test_tuning_only_draft_params_do_not_satisfy_requirement(self, manager, launcher_mock, capsys, spec_type):
         self._enable(launcher_mock, spec_type)
         launcher_mock.spec_draft_params.set("-ngl 99")
         cmd = manager.build_cmd()
-        assert cmd[cmd.index("--spec-type") + 1] == spec_type
-        assert cmd[cmd.index("-draft") + 1] == "-ngl 99"
+        assert "--spec-type" not in cmd
+        assert "-draft" not in cmd
+        assert "requires a draft model" in capsys.readouterr().err
+
+    def test_dropped_stage_does_not_force_single_slot(self, manager, launcher_mock, spec_type):
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "4"
 
     def test_forces_single_slot(self, manager, launcher_mock, tmp_path, spec_type):
         draft = tmp_path / "draft.gguf"
