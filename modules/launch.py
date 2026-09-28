@@ -239,6 +239,38 @@ class LaunchManager:
             cmd.extend(["--fit", "off"])
             print("DEBUG: Adding --fit off", file=sys.stderr)
 
+    # (no_mmap, mlock) -> llama.cpp ``--load-mode`` value. Upstream folded the
+    # old ``--no-mmap`` / ``--mlock`` switches into ``--load-mode`` and now
+    # rejects them as invalid arguments.
+    _LLAMA_CPP_LOAD_MODES = {
+        (True, False): "none",
+        (False, True): "mmap+mlock",
+        (True, True): "mlock",
+    }
+
+    def _build_memory_args(self, cmd, backend, exe_path, probe=False):
+        """Append the model-loading memory flags for the active backend.
+
+        ik_llama still takes ``--no-mmap`` / ``--mlock``. llama.cpp takes
+        ``--load-mode`` instead; older llama.cpp builds that predate it are
+        detected when ``probe`` is True and get the legacy switches. A failed
+        probe proves nothing about the binary, so it keeps ``--load-mode``:
+        current upstream exits on the legacy switches.
+        """
+        no_mmap = bool(self.launcher.no_mmap.get())
+        mlock = bool(self.launcher.mlock.get())
+        if not (no_mmap or mlock):
+            return
+        if backend != "ik_llama" and (
+            not probe
+            or self._get_help_text(exe_path) is None
+            or self._backend_supports_flag(exe_path, "--load-mode")
+        ):
+            cmd.extend(["--load-mode", self._LLAMA_CPP_LOAD_MODES[(no_mmap, mlock)]])
+            return
+        self.add_arg(cmd, "--no-mmap", no_mmap)
+        self.add_arg(cmd, "--mlock", mlock)
+
     def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
         """Append ik_llama fit args, translating from the shared UI fields:
           - shared `fit_enabled` -> bare `--fit` flag (no on/off arg)
@@ -607,8 +639,7 @@ class LaunchManager:
             self._build_llama_cpp_fit_args(cmd)
 
         # Memory options
-        self.add_arg(cmd, "--no-mmap", self.launcher.no_mmap.get())  # Omit if False (default)
-        self.add_arg(cmd, "--mlock", self.launcher.mlock.get())  # Omit if False (default)
+        self._build_memory_args(cmd, backend, exe_path, probe=probe_backend)
         self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get())  # Omit if False (default)
 
         # Performance options

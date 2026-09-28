@@ -53,6 +53,8 @@ LLAMACPP_SPEC_TYPES = [
 # All 7 ik_llama spec_types supported by the emission block.
 IK_LLAMA_SPEC_TYPES = [
     "mtp",
+    "dflash",
+    "dspark",
     "ngram-cache",
     "ngram-simple",
     "ngram-map-k",
@@ -788,6 +790,63 @@ class TestSpecEmissionIkLlama:
             "--spec-draft-type-v",
         ):
             assert absent not in cmd
+
+
+@pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+class TestSpecSeparateDraftTypesIkLlama:
+    """``dflash``/``dspark`` always draft from a separate GGUF via --model-draft,
+    with no opt-in checkbox, and keep their own name in the --spec-type stage."""
+
+    def _enable(self, launcher_mock, spec_type, draft=None):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        if draft is not None:
+            launcher_mock.spec_draft_model.set(str(draft))
+
+    def test_emits_model_draft_and_tuning_without_opt_in(self, manager, launcher_mock, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.spec_draft_n_max.set("8")
+        launcher_mock.spec_draft_p_min.set("0.5")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--model-draft") + 1] == str(draft.resolve())
+        assert cmd[cmd.index("--spec-type") + 1] == f"{spec_type}:n_max=8,p_min=0.5"
+
+    def test_emits_draft_offload_flags(self, manager, launcher_mock, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.spec_draft_ngl.set("99")
+        launcher_mock.spec_draft_device.set("CUDA1")
+        launcher_mock.spec_draft_ctk.set("q8_0")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("-ngld") + 1] == "99"
+        assert cmd[cmd.index("-devd") + 1] == "CUDA1"
+        assert cmd[cmd.index("-ctkd") + 1] == "q8_0"
+
+    def test_without_draft_model_warns(self, manager, launcher_mock, capsys, spec_type):
+        self._enable(launcher_mock, spec_type)
+        cmd = manager.build_cmd()
+        assert "--model-draft" not in cmd
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert "requires a draft model" in capsys.readouterr().err
+
+    def test_forces_single_slot(self, manager, launcher_mock, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--parallel" not in cmd or cmd[cmd.index("--parallel") + 1] == "1"
+
+    def test_rejected_on_llama_cpp(self, manager, launcher_mock, spec_type):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        cmd = manager.build_cmd()
+        assert "--spec-type" not in cmd
 
 
 # ============================================================================
@@ -1886,6 +1945,13 @@ class TestMtpParallelDefault:
         entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
         assert mtp_parallel_stub.parallel.get() == "1"
 
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_ik_llama_draft_model_types_force_parallel_to_1(self, mtp_parallel_stub, entry_module, spec_type):
+        mtp_parallel_stub.parallel.set("4")
+        mtp_parallel_stub.spec_type.set(spec_type)
+        entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
+        assert mtp_parallel_stub.parallel.get() == "1"
+
     def test_non_mtp_spec_type_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("8")
         mtp_parallel_stub.spec_type.set("ngram-simple")
@@ -1961,6 +2027,17 @@ class TestMtpParallelEmissionOverride:
         assert cmd[cmd.index("--parallel") + 1] == "8"
         captured = capsys.readouterr()
         assert "MTP requires --parallel" not in captured.err
+
+    def test_ik_llama_ngram_with_parallel_4_overrides(self, manager, launcher_mock, capsys):
+        """ik_llama's server refuses any --spec-type stage with --parallel > 1,
+        so non-MTP ik_llama types force a single slot too."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("ngram-simple")
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert "--parallel" not in cmd
+        assert "requires --parallel 1" in capsys.readouterr().err
 
     def test_ik_llama_mtp_with_parallel_4_also_overrides(self, manager, launcher_mock, capsys):
         """ik_llama's 'mtp' spec_type triggers the same override."""

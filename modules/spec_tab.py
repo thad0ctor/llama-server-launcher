@@ -73,6 +73,8 @@ class SpecTab:
     _SPEC_TYPES_IK_LLAMA = (
         "none",
         "mtp",
+        "dflash",
+        "dspark",
         "ngram-cache",
         "ngram-simple",
         "ngram-map-k",
@@ -1500,7 +1502,8 @@ class SpecTab:
         except Exception:
             return
         spec_type = (self.spec_type.get() or "").strip()
-        if spec_type not in ("draft-mtp", "mtp"):
+        # dflash/dspark are ik_llama-only; ik_llama needs -np 1 for any stage.
+        if spec_type not in ("draft-mtp", "mtp", "dflash", "dspark"):
             return
         try:
             if self.parallel.get().strip() != "1":
@@ -1620,8 +1623,11 @@ class SpecTab:
             # Draft model section: shown for the spec_types that actually use
             # a separate draft model. On llama.cpp this means draft-simple /
             # draft-eagle3 (draft-mtp shares the base GGUF). On ik_llama, the
-            # legacy --model-draft FNAME flag is also supported for mtp mode.
-            if effective_spec_type in ("draft-simple", "draft-eagle3") or (is_ik and effective_spec_type == "mtp"):
+            # legacy --model-draft FNAME flag is also supported for mtp mode,
+            # and dflash/dspark always load their draft GGUF through --model-draft.
+            if effective_spec_type in ("draft-simple", "draft-eagle3") or (
+                is_ik and effective_spec_type in ("mtp", "dflash", "dspark")
+            ):
                 visible.add("draft_model")
             # Ngram sections - mainline has per-variant; ik_llama has shared.
             if effective_spec_type.startswith("ngram-"):
@@ -1674,7 +1680,12 @@ class SpecTab:
                 else:
                     self.spec_pmin_hint_var.set("")
                 # MTP constraint hint: surface the --parallel 1 requirement.
-                if effective_spec_type in ("draft-mtp", "mtp"):
+                if is_ik:
+                    self.spec_parallel_hint_var.set(
+                        "Note: ik_llama speculative decoding requires --parallel 1 "
+                        "(single-slot). The launcher enforces this at launch."
+                    )
+                elif effective_spec_type == "draft-mtp":
                     self.spec_parallel_hint_var.set(
                         "Note: MTP requires --parallel 1 (single-slot). The launcher "
                         "auto-sets and enforces this at launch — overrides from elsewhere "
