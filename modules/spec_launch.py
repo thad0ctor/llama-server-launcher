@@ -214,6 +214,17 @@ def _ik_required_draft_available(launcher):
         return False
 
 
+def _launcher_uses_separate_draft_gpus(launcher, spec_type, backend):
+    """``_uses_separate_draft_gpus`` for the launcher's current state. A
+    dflash/dspark stage with no usable draft model is dropped by
+    ``emit_spec_args``, so its draft GPUs must not widen the device set."""
+    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
+        return False
+    if backend == "ik_llama" and spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA:
+        return _ik_required_draft_available(launcher)
+    return True
+
+
 def _use_draft_model_opt_in(launcher):
     """Read the ``spec_use_draft_model`` Tk var safely. Returns False if
     the var is missing (defensive) or raises."""
@@ -312,7 +323,7 @@ def get_effective_visible_gpu_indices(launcher):
     # the visible-device set when the user is now on draft-mtp / mtp —
     # UNLESS the user has explicitly opted into a separate --model-draft
     # for ik_llama mtp via the "Use a separate draft model" checkbox.
-    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
+    if not _launcher_uses_separate_draft_gpus(launcher, spec_type, backend):
         return main_ordered
     try:
         raw_value = launcher.app_settings.get("spec_draft_selected_gpus", [])
@@ -533,7 +544,7 @@ def _resolve_draft_device_value(launcher):
         backend = launcher.backend_selection.get()
     except Exception:
         spec_type, backend = "", ""
-    if not _uses_separate_draft_gpus(spec_type, backend, _use_draft_model_opt_in(launcher)):
+    if not _launcher_uses_separate_draft_gpus(launcher, spec_type, backend):
         return ""
 
     # Mirror the list/tuple gate from ``get_effective_visible_gpu_indices``:

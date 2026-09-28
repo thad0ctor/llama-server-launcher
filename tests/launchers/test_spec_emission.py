@@ -2522,6 +2522,37 @@ class TestDraftGpuUnionWithCudaVisibleDevices:
         assert action == "export"
         assert value == "1,7"
 
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_ik_llama_required_draft_type_unions_with_draft_model(self, manager, union_launcher, tmp_path, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set(spec_type)
+        union_launcher.spec_draft_model.set(str(draft))
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert value == "1,7,2,5"
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("-devd") + 1] == "CUDA2,CUDA3"
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_ik_llama_dropped_required_draft_stage_does_not_union(self, manager, union_launcher, spec_type):
+        """No usable draft model → the stage is dropped, so the launch is
+        non-speculative and must keep the main-only GPU environment."""
+        union_launcher.backend_selection.set("ik_llama")
+        union_launcher.spec_type.set(spec_type)
+        union_launcher.app_settings["selected_gpus"] = [1, 7]
+        union_launcher.app_settings["gpu_order"] = [1, 7]
+        union_launcher.app_settings["spec_draft_selected_gpus"] = [2, 5]
+        action, value = manager._resolve_cuda_visible_devices_action()
+        assert action == "export"
+        assert value == "1,7"
+        cmd = manager.build_cmd()
+        assert "-devd" not in cmd
+        assert "--device" not in cmd
+
     def test_ik_llama_mtp_does_NOT_union(self, manager, union_launcher):
         """ik_llama + mtp (MTP head embedded in main GGUF) → no union and
         no -devd. The MTP head shares the main GPUs.
