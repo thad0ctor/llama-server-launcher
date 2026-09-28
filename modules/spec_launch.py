@@ -188,15 +188,36 @@ def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
     return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
 
 
-# ``-m``/``--model`` followed by a non-option operand (``-m PATH``,
-# ``--model=PATH``); a bare trailing ``-m`` does not name a model.
-_DRAFT_PARAMS_MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:\s+|=)[^\s-]")
+def _split_ik_draft_params(draft_params):
+    """Tokenize ``-draft`` params the way ik_llama's ``parse_command_line``
+    does: split on spaces outside double quotes, dropping the quotes."""
+    tokens, current, in_quotes = [], "", False
+    for ch in draft_params:
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch == " " and not in_quotes:
+            if current:
+                tokens.append(current)
+                current = ""
+        else:
+            current += ch
+    if current:
+        tokens.append(current)
+    return tokens
 
 
 def _draft_params_name_model(draft_params):
-    """True when ik_llama ``-draft`` params (space-separated llama-server
-    args for the draft model) include ``-m``/``--model``."""
-    return bool(draft_params) and bool(_DRAFT_PARAMS_MODEL_RE.search(draft_params))
+    """True when ik_llama ``-draft`` params (llama-server args for the draft
+    model) contain a standalone ``-m``/``--model`` token followed by a
+    non-option operand. ik_llama has no ``--model=PATH`` form, and a ``-m``
+    inside a quoted value belongs to that value."""
+    if not draft_params:
+        return False
+    tokens = _split_ik_draft_params(draft_params)
+    for i, token in enumerate(tokens[:-1]):
+        if token in ("-m", "--model") and not tokens[i + 1].startswith("-"):
+            return True
+    return False
 
 
 def _ik_required_draft_available(launcher):

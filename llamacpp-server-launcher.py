@@ -644,7 +644,7 @@ class LlamaCppLauncher:
         _SPEC_TAB_METHOD_REEXPORT = (
             "_apply_spec_defaults_if_blank", "_apply_mtp_parallel_default",
             "_reset_spec_defaults", "_on_spec_enabled_changed", "_on_spec_type_changed",
-            "_refresh_spec_tab_state", "_on_spec_draft_model_selected",
+            "_refresh_spec_tab_state", "_refresh_spec_status", "_on_spec_draft_model_selected",
             "_clear_spec_draft_model", "_set_spec_draft_gpu_layers",
             "_sync_spec_draft_gpu_layers_from_slider",
             "_sync_spec_draft_gpu_layers_from_entry",
@@ -933,6 +933,9 @@ class LlamaCppLauncher:
         self.spec_enabled.trace_add("write", lambda *a: self._on_spec_enabled_changed())
         self.spec_type.trace_add("write", lambda *a: self._on_spec_type_changed())
         self.spec_use_draft_model.trace_add("write", lambda *a: self._refresh_spec_tab_state())
+        # dflash/dspark are only active with a usable draft model; keep the status current.
+        self.spec_draft_model.trace_add("write", lambda *a: self._refresh_spec_status())
+        self.spec_draft_params.trace_add("write", lambda *a: self._refresh_spec_status())
 
 
         # Populate model directories listbox

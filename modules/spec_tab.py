@@ -21,6 +21,7 @@ import tkinter as tk
 from threading import Event, Lock, Thread
 from tkinter import ttk
 
+from modules.spec_launch import _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA, _ik_required_draft_available
 from modules.system import parse_gguf_header_simple
 
 SPEC_DRAFT_ANALYSIS_POLL_MS = 80
@@ -1770,9 +1771,28 @@ class SpecTab:
             except (AttributeError, tk.TclError):
                 pass
 
-        # 5) Status label so users know what's emitted. Surface the
-        # "stored but inactive on this backend" case explicitly so a user
-        # who flipped backends knows their setting is preserved.
+        # 5) Status label so users know what's emitted. Called through the
+        # class so stub ``self`` objects in tests need no extra method.
+        SpecTab._refresh_spec_status(self)
+
+    def _refresh_spec_status(self):
+        """Update the status label describing what the launch will emit.
+
+        Split from ``_refresh_spec_tab_state`` so the draft-model / draft-params
+        traces can re-check a dflash/dspark draft without a full relayout.
+        Surfaces the "stored but inactive on this backend" case explicitly so
+        a user who flipped backends knows their setting is preserved.
+        """
+        status_var = getattr(self, "spec_status_var", None)
+        if status_var is None:
+            return
+        backend = self.backend_selection.get() if hasattr(self, "backend_selection") else "llama.cpp"
+        is_ik = backend == "ik_llama"
+        enabled = bool(self.spec_enabled.get())
+        spec_type = (self.spec_type.get() or "none").strip()
+        allowed = self._SPEC_TYPES_IK_LLAMA if is_ik else self._SPEC_TYPES_LLAMA_CPP
+        spec_type_is_valid_for_backend = spec_type in allowed
+        effective_spec_type = spec_type if spec_type_is_valid_for_backend else "none"
         backend_label = "ik_llama" if is_ik else "llama.cpp"
         if not enabled:
             self.spec_status_var.set("Disabled - no --spec-* / --draft-* flags will be emitted.")
@@ -1783,5 +1803,14 @@ class SpecTab:
             )
         elif effective_spec_type in ("", "none"):
             self.spec_status_var.set("Enabled, but type is 'none' - no spec flags will be emitted.")
+        elif (
+            is_ik
+            and effective_spec_type in _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA
+            and not _ik_required_draft_available(self)
+        ):
+            self.spec_status_var.set(
+                f"Inactive: {effective_spec_type} needs a draft model - select one below or add "
+                f"'-m <path>' to Draft params. No spec flags will be emitted until then."
+            )
         else:
             self.spec_status_var.set(f"Active: type={effective_spec_type} (backend: {backend_label}).")

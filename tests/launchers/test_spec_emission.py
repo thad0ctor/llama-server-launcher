@@ -2998,14 +2998,27 @@ class TestDraftParamsNameModel:
 
     @pytest.mark.parametrize(
         "params",
-        ["-m draft.gguf", "--model draft.gguf", "--model=draft.gguf", "-ngl 99 -m /x/d.gguf", '-m "/a b/d.gguf"'],
+        ["-m draft.gguf", "--model draft.gguf", "-ngl 99 -m /x/d.gguf", '-m "/a b/d.gguf"', "-m  draft.gguf"],
     )
     def test_model_with_operand(self, params):
         assert _draft_params_name_model(params)
 
     @pytest.mark.parametrize(
         "params",
-        ["", "-ngl 99", "-m", "-ngl 99 -m", "--model=", "-m -ngl 99", "-md draft.gguf", "--model-draft d.gguf", "-mg 1"],
+        [
+            "",
+            "-ngl 99",
+            "-m",
+            "-ngl 99 -m",
+            "-m -ngl 99",
+            "-md draft.gguf",
+            "--model-draft d.gguf",
+            "-mg 1",
+            # ik_llama has no --model=PATH form.
+            "--model=draft.gguf",
+            # -m inside a quoted value belongs to that value.
+            '--chat-template "text -m draft.gguf"',
+        ],
     )
     def test_no_model_or_missing_operand(self, params):
         assert not _draft_params_name_model(params)
@@ -3022,3 +3035,45 @@ class TestEmptyDraftPathText:
     @pytest.mark.parametrize("spec_type", ["dflash", "dspark", "draft-simple", "draft-eagle3"])
     def test_required_draft_types_say_required(self, spec_type):
         assert "required" in empty_draft_path_text(spec_type)
+
+
+class TestSpecStatusRequiredDraft:
+    """The Spec tab status must not call a dflash/dspark stage active when the
+    launch will drop it for lack of a draft model."""
+
+    @pytest.fixture
+    def status_stub(self, tk_root, entry_module):
+        stub = SimpleNamespace(
+            backend_selection=tk.StringVar(master=tk_root, value="ik_llama"),
+            spec_enabled=tk.BooleanVar(master=tk_root, value=True),
+            spec_type=tk.StringVar(master=tk_root, value="dspark"),
+            spec_draft_model=tk.StringVar(master=tk_root, value=""),
+            spec_draft_params=tk.StringVar(master=tk_root, value=""),
+            spec_status_var=tk.StringVar(master=tk_root, value=""),
+            _SPEC_TYPES_IK_LLAMA=entry_module.SpecTab._SPEC_TYPES_IK_LLAMA,
+            _SPEC_TYPES_LLAMA_CPP=entry_module.SpecTab._SPEC_TYPES_LLAMA_CPP,
+        )
+        return stub
+
+    @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
+    def test_inactive_without_draft_model(self, status_stub, entry_module, spec_type):
+        status_stub.spec_type.set(spec_type)
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith(f"Inactive: {spec_type} needs a draft model")
+
+    def test_active_with_draft_file(self, status_stub, entry_module, tmp_path):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        status_stub.spec_draft_model.set(str(draft))
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith("Active: type=dspark")
+
+    def test_active_with_model_in_draft_params(self, status_stub, entry_module):
+        status_stub.spec_draft_params.set("-m /models/dspark.gguf")
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith("Active: type=dspark")
+
+    def test_mtp_active_without_draft_model(self, status_stub, entry_module):
+        status_stub.spec_type.set("mtp")
+        entry_module.SpecTab._refresh_spec_status(status_stub)
+        assert status_stub.spec_status_var.get().startswith("Active: type=mtp")
