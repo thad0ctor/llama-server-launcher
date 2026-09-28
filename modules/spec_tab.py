@@ -1509,8 +1509,11 @@ class SpecTab:
         except Exception:
             return
         spec_type = (self.spec_type.get() or "").strip()
-        # dflash/dspark are ik_llama-only; ik_llama needs -np 1 for any stage.
-        if spec_type not in ("draft-mtp", "mtp", "dflash", "dspark"):
+        # Other ik_llama types also need -np 1, but only once their stage is
+        # actually emitted (dflash/dspark need a draft model first), so
+        # resolve_effective_parallel enforces those at launch instead of
+        # mutating the user's setting here.
+        if spec_type not in ("draft-mtp", "mtp"):
             return
         # A type stored from the other backend is inactive; leave parallel alone.
         backend_var = getattr(self, "backend_selection", None)

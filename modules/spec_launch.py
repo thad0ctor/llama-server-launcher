@@ -188,7 +188,9 @@ def _uses_separate_draft_gpus(spec_type, backend, use_draft_model_opt_in=False):
     return spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
 
 
-_DRAFT_PARAMS_MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:\s|=|$)")
+# ``-m``/``--model`` followed by a non-option operand (``-m PATH``,
+# ``--model=PATH``); a bare trailing ``-m`` does not name a model.
+_DRAFT_PARAMS_MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:\s+|=)[^\s-]")
 
 
 def _draft_params_name_model(draft_params):

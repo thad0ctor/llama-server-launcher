@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from modules.spec_launch import _draft_params_name_model  # noqa: E402
 from modules.spec_tab import empty_draft_path_text  # noqa: E402
 
 
@@ -1997,11 +1998,16 @@ class TestMtpParallelDefault:
         assert mtp_parallel_stub.parallel.get() == "4"
 
     @pytest.mark.parametrize("spec_type", ["dflash", "dspark"])
-    def test_ik_llama_draft_model_types_force_parallel_to_1(self, mtp_parallel_stub, entry_module, spec_type):
+    def test_ik_llama_draft_model_types_leave_parallel_to_launch_guard(
+        self, mtp_parallel_stub, entry_module, spec_type
+    ):
+        """dflash/dspark only need one slot once a draft model makes their stage
+        emit; resolve_effective_parallel enforces that at launch, so selecting
+        the type must not overwrite the user's parallel value."""
         mtp_parallel_stub.parallel.set("4")
         mtp_parallel_stub.spec_type.set(spec_type)
         entry_module.SpecTab._apply_mtp_parallel_default(mtp_parallel_stub)
-        assert mtp_parallel_stub.parallel.get() == "1"
+        assert mtp_parallel_stub.parallel.get() == "4"
 
     def test_non_mtp_spec_type_leaves_parallel_alone(self, mtp_parallel_stub, entry_module):
         mtp_parallel_stub.parallel.set("8")
@@ -2954,6 +2960,24 @@ class TestMtpDoesNotUnionDraftGpus:
         mtp_launcher.spec_type.set("draft-eagle3")
         action, value = manager._resolve_cuda_visible_devices_action()
         assert value == "0,1,2,3"
+
+
+class TestDraftParamsNameModel:
+    """``-draft`` only supplies a dflash/dspark draft model when it names one."""
+
+    @pytest.mark.parametrize(
+        "params",
+        ["-m draft.gguf", "--model draft.gguf", "--model=draft.gguf", "-ngl 99 -m /x/d.gguf", '-m "/a b/d.gguf"'],
+    )
+    def test_model_with_operand(self, params):
+        assert _draft_params_name_model(params)
+
+    @pytest.mark.parametrize(
+        "params",
+        ["", "-ngl 99", "-m", "-ngl 99 -m", "--model=", "-m -ngl 99", "-md draft.gguf", "--model-draft d.gguf", "-mg 1"],
+    )
+    def test_no_model_or_missing_operand(self, params):
+        assert not _draft_params_name_model(params)
 
 
 class TestEmptyDraftPathText:
