@@ -871,7 +871,9 @@ class LlamaCppLauncher:
         # V follows K until the user picks a different V, which keeps the
         # pre-split "one KV type" behavior (and the K == V that MLA models
         # need on llama.cpp) for anyone who only sets K.
-        self._last_cache_type_k = self.cache_type_k.get()
+        # Explicit follow/decoupled state: only the V control (and config
+        # load) change it, never an equality guess.
+        self.cache_type_v_follows_k = True
         self.cache_type_k.trace_add("write", lambda *args: self._sync_cache_type_v_with_k())
         # Context size updates handled in _override_ctx_size and _update_ctx_label_from_slider
         # n_gpu_layers updates handled in _set_gpu_layers (called by entry/slider sync)
@@ -1884,6 +1886,7 @@ class LlamaCppLauncher:
         # Combobox state is "readonly" for selection, but not disabled
         self.cache_type_v_combo = ttk.Combobox(inner, textvariable=self.cache_type_v, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_v_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
+        self.cache_type_v_combo.bind("<<ComboboxSelected>>", self._on_cache_type_v_selected)
         ttk.Label(inner, text="Follows K until changed. Quantized V needs Flash Attention; MLA models need V = K on llama.cpp", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
@@ -5234,13 +5237,17 @@ class LlamaCppLauncher:
         return self.config_manager.generate_default_config_name()
 
     def _sync_cache_type_v_with_k(self):
-        """Trace callback for ``cache_type_k``: carry V along while it still
-        equals the previous K (i.e. the user hasn't picked a separate V).
-        A config load sets K before V, so the loaded V always wins."""
-        new_k = self.cache_type_k.get()
-        if self.cache_type_v.get() == getattr(self, "_last_cache_type_k", new_k):
-            self.cache_type_v.set(new_k)
-        self._last_cache_type_k = new_k
+        """Trace callback for ``cache_type_k``: carry V along while V follows
+        K. Only the V control (``_on_cache_type_v_selected``) and config load
+        change that state, so V values that merely happen to match K are
+        never mistaken for "following". A config load sets K before V, so the
+        loaded V always wins."""
+        if getattr(self, "cache_type_v_follows_k", True):
+            self.cache_type_v.set(self.cache_type_k.get())
+
+    def _on_cache_type_v_selected(self, event=None):
+        """The user picked a V type: V follows K again only if they picked K's type."""
+        self.cache_type_v_follows_k = self.cache_type_v.get() == self.cache_type_k.get()
 
     def _update_default_config_name_if_needed(self, *args):
         """Delegates to config manager."""

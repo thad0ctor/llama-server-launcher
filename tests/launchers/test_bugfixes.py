@@ -347,19 +347,22 @@ def launcher_entry_module():
 
 
 class TestCacheTypeVFollowsK:
-    """The V control now drives --cache-type-v on its own; the K trace keeps
-    the old single-type behavior for users who only touch K."""
+    """The V control drives --cache-type-v on its own; the K trace keeps the
+    old single-type behavior while V *follows* K. Following is an explicit
+    state set only by the V control (and config load), never inferred from
+    V == previous K."""
 
     def _stub(self, tk_root, launcher_entry_module, k="f16", v="f16"):
         from types import SimpleNamespace
 
+        cls = launcher_entry_module.LlamaCppLauncher
         stub = SimpleNamespace(
             cache_type_k=tk.StringVar(master=tk_root, value=k),
             cache_type_v=tk.StringVar(master=tk_root, value=v),
-            _last_cache_type_k=k,
+            cache_type_v_follows_k=True,
         )
-        sync = launcher_entry_module.LlamaCppLauncher._sync_cache_type_v_with_k
-        stub.cache_type_k.trace_add("write", lambda *a: sync(stub))
+        stub.cache_type_k.trace_add("write", lambda *a: cls._sync_cache_type_v_with_k(stub))
+        stub.pick_v = lambda value: (stub.cache_type_v.set(value), cls._on_cache_type_v_selected(stub))
         return stub
 
     def test_v_follows_k_while_untouched(self, tk_root, launcher_entry_module):
@@ -372,9 +375,26 @@ class TestCacheTypeVFollowsK:
     def test_separately_chosen_v_is_kept(self, tk_root, launcher_entry_module):
         stub = self._stub(tk_root, launcher_entry_module)
         stub.cache_type_k.set("q8_0")
-        stub.cache_type_v.set("f16")
+        stub.pick_v("f16")
         stub.cache_type_k.set("q4_0")
         assert stub.cache_type_v.get() == "f16"
+
+    def test_decoupled_v_survives_k_passing_through_its_value(self, tk_root, launcher_entry_module):
+        """Codex review: K=f16/V=f16 -> V=q8_0 -> K=q8_0 -> K=q4_0 used to
+        overwrite the separately chosen V with q4_0."""
+        stub = self._stub(tk_root, launcher_entry_module)
+        stub.pick_v("q8_0")
+        stub.cache_type_k.set("q8_0")
+        stub.cache_type_k.set("q4_0")
+        assert (stub.cache_type_k.get(), stub.cache_type_v.get()) == ("q4_0", "q8_0")
+
+    def test_picking_k_type_for_v_reattaches(self, tk_root, launcher_entry_module):
+        stub = self._stub(tk_root, launcher_entry_module)
+        stub.pick_v("q8_0")
+        stub.cache_type_k.set("q4_0")
+        stub.pick_v("q4_0")
+        stub.cache_type_k.set("q5_0")
+        assert stub.cache_type_v.get() == "q5_0"
 
     def test_config_load_order_keeps_loaded_v(self, tk_root, launcher_entry_module):
         """ConfigManager sets K then V, so the loaded V wins over the trace."""
@@ -382,3 +402,4 @@ class TestCacheTypeVFollowsK:
         stub.cache_type_k.set("q8_0")
         stub.cache_type_v.set("f16")
         assert (stub.cache_type_k.get(), stub.cache_type_v.get()) == ("q8_0", "f16")
+

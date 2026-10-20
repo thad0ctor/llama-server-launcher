@@ -573,6 +573,9 @@ class ConfigManager:
         self.launcher.venv_dir.set(cfg.get("venv_dir", ""))  # Setting this triggers the venv trace -> flash attn check
         self.launcher.cache_type_k.set(cfg.get("cache_type_k", "f16"))
         self.launcher.cache_type_v.set(self._loaded_cache_type_v(cfg))
+        # Follow state for the K -> V trace: a loaded V that differs from K
+        # was chosen separately; unmarked configs always load V = K (follow).
+        self.launcher.cache_type_v_follows_k = self.launcher.cache_type_v.get() == self.launcher.cache_type_k.get()
         # Load parameters, providing defaults for backward compatibility with older configs
         # Default to the *current* detected cores if not in the config for threads
         self.launcher.threads.set(

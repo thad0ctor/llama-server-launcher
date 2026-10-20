@@ -433,6 +433,24 @@ class TestLoadConfiguration:
         assert cfg["ctx_size_explicit"] is True
         assert ConfigManager._loaded_ctx_size(cfg) == 2048
 
+    @pytest.mark.parametrize(
+        "saved,follows",
+        [
+            ({"cache_type_k": "q8_0", "cache_type_v": "q4_0", "cache_type_v_explicit": True}, False),
+            ({"cache_type_k": "q8_0", "cache_type_v": "q8_0", "cache_type_v_explicit": True}, True),
+            ({"cache_type_k": "q8_0", "cache_type_v": "q4_0"}, True),  # unmarked: V = K, follows
+        ],
+    )
+    def test_load_sets_cache_type_v_follow_state(self, rich_launcher_factory, tmp_path, saved, follows):
+        cfg = _full_cfg()
+        for key in ("cache_type_k", "cache_type_v", "cache_type_v_explicit"):
+            cfg.pop(key, None)
+        cfg.update(saved)
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher.cache_type_v_follows_k is follows
+
     def test_current_cfg_marks_n_gpu_layers_explicit(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
 
