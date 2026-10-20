@@ -390,7 +390,8 @@ class BenchmarkTab:
             "Tick to include; use 'list' for comma-separated values or 'range' for numeric min/max/step. "
             "Each value becomes its own matrix combo on llama-sweep-bench; on llama-bench the values are "
             "passed as one comma-list, so a custom flag only sweeps there if it accepts comma-separated values "
-            "(known single-value ik_llama flags such as -fmoe, -rtr or -ot run once per value instead).",
+            "(known single-value ik_llama flags such as -fmoe or -rtr run once per value instead; an -ot "
+            "comma list is several overrides in one run, so it stays a single run).",
             foreground="#666",
             wraplength=1020,
             justify="left",

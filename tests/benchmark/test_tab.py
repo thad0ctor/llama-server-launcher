@@ -884,3 +884,19 @@ def test_seed_skips_model_context_ctx_size(bench_tab, ctx, expected):
         assert bench_tab.lever_vars["ctx_size"]["values"].get() == ""
     else:
         assert bench_tab.lever_vars["ctx_size"]["values"].get() == expected
+
+
+def test_custom_flags_hint_does_not_claim_ot_splits(bench_tab):
+    """CodeRabbit/Codex: -ot comma lists deliberately stay one run."""
+    from tkinter import ttk
+
+    texts = []
+    stack = [bench_tab._preview.winfo_toplevel()]
+    while stack:
+        widget = stack.pop()
+        stack.extend(widget.winfo_children())
+        if isinstance(widget, ttk.Label):
+            texts.append(str(widget.cget("text")))
+    hint = next(t for t in texts if t.startswith("Sweep an arbitrary flag"))
+    assert "-fmoe or -rtr run once per value" in hint
+    assert "-ot comma list is several overrides in one run" in hint
