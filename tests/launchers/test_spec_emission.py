@@ -928,6 +928,25 @@ class TestSpecDflashDsparkLlamaCpp:
         assert spec_type in _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP
         assert spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
 
+    def test_warns_without_draft_model(self, manager, launcher_mock, tmp_path, capsys, spec_type):
+        """QA-2: b11718 starts such a stage but logs "no implementations
+        specified for speculative decoding" (speculation silently off)."""
+        self._enable(launcher_mock, spec_type)
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert "--spec-draft-model" not in cmd
+        assert "speculative decoding OFF" in capsys.readouterr().err
+        self._enable(launcher_mock, spec_type, tmp_path / "gone.gguf")
+        manager.build_cmd()
+        assert "speculative decoding OFF" in capsys.readouterr().err
+
+    def test_no_warning_with_draft_model(self, manager, launcher_mock, tmp_path, capsys, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        manager.build_cmd()
+        assert "speculative decoding OFF" not in capsys.readouterr().err
+
     def test_does_not_force_single_slot(self, manager, launcher_mock, spec_type):
         self._enable(launcher_mock, spec_type)
         launcher_mock.parallel.set("4")

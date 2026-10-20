@@ -1016,6 +1016,17 @@ def emit_spec_args(launcher, backend, cmd):
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
                                         file=sys.stderr,
                                     )
+                            # Mainline starts a dflash/dspark stage without a
+                            # drafter but logs "no implementations specified
+                            # for speculative decoding": speculation is silently
+                            # off. (ik_llama drops the stage instead.)
+                            if spec_type in ("draft-dflash", "draft-dspark") and "--spec-draft-model" not in cmd:
+                                print(
+                                    f"WARNING: spec_type={spec_type} needs a DFlash/DSpark draft model "
+                                    f"(--spec-draft-model); without one llama.cpp starts with "
+                                    f"speculative decoding OFF.",
+                                    file=sys.stderr,
+                                )
                         # ``spec_draft_device`` is resolved through the
                         # CUDA_VISIBLE_DEVICES remap helper (see ik_llama branch
                         # comment) so the value emitted matches what the binary
