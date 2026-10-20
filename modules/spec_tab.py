@@ -1440,11 +1440,14 @@ class SpecTab:
         # baseline; users tuning further can raise it. n_max/p_min/p_split are
         # spec-type specific (MTP is essentially free so n_max=3 is the
         # benchmark-validated sweet spot; classical draft models gain from
-        # the binary's larger default of 16).
+        # the binary's larger default of 16; DSpark verification cost grows
+        # fast with draft length, so n_max=2 with no confidence cutoff wins).
         if spec_type in ("draft-mtp", "mtp"):
             defaults = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
         elif spec_type in ("draft-simple", "draft-eagle3"):
             defaults = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+        elif spec_type == "draft-dspark":
+            defaults = {"n_max": "2", "n_min": "0", "p_min": "0", "p_split": "0.10"}
         else:
             # ngram-*, suffix, cache, none, or unknown — no defaults to pre-fill.
             return
@@ -1478,6 +1481,8 @@ class SpecTab:
             values = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
         elif spec_type in ("draft-simple", "draft-eagle3"):
             values = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+        elif spec_type == "draft-dspark":
+            values = {"n_max": "2", "n_min": "0", "p_min": "0", "p_split": "0.10"}
         else:
             # ngram-*, suffix, cache, blank — clear to "use binary default".
             values = {"n_max": "", "n_min": "", "p_min": "", "p_split": ""}

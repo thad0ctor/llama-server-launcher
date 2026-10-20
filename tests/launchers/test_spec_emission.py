@@ -1910,6 +1910,17 @@ class TestSpecDefaultsPrefill:
         assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
 
+    def test_draft_dspark_prefills_n_max_2_no_p_min(self, spec_defaults_stub, entry_module):
+        """draft-dspark uses n_max=2 and p_min=0: longer drafts and the
+        confidence cutoff both measured slower than no speculation."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-dspark")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "2"
+        assert spec_defaults_stub.spec_draft_n_min.get() == "0"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0"
+        assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
+
     def test_ngram_simple_no_prefill(self, spec_defaults_stub, entry_module):
         """ngram-* types don't use the draft tuning knobs and must not be
         autofilled (would clutter the UI for users picking ngram)."""
@@ -2228,6 +2239,17 @@ class TestResetSpecDefaults:
         assert reset_stub.spec_draft_n_max.get() == "16"
         assert reset_stub.spec_draft_n_min.get() == "0"
         assert reset_stub.spec_draft_p_min.get() == "0.75"
+        assert reset_stub.spec_draft_p_split.get() == "0.10"
+
+    def test_draft_dspark_overwrites_to_dspark_defaults(self, reset_stub, entry_module):
+        """Reset replaces carried-over MTP values (p_min=0.75 slows DSpark)."""
+        reset_stub.spec_draft_n_max.set("3")
+        reset_stub.spec_draft_p_min.set("0.75")
+        reset_stub.spec_type.set("draft-dspark")
+        entry_module.SpecTab._reset_spec_defaults(reset_stub)
+        assert reset_stub.spec_draft_n_max.get() == "2"
+        assert reset_stub.spec_draft_n_min.get() == "0"
+        assert reset_stub.spec_draft_p_min.get() == "0"
         assert reset_stub.spec_draft_p_split.get() == "0.10"
 
     @pytest.mark.parametrize(
