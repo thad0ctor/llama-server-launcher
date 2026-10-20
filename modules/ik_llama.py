@@ -152,7 +152,8 @@ class IkLlamaTab:
         self.amb_entry = ttk.Entry(scrollable_frame, textvariable=self.amb_value, width=20)
         self.amb_entry.grid(column=0, row=row, sticky="w", padx=10, pady=5)
         
-        ttk.Label(scrollable_frame, text="Good for models like DeepSeek-R1 671B (leave empty to disable)", 
+        ttk.Label(scrollable_frame, text="Empty = ik default (256); 0 = disable; values below 128 are raised to 128. "
+                 "Only used without flash attention, or for MLA models (e.g. DeepSeek-R1 671B)", 
                  font=("TkSmallCaptionFont",)).grid(
             column=1, row=row, sticky="w", padx=5, pady=5, columnspan=2)
         row += 1
@@ -205,7 +206,7 @@ class IkLlamaTab:
                     "  NOTE: Disables mmap, requires enough RAM to malloc all repacked quants (good for hybrid GPU+CPU)\n"
                     "• FMoE: current ik_llama enables fused MoE by default\n"
                     "• SER (-ser): Smart expert reduction trades quality for speed (format: experts,factor)\n"
-                    "• AMB (-amb): Sets K*Q tensor compute buffer size in MiB for memory optimization\n"
+                    "• AMB (-amb): Caps the K*Q tensor compute buffer in MiB (empty = 256, 0 = no cap, min 128); ignored with flash attention on unless the model uses MLA\n"
                     "• CTK (-ctk): Sets KV cache type for K tensor (f16/f32/bf16/q4_0/q4_1/q5_0/q5_1/q6_0/q8_0/iq4_nl/q8_KV)\n"
                     "• CTV (-ctv): Sets KV cache type for V tensor (f16/f32/bf16/q4_0/q4_1/q5_0/q5_1/q6_0/q8_0/iq4_nl/q8_KV)\n"
                     "• These flags are specific to ik_llama and will be ignored by standard llama.cpp")
