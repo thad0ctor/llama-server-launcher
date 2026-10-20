@@ -334,11 +334,15 @@ IK_LLAMA_FLAGS = frozenset(IK_LLAMA_FLAG_INPUTS)
 
 
 # ik_llama hides its GPU-only flags from --help when compiled without GPU
-# offload (``llama_supports_gpu_offload()``), even though GPU-enabled builds
-# parse them. CI builds with -DGGML_RPC=ON, which advertises them (identical
-# help to a CUDA build) so input-shape checks run; this list is the
-# source-scan fallback for a build without any offload backend.
-IK_LLAMA_HELP_HIDDEN_FLAGS = frozenset({"--device", "--main-gpu", "--n-gpu-layers", "--tensor-split", "-devd", "-ngld"})
+# offload (``llama_supports_gpu_offload()``). CI builds with -DGGML_RPC=ON,
+# which advertises them like a CUDA build, so this source-scan fallback stays
+# minimal: every extra entry here would let a flag that upstream actually
+# removed pass as "hidden" whenever its string survives anywhere in the scan.
+IK_LLAMA_HELP_HIDDEN_FLAGS = frozenset({"--tensor-split"})
+
+# Only the server's own parsing code may confirm a help-hidden flag. A scan of
+# the whole tree would also find the spelling in llama-bench, tests or docs.
+UPSTREAM_SERVER_SOURCE_SUBDIRS = ("common", "examples/server", "tools/server")
 
 
 # Option tokens present in the same emission modules but intentionally excluded
@@ -631,12 +635,19 @@ def extract_text_flags(paths: list[Path]) -> set[str]:
 
 
 def upstream_source_files(paths: list[Path]) -> list[Path]:
-    """Expand upstream source files or directories for hidden-flag checks."""
+    """Expand upstream source files or directories for hidden-flag checks.
+
+    A directory that looks like an upstream checkout (it has any of
+    ``UPSTREAM_SERVER_SOURCE_SUBDIRS``) is narrowed to those server/common
+    sources; any other directory is scanned whole.
+    """
     files: list[Path] = []
     suffixes = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
     for path in paths:
         if path.is_dir():
-            files.extend(candidate for candidate in path.rglob("*") if candidate.suffix in suffixes)
+            roots = [path / sub for sub in UPSTREAM_SERVER_SOURCE_SUBDIRS if (path / sub).is_dir()] or [path]
+            for root in roots:
+                files.extend(candidate for candidate in root.rglob("*") if candidate.suffix in suffixes)
         else:
             files.append(path)
     return files
@@ -776,17 +787,51 @@ def help_flag_blocks(help_text: str) -> dict[str, list[str]]:
     return blocks
 
 
-def _value_listed(value: str, text: str) -> bool:
-    # ``mlock`` must not match inside ``mmap+mlock``, nor ``ngram-map-k``
-    # inside ``ngram-map-k4v``.
-    return re.search(rf"(?<![\w+-]){re.escape(value)}(?![\w+-])", text) is not None
+_VALUE_TOKEN = r"[A-Za-z0-9][\w.+-]*"
+
+
+def enumerated_values(block: str) -> set[str]:
+    """Return the values a help entry enumerates, ignoring free prose.
+
+    Recognized shapes (all seen in llama.cpp / ik_llama help):
+      - a list metavar on the option line: ``--spec-type none,draft-simple,...``
+        or ``{a,b}`` / ``a|b``
+      - bullet items: ``- mlock: force system to keep model in RAM``
+      - a ``types: a, b, c`` line (ik ``--spec-type``)
+      - quoted choices: ``'auto', or 'all'``
+    """
+    lines = block.splitlines()
+    if not lines:
+        return set()
+    values: set[str] = set()
+    # Option-line segments that start with a flag hold the flags and metavar;
+    # the description is a separate (2+-space separated) segment.
+    for segment in re.split(r"\s{2,}", lines[0].strip()):
+        if not segment.startswith("-"):
+            continue
+        for token in segment.split():
+            if token.startswith("-") or not re.search(r"[,|{}]", token):
+                continue
+            values.update(re.findall(_VALUE_TOKEN, token))
+    for line in lines:
+        bullet = re.match(rf"\s*-\s+({_VALUE_TOKEN}):", line)
+        if bullet:
+            values.add(bullet.group(1))
+        types = re.search(r"\btypes?:\s*(.+)", line)
+        if types:
+            values.update(re.findall(_VALUE_TOKEN, types.group(1)))
+        values.update(re.findall(rf"'({_VALUE_TOKEN})'", line))
+    return values
 
 
 def detect_missing_emitted_values(
     help_text: str,
     flag_inputs: dict[str, FlagInput] = LLAMA_CPP_FLAG_INPUTS,
 ) -> dict[str, list[str]]:
-    """Return launcher-emitted literal values that a flag's help no longer lists.
+    """Return launcher-emitted literal values that a flag's help no longer
+    enumerates (see :func:`enumerated_values`; prose, examples and defaults
+    don't count). Used in ``--help-file`` mode; with a binary every value is
+    probed instead.
 
     Flags absent from help are skipped here; they are reported as missing
     flags instead.
@@ -797,8 +842,10 @@ def detect_missing_emitted_values(
         blocks = blocks_by_flag.get(flag)
         if not spec.emitted_values or not blocks:
             continue
-        text = "\n".join(blocks)
-        absent = [value for value in spec.emitted_values if not _value_listed(value, text)]
+        listed: set[str] = set()
+        for block in blocks:
+            listed |= enumerated_values(block)
+        absent = [value for value in spec.emitted_values if value not in listed]
         if absent:
             missing[flag] = absent
     return missing
@@ -959,23 +1006,29 @@ def audit_result(
     else:
         shape_mismatch_lines = []
 
-    missing_values = detect_missing_emitted_values(help_text, flag_inputs)
+    # With a binary, ask it: every emitted value is probed, because help text
+    # can mention a value in prose or examples after the parser dropped it.
+    # Without one (--help-file), only the help's enumerated value lists count.
+    if probe_binary is not None:
+        missing_values = {}
+        for flag, spec in flag_inputs.items():
+            rejected = [
+                value
+                for value in spec.emitted_values
+                if not binary_accepts_flag(probe_binary, flag, FlagInput(spec.kind, True, spec.intended_input, value))
+            ]
+            if rejected:
+                missing_values[flag] = rejected
+        verdict = "the binary rejects"
+    else:
+        missing_values = detect_missing_emitted_values(help_text, flag_inputs)
+        verdict = "upstream help no longer lists"
     missing_value_lines = []
     for flag, values in sorted(missing_values.items()):
-        if probe_binary is not None:
-            spec = flag_inputs[flag]
-            values = [
-                value
-                for value in values
-                if not binary_accepts_flag(
-                    probe_binary, flag, FlagInput(spec.kind, True, spec.intended_input, value)
-                )
-            ]
-        if values:
-            missing_value_lines.append(
-                f"- {flag}: launcher emits {', '.join(values)} but upstream help no longer lists "
-                f"{'it' if len(values) == 1 else 'them'} ({flag_inputs[flag].intended_input})"
-            )
+        missing_value_lines.append(
+            f"- {flag}: launcher emits {', '.join(values)} but {verdict} "
+            f"{'it' if len(values) == 1 else 'them'} ({flag_inputs[flag].intended_input})"
+        )
 
     uncategorized: set[str] = set()
     unused_tracked: set[str] = set()
@@ -1091,8 +1144,8 @@ def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launc
         ),
         "Input shape mismatches": "Launcher value/switch expectations that disagree with upstream help.",
         "Missing emitted values": (
-            "Literal values the launcher emits (e.g. -ngl all, --spec-type names) that upstream help no "
-            "longer lists and the binary does not accept."
+            "Literal values the launcher emits (e.g. -ngl all, --spec-type names) that the binary rejects "
+            "(or, with --help-file, that the help's enumerated value lists no longer contain)."
         ),
         "Uncategorized launcher source flags": (
             "Option-looking tokens emitted by scanned launcher source but not assigned to this backend manifest "
