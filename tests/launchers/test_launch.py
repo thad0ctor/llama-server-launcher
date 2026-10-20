@@ -137,7 +137,7 @@ def launcher_mock(tk_root, built_tree):
 
     # GPU
     m.tensor_split = _mk(tk.StringVar, "")
-    m.n_gpu_layers = _mk(tk.StringVar, "0")
+    m.n_gpu_layers = _mk(tk.StringVar, "")  # GUI default: auto
     m.main_gpu = _mk(tk.StringVar, "0")
     m.flash_attn = _mk(tk.BooleanVar, False)
 
@@ -642,7 +642,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
-        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
+        launcher_mock.n_gpu_layers.set("")  # auto: a fixed -ngl drops ik --fit
         launcher_mock.fit_ctx.set("")
         launcher_mock.fit_target.set("")
         cmd = manager.build_cmd(probe_backend=True)
@@ -664,7 +664,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
-        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
+        launcher_mock.n_gpu_layers.set("")  # auto: a fixed -ngl drops ik --fit
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-margin" in cmd
@@ -734,7 +734,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", _probe)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
-        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
+        launcher_mock.n_gpu_layers.set("")  # auto: a fixed -ngl drops ik --fit
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd(probe_backend=True)
         assert "--fit" in cmd
@@ -768,26 +768,64 @@ class TestBuildCmdHappyPath:
         assert not probe_spy.called, "save-script flow must not invoke the runtime feature probe"
 
     @pytest.mark.parametrize("probe", [True, False])
-    def test_ik_llama_fit_omitted_when_ngl_is_zero(self, manager, launcher_mock, built_tree, monkeypatch, capsys, probe):
-        """ik_llama's --fit ignores -ngl (validated: "-ngl 0 --fit" offloads
-        25/25 layers), so an explicit CPU-only 0 drops --fit/--fit-margin."""
+    @pytest.mark.parametrize("ngl", ["0", "00", "20", "+20"])
+    def test_ik_llama_fit_omitted_for_fixed_ngl(self, manager, launcher_mock, built_tree, monkeypatch, capsys, probe, ngl):
+        """ik_llama's --fit forces n_gpu_layers = 999 (validated: "-ngl 0 --fit"
+        and "-ngl 10 --fit" offload 25/25), so an explicit layer count drops
+        --fit/--fit-margin with a warning, in live launches and saved scripts."""
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.fit_target.set("2048")
-        launcher_mock.n_gpu_layers.set("0")
+        launcher_mock.n_gpu_layers.set(ngl)
         cmd = manager.build_cmd(probe_backend=probe)
         assert "--fit" not in cmd and "--fit-margin" not in cmd
-        assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == str(int(ngl))
         assert "omitting ik_llama --fit" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("ngl", ["", "20", "-1"])
-    def test_ik_llama_fit_kept_for_other_ngl(self, manager, launcher_mock, built_tree, ngl):
+    @pytest.mark.parametrize("ngl", ["", "-1", "-01"])
+    def test_ik_llama_fit_kept_for_auto_or_all(self, manager, launcher_mock, built_tree, ngl):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
         launcher_mock.n_gpu_layers.set(ngl)
         cmd = manager.build_cmd()
         assert "--fit" in cmd
+
+    @pytest.mark.parametrize(
+        "setup",
+        [
+            {"cpu_moe": True},
+            {"n_cpu_moe": "4"},
+            {"custom": ["-ot blk\\.1\\.=CPU"]},
+            {"custom": ["--override-tensor=exps=CPU"]},
+            {"custom": ["-ncmoe 2"]},
+            {"custom": ["-cmoe"]},
+            {"custom": ["--moe-cache-mib 512"]},
+            {"ik_flags": ["-ot", "exps=CPU"]},
+        ],
+    )
+    def test_ik_llama_fit_omitted_with_manual_placement(self, manager, launcher_mock, built_tree, capsys, setup):
+        """ik_llama aborts the load when --fit meets manual placement
+        ("-ncmoe | --n-cpu-moe cannot be used with --fit", "Manual tensor
+        overrides cannot be used with --fit", --moe-cache-mib)."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_target.set("2048")
+        if "cpu_moe" in setup:
+            launcher_mock.cpu_moe.set(True)
+        if "n_cpu_moe" in setup:
+            launcher_mock.n_cpu_moe.set(setup["n_cpu_moe"])
+        launcher_mock.custom_parameters_list = setup.get("custom", [])
+        launcher_mock.ik_llama_tab.get_ik_llama_flags.return_value = setup.get("ik_flags", [])
+        cmd = manager.build_cmd()
+        assert "--fit" not in cmd and "--fit-margin" not in cmd
+        assert "omitting ik_llama --fit" in capsys.readouterr().err
+
+    def test_ik_llama_fit_kept_with_n_cpu_moe_zero(self, manager, launcher_mock, built_tree):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_cpu_moe.set("0")
+        assert "--fit" in manager.build_cmd()
 
     def test_llama_cpp_fit_kept_with_ngl_zero(self, manager, launcher_mock):
         """llama.cpp's --fit on honours an explicit -ngl 0 (validated: 0/25)."""
@@ -796,6 +834,12 @@ class TestBuildCmdHappyPath:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--fit") + 1] == "on"
         assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
+
+    @pytest.mark.parametrize("raw,emitted", [("00", "0"), ("-0", "0"), ("+0", "0"), ("007", "7"), ("-01", "-1")])
+    def test_n_gpu_layers_emitted_in_canonical_form(self, manager, launcher_mock, raw, emitted):
+        launcher_mock.n_gpu_layers.set(raw)
+        cmd = manager.build_cmd()  # fit off: -1 may become "all"; help is unreadable here -> "-1"
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == emitted
 
     def test_default_build_cmd_emits_ik_llama_fit_optimistically(self, manager, launcher_mock, built_tree, monkeypatch):
         """When probing is disabled (the save-script flow), trust the user's
@@ -811,7 +855,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
-        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
+        launcher_mock.n_gpu_layers.set("")  # auto: a fixed -ngl drops ik --fit
         launcher_mock.fit_ctx.set("8192")
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()
@@ -830,6 +874,27 @@ class TestBuildCmdHappyPath:
         launcher_mock.ctx_size.set(2048)
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--ctx-size") + 1] == "2048"
+
+    def test_ctx_size_zero_is_omitted(self, manager, launcher_mock):
+        """0 = the model's context (both backends' default), which also lets
+        llama.cpp's --fit shrink it via --fit-ctx."""
+        launcher_mock.ctx_size.set(0)
+        cmd = manager.build_cmd()
+        assert "--ctx-size" not in cmd
+
+    def test_blank_ctx_size_is_treated_as_zero(self, manager, launcher_mock):
+        """QA#3: a blank IntVar raised TclError out of build_cmd()."""
+        launcher_mock.ctx_size = _mk(tk.StringVar, "")
+        cmd = manager.build_cmd()
+        assert cmd is not None
+        assert "--ctx-size" not in cmd
+
+    def test_fit_ctx_zero_is_not_emitted(self, manager, launcher_mock):
+        launcher_mock.ctx_size.set(0)
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_ctx.set("0")
+        cmd = manager.build_cmd()
+        assert "--fit-ctx" not in cmd
 
     def test_ctx_size_non_default_emitted(self, manager, launcher_mock):
         launcher_mock.ctx_size.set(4096)
@@ -876,10 +941,24 @@ class TestBuildCmdHappyPath:
     )
     _PRE_AUTO_NGL_HELP = "-ngl,  --gpu-layers, --n-gpu-layers N   number of layers to store in VRAM\n"
 
+    def test_n_gpu_layers_minus_one_with_fit_on_stays_auto(self, manager, launcher_mock, monkeypatch, capsys):
+        """With --fit on, 'all' makes fit abort ("n_gpu_layers already set by
+        user") and then OOM, so -1 stays -1 (auto) and fit sizes the offload."""
+        probe = MagicMock(return_value=self._LLAMA_CPP_NGL_HELP)
+        monkeypatch.setattr(manager, "_get_help_text", probe)
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("-1")
+        cmd = manager.build_cmd(probe_backend=True)
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"
+        assert cmd[cmd.index("--fit") + 1] == "on"
+        assert "--fit decides" in capsys.readouterr().err
+        probe.assert_not_called()
+
     def test_n_gpu_layers_minus_one_maps_to_all_when_advertised(self, manager, launcher_mock, monkeypatch):
         """Regression: on current llama.cpp -1 means *auto* (validated: 0/25
-        layers offloaded under memory pressure vs 25/25 for 'all')."""
+        layers offloaded under memory pressure vs 25/25 for 'all'). Fit off."""
         monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: self._LLAMA_CPP_NGL_HELP)
+        launcher_mock.fit_enabled.set(False)
         launcher_mock.n_gpu_layers.set("-1")
         for probe in (True, False):  # live launch and saved scripts alike
             cmd = manager.build_cmd(probe_backend=probe)
@@ -1148,6 +1227,38 @@ class TestBuildCmdHappyPath:
         assert "--load-mode" not in cmd
         assert "--mlock" in cmd
         assert ("--no-mmap" in cmd) == no_mmap
+
+    def test_saved_script_reuses_cached_probe_and_falls_back_on_failure(self, manager, launcher_mock, monkeypatch):
+        """Saving a script runs --help at most once per binary build (the
+        5s-timeout probe is cached by path+mtime+size); a failed probe falls
+        back to the spellings that start on current upstream."""
+        from unittest.mock import MagicMock as _MM
+
+        calls = {"n": 0}
+
+        def _run(*a, **kw):
+            calls["n"] += 1
+            r = _MM()
+            r.stdout, r.stderr, r.returncode = "  --load-mode MODE\n-ngl, --n-gpu-layers N  'auto', or 'all'\n", "", 0
+            return r
+
+        monkeypatch.setattr("modules.launch.subprocess.run", _run)
+        launcher_mock.mlock.set(True)
+        launcher_mock.n_gpu_layers.set("-1")
+        manager.build_cmd(probe_backend=True)  # live launch fills the cache
+        cmd = manager.build_cmd()  # save-script flow
+        assert calls["n"] == 1
+        assert cmd[cmd.index("--load-mode") + 1] == "mmap+mlock"
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "all"
+
+        def _broken(*a, **kw):
+            raise OSError("exec format error")
+
+        fresh = type(manager)(launcher_mock)
+        monkeypatch.setattr("modules.launch.subprocess.run", _broken)
+        cmd = fresh.build_cmd()
+        assert cmd[cmd.index("--load-mode") + 1] == "mmap+mlock"
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"
 
     def test_saved_script_keeps_load_mode_on_current_build(self, manager, launcher_mock, monkeypatch):
         monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "--load-mode MODE")

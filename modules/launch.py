@@ -251,7 +251,8 @@ class LaunchManager:
             cmd.extend(["--fit", "on"])
             print("DEBUG: Adding --fit on", file=sys.stderr)
             fit_ctx_val = self.launcher.fit_ctx.get().strip()
-            if fit_ctx_val and fit_ctx_val != "4096":
+            # "0" mirrors a ctx of 0 (model default); let fit use its own minimum.
+            if fit_ctx_val and fit_ctx_val not in ("0", "4096"):
                 cmd.extend(["--fit-ctx", fit_ctx_val])
                 print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
             fit_target_val = self.launcher.fit_target.get().strip()
@@ -300,6 +301,16 @@ class LaunchManager:
         self.add_arg(cmd, "--no-mmap", no_mmap)
         self.add_arg(cmd, "--mlock", mlock)
 
+    def _normalized_gpu_layers(self):
+        """The GPU-layers field as a canonical string: "" (auto), an int
+        string ("00"/"+0"/"-0" -> "0", "-01" -> "-1"), or the raw text when it
+        isn't an integer (passed through for the binary to judge)."""
+        raw = str(self.launcher.n_gpu_layers.get()).strip()
+        try:
+            return str(int(raw, 10))
+        except ValueError:
+            return raw
+
     @staticmethod
     def _help_block(help_text, flag):
         """Return the ``--help`` line advertising ``flag`` plus its continuation
@@ -317,6 +328,13 @@ class LaunchManager:
                     block.append(cont)
                 return "\n".join(block)
         return ""
+
+    def _ctx_size_value(self):
+        """The context-size field as an int; a blank/invalid IntVar is 0."""
+        try:
+            return int(self.launcher.ctx_size.get())
+        except (tk.TclError, TypeError, ValueError):
+            return 0
 
     def _llama_cpp_all_gpu_layers_value(self, exe_path):
         """Map the GUI's "-1 = All" to the llama.cpp spelling of "all layers".
@@ -345,6 +363,48 @@ class LaunchManager:
         )
         return "-1"
 
+    # ik_llama options that place tensors by hand; its --fit refuses them.
+    _IK_FIT_CONFLICT_FLAGS = (
+        "-ot",
+        "--override-tensor",
+        "-cmoe",
+        "--cpu-moe",
+        "-ncmoe",
+        "--n-cpu-moe",
+        "--moe-cache-mib",
+    )
+
+    def _ik_llama_fit_conflicts(self):
+        """Return why ik_llama --fit must not be emitted (empty list = emit).
+
+        Looks at the GPU-layers field, the MoE CPU fields, the ik_llama tab
+        flags and custom parameters (``-ot x``, ``--n-cpu-moe=4``, ...).
+        """
+        conflicts = []
+        ngl = self._normalized_gpu_layers()
+        if ngl not in ("", "-1", "all"):
+            label = "CPU only" if ngl == "0" else "a fixed layer count"
+            conflicts.append(f"--n-gpu-layers {ngl} ({label})")
+        try:
+            if self.launcher.cpu_moe.get():
+                conflicts.append("--cpu-moe")
+        except Exception:
+            pass
+        n_cpu_moe = str(self.launcher.n_cpu_moe.get()).strip()
+        if n_cpu_moe and n_cpu_moe != "0":
+            conflicts.append(f"--n-cpu-moe {n_cpu_moe}")
+        tokens = list(self.launcher.ik_llama_tab.get_ik_llama_flags() or [])
+        for param_string in self.launcher.custom_parameters_list:
+            try:
+                tokens.extend(shlex.split(param_string))
+            except ValueError:
+                continue
+        for tok in tokens:
+            name = tok.split("=", 1)[0]
+            if name in self._IK_FIT_CONFLICT_FLAGS and name not in conflicts:
+                conflicts.append(name)
+        return conflicts
+
     def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
         """Append ik_llama fit args, translating from the shared UI fields:
           - shared `fit_enabled` -> bare `--fit` flag (no on/off arg)
@@ -365,14 +425,19 @@ class LaunchManager:
             print("DEBUG: ik_llama fit disabled — omitting --fit flag", file=sys.stderr)
             return
 
-        # ik_llama's --fit places tensors itself and ignores -ngl (validated:
-        # "-ngl 0 --fit" offloads every layer). An explicit 0 is the GUI's
-        # "CPU only", so it wins over fit; llama.cpp's --fit on already
-        # honours -ngl 0. Other -ngl values keep fit's placement as before.
-        if self.launcher.n_gpu_layers.get().strip() == "0":
+        # ik_llama's --fit places every tensor itself: it forces
+        # n_gpu_layers = 999 (validated: "-ngl 0 --fit" and "-ngl 10 --fit"
+        # both offload 25/25) and aborts the load when combined with manual
+        # placement (src/llama.cpp: tensor overrides, --n-cpu-moe/--cpu-moe;
+        # common.cpp: --moe-cache-mib). So fit only goes out when -ngl is
+        # auto (empty) or all (-1) and nothing places tensors by hand.
+        # llama.cpp's --fit on honours an explicit -ngl and needs no gate.
+        conflicts = self._ik_llama_fit_conflicts()
+        if conflicts:
             print(
-                "WARNING: --n-gpu-layers 0 (CPU only) is set; omitting ik_llama --fit, "
-                "which would ignore it and offload layers to the GPU.",
+                f"WARNING: omitting ik_llama --fit/--fit-margin: ik_llama's fit ignores or rejects "
+                f"{'; '.join(conflicts)}. Clear GPU Layers (auto) or set -1 (all) and remove manual "
+                f"tensor placement to use Fit.",
                 file=sys.stderr,
             )
             return
@@ -674,28 +739,44 @@ class LaunchManager:
         self.add_arg(cmd, "--batch-size", self.launcher.batch_size.get())
         self.add_arg(cmd, "--ubatch-size", self.launcher.ubatch_size.get())
 
-        # Always pass --ctx-size: current llama.cpp defaults to 0 (= the model's
-        # n_ctx_train), so omitting the GUI's 2048 silently loads the full context.
+        # Pass any positive --ctx-size: both backends default to 0 (= the
+        # model's n_ctx_train), so omitting the user's 2048 would silently load
+        # the full context. 0 (or a blank field) means "the model's context",
+        # which is also what lets llama.cpp's --fit shrink it, so omit it then.
         # Sampling defaults below still match both backends: --seed=-1, --temp=0.8, --min-p=0.05
-        self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()))  # Use str() for int var
+        ctx_size_val = self._ctx_size_value()
+        if ctx_size_val > 0:
+            self.add_arg(cmd, "--ctx-size", str(ctx_size_val))
+        else:
+            print("DEBUG: Omitting --ctx-size (0 = model's context)", file=sys.stderr)
         self.add_arg(cmd, "--seed", self.launcher.seed.get(), "-1")
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
 
         # --- Handle GPU arguments: Now ADDING BOTH if set ---
         tensor_split_val = self.launcher.tensor_split.get().strip()
-        n_gpu_layers_val = self.launcher.n_gpu_layers.get().strip()
+        n_gpu_layers_val = self._normalized_gpu_layers()
 
         # Add --tensor-split if the value is non-empty
         # Use add_arg which handles the non-empty check
         self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
 
-        # Add --n-gpu-layers whenever the field is non-empty, including "0".
-        # Omitting it is NOT CPU-only: llama.cpp defaults to auto (offloads
-        # what fits) and ik_llama puts every layer on the GPU.
+        # Empty = auto: omit --n-gpu-layers (llama.cpp offloads what fits;
+        # ik_llama puts every layer on the GPU). Any value, including "0"
+        # (CPU only), is sent in canonical integer form.
+        # With llama.cpp's --fit on, -1 stays -1 (auto) so fit can still size
+        # the offload: "all" makes fit abort ("n_gpu_layers already set by
+        # user") and then OOM on a model that doesn't fit.
         # This argument will now be added regardless of the --tensor-split value
         if n_gpu_layers_val == "-1" and backend != "ik_llama":
-            n_gpu_layers_val = self._llama_cpp_all_gpu_layers_value(exe_path)
+            if self.launcher.fit_enabled.get():
+                print(
+                    "INFO: GPU Layers -1 (All) with Fit on: sending -1 (auto) so llama.cpp's --fit "
+                    "decides the offload; turn Fit off to force every layer onto the GPU.",
+                    file=sys.stderr,
+                )
+            else:
+                n_gpu_layers_val = self._llama_cpp_all_gpu_layers_value(exe_path)
         self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "")
 
         # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)

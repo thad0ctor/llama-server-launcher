@@ -113,7 +113,7 @@ def launcher_mock(tk_root, built_tree):
     m.min_p = _mk(tk.StringVar, "0.05")
 
     m.tensor_split = _mk(tk.StringVar, "")
-    m.n_gpu_layers = _mk(tk.StringVar, "0")
+    m.n_gpu_layers = _mk(tk.StringVar, "")  # GUI default: auto
     m.main_gpu = _mk(tk.StringVar, "0")
     m.flash_attn = _mk(tk.BooleanVar, False)
 

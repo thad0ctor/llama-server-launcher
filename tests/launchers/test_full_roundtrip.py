@@ -634,10 +634,16 @@ class TestScriptExportIncludesNewFlags:
 
 class TestScriptExportKeepsExplicitDefaults:
     """Saved scripts come from the same ``build_cmd()`` as a live launch, so
-    the GUI values that used to be dropped as stale "llama.cpp defaults"
+    explicit values that used to be dropped as stale "llama.cpp defaults"
     (ctx 2048, ngl 0, parallel 1, port 8080) must be in the script body too.
     Upstream now defaults to ctx 0 (model), ngl auto, parallel auto and port
-    9931, so a script without them silently runs a different server."""
+    9931, so a script without them silently runs a different server. (Blank
+    GPU layers / ctx 0 now mean auto / model and are omitted on purpose.)"""
+
+    @pytest.fixture(autouse=True)
+    def _explicit_values(self, launcher_mock):
+        launcher_mock.ctx_size.set(2048)
+        launcher_mock.n_gpu_layers.set("0")
 
     @staticmethod
     def _assert_pairs(text, pairs, quote):

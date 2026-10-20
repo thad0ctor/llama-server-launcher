@@ -146,7 +146,7 @@ def build_rich_launcher_mock(
         ("threads_batch", "8"),
         ("batch_size", "512"),
         ("ubatch_size", "512"),
-        ("n_gpu_layers", "0"),
+        ("n_gpu_layers", ""),  # GUI default: auto
         ("tensor_split", ""),
         ("main_gpu", "0"),
         ("prio", "0"),
@@ -191,7 +191,7 @@ def build_rich_launcher_mock(
     # generate_default_config_name doesn't see every fixture as a deviation.
     launcher.flash_attn = FakeVar(True)
 
-    launcher.ctx_size = FakeVar(2048)
+    launcher.ctx_size = FakeVar(0)  # GUI default: model's context
     launcher.n_gpu_layers_int = FakeVar(0)
     launcher.max_gpu_layers = FakeVar(0)
 

@@ -111,7 +111,7 @@ from modules.benchmark import BenchmarkTab
 from modules.launch import LaunchManager
 
 # Import the configuration management module
-from modules.config import ConfigManager
+from modules.config import ConfigManager, fit_ctx_for_ctx_size
 
 # Import spec persistence helpers (re-sync block extracted to spec_persistence)
 from modules.spec_persistence import resync_spec_tk_vars_from_app_settings
@@ -494,12 +494,12 @@ class LlamaCppLauncher:
         self.ubatch_size     = tk.StringVar(value="512") # --ubatch-size (unconditional batch)
         self.temperature     = tk.StringVar(value="0.8")
         self.min_p           = tk.StringVar(value="0.05")
-        self.ctx_size        = tk.IntVar(value=2048)
+        self.ctx_size        = tk.IntVar(value=0)  # 0 = model's context (no --ctx-size)
         self.seed            = tk.StringVar(value="-1")
 
         # --- GPU Settings ---
         # String var for the entry (-1, 0, N)
-        self.n_gpu_layers    = tk.StringVar(value="0")
+        self.n_gpu_layers    = tk.StringVar(value="")  # "" = auto (no --n-gpu-layers)
         # Int var for the slider (0 to MaxLayers), updated when a model is loaded
         self.n_gpu_layers_int = tk.IntVar(value=0)
         # Max layers detected in the currently loaded model for slider max, updated with model info
@@ -659,7 +659,7 @@ class LlamaCppLauncher:
 
         # --- Fit Parameters (memory fitting) ---
         self.fit_enabled     = tk.BooleanVar(value=True)   # --fit on/off (default: on)
-        self.fit_ctx         = tk.StringVar(value="2048")  # --fit-ctx (synced with ctx_size by default)
+        self.fit_ctx         = tk.StringVar(value="")  # --fit-ctx (synced with ctx_size by default; "" = upstream default)
         self.fit_ctx_synced  = True                        # Track if fit_ctx is synced with ctx_size
         self.fit_target      = tk.StringVar(value="1024")  # --fit-target (MiB to reserve per device)
 
@@ -1417,7 +1417,7 @@ class LlamaCppLauncher:
         # Setting the variable triggers the linked slider
         self.ctx_size.set(self.ctx_size.get()) # Sync display initially
         ctx_f.columnconfigure(0, weight=3) # Slider expands
-        ttk.Label(inner, text="Prompt context size in tokens (-c)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Prompt context size in tokens (-c). 0 or blank = the model's context (llama.cpp Fit may shrink it)", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Temperature ---
@@ -1492,9 +1492,13 @@ class LlamaCppLauncher:
     def _override_ctx_size(self, event=None):
         """Manually set context size from entry."""
         try:
-            value = int(self.ctx_entry.get())
+            raw = self.ctx_entry.get().strip()
+            # Blank or 0 = the model's context (no --ctx-size).
+            value = int(raw) if raw else 0
             # Allow any positive value, not just clamped to slider range
-            if value < 1024:
+            if value <= 0:
+                value = 0
+            elif value < 1024:
                 value = 1024  # Minimum reasonable context size
             self.ctx_size.set(value)
             self._sync_ctx_display(value) # Update entry/label to value
@@ -1718,7 +1722,7 @@ class LlamaCppLauncher:
 
         gpu_layers_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All; sent as 'all' to llama.cpp builds that list it). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Layers to offload (empty=auto, 0=CPU only, -1=all; with llama.cpp Fit on, -1 lets fit decide). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Manual Model Entry (when analysis fails) ---
@@ -2361,7 +2365,11 @@ class LlamaCppLauncher:
     def _sync_fit_ctx_to_ctx_size(self, *args):
         """Sync fit_ctx to ctx_size slider value if still synced."""
         if self.fit_ctx_synced:
-            self.fit_ctx.set(str(self.ctx_size.get()))
+            try:
+                ctx = int(self.ctx_size.get())
+            except (tk.TclError, ValueError):
+                ctx = 0
+            self.fit_ctx.set(fit_ctx_for_ctx_size(ctx))
 
     def _on_fit_ctx_changed(self, *args):
         """Detect manual changes to fit_ctx and break sync if different from ctx_size."""
@@ -4259,9 +4267,10 @@ class LlamaCppLauncher:
 
         current_str = self.n_gpu_layers.get().strip() # Use stripped value from entry
 
-        # If entry is empty, treat as 0
+        # Empty = auto (no --n-gpu-layers); the slider just rests at 0.
         if current_str == "":
-            current_str = "0"
+            self._set_gpu_layers(0)
+            return
 
         try:
             value = int(current_str)

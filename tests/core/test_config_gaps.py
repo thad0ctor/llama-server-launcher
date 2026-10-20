@@ -47,6 +47,7 @@ def _full_cfg(**overrides):
         "selected_mmproj_path": "",
         "cache_type_k": "q8_0",
         "cache_type_v": "q4_0",
+        "cache_type_v_explicit": True,  # saved by the current launcher
         "threads": "16",
         "threads_batch": "8",
         "batch_size": "1024",
@@ -219,11 +220,11 @@ class TestLoadConfiguration:
         assert launcher.jinja_enabled.get() is False
         assert launcher.custom_parameters_list == []
 
-    def test_non_integer_n_gpu_layers_falls_back_to_zero(self, rich_launcher_factory, tmp_path):
+    def test_non_integer_n_gpu_layers_falls_back_to_auto(self, rich_launcher_factory, tmp_path):
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, _full_cfg(n_gpu_layers="abc"))
         with patch("modules.config.messagebox"):
             cm.load_configuration()
-        assert launcher.n_gpu_layers.get() == "0"
+        assert launcher.n_gpu_layers.get() == ""
         launcher._set_gpu_layers.assert_called_with(0)
 
     def test_gpu_checkboxes_reconstructed_from_config(self, rich_launcher_factory, tmp_path):
@@ -352,13 +353,14 @@ class TestLoadConfiguration:
 
     # V cache back-compat. Configs saved before the V control was wired up
     # (no ``cache_type_v_explicit`` marker) ran with V = K regardless of the
-    # V box, which almost always held the untouched f16 default.
+    # V box, so they always load as V = K.
     @pytest.mark.parametrize(
         "saved,expected_v",
         [
             ({"cache_type_k": "q8_0", "cache_type_v": "f16"}, "q8_0"),  # untouched V box: V followed K
             ({"cache_type_k": "q8_0"}, "q8_0"),  # pre-V-control config: K only
-            ({"cache_type_k": "q8_0", "cache_type_v": "q4_0"}, "q4_0"),  # deliberate V pick is honored
+            ({"cache_type_k": "q8_0", "cache_type_v": "q4_0"}, "q8_0"),  # unmarked: V was never applied, V = K
+            ({"cache_type_v": "q4_0"}, "f16"),  # unmarked, no K: K default f16
             ({"cache_type_k": "f16", "cache_type_v": "f16"}, "f16"),
             ({"cache_type_k": "q8_0", "cache_type_v": "f16", "cache_type_v_explicit": True}, "f16"),
             ({"cache_type_k": "q4_0", "cache_type_v": "q8_0", "cache_type_v_explicit": True}, "q8_0"),
@@ -366,14 +368,67 @@ class TestLoadConfiguration:
     )
     def test_cache_type_v_back_compat(self, rich_launcher_factory, tmp_path, saved, expected_v):
         cfg = _full_cfg()
-        cfg.pop("cache_type_v", None)
-        cfg.pop("cache_type_v_explicit", None)
+        for key in ("cache_type_k", "cache_type_v", "cache_type_v_explicit"):
+            cfg.pop(key, None)
         cfg.update(saved)
         cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
         with patch("modules.config.messagebox"):
             cm.load_configuration()
-        assert launcher.cache_type_k.get() == saved["cache_type_k"]
+        assert launcher.cache_type_k.get() == saved.get("cache_type_k", "f16")
         assert launcher.cache_type_v.get() == expected_v
+
+    # GPU layers back-compat. Empty now means auto; configs saved before
+    # that (no ``n_gpu_layers_explicit`` marker) stored the old GUI default
+    # "0", which the launcher dropped, i.e. they ran as auto.
+    @pytest.mark.parametrize(
+        "saved,expected",
+        [
+            ({"n_gpu_layers": "0"}, ""),  # unmarked old default -> auto
+            ({"n_gpu_layers": "00"}, ""),
+            ({}, ""),  # key missing -> auto
+            ({"n_gpu_layers": "33"}, "33"),
+            ({"n_gpu_layers": "-1"}, "-1"),
+            ({"n_gpu_layers": "0", "n_gpu_layers_explicit": True}, "0"),  # new save: CPU only
+            ({"n_gpu_layers": "", "n_gpu_layers_explicit": True}, ""),
+        ],
+    )
+    def test_n_gpu_layers_back_compat(self, rich_launcher_factory, tmp_path, saved, expected):
+        cfg = _full_cfg()
+        cfg.pop("n_gpu_layers", None)
+        cfg.pop("n_gpu_layers_explicit", None)
+        cfg.update(saved)
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher.n_gpu_layers.get() == expected
+
+    def test_current_cfg_marks_n_gpu_layers_explicit(self, rich_launcher_factory, tmp_path):
+        from modules.config import ConfigManager
+
+        launcher = rich_launcher_factory(tmp_path / "cfg.json")
+        launcher.n_gpu_layers.set("0")
+        cfg = ConfigManager(launcher).current_cfg()
+        assert cfg["n_gpu_layers_explicit"] is True
+        assert ConfigManager._loaded_n_gpu_layers(cfg) == "0"
+
+    def test_ctx_size_zero_round_trips_and_blank_reads_as_zero(self, rich_launcher_factory, tmp_path):
+        """0 = the model's context and must not be migrated; a blank IntVar
+        (QA#3, TclError) is saved as 0 instead of crashing."""
+        from modules.config import ConfigManager
+
+        launcher = rich_launcher_factory(tmp_path / "cfg.json")
+
+        class _BlankIntVar:
+            def get(self):
+                raise ValueError("expected integer but got \"\"")
+
+        launcher.ctx_size = _BlankIntVar()
+        assert ConfigManager(launcher).current_cfg()["ctx_size"] == 0
+        cm, launcher2 = self._prepare(rich_launcher_factory, tmp_path, _full_cfg(ctx_size=0, fit_ctx_synced=True))
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher2.ctx_size.get() == 0
+        assert launcher2.fit_ctx.get() == ""  # synced fit-ctx falls back to upstream's minimum
 
     def test_current_cfg_marks_cache_type_v_explicit(self, rich_launcher_factory, tmp_path):
         """New saves carry the marker so an explicit f16 V next to a quantized
