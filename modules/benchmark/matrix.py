@@ -631,7 +631,7 @@ def llama_bench_command(
         raise SweepError("no model selected")
     cmd: list[str] = [exe, "-m", model]
     applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
-    scalar = _swept_bench_scalar_axes(applicable)
+    scalar = _swept_bench_scalar_axes(applicable, backend)
     if scalar:
         raise SweepError(
             f"llama-bench takes a single {scalar[0].flag!r} value per run; "
@@ -674,9 +674,46 @@ def llama_bench_command(
     return cmd
 
 
-def _swept_bench_scalar_axes(applicable: list[Axis]) -> list[Axis]:
-    """Swept axes whose lever llama-bench parses as a single value."""
-    return [axis for axis in applicable if not axis.is_custom and axis.lever.bench_scalar and axis.is_swept]
+# Flags ik_llama's llama-bench parses as ONE value per run (``std::stoi`` or a
+# single pattern), verified against examples/llama-bench/llama-bench.cpp at
+# c446f1e. A custom-flag axis using one of them is split like a
+# ``bench_scalar`` lever instead of comma-joined (``-fmoe 0,1`` runs only 0).
+# -ot is included because a comma list there means several simultaneous
+# overrides in one run, not a sweep. (-ncmoe is not a llama-bench spelling.)
+_IK_LLAMA_BENCH_SINGLE_VALUE_FLAGS = frozenset(
+    {
+        "-w", "--warmup",
+        "-rtr", "--run-time-repack",
+        "-mqkv", "--merge-qkv",
+        "-muge", "--merge-up-gate-exps",
+        "-sas", "--scheduler-async",
+        "--fit", "--fit-margin", "--max-gpu",
+        "-rcache", "--rope-cache",
+        "-thp", "--transparent-huge-pages",
+        "-fmoe", "--fused-moe",
+        "-ger", "--grouped-expert-routing",
+        "-no-fug", "--no-fused-up-gate",
+        "-no-ooae", "--no-offload-only-active-experts",
+        "--n-cpu-moe",
+        "-ot", "--override-tensor",
+        "--print-overrides",
+    }
+)  # fmt: skip
+
+
+def _swept_bench_scalar_axes(applicable: list[Axis], backend: str = "llama.cpp") -> list[Axis]:
+    """Swept axes that llama-bench parses as a single value: ``bench_scalar``
+    levers, plus (on ik_llama) custom flags in the known single-value set."""
+    out = []
+    for axis in applicable:
+        if not axis.is_swept:
+            continue
+        if axis.is_custom:
+            if backend == "ik_llama" and axis.flag in _IK_LLAMA_BENCH_SINGLE_VALUE_FLAGS:
+                out.append(axis)
+        elif axis.lever.bench_scalar:
+            out.append(axis)
+    return out
 
 
 def llama_bench_commands(
@@ -698,7 +735,7 @@ def llama_bench_commands(
     scalar values it pins so result rows stay labelled.
     """
     applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
-    scalar = _swept_bench_scalar_axes(applicable)
+    scalar = _swept_bench_scalar_axes(applicable, backend)
 
     def _command(run_axes: list[Axis]) -> list[str]:
         return llama_bench_command(
@@ -723,7 +760,14 @@ def llama_bench_commands(
     scalar_keys = {axis.key for axis in scalar}
     out: list[tuple[list[str], dict[str, str]]] = []
     for combo in _cartesian(scalar):
-        pinned = [Axis(axis.key, [combo[axis.key]]) if axis.key in scalar_keys else axis for axis in axes]
+        pinned = [
+            (
+                Axis(axis.key, [combo[axis.key]], custom_flag=axis.custom_flag, custom_kind=axis.custom_kind)
+                if axis.key in scalar_keys
+                else axis
+            )
+            for axis in axes
+        ]
         out.append((_command(pinned), combo))
     return out
 
