@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .results import _ws_split
+
 EVENT_LINE = "line"  # ("line", text)
 EVENT_STEP_START = "step_start"  # ("step_start", StepInfo)
 EVENT_STEP_RESULT = "step_result"  # ("step_result", StepResult)
@@ -36,8 +38,8 @@ PROC_KILL_WAIT_SECONDS = 2.0
 PROC_POLL_SECONDS = 0.05
 MAX_CAPTURE_BYTES = 256 * 1024 * 1024  # cap stdout capture per step (bounds memory)
 # Some builds (ik_llama c446f1e llama-sweep-bench) print the PP/TG result table
-# to STDERR. Pipe-table lines seen on stderr are kept (bounded) so the tab can
-# parse them when stdout has no table.
+# to STDERR. Its table lines (pipe or whitespace form) seen on stderr are kept
+# (bounded) so the tab can parse them when stdout has no table.
 MAX_STDERR_TABLE_LINES = 100_000
 
 
@@ -338,12 +340,38 @@ class BenchRunner:
         return rc, text, "\n".join(table_lines)
 
     def _stream_stderr(self, stderr, table_lines: list[str] | None = None) -> None:
-        """Emit each stderr line as a console event; collect ``|`` table rows
-        into ``table_lines`` (bounded) when given."""
+        """Emit each stderr line as a console event; collect sweep-bench table
+        lines into ``table_lines`` (bounded) when given: ``|`` rows, or a
+        whitespace table's ``PP TG N_KV ...`` header, separators and the
+        numeric rows matching its column count (log lines are skipped)."""
+        ws_columns: list[int] = []  # column count of a whitespace header once seen
+
+        def _is_table_line(line: str) -> bool:
+            stripped = line.strip()
+            if stripped.startswith("|"):
+                return True
+            if not stripped:
+                return False
+            cells = _ws_split(stripped)
+            if {"PP", "TG", "N_KV"} <= {c.upper() for c in cells}:
+                ws_columns[:] = [len(cells)]
+                return True
+            if not ws_columns:
+                return False
+            if set(stripped) <= set("-: "):
+                return True
+            if len(cells) != ws_columns[0]:
+                return False
+            try:
+                for cell in cells:
+                    float(cell)
+            except ValueError:
+                return False
+            return True
 
         def _emit(line: str) -> None:
             self._emit_line(line)
-            if table_lines is not None and line.lstrip().startswith("|") and len(table_lines) < MAX_STDERR_TABLE_LINES:
+            if table_lines is not None and len(table_lines) < MAX_STDERR_TABLE_LINES and _is_table_line(line):
                 table_lines.append(line)
 
         buf = bytearray()
