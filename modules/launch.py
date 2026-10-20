@@ -365,6 +365,18 @@ class LaunchManager:
             print("DEBUG: ik_llama fit disabled — omitting --fit flag", file=sys.stderr)
             return
 
+        # ik_llama's --fit places tensors itself and ignores -ngl (validated:
+        # "-ngl 0 --fit" offloads every layer). An explicit 0 is the GUI's
+        # "CPU only", so it wins over fit; llama.cpp's --fit on already
+        # honours -ngl 0. Other -ngl values keep fit's placement as before.
+        if self.launcher.n_gpu_layers.get().strip() == "0":
+            print(
+                "WARNING: --n-gpu-layers 0 (CPU only) is set; omitting ik_llama --fit, "
+                "which would ignore it and offload layers to the GPU.",
+                file=sys.stderr,
+            )
+            return
+
         fit_supported = (not probe) or self._backend_supports_flag(exe_path, "--fit")
         if not fit_supported:
             print(

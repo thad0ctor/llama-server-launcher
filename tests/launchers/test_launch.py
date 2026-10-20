@@ -642,6 +642,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
         launcher_mock.fit_ctx.set("")
         launcher_mock.fit_target.set("")
         cmd = manager.build_cmd(probe_backend=True)
@@ -663,6 +664,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd(probe_backend=True)
         assert "--fit-margin" in cmd
@@ -732,6 +734,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", _probe)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd(probe_backend=True)
         assert "--fit" in cmd
@@ -764,6 +767,36 @@ class TestBuildCmdHappyPath:
         assert cmd is not None
         assert not probe_spy.called, "save-script flow must not invoke the runtime feature probe"
 
+    @pytest.mark.parametrize("probe", [True, False])
+    def test_ik_llama_fit_omitted_when_ngl_is_zero(self, manager, launcher_mock, built_tree, monkeypatch, capsys, probe):
+        """ik_llama's --fit ignores -ngl (validated: "-ngl 0 --fit" offloads
+        25/25 layers), so an explicit CPU-only 0 drops --fit/--fit-margin."""
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.fit_target.set("2048")
+        launcher_mock.n_gpu_layers.set("0")
+        cmd = manager.build_cmd(probe_backend=probe)
+        assert "--fit" not in cmd and "--fit-margin" not in cmd
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
+        assert "omitting ik_llama --fit" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("ngl", ["", "20", "-1"])
+    def test_ik_llama_fit_kept_for_other_ngl(self, manager, launcher_mock, built_tree, ngl):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set(ngl)
+        cmd = manager.build_cmd()
+        assert "--fit" in cmd
+
+    def test_llama_cpp_fit_kept_with_ngl_zero(self, manager, launcher_mock):
+        """llama.cpp's --fit on honours an explicit -ngl 0 (validated: 0/25)."""
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("0")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--fit") + 1] == "on"
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
+
     def test_default_build_cmd_emits_ik_llama_fit_optimistically(self, manager, launcher_mock, built_tree, monkeypatch):
         """When probing is disabled (the save-script flow), trust the user's
         UI selection and emit the flags they configured. The script writer
@@ -778,6 +811,7 @@ class TestBuildCmdHappyPath:
         monkeypatch.setattr(manager, "_backend_supports_flag", probe_spy)
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("99")  # -ngl 0 would drop ik --fit
         launcher_mock.fit_ctx.set("8192")
         launcher_mock.fit_target.set("2048")
         cmd = manager.build_cmd()
