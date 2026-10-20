@@ -335,6 +335,8 @@ class ConfigManager:
             "cache_type_v": self.launcher.cache_type_v.get(),
             # Marks cache_type_v as authoritative; see _loaded_cache_type_v.
             "cache_type_v_explicit": True,
+            # Whether V follows K in the GUI (explicit state, not V == K).
+            "cache_type_v_follows_k": bool(getattr(self.launcher, "cache_type_v_follows_k", True)),
             "threads": self.launcher.threads.get(),  # Save the user-set value
             "threads_batch": self.launcher.threads_batch.get(),  # Save the user-set value
             "batch_size": self.launcher.batch_size.get(),  # Save the user-set value
@@ -513,6 +515,21 @@ class ConfigManager:
         return cfg.get("cache_type_k", "f16")
 
     @staticmethod
+    def _loaded_cache_type_v_follows_k(cfg, cache_type_k, cache_type_v):
+        """Follow state for the GUI's K -> V trace.
+
+        Saved state wins (``cache_type_v_follows_k``), so a decoupled V that
+        happens to equal K at save time stays decoupled. Marked configs from
+        before that key infer it from V == K; unmarked configs load V = K and
+        follow. A V that differs from K can never be "following".
+        """
+        if cache_type_v != cache_type_k:
+            return False
+        if "cache_type_v_follows_k" in cfg:
+            return bool(cfg["cache_type_v_follows_k"])
+        return True
+
+    @staticmethod
     def _loaded_n_gpu_layers(cfg):
         """Return the GPU-layers field to restore from a saved config.
 
@@ -573,9 +590,9 @@ class ConfigManager:
         self.launcher.venv_dir.set(cfg.get("venv_dir", ""))  # Setting this triggers the venv trace -> flash attn check
         self.launcher.cache_type_k.set(cfg.get("cache_type_k", "f16"))
         self.launcher.cache_type_v.set(self._loaded_cache_type_v(cfg))
-        # Follow state for the K -> V trace: a loaded V that differs from K
-        # was chosen separately; unmarked configs always load V = K (follow).
-        self.launcher.cache_type_v_follows_k = self.launcher.cache_type_v.get() == self.launcher.cache_type_k.get()
+        self.launcher.cache_type_v_follows_k = self._loaded_cache_type_v_follows_k(
+            cfg, self.launcher.cache_type_k.get(), self.launcher.cache_type_v.get()
+        )
         # Load parameters, providing defaults for backward compatibility with older configs
         # Default to the *current* detected cores if not in the config for threads
         self.launcher.threads.set(

@@ -451,6 +451,64 @@ class TestLoadConfiguration:
             cm.load_configuration()
         assert launcher.cache_type_v_follows_k is follows
 
+    def test_decoupled_v_equal_to_k_survives_save_and_reload(self, rich_launcher_factory, tmp_path):
+        """Codex: decouple V, move K onto V's value, save, reload -> V must
+        stay decoupled (the follow state is saved, not re-inferred)."""
+        from modules.config import ConfigManager
+
+        launcher = rich_launcher_factory(tmp_path / "cfg.json")
+        launcher.cache_type_k.set("q8_0")
+        launcher.cache_type_v.set("q8_0")
+        launcher.cache_type_v_follows_k = False  # V was picked separately
+        saved = ConfigManager(launcher).current_cfg()
+        assert saved["cache_type_v_follows_k"] is False
+        cm, launcher2 = self._prepare(
+            rich_launcher_factory,
+            tmp_path,
+            dict(
+                _full_cfg(),
+                **{
+                    k: saved[k]
+                    for k in ("cache_type_k", "cache_type_v", "cache_type_v_explicit", "cache_type_v_follows_k")
+                },
+            ),
+        )
+        launcher2.cache_type_v_follows_k = True
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher2.cache_type_v_follows_k is False
+
+    @pytest.mark.parametrize(
+        "saved,follows",
+        [
+            (
+                {
+                    "cache_type_k": "q8_0",
+                    "cache_type_v": "q8_0",
+                    "cache_type_v_explicit": True,
+                    "cache_type_v_follows_k": True,
+                },
+                True,
+            ),
+            (
+                {
+                    "cache_type_k": "q8_0",
+                    "cache_type_v": "q4_0",
+                    "cache_type_v_explicit": True,
+                    "cache_type_v_follows_k": True,
+                },
+                False,
+            ),  # contradictory: V != K is never following
+        ],
+    )
+    def test_saved_follow_state_is_used(self, rich_launcher_factory, tmp_path, saved, follows):
+        cfg = _full_cfg()
+        cfg.update(saved)
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher.cache_type_v_follows_k is follows
+
     def test_current_cfg_marks_n_gpu_layers_explicit(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
 
