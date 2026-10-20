@@ -403,3 +403,22 @@ class TestCacheTypeVFollowsK:
         stub.cache_type_v.set("f16")
         assert (stub.cache_type_k.get(), stub.cache_type_v.get()) == ("q8_0", "f16")
 
+
+class TestAnalysisDoesNotRewriteGpuLayers:
+    """CodeRabbit: with a tensor split set, model analysis replaced "0"
+    (explicit CPU only) and "" (auto) with the max layer count. Auto already
+    offloads on both backends, and a fixed count would drop ik's --fit."""
+
+    @pytest.mark.parametrize("ngl", ["", "0", "12"])
+    def test_tensor_split_keeps_gpu_layers(self, tk_root, launcher_entry_module, ngl):
+        stub = MagicMock()
+        stub.model_path = tk.StringVar(master=tk_root, value="/m.gguf")
+        stub.manual_model_mode = tk.BooleanVar(master=tk_root, value=False)
+        stub.tensor_split = tk.StringVar(master=tk_root, value="3,1")
+        stub.n_gpu_layers = tk.StringVar(master=tk_root, value=ngl)
+        stub.max_gpu_layers = tk.IntVar(master=tk_root, value=0)
+        launcher_entry_module.LlamaCppLauncher._update_ui_after_analysis(
+            stub, {"path": "/m.gguf", "n_layers": 24, "architecture": "qwen2"}
+        )
+        assert stub.max_gpu_layers.get() == 25
+        assert stub.n_gpu_layers.get() == ngl

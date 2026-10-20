@@ -4114,11 +4114,10 @@ class LlamaCppLauncher:
             if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
                 self.gpu_layers_slider.config(to=max_offloadable, state=tk.NORMAL) # Enable slider
 
-            # If tensor split is not blank, set max layers to the maximum quantity instead of defaulting to 0
-            tensor_split_val = self.tensor_split.get().strip()
-            if tensor_split_val and self.n_gpu_layers.get().strip() in ["0", ""]:
-                # Set to max layers (show actual number instead of -1)
-                self.n_gpu_layers.set(str(max_offloadable))
+            # A tensor split no longer rewrites GPU Layers. Empty (auto) already
+            # offloads on both backends (llama.cpp auto, ik_llama all layers)
+            # and lets Fit decide; a fixed count would also drop ik's --fit.
+            # An explicit 0 is a CPU-only request and is never overwritten.
 
             # Sync the controls based on the *current* value in the n_gpu_layers StringVar.
             # This already calls _update_recommendations internally via
