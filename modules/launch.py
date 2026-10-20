@@ -1041,7 +1041,12 @@ class LaunchManager:
                 v_type = cmd[i + 1].strip()
             elif tok in ("--flash-attn", "-fa"):
                 fa_value = cmd[i + 1].strip().lower()
-        if fa_value in ("off", "0", "false") and v_type and v_type.lower() not in cls._UNQUANTIZED_CACHE_TYPES:
+        # llama.cpp's is_falsey(): off/disabled/false/0; ik_llama: off/0.
+        if (
+            fa_value in ("off", "0", "false", "disabled")
+            and v_type
+            and v_type.lower() not in cls._UNQUANTIZED_CACHE_TYPES
+        ):
             return v_type
         return None
 

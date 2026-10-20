@@ -1163,6 +1163,23 @@ class TestBuildCmdHappyPath:
             assert manager.build_cmd() is None
         assert mb.showerror.called
 
+    @pytest.mark.parametrize("fa", ["off", "0", "false", "disabled", "OFF"])
+    def test_quantized_v_with_any_falsey_custom_fa_is_refused(self, manager, launcher_mock, fa):
+        """Codex: llama.cpp's is_falsey() also accepts 'disabled' (and
+        false/0); ik_llama accepts off/0 case-insensitively."""
+        launcher_mock.cache_type_v.set("q8_0")
+        launcher_mock.custom_parameters_list = [f"--flash-attn {fa}"]
+        with patch("modules.launch.messagebox") as mb:
+            assert manager.build_cmd() is None
+        assert mb.showerror.called
+
+    def test_custom_fa_on_after_gui_off_wins(self, manager, launcher_mock):
+        """Last occurrence wins, as in both parsers."""
+        launcher_mock.backend_selection.set("ik_llama")  # GUI box off -> --flash-attn off
+        launcher_mock.cache_type_v.set("q8_0")
+        launcher_mock.custom_parameters_list = ["-fa on"]
+        assert manager.build_cmd() is not None
+
     def test_quantized_v_on_llama_cpp_without_fa_flag_is_allowed(self, manager, launcher_mock):
         """llama.cpp's unchecked box emits no --flash-attn (auto), and auto
         turns flash attention on for a quantized V cache."""
