@@ -413,7 +413,7 @@ class TestBackendSupportsFlag:
         """Patch ``manager._exe_signature`` so synthetic paths pass."""
         monkeypatch.setattr(manager, "_exe_signature", self._fake_sig)
 
-    def _fake_run(self, stdout="", stderr="", raise_exc=None):
+    def _fake_run(self, stdout="", stderr="", raise_exc=None, returncode=0):
         from unittest.mock import MagicMock as _MM
 
         if raise_exc is not None:
@@ -426,8 +426,46 @@ class TestBackendSupportsFlag:
         result.stdout = stdout
         result.stderr = stderr
         # Subprocess result needs a returncode for the empty-payload check.
-        result.returncode = 0
+        result.returncode = returncode
         return lambda *a, **kw: result
+
+    # Shape of ik_llama c446f1e's ``--help`` (printed in full, then exit 1).
+    _IK_HELP = "usage: llama-server [options]\n\ngeneral:\n\n" + "".join(
+        f"  -o{i}, --option-{i} N     synthetic option {i}\n" for i in range(12)
+    ) + "         --fit                    automatically determine which tensors to offload\n"
+
+    def test_rc1_with_valid_help_page_is_accepted(self, manager, monkeypatch):
+        """Regression: ik_llama exits 1 after a complete --help page, so every
+        live-launch probe on ik failed and --fit/--fit-margin were dropped."""
+        self._patch_sig(manager, monkeypatch)
+        monkeypatch.setattr("modules.launch.subprocess.run", self._fake_run(stdout=self._IK_HELP, returncode=1))
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is True
+        assert manager._backend_supports_flag("/fake/exe", "--fit-margin") is False
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "",
+            "   \n",
+            "error: unknown argument: --help\n",
+            "Segmentation fault (core dumped)\n  --fit\n",
+            "usage: llama-server [options]\n  --fit\n",  # too few option lines to be a help page
+            "error: invalid argument: --help\n" + _IK_HELP,  # help text printed after rejecting --help
+        ],
+    )
+    def test_rc1_with_garbage_is_rejected(self, manager, monkeypatch, output):
+        self._patch_sig(manager, monkeypatch)
+        monkeypatch.setattr("modules.launch.subprocess.run", self._fake_run(stderr=output, returncode=1))
+        assert manager._get_help_text("/fake/exe") is None
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is False
+        # Failures are not cached as help text.
+        assert manager._help_text_cache == {}
+
+    def test_rc0_short_help_still_accepted(self, manager, monkeypatch):
+        """Mainline exits 0 and needs no usage/option-count markers."""
+        self._patch_sig(manager, monkeypatch)
+        monkeypatch.setattr("modules.launch.subprocess.run", self._fake_run(stdout="  --fit on|off\n"))
+        assert manager._backend_supports_flag("/fake/exe", "--fit") is True
 
     def test_returns_true_when_flag_in_stdout(self, manager, monkeypatch):
         self._patch_sig(manager, monkeypatch)

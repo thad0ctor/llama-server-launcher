@@ -167,8 +167,10 @@ class LaunchManager:
         # ``_backend_supports_flag`` decide flag support by pattern-
         # matching the error message. Treat it as a failure: don't cache
         # the bad text, do mark this build as failed so subsequent
-        # ``supports_flag`` calls skip re-probing.
-        if result.returncode != 0:
+        # ``supports_flag`` calls skip re-probing. Exception: ik_llama's
+        # ``--help`` prints its full usage and then exits 1, so a payload
+        # that is unmistakably a help page is accepted whatever the rc.
+        if result.returncode != 0 and not self._looks_like_help_text(help_text):
             print(
                 f"DEBUG: Feature probe rc={result.returncode} for {exe_path}; "
                 f"output looks like an error message — treating as "
@@ -179,6 +181,27 @@ class LaunchManager:
             return None
         self._help_text_cache[sig] = help_text
         return help_text
+
+    # A help page has a ``usage:`` line and many option lines; an error blob
+    # that merely mentions a flag (or rejects ``--help`` itself) does not.
+    _HELP_USAGE_RE = re.compile(r"^\s*usage:", re.IGNORECASE | re.MULTILINE)
+    _HELP_OPTION_LINE_RE = re.compile(r"^\s*--?[A-Za-z][\w-]*", re.MULTILINE)
+    _HELP_REJECTED_RE = re.compile(
+        r"\b(?:unknown|invalid|unrecognized)\b[^\n]*\b(?:argument|option|flag)\b[^\n]*--help", re.IGNORECASE
+    )
+    _HELP_MIN_OPTION_LINES = 10
+
+    @classmethod
+    def _looks_like_help_text(cls, text: str) -> bool:
+        """True when ``text`` is clearly a ``--help`` page (``usage:`` plus at
+        least ``_HELP_MIN_OPTION_LINES`` option lines, and ``--help`` itself
+        was not rejected). Used to accept help from binaries that exit
+        non-zero after printing it (ik_llama c446f1e exits 1)."""
+        return (
+            bool(cls._HELP_USAGE_RE.search(text))
+            and len(cls._HELP_OPTION_LINE_RE.findall(text)) >= cls._HELP_MIN_OPTION_LINES
+            and not cls._HELP_REJECTED_RE.search(text)
+        )
 
     def _effective_venv_path(self) -> str:
         """Return the normalized venv path used for launch and saved scripts."""
