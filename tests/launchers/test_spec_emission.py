@@ -889,6 +889,52 @@ class TestSpecSeparateDraftTypesIkLlama:
         assert "--spec-type" not in cmd
 
 
+@pytest.mark.parametrize("spec_type", ["draft-dflash", "draft-dspark"])
+class TestSpecDflashDsparkLlamaCpp:
+    """Mainline llama.cpp (b11718) accepts ``--spec-type draft-dflash`` and
+    ``draft-dspark``; both draft from --spec-draft-model. Regression: the
+    launcher used to drop them with "not valid for backend 'llama.cpp'"."""
+
+    def _enable(self, launcher_mock, spec_type, draft=None):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        if draft is not None:
+            launcher_mock.spec_draft_model.set(str(draft))
+
+    def test_emits_spec_type_and_draft_model(self, manager, launcher_mock, tmp_path, capsys, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.spec_draft_n_max.set("15")
+        launcher_mock.spec_draft_ngl.set("99")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
+        assert cmd[cmd.index("--spec-draft-n-max") + 1] == "15"
+        assert cmd[cmd.index("--spec-draft-ngl") + 1] == "99"
+        assert "not valid for backend" not in capsys.readouterr().err
+
+    def test_listed_in_llama_cpp_dropdown_and_whitelists(self, spec_type):
+        from modules.spec_launch import (
+            _ALLOWED_SPEC_TYPES_LLAMA_CPP,
+            _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP,
+            _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP,
+        )
+        from modules.spec_tab import SpecTab
+
+        assert spec_type in SpecTab._SPEC_TYPES_LLAMA_CPP
+        assert spec_type in _ALLOWED_SPEC_TYPES_LLAMA_CPP
+        assert spec_type in _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP
+        assert spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
+
+    def test_does_not_force_single_slot(self, manager, launcher_mock, spec_type):
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--parallel") + 1] == "4"
+
+
 # ============================================================================
 # ik_llama ngram knobs (single shared set)
 # ============================================================================

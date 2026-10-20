@@ -72,6 +72,8 @@ class SpecTab:
         "draft-simple",
         "draft-eagle3",
         "draft-mtp",
+        "draft-dflash",
+        "draft-dspark",
         "ngram-simple",
         "ngram-map-k",
         "ngram-map-k4v",
@@ -1642,10 +1644,11 @@ class SpecTab:
                 visible.add("common")
             # Draft model section: shown for the spec_types that actually use
             # a separate draft model. On llama.cpp this means draft-simple /
-            # draft-eagle3 (draft-mtp shares the base GGUF). On ik_llama, the
+            # draft-eagle3 / draft-dflash / draft-dspark (draft-mtp shares the
+            # base GGUF). On ik_llama, the
             # legacy --model-draft FNAME flag is also supported for mtp mode,
             # and dflash/dspark always load their draft GGUF through --model-draft.
-            if effective_spec_type in ("draft-simple", "draft-eagle3") or (
+            if effective_spec_type in ("draft-simple", "draft-eagle3", "draft-dflash", "draft-dspark") or (
                 is_ik and effective_spec_type in ("mtp", "dflash", "dspark")
             ):
                 visible.add("draft_model")
