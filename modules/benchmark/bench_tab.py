@@ -1551,6 +1551,10 @@ class BenchmarkTab:
             rows = results.parse_llama_bench_json(result.stdout, result.combo)
         else:
             rows = results.parse_sweep_bench_table(result.stdout, result.combo)
+            # ik_llama c446f1e prints the table to stderr; fall back to the
+            # stderr table rows only when stdout had none (no double count).
+            if not rows and result.stderr_table:
+                rows = results.parse_sweep_bench_table(result.stderr_table, result.combo)
         if rows:
             self._result_rows.extend(rows)
             self._refresh_results_grid()

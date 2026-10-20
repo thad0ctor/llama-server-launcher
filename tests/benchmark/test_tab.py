@@ -838,3 +838,32 @@ def test_repetitions_field_disabled_for_sweep_bench(bench_tab):
     bench_tab._set_tool(TOOL_LLAMA_BENCH)
     bench_tab._on_tool_changed()
     assert str(bench_tab._repetitions_entry["state"]) == "normal"
+
+
+_SWEEP_TABLE = (
+    "|    PP |     TG |   N_KV |   T_PP s | S_PP t/s |   T_TG s | S_TG t/s |\n"
+    "|-------|--------|--------|----------|----------|----------|----------|\n"
+    "|   128 |     32 |      0 |    0.153 |   839.32 |    0.245 |   130.80 |\n"
+)
+
+
+@pytest.mark.parametrize("where", ["stdout", "stderr", "both"])
+def test_sweep_bench_rows_parsed_from_stdout_or_stderr_once(bench_tab, where):
+    """QA-1: ik_llama c446f1e prints the sweep-bench table to stderr, which
+    left the results grid empty. Rows come from stdout when it has them, else
+    from the stderr table lines, never both."""
+    from modules.benchmark.bench_runner import StepResult
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    result = StepResult(
+        index=0,
+        combo={"mtp": "1"},
+        rc=0,
+        stdout=_SWEEP_TABLE if where in ("stdout", "both") else "",
+        tool=TOOL_SWEEP_BENCH,
+        stderr_table=_SWEEP_TABLE if where in ("stderr", "both") else "",
+    )
+    bench_tab._result_rows = []
+    bench_tab._ingest_result(result)
+    assert len(bench_tab._result_rows) == 1
+    assert bench_tab._result_rows[0].get("[mtp]") == "1"

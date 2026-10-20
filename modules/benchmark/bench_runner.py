@@ -35,6 +35,10 @@ PROC_TERMINATE_WAIT_SECONDS = 5.0
 PROC_KILL_WAIT_SECONDS = 2.0
 PROC_POLL_SECONDS = 0.05
 MAX_CAPTURE_BYTES = 256 * 1024 * 1024  # cap stdout capture per step (bounds memory)
+# Some builds (ik_llama c446f1e llama-sweep-bench) print the PP/TG result table
+# to STDERR. Pipe-table lines seen on stderr are kept (bounded) so the tab can
+# parse them when stdout has no table.
+MAX_STDERR_TABLE_LINES = 100_000
 
 
 @dataclass
@@ -76,6 +80,9 @@ class StepResult:
     rc: int
     stdout: str
     tool: str
+    # ``|``-delimited table lines the step printed to stderr (see
+    # MAX_STDERR_TABLE_LINES); empty when there were none.
+    stderr_table: str = ""
 
 
 class BenchRunner:
@@ -230,7 +237,7 @@ class BenchRunner:
                     EVENT_STEP_START,
                     StepInfo(index=i, total=total, combo=step.combo, cmd=list(step.cmd), label=step.label),
                 )
-                rc, out = self._run_one(step.cmd, cwd, env)
+                rc, out, stderr_table = self._run_one(step.cmd, cwd, env)
                 if self._cancel.is_set():
                     self._emit_event(EVENT_CANCELLED, None)
                     return
@@ -238,17 +245,17 @@ class BenchRunner:
                     failed += 1
                 self._emit_event(
                     EVENT_STEP_RESULT,
-                    StepResult(index=i, combo=step.combo, rc=rc, stdout=out, tool=plan.tool),
+                    StepResult(index=i, combo=step.combo, rc=rc, stdout=out, tool=plan.tool, stderr_table=stderr_table),
                 )
             self._emit_event(EVENT_DONE, failed)
         except Exception as exc:
             self._emit_event(EVENT_ERROR, f"{type(exc).__name__}: {exc}")
 
     # ---------------------------------------------------------------- exec
-    def _run_one(self, cmd: list[str], cwd: str | None, env: dict[str, str]) -> tuple[int, str]:
+    def _run_one(self, cmd: list[str], cwd: str | None, env: dict[str, str]) -> tuple[int, str, str]:
         """Run one process; stream stderr to the console, capture stdout.
 
-        Returns ``(returncode, captured_stdout_text)``.
+        Returns ``(returncode, captured_stdout_text, stderr_table_lines)``.
         """
         try:
             popen_kwargs: dict = {
@@ -266,10 +273,10 @@ class BenchRunner:
             proc = subprocess.Popen(cmd, **popen_kwargs)
         except FileNotFoundError as exc:
             self._emit_line(f"ERROR: Command not found: {cmd[0]} ({exc})")
-            return 127, ""
+            return 127, "", ""
         except Exception as exc:
             self._emit_line(f"ERROR: Failed to spawn {cmd[0]}: {exc}")
-            return 1, ""
+            return 1, "", ""
 
         with self._lock:
             self._proc = proc
@@ -301,7 +308,8 @@ class BenchRunner:
             except Exception:
                 pass
 
-        stderr_reader = threading.Thread(target=self._stream_stderr, args=(proc.stderr,), daemon=True)
+        table_lines: list[str] = []
+        stderr_reader = threading.Thread(target=self._stream_stderr, args=(proc.stderr, table_lines), daemon=True)
         stdout_reader = threading.Thread(target=_capture_stdout, daemon=True)
         stderr_reader.start()
         stdout_reader.start()
@@ -327,10 +335,17 @@ class BenchRunner:
                 f"WARNING: benchmark output exceeded {MAX_CAPTURE_BYTES // (1024 * 1024)} MiB "
                 "and was truncated; some result rows may be missing."
             )
-        return rc, text
+        return rc, text, "\n".join(table_lines)
 
-    def _stream_stderr(self, stderr) -> None:
-        """Emit each stderr line as a console event."""
+    def _stream_stderr(self, stderr, table_lines: list[str] | None = None) -> None:
+        """Emit each stderr line as a console event; collect ``|`` table rows
+        into ``table_lines`` (bounded) when given."""
+
+        def _emit(line: str) -> None:
+            self._emit_line(line)
+            if table_lines is not None and line.lstrip().startswith("|") and len(table_lines) < MAX_STDERR_TABLE_LINES:
+                table_lines.append(line)
+
         buf = bytearray()
         max_line_len = 4096
         try:
@@ -347,16 +362,16 @@ class BenchRunner:
                             break
                     if nl < 0:
                         if len(buf) >= max_line_len:
-                            self._emit_line(buf.decode("utf-8", errors="replace"))
+                            _emit(buf.decode("utf-8", errors="replace"))
                             buf.clear()
                         break
                     sep = buf[nl]
-                    self._emit_line(bytes(buf[:nl]).decode("utf-8", errors="replace"))
+                    _emit(bytes(buf[:nl]).decode("utf-8", errors="replace"))
                     del buf[: nl + 1]
                     if sep == 13 and buf[:1] == b"\n":
                         del buf[:1]
             if buf:
-                self._emit_line(buf.decode("utf-8", errors="replace"))
+                _emit(buf.decode("utf-8", errors="replace"))
         except Exception as exc:
             if not self._cancel.is_set():
                 self._emit_line(f"ERROR: stderr read error: {exc}")
