@@ -246,16 +246,21 @@ class LaunchManager:
         (True, True): "mlock",
     }
 
-    def _build_memory_args(self, cmd, backend, exe_path, probe=False):
+    def _build_memory_args(self, cmd, backend, exe_path):
         """Append the model-loading memory flags for the active backend.
 
         ik_llama still takes ``--no-mmap`` / ``--mlock``. Current llama.cpp
         only takes ``--load-mode`` and exits on the legacy switches, which it
         dropped in 2026-09 (#28334). Builds from 2026-07 to 2026-09 accept
         both, but their early ``--load-mode`` lacked ``mmap+mlock``, so the
-        legacy switches are the exact match wherever a probed binary still
-        advertises them. Unprobed (save-script) and failed probes target
-        current upstream.
+        legacy switches are the exact match wherever the binary still
+        advertises them. A failed probe targets current upstream.
+
+        Unlike the other optional-flag gates, the cached ``--help`` probe
+        also runs in the save-script flow (``probe_backend=False``): the script
+        invokes this same local exe, and guessing the spelling there is not
+        harmless (on 2026-07/08 builds ``--load-mode mmap+mlock`` exits and
+        ``--load-mode mlock`` still mmaps). Only the toggles' users pay for it.
         """
         no_mmap = bool(self.launcher.no_mmap.get())
         mlock = bool(self.launcher.mlock.get())
@@ -263,10 +268,8 @@ class LaunchManager:
             return
         if backend != "ik_llama":
             wanted = [flag for flag, on in (("--no-mmap", no_mmap), ("--mlock", mlock)) if on]
-            legacy_ok = (
-                probe
-                and self._get_help_text(exe_path) is not None
-                and all(self._backend_supports_flag(exe_path, flag) for flag in wanted)
+            legacy_ok = self._get_help_text(exe_path) is not None and all(
+                self._backend_supports_flag(exe_path, flag) for flag in wanted
             )
             if not legacy_ok:
                 cmd.extend(["--load-mode", self._LLAMA_CPP_LOAD_MODES[(no_mmap, mlock)]])
@@ -380,10 +383,14 @@ class LaunchManager:
         """Builds the command list for the server based on selected backend.
 
         ``probe_backend`` (default False) controls whether we may run
-        ``<exe> --help`` to detect optional CLI flags (currently used only
-        for the ik_llama --fit / --fit-margin gate). The launch flow opts
-        in; save-script flows leave it off so writing a script never
-        executes the binary or hangs the UI on a probe timeout.
+        ``<exe> --help`` to detect optional CLI flags (the ik_llama --fit /
+        --fit-margin gate, reasoning flags). The launch flow opts in;
+        save-script flows leave it off and emit those optimistically.
+
+        Two llama.cpp spellings are probed (once per binary, cached) in BOTH
+        flows because no optimistic guess is safe across builds and the
+        saved script runs this same exe: the no-mmap/mlock toggles
+        (``--load-mode`` vs the legacy switches) and ``-ngl -1`` (``all``).
         """
         # New build → reset the per-build failure memo so a later launch
         # against a fixed binary can re-probe. Successes stay in
@@ -693,7 +700,7 @@ class LaunchManager:
             self._build_llama_cpp_fit_args(cmd)
 
         # Memory options
-        self._build_memory_args(cmd, backend, exe_path, probe=probe_backend)
+        self._build_memory_args(cmd, backend, exe_path)
         self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get())  # Omit if False (default)
 
         # Performance options

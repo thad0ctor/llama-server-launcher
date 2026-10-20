@@ -999,6 +999,31 @@ class TestBuildCmdHappyPath:
         assert "--mlock" in cmd
         assert "--load-mode" not in cmd
 
+    @pytest.mark.parametrize("no_mmap,mlock", [(False, True), (True, True)])
+    def test_saved_script_uses_legacy_flags_on_transition_build(self, manager, launcher_mock, monkeypatch, no_mmap, mlock):
+        """Regression: saved scripts used to skip the probe and always emit
+        --load-mode. On b10107-era builds mlock-only became --load-mode
+        mmap+mlock (exits: invalid value) and no-mmap+mlock became --load-mode
+        mlock (which still mmaps there). The script runs this same local exe,
+        so it gets the probed spelling too."""
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "--load-mode --mlock --no-mmap")
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda *a, **kw: True)
+        launcher_mock.no_mmap.set(no_mmap)
+        launcher_mock.mlock.set(mlock)
+        cmd = manager.build_cmd()  # save-script flow
+        assert "--load-mode" not in cmd
+        assert "--mlock" in cmd
+        assert ("--no-mmap" in cmd) == no_mmap
+
+    def test_saved_script_keeps_load_mode_on_current_build(self, manager, launcher_mock, monkeypatch):
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: "--load-mode MODE")
+        monkeypatch.setattr(manager, "_backend_supports_flag", lambda _exe, flag: flag == "--load-mode")
+        launcher_mock.no_mmap.set(True)
+        launcher_mock.mlock.set(True)
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--load-mode") + 1] == "mlock"
+        assert "--no-mmap" not in cmd and "--mlock" not in cmd
+
     def test_llama_cpp_transition_build_prefers_legacy_flags(self, manager, launcher_mock, monkeypatch):
         """2026-07/08 builds advertise both; early --load-mode lacked mmap+mlock,
         so the legacy switch is the exact match there."""
