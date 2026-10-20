@@ -105,6 +105,33 @@ class TestGetFlags:
         tab.amb_value.set("\t ")
         assert "-amb" not in tab.get_ik_llama_flags()
 
+    def test_amb_zero_is_emitted(self, tab):
+        """0 is how ik_llama disables -amb (empty means its default of 256),
+        so it must reach argv."""
+        tab.amb_value.set("0")
+        assert tab.get_ik_llama_flags() == ["-amb", "0"]
+
+    def test_amb_hint_documents_real_semantics(self, tab, tk_root):
+        """Regression: the hint said "leave empty to disable", but empty means
+        the default 256 MiB and 0 disables (validated on ik_llama c446f1e)."""
+        from tkinter import ttk
+
+        frame = ttk.Frame(tk_root)
+        try:
+            tab.create_tab(frame)
+            texts = []
+            stack = list(frame.winfo_children())
+            while stack:
+                widget = stack.pop()
+                stack.extend(widget.winfo_children())
+                if isinstance(widget, ttk.Label):
+                    texts.append(str(widget.cget("text")))
+            amb_hints = [t for t in texts if "DeepSeek-R1" in t]
+            assert amb_hints and "0 = disable" in amb_hints[0] and "256" in amb_hints[0]
+            assert not any("leave empty to disable" in t and "DeepSeek" in t for t in texts)
+        finally:
+            frame.destroy()
+
     def test_ctk_default_f16_is_omitted(self, tab):
         # f16 is the documented default and must NOT appear on the command line.
         assert tab.ctk_value.get() == "f16"

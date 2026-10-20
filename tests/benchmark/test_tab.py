@@ -285,8 +285,8 @@ def test_launcher_backend_change_mirrors_into_tab(bench_tab):
 
 
 def test_ik_value_lever_renders_in_command(bench_tab):
-    # -mqkv is a VALUE lever (0/1), not a bare flag: on ik_llama's llama-bench
-    # it renders as a native comma-swept value.
+    # -mqkv is a VALUE lever (0/1), not a bare flag. ik_llama's llama-bench
+    # reads ONE value per run (std::stoi), so a 0,1 sweep becomes two runs.
     from modules.benchmark.detection import TOOL_LLAMA_BENCH
 
     bench_tab.backend_var.set("ik_llama")
@@ -297,11 +297,11 @@ def test_ik_value_lever_renders_in_command(bench_tab):
     bench_tab.lever_vars["mqkv"]["mode"].set("list")
     bench_tab.lever_vars["mqkv"]["values"].set("0,1")
 
-    commands, _ = bench_tab._build_command_list()
-    assert len(commands) == 1
-    cmd = commands[0]
-    idx = cmd.index("-mqkv")
-    assert cmd[idx + 1] == "0,1"
+    commands, combos = bench_tab._build_command_list()
+    assert [cmd[cmd.index("-mqkv") + 1] for cmd in commands] == ["0", "1"]
+    assert combos == [{"mqkv": "0"}, {"mqkv": "1"}]
+    bench_tab.refresh_preview()
+    assert "# 2 invocation(s)" in bench_tab._preview.get("1.0", "end")
 
 
 def test_ik_sweep_lever_roundtrips_through_save_load(bench_tab):
@@ -463,7 +463,7 @@ def test_mtp_rows_visible_only_on_sweep_bench(bench_tab):
     assert bench_tab._lever_rows["fmoe"]["chk"].grid_info() != {}
 
 
-def test_mtp_command_renders_bare_flag_and_draft_max(bench_tab):
+def test_mtp_command_renders_canonical_spec_type(bench_tab):
     from modules.benchmark.detection import TOOL_SWEEP_BENCH
 
     bench_tab.backend_var.set("ik_llama")
@@ -480,11 +480,10 @@ def test_mtp_command_renders_bare_flag_and_draft_max(bench_tab):
     commands, _ = bench_tab._build_command_list()
     assert len(commands) == 1
     cmd = commands[0]
-    # -mtp is a BARE flag: the token immediately after it must be the next flag,
-    # not a value (guards against a regression that renders `-mtp 1`).
-    assert "-mtp" in cmd
-    assert cmd[cmd.index("-mtp") + 1] == "--draft-max"
-    assert cmd[cmd.index("--draft-max") + 1] == "4"
+    # Current ik_llama rejects the legacy -mtp / --draft-max flags; the stage
+    # and its keys travel in one --spec-type payload.
+    assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=4"
+    assert "-mtp" not in cmd and "--draft-max" not in cmd
 
 
 def test_mtp_sweep_roundtrips_through_save_load(bench_tab):
@@ -839,3 +838,65 @@ def test_repetitions_field_disabled_for_sweep_bench(bench_tab):
     bench_tab._set_tool(TOOL_LLAMA_BENCH)
     bench_tab._on_tool_changed()
     assert str(bench_tab._repetitions_entry["state"]) == "normal"
+
+
+_SWEEP_TABLE = (
+    "|    PP |     TG |   N_KV |   T_PP s | S_PP t/s |   T_TG s | S_TG t/s |\n"
+    "|-------|--------|--------|----------|----------|----------|----------|\n"
+    "|   128 |     32 |      0 |    0.153 |   839.32 |    0.245 |   130.80 |\n"
+)
+
+
+@pytest.mark.parametrize("where", ["stdout", "stderr", "both"])
+def test_sweep_bench_rows_parsed_from_stdout_or_stderr_once(bench_tab, where):
+    """QA-1: ik_llama c446f1e prints the sweep-bench table to stderr, which
+    left the results grid empty. Rows come from stdout when it has them, else
+    from the stderr table lines, never both."""
+    from modules.benchmark.bench_runner import StepResult
+    from modules.benchmark.detection import TOOL_SWEEP_BENCH
+
+    result = StepResult(
+        index=0,
+        combo={"mtp": "1"},
+        rc=0,
+        stdout=_SWEEP_TABLE if where in ("stdout", "both") else "",
+        tool=TOOL_SWEEP_BENCH,
+        stderr_table=_SWEEP_TABLE if where in ("stderr", "both") else "",
+    )
+    bench_tab._result_rows = []
+    bench_tab._ingest_result(result)
+    assert len(bench_tab._result_rows) == 1
+    assert bench_tab._result_rows[0].get("[mtp]") == "1"
+
+
+@pytest.mark.parametrize("ctx,expected", [(0, None), (-5, None), (8192, "8192")])
+def test_seed_skips_model_context_ctx_size(bench_tab, ctx, expected):
+    """Round 2 N1: the launcher's new ctx default 0 (model's context) must not
+    seed sweep-bench -c 0, which sweeps up to n_ctx_train."""
+    import tkinter as tk
+
+    bench_tab.launcher.ctx_size = tk.IntVar(value=ctx)
+    bench_tab.lever_vars["ctx_size"]["include"].set(False)
+    bench_tab.lever_vars["ctx_size"]["values"].set("")
+    bench_tab.seed_from_config()
+    if expected is None:
+        assert bool(bench_tab.lever_vars["ctx_size"]["include"].get()) is False
+        assert bench_tab.lever_vars["ctx_size"]["values"].get() == ""
+    else:
+        assert bench_tab.lever_vars["ctx_size"]["values"].get() == expected
+
+
+def test_custom_flags_hint_does_not_claim_ot_splits(bench_tab):
+    """CodeRabbit/Codex: -ot comma lists deliberately stay one run."""
+    from tkinter import ttk
+
+    texts = []
+    stack = [bench_tab._preview.winfo_toplevel()]
+    while stack:
+        widget = stack.pop()
+        stack.extend(widget.winfo_children())
+        if isinstance(widget, ttk.Label):
+            texts.append(str(widget.cget("text")))
+    hint = next(t for t in texts if t.startswith("Sweep an arbitrary flag"))
+    assert "-fmoe or -rtr run once per value" in hint
+    assert "-ot comma list is several overrides in one run" in hint

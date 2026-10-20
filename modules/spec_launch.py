@@ -48,6 +48,8 @@ _ALLOWED_SPEC_TYPES_LLAMA_CPP = frozenset(
         "draft-simple",
         "draft-eagle3",
         "draft-mtp",
+        "draft-dflash",
+        "draft-dspark",
         "ngram-simple",
         "ngram-map-k",
         "ngram-map-k4v",
@@ -75,11 +77,17 @@ _ALLOWED_SPEC_TYPES_IK_LLAMA = frozenset(
 # (ngram-*, suffix, etc.) reuse the main model and don't read these flags;
 # emitting them anyway produces nonsensical CLI combos from saved configs
 # where the user toggled spec_type without clearing prior draft fields.
-_DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3", "draft-mtp"})
+_DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP = frozenset(
+    {"draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash", "draft-dspark"}
+)
 _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp", "dflash", "dspark"})
 # ik_llama spec_types that always load a separate ``--model-draft`` GGUF
 # (mtp only does so behind the ``spec_use_draft_model`` opt-in).
 _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA = frozenset({"dflash", "dspark"})
+# The --spec-type stage ik_llama mtp turns into when the opt-in separate draft
+# model is used. Not selectable in the UI, but emitted (the CI drift manifest
+# lists it so the weekly check probes it).
+_IK_SEPARATE_DRAFT_SPEC_TYPE = "draft"
 
 # Spec types that load a SEPARATE draft model on its own GPU subset.
 # MTP (both backends) is excluded because the MTP head is embedded in
@@ -89,7 +97,9 @@ _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA = frozenset({"dflash", "dspark"})
 # union or a --spec-draft-device emission when the user is now on
 # draft-mtp. Only the explicit draft-model variants need separate GPU
 # handling.
-_SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3"})
+# draft-dflash/draft-dspark read their block-diffusion drafter from
+# --spec-draft-model, like draft-simple.
+_SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP = frozenset({"draft-simple", "draft-eagle3", "draft-dflash", "draft-dspark"})
 _SEPARATE_DRAFT_GPU_SPEC_TYPES_IK_LLAMA = _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA  # mtp uses main GPUs
 
 
@@ -846,7 +856,7 @@ def emit_spec_args(launcher, backend, cmd):
                                     cmd.extend(["--model-draft", str(draft_path.resolve())])
                                     draft_model_emitted = True
                                     if not requires_draft:
-                                        emit_spec_type = "draft"
+                                        emit_spec_type = _IK_SEPARATE_DRAFT_SPEC_TYPE
                                 elif draft_path is not None:
                                     print(
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",
@@ -939,7 +949,8 @@ def emit_spec_args(launcher, backend, cmd):
                     # llama.cpp (mainline) branch.
                     cmd.extend(["--spec-type", spec_type])
                     # Only draft-capable spec_types (llama.cpp:
-                    # draft-simple/draft-eagle3/draft-mtp) read a
+                    # draft-simple/draft-eagle3/draft-mtp/draft-dflash/
+                    # draft-dspark) read a
                     # separate draft model + the matching tuning/offload
                     # knobs. ngram-*/cache types reuse the main model;
                     # forwarding stale draft fields from a prior
@@ -1009,6 +1020,17 @@ def emit_spec_args(launcher, backend, cmd):
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --spec-draft-model emission.",
                                         file=sys.stderr,
                                     )
+                            # Mainline starts a dflash/dspark stage without a
+                            # drafter but logs "no implementations specified
+                            # for speculative decoding": speculation is silently
+                            # off. (ik_llama drops the stage instead.)
+                            if spec_type in ("draft-dflash", "draft-dspark") and "--spec-draft-model" not in cmd:
+                                print(
+                                    f"WARNING: spec_type={spec_type} needs a DFlash/DSpark draft model "
+                                    f"(--spec-draft-model); without one llama.cpp starts with "
+                                    f"speculative decoding OFF.",
+                                    file=sys.stderr,
+                                )
                         # ``spec_draft_device`` is resolved through the
                         # CUDA_VISIBLE_DEVICES remap helper (see ik_llama branch
                         # comment) so the value emitted matches what the binary

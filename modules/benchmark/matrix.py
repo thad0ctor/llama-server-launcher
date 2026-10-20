@@ -5,7 +5,10 @@ work:
 
 * **llama-bench** accepts comma-separated *lists* for most parameters and
   builds the matrix itself in a single process. :func:`llama_bench_command`
-  therefore emits one command with each swept lever joined by commas.
+  therefore emits one command with each swept lever joined by commas. A few
+  ik_llama levers are parsed as a single value (``bench_scalar``); sweeping
+  one of those splits the run into one invocation per value
+  (:func:`llama_bench_commands`).
 
 * **llama-sweep-bench** (ik_llama) takes server-style flags and has no list
   syntax, so :func:`sweep_bench_commands` computes the cartesian product of
@@ -23,6 +26,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from ..spec_launch import _append_ik_spec_type
 from .detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
 
 # Value kinds
@@ -61,6 +65,10 @@ class Lever:
     # keep on llama-bench. When True, :func:`sweep_bench_commands` renders this
     # lever like flash-attn's bare pattern; llama-bench rendering is unaffected.
     sweep_bare: bool = False
+    # ik_llama's llama-bench parses this flag with ``std::stoi`` (one value, no
+    # list): ``-rtr 0,1`` silently runs only 0. When True and swept,
+    # :func:`llama_bench_commands` runs one llama-bench invocation per value.
+    bench_scalar: bool = False
     # Attribute on the launcher to seed a baseline value from, if any.
     seed_attr: str = ""
     help: str = ""
@@ -131,9 +139,11 @@ LEVERS: tuple[Lever, ...] = (
     # These flags exist only in ik_llama's builds (not upstream llama.cpp), so
     # they are scoped to the ik_llama backend. Some apply to llama-bench only;
     # others (verified against the real binaries) also apply to
-    # llama-sweep-bench. On llama-bench every value lever is natively
-    # comma-sweepable just like the built-in list levers; on sweep-bench the
-    # ``sweep_bare`` toggles below render as bare present/absent flags instead.
+    # llama-sweep-bench. On ik llama-bench only -mla/-amb (and -fa/-gr) take a
+    # comma list; the 0/1 toggles and --n-cpu-moe are parsed with std::stoi
+    # (``"0,1"`` -> 0), so they are ``bench_scalar`` and a sweep becomes one
+    # invocation per value. On sweep-bench the ``sweep_bare`` toggles below
+    # render as bare present/absent flags instead.
     Lever(
         "rtr",
         "Run-time repack (-rtr)",
@@ -142,6 +152,7 @@ LEVERS: tuple[Lever, ...] = (
         _BOTH,
         backends=_IK_BACKEND,
         sweep_bare=True,
+        bench_scalar=True,
         help="ik_llama run-time tensor repack (0/1).",
     ),
     Lever(
@@ -151,6 +162,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama fused mixture-of-experts (0/1).",
     ),
     Lever(
@@ -160,6 +172,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama grouped expert routing (0/1).",
     ),
     Lever(
@@ -169,6 +182,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama disable fused up-gate (0/1).",
     ),
     Lever(
@@ -196,6 +210,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BOTH,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama number of MoE layers kept on CPU.",
     ),
     Lever(
@@ -206,6 +221,7 @@ LEVERS: tuple[Lever, ...] = (
         _BOTH,
         backends=_IK_BACKEND,
         sweep_bare=True,
+        bench_scalar=True,
         help="ik_llama merge QKV (0/1).",
     ),
     Lever(
@@ -215,6 +231,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama merge up-gate experts (0/1).",
     ),
     Lever(
@@ -224,7 +241,9 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
-        help="ik_llama rope cache (0/1).",
+        bench_scalar=True,
+        help="ik_llama rope cache (0/1). Only llama-bench still wires it up (server/sweep-bench ignore it), "
+        "and only some architectures (glm4, qwen3, deepseek2, gemma3, ...) use it.",
     ),
     Lever(
         "ser",
@@ -245,51 +264,52 @@ LEVERS: tuple[Lever, ...] = (
         help='A tensor-override pattern is ONE value; sweep several with ";".',
     ),
     # ── MTP / speculative-decoding levers (llama-sweep-bench + ik_llama only) ─
-    # ik_llama's llama-sweep-bench supports embedded-head multi-token prediction:
-    # the bare ``-mtp`` legacy shortcut (the embedded head — NO draft model) plus
-    # the ``--draft-*`` controls and the ``-mtprot`` requant-output knob. ik
-    # llama-bench REJECTS all of these ("invalid parameter for argument"), so they
-    # are scoped to sweep-bench only. ``-mtp`` is itself a BARE on/off flag on
-    # sweep-bench (present when enabled, absent otherwise), so it renders via the
-    # same ``sweep_bare`` path as -rtr/-mqkv and can sweep 0/1 to measure MTP's
-    # speedup. ``-mtp`` cannot be combined with ``--spec-stage``, so only the
-    # shortcut + ``--draft-*`` controls are exposed (no --spec-stage lever).
+    # Current ik_llama rejects the legacy ``-mtp`` / ``--draft-max`` /
+    # ``--draft-min`` / ``--draft-p-min`` flags ("legacy speculative option ...
+    # is disabled; use --spec-type"), so these levers render ONE canonical
+    # ``--spec-type mtp[:n_max=..,n_min=..,p_min=..]`` stage instead (see
+    # :func:`_render_mtp_stage`). ik llama-bench rejects all of them, so they are
+    # scoped to sweep-bench. llama-sweep-bench has NO speculative-decoding loop:
+    # the stage only loads/builds the embedded MTP head, so ``mtp`` 0/1 measures
+    # that cost (not a speculative speedup) and the n_max/n_min/p_min keys are
+    # parsed but cannot change its numbers — sweeping them is refused.
     Lever(
         "mtp",
-        "MTP enable (-mtp)",
-        "-mtp",
+        "MTP stage (--spec-type mtp)",
+        "--spec-type",
         KIND_INT,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        sweep_bare=True,
-        help="ik_llama embedded-head multi-token prediction (0/1); no draft model.",
+        help="0/1: load the model's embedded MTP head (no draft model). sweep-bench has no "
+        "speculative loop, so this measures the head's cost, not MTP speedup.",
     ),
     Lever(
         "draft_max",
-        "MTP draft max (--draft-max)",
-        "--draft-max",
+        "MTP n_max (--spec-type key)",
+        "n_max",
         KIND_INT,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        help="Max speculative draft tokens per step.",
+        help="Max draft tokens, passed inside --spec-type mtp. No effect on sweep-bench numbers; single value only.",
     ),
     Lever(
         "draft_min",
-        "MTP draft min (--draft-min)",
-        "--draft-min",
+        "MTP n_min (--spec-type key)",
+        "n_min",
         KIND_INT,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        help="Min speculative draft tokens per step.",
+        help="Min draft tokens, passed inside --spec-type mtp. No effect on sweep-bench numbers; single value only.",
     ),
     Lever(
         "draft_p_min",
-        "MTP draft p-min (--draft-p-min)",
-        "--draft-p-min",
+        "MTP p_min (--spec-type key)",
+        "p_min",
         KIND_STR,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        help="Min draft acceptance probability, a float like 0.5.",
+        help="Min draft probability (e.g. 0.5), passed inside --spec-type mtp. No effect on sweep-bench "
+        "numbers; single value only.",
     ),
     Lever(
         "mtprot",
@@ -599,6 +619,8 @@ def llama_bench_command(
     Swept levers become comma-joined list arguments; llama-bench expands
     them internally. Levers that don't apply to llama-bench are silently
     skipped (use :func:`split_axes_for_tool` to surface them in the UI).
+    A swept ``bench_scalar`` lever can't be expressed in one invocation and
+    raises :class:`SweepError`; use :func:`llama_bench_commands`.
 
     ``backend`` selects flash-attn rendering: ``"ik_llama"`` emits numeric
     ``-fa 1,0``; any other value keeps the upstream ``-fa on,off`` tokens.
@@ -609,6 +631,12 @@ def llama_bench_command(
         raise SweepError("no model selected")
     cmd: list[str] = [exe, "-m", model]
     applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
+    scalar = _swept_bench_scalar_axes(applicable, backend)
+    if scalar:
+        raise SweepError(
+            f"llama-bench takes a single {scalar[0].flag!r} value per run; "
+            f"use llama_bench_commands() to split the sweep into one run per value"
+        )
     for axis in applicable:
         if axis.kind == KIND_FA:
             values = _render_fa_values(axis.values, backend)
@@ -646,12 +674,149 @@ def llama_bench_command(
     return cmd
 
 
+# Flags ik_llama's llama-bench parses as ONE value per run (``std::stoi`` or a
+# single pattern), verified against examples/llama-bench/llama-bench.cpp at
+# c446f1e. A custom-flag axis using one of them is split like a
+# ``bench_scalar`` lever instead of comma-joined (``-fmoe 0,1`` runs only 0).
+# -ot is NOT here: parse_buft_overrides takes a comma list of overrides that
+# all apply to ONE run, so ``-ot a=CPU,b=CPU`` must stay one value (the
+# built-in ``ot`` lever sweeps whole patterns separated by ';'). (-ncmoe is
+# not a llama-bench spelling.)
+_IK_LLAMA_BENCH_SINGLE_VALUE_FLAGS = frozenset(
+    {
+        "-w", "--warmup",
+        "-rtr", "--run-time-repack",
+        "-mqkv", "--merge-qkv",
+        "-muge", "--merge-up-gate-exps",
+        "-sas", "--scheduler-async",
+        "--fit", "--fit-margin", "--max-gpu",
+        "-rcache", "--rope-cache",
+        "-thp", "--transparent-huge-pages",
+        "-fmoe", "--fused-moe",
+        "-ger", "--grouped-expert-routing",
+        "-no-fug", "--no-fused-up-gate",
+        "-no-ooae", "--no-offload-only-active-experts",
+        "--n-cpu-moe",
+        "--print-overrides",
+    }
+)  # fmt: skip
+
+
+def _swept_bench_scalar_axes(applicable: list[Axis], backend: str = "llama.cpp") -> list[Axis]:
+    """Swept axes that llama-bench parses as a single value: ``bench_scalar``
+    levers, plus (on ik_llama) custom flags in the known single-value set."""
+    out = []
+    for axis in applicable:
+        if not axis.is_swept:
+            continue
+        if axis.is_custom:
+            if backend == "ik_llama" and axis.flag in _IK_LLAMA_BENCH_SINGLE_VALUE_FLAGS:
+                out.append(axis)
+        elif axis.lever.bench_scalar:
+            out.append(axis)
+    return out
+
+
+def llama_bench_commands(
+    exe: str,
+    model: str,
+    axes: list[Axis],
+    *,
+    backend: str = "llama.cpp",
+    output_format: str = "json",
+    repetitions: int | None = None,
+    extra_args: str | list[str] | None = None,
+) -> list[tuple[list[str], dict[str, str]]]:
+    """Build the llama-bench invocation(s) covering the whole matrix.
+
+    Normally one command with an empty combo (llama-bench expands the comma
+    lists itself). Swept ``bench_scalar`` levers (ik_llama's -rtr, -fmoe, …)
+    are expanded here instead: one invocation per combination of their
+    values, each still carrying the native comma lists, and tagged with the
+    scalar values it pins so result rows stay labelled.
+    """
+    applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
+    scalar = _swept_bench_scalar_axes(applicable, backend)
+
+    def _command(run_axes: list[Axis]) -> list[str]:
+        return llama_bench_command(
+            exe,
+            model,
+            run_axes,
+            backend=backend,
+            output_format=output_format,
+            repetitions=repetitions,
+            extra_args=extra_args,
+        )
+
+    if not scalar:
+        return [(_command(axes), {})]
+    total = 1
+    for axis in scalar:
+        total *= len(axis.values)
+    if total > MAX_SWEEP_COMBOS:
+        raise SweepError(
+            f"sweep expands to {total} llama-bench runs (max {MAX_SWEEP_COMBOS}); narrow the parameter ranges."
+        )
+    scalar_keys = {axis.key for axis in scalar}
+    out: list[tuple[list[str], dict[str, str]]] = []
+    for combo in _cartesian(scalar):
+        pinned = [
+            (
+                Axis(axis.key, [combo[axis.key]], custom_flag=axis.custom_flag, custom_kind=axis.custom_kind)
+                if axis.key in scalar_keys
+                else axis
+            )
+            for axis in axes
+        ]
+        out.append((_command(pinned), combo))
+    return out
+
+
 def _cartesian(applicable: list[Axis]) -> list[dict[str, str]]:
     """Cartesian product of axis values → list of ``{key: value}`` combos."""
     combos: list[dict[str, str]] = [{}]
     for axis in applicable:
         combos = [dict(combo, **{axis.key: value}) for combo in combos for value in axis.values]
     return combos
+
+
+# The MTP stage lever and the ``--spec-type mtp`` payload keys its sibling
+# levers feed, in payload order.
+_MTP_STAGE_KEY = "mtp"
+_MTP_PAYLOAD_KEYS = (("draft_max", "n_max"), ("draft_min", "n_min"), ("draft_p_min", "p_min"))
+
+
+def _check_mtp_axes(applicable: list[Axis]) -> None:
+    """Reject MTP payload levers that would render nothing or sweep nothing."""
+    keys = {axis.key: axis for axis in applicable}
+    payload = [keys[k] for k, _ in _MTP_PAYLOAD_KEYS if k in keys]
+    if payload and _MTP_STAGE_KEY not in keys:
+        raise SweepError(
+            f"{payload[0].label} only applies inside --spec-type mtp; also tick "
+            f"{LEVERS_BY_KEY[_MTP_STAGE_KEY].label}."
+        )
+    for axis in payload:
+        if axis.is_swept:
+            raise SweepError(
+                f"{axis.label}: llama-sweep-bench has no speculative-decoding loop, so sweeping it "
+                f"would produce identical rows; give a single value."
+            )
+
+
+def _render_mtp_stage(cmd: list[str], combo: dict[str, str]) -> None:
+    """Append ik_llama's canonical ``--spec-type mtp[:k=v,...]`` for ``combo``.
+
+    Reuses the server launch path's payload builder so the benchmark and
+    ``modules/spec_launch.py`` can't drift apart. The payload keys are only
+    rendered while the stage is on, and are dropped from ``combo`` otherwise
+    so an "off" row isn't labelled with values it never used.
+    """
+    if _is_truthy(combo[_MTP_STAGE_KEY]):
+        _append_ik_spec_type(cmd, "mtp", [(key, combo.get(lever_key, "")) for lever_key, key in _MTP_PAYLOAD_KEYS])
+    else:
+        for lever_key, _key in _MTP_PAYLOAD_KEYS:
+            combo.pop(lever_key, None)
 
 
 def sweep_bench_commands(
@@ -689,11 +854,22 @@ def sweep_bench_commands(
             f"sweep expands to {total} llama-sweep-bench runs (max {MAX_SWEEP_COMBOS}); "
             f"narrow the parameter ranges."
         )
+    _check_mtp_axes(applicable)
+    for axis in applicable:
+        if not axis.is_custom and axis.key == "ctx_size" and any(int(v) <= 0 for v in axis.values):
+            raise SweepError(
+                "llama-sweep-bench -c 0 means the model's full training context (it sweeps all the way "
+                "up to it, which can be huge or OOM); give an explicit context size."
+            )
     extra = _extra_tokens(extra_args)
     out: list[tuple[list[str], dict[str, str]]] = []
     for combo in _cartesian(applicable):
         cmd: list[str] = [exe, "-m", model]
         for axis in applicable:
+            if not axis.is_custom and axis.key in (_MTP_STAGE_KEY, *(k for k, _ in _MTP_PAYLOAD_KEYS)):
+                if axis.key == _MTP_STAGE_KEY:
+                    _render_mtp_stage(cmd, combo)
+                continue
             value = combo[axis.key]
             if axis.sweep_bare:
                 # A handful of ik_llama toggles (-rtr, -mqkv) are BARE flags on
@@ -729,11 +905,12 @@ def build_commands(
     """Uniform entry point returning ``(command, combo)`` pairs for ``tool``.
 
     llama-bench yields a single pair with an empty combo (it emits the whole
-    matrix itself); sweep-bench yields one pair per combination. ``backend``
-    is forwarded to :func:`llama_bench_command` for flash-attn rendering.
+    matrix itself) unless a single-value ik_llama lever is swept, which adds
+    one pair per value (:func:`llama_bench_commands`); sweep-bench yields one
+    pair per combination. ``backend`` is forwarded for flash-attn rendering.
     """
     if tool == TOOL_LLAMA_BENCH:
-        cmd = llama_bench_command(
+        return llama_bench_commands(
             exe,
             model,
             axes,
@@ -742,7 +919,6 @@ def build_commands(
             repetitions=repetitions,
             extra_args=extra_args,
         )
-        return [(cmd, {})]
     if tool == TOOL_SWEEP_BENCH:
         # ``repetitions`` is intentionally NOT forwarded: llama-sweep-bench has
         # no -r/--repetitions flag (it sweeps context internally), so there is

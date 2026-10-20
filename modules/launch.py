@@ -167,8 +167,10 @@ class LaunchManager:
         # ``_backend_supports_flag`` decide flag support by pattern-
         # matching the error message. Treat it as a failure: don't cache
         # the bad text, do mark this build as failed so subsequent
-        # ``supports_flag`` calls skip re-probing.
-        if result.returncode != 0:
+        # ``supports_flag`` calls skip re-probing. Exception: ik_llama's
+        # ``--help`` prints its full usage and then exits 1, so a payload
+        # that is unmistakably a help page is accepted whatever the rc.
+        if result.returncode != 0 and not self._looks_like_help_text(help_text):
             print(
                 f"DEBUG: Feature probe rc={result.returncode} for {exe_path}; "
                 f"output looks like an error message — treating as "
@@ -179,6 +181,27 @@ class LaunchManager:
             return None
         self._help_text_cache[sig] = help_text
         return help_text
+
+    # A help page has a ``usage:`` line and many option lines; an error blob
+    # that merely mentions a flag (or rejects ``--help`` itself) does not.
+    _HELP_USAGE_RE = re.compile(r"^\s*usage:", re.IGNORECASE | re.MULTILINE)
+    _HELP_OPTION_LINE_RE = re.compile(r"^\s*--?[A-Za-z][\w-]*", re.MULTILINE)
+    _HELP_REJECTED_RE = re.compile(
+        r"\b(?:unknown|invalid|unrecognized)\b[^\n]*\b(?:argument|option|flag)\b[^\n]*--help", re.IGNORECASE
+    )
+    _HELP_MIN_OPTION_LINES = 10
+
+    @classmethod
+    def _looks_like_help_text(cls, text: str) -> bool:
+        """True when ``text`` is clearly a ``--help`` page (``usage:`` plus at
+        least ``_HELP_MIN_OPTION_LINES`` option lines, and ``--help`` itself
+        was not rejected). Used to accept help from binaries that exit
+        non-zero after printing it (ik_llama c446f1e exits 1)."""
+        return (
+            bool(cls._HELP_USAGE_RE.search(text))
+            and len(cls._HELP_OPTION_LINE_RE.findall(text)) >= cls._HELP_MIN_OPTION_LINES
+            and not cls._HELP_REJECTED_RE.search(text)
+        )
 
     def _effective_venv_path(self) -> str:
         """Return the normalized venv path used for launch and saved scripts."""
@@ -228,7 +251,8 @@ class LaunchManager:
             cmd.extend(["--fit", "on"])
             print("DEBUG: Adding --fit on", file=sys.stderr)
             fit_ctx_val = self.launcher.fit_ctx.get().strip()
-            if fit_ctx_val and fit_ctx_val != "4096":
+            # "0" mirrors a ctx of 0 (model default); let fit use its own minimum.
+            if fit_ctx_val and fit_ctx_val not in ("0", "4096"):
                 cmd.extend(["--fit-ctx", fit_ctx_val])
                 print(f"DEBUG: Adding --fit-ctx {fit_ctx_val}", file=sys.stderr)
             fit_target_val = self.launcher.fit_target.get().strip()
@@ -246,16 +270,21 @@ class LaunchManager:
         (True, True): "mlock",
     }
 
-    def _build_memory_args(self, cmd, backend, exe_path, probe=False):
+    def _build_memory_args(self, cmd, backend, exe_path):
         """Append the model-loading memory flags for the active backend.
 
         ik_llama still takes ``--no-mmap`` / ``--mlock``. Current llama.cpp
         only takes ``--load-mode`` and exits on the legacy switches, which it
         dropped in 2026-09 (#28334). Builds from 2026-07 to 2026-09 accept
         both, but their early ``--load-mode`` lacked ``mmap+mlock``, so the
-        legacy switches are the exact match wherever a probed binary still
-        advertises them. Unprobed (save-script) and failed probes target
-        current upstream.
+        legacy switches are the exact match wherever the binary still
+        advertises them. A failed probe targets current upstream.
+
+        Unlike the other optional-flag gates, the cached ``--help`` probe
+        also runs in the save-script flow (``probe_backend=False``): the script
+        invokes this same local exe, and guessing the spelling there is not
+        harmless (on 2026-07/08 builds ``--load-mode mmap+mlock`` exits and
+        ``--load-mode mlock`` still mmaps). Only the toggles' users pay for it.
         """
         no_mmap = bool(self.launcher.no_mmap.get())
         mlock = bool(self.launcher.mlock.get())
@@ -263,16 +292,174 @@ class LaunchManager:
             return
         if backend != "ik_llama":
             wanted = [flag for flag, on in (("--no-mmap", no_mmap), ("--mlock", mlock)) if on]
-            legacy_ok = (
-                probe
-                and self._get_help_text(exe_path) is not None
-                and all(self._backend_supports_flag(exe_path, flag) for flag in wanted)
+            legacy_ok = self._get_help_text(exe_path) is not None and all(
+                self._backend_supports_flag(exe_path, flag) for flag in wanted
             )
             if not legacy_ok:
                 cmd.extend(["--load-mode", self._LLAMA_CPP_LOAD_MODES[(no_mmap, mlock)]])
                 return
         self.add_arg(cmd, "--no-mmap", no_mmap)
         self.add_arg(cmd, "--mlock", mlock)
+
+    def _normalized_gpu_layers(self):
+        """The GPU-layers field as a canonical string: "" (auto), an int
+        string ("00"/"+0"/"-0" -> "0", "-01" -> "-1"), or the raw text when it
+        isn't an integer (passed through for the binary to judge)."""
+        raw = str(self.launcher.n_gpu_layers.get()).strip()
+        try:
+            return str(int(raw, 10))
+        except ValueError:
+            return raw
+
+    @staticmethod
+    def _help_block(help_text, flag):
+        """Return the ``--help`` line advertising ``flag`` plus its continuation
+        lines (indented deeper than the option itself), or "" when the flag
+        isn't listed."""
+        lines = help_text.splitlines()
+        pattern = re.compile(rf"(?:^|[\s,]){re.escape(flag)}(?:[\s,=]|$)")
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("-") and pattern.search(line):
+                indent = len(line) - len(line.lstrip())
+                block = [line]
+                for cont in lines[i + 1 :]:
+                    if len(cont) - len(cont.lstrip()) <= indent:
+                        break
+                    block.append(cont)
+                return "\n".join(block)
+        return ""
+
+    # llama.cpp's is_truthy()/is_falsey() (common/arg.cpp) for --fit values.
+    _LLAMA_CPP_TRUTHY = ("on", "enabled", "true", "1")
+    _LLAMA_CPP_FALSEY = ("off", "disabled", "false", "0")
+
+    def _custom_param_tokens(self):
+        """Custom parameters as argv tokens (unparseable strings skipped)."""
+        tokens = []
+        for param_string in self.launcher.custom_parameters_list:
+            try:
+                tokens.extend(shlex.split(param_string))
+            except ValueError:
+                continue
+        return tokens
+
+    def _llama_cpp_effective_fit(self):
+        """Whether llama.cpp will actually run --fit: the checkbox emits
+        ``--fit on|off`` before custom parameters, and a later custom
+        ``--fit``/``-fit`` value wins (last occurrence, as in the parser).
+        ``name=value`` forms are rejected by llama.cpp, so they don't count."""
+        fit = bool(self.launcher.fit_enabled.get())
+        tokens = self._custom_param_tokens()
+        for i, tok in enumerate(tokens[:-1]):
+            if tok in ("--fit", "-fit"):
+                value = tokens[i + 1].strip()
+                if value in self._LLAMA_CPP_TRUTHY:
+                    fit = True
+                elif value in self._LLAMA_CPP_FALSEY:
+                    fit = False
+        return fit
+
+    def _ctx_size_value(self):
+        """The context-size field as an int; a blank/invalid IntVar is 0."""
+        try:
+            return int(self.launcher.ctx_size.get())
+        except (tk.TclError, TypeError, ValueError):
+            return 0
+
+    def _llama_cpp_all_gpu_layers_value(self, exe_path):
+        """Map the GUI's "-1 = All" to the llama.cpp spelling of "all layers".
+
+        Current llama.cpp reads ``-ngl -1`` as *auto* (``--fit`` may then keep
+        layers on the CPU); "every layer" is ``-ngl all``. Builds from before
+        ``auto``/``all`` existed reject ``all`` but read ``-1`` as their
+        all-layers model default. So emit ``all`` only when the binary's
+        ``--help`` lists it, otherwise keep ``-1``, which starts on every build.
+
+        Probed in the save-script flow too: the script runs this same local
+        exe, the ``--help`` text is cached per binary, and only a "-1" entry
+        pays for it. ik_llama never gets here (it rejects ``all``; ``-1``
+        already means every layer there).
+        """
+        help_text = self._get_help_text(exe_path)
+        if help_text is not None:
+            block = self._help_block(help_text, "--n-gpu-layers") or self._help_block(help_text, "-ngl")
+            if re.search(r"['\"]all['\"]", block):
+                print("DEBUG: Mapping --n-gpu-layers -1 (All) to 'all'", file=sys.stderr)
+                return "all"
+        print(
+            "INFO: llama.cpp --help does not list '--n-gpu-layers all' (or could not be read); "
+            "sending -1, which current llama.cpp treats as 'auto' rather than 'all'.",
+            file=sys.stderr,
+        )
+        return "-1"
+
+    # ik_llama spellings of the GPU-layer count (custom params can override the field).
+    _IK_GPU_LAYERS_FLAGS = ("-ngl", "--gpu-layers", "--n-gpu-layers")
+
+    @staticmethod
+    def _normalized_count(value):
+        """An int-like CLI value in canonical form ("00" -> "0"); other text
+        lower-cased ("all", "auto") or "" when missing."""
+        text = str(value).strip()
+        try:
+            return str(int(text, 10))
+        except ValueError:
+            return text.lower()
+
+    def _ik_llama_fit_conflicts(self):
+        """Return why ik_llama --fit must not be emitted (empty list = emit).
+
+        Uses the LAST effective value of each placement setting, in argv
+        order (later wins in ik's parser): GUI fields, then custom parameters,
+        then the ik_llama tab flags. So a GUI ``-ngl 10`` overridden by a
+        custom ``-ngl -1`` does not block fit, and a GUI ``--n-cpu-moe 2``
+        overridden by a custom ``--n-cpu-moe 0`` doesn't either.
+        """
+        ngl = (self._normalized_gpu_layers(), None)  # (value, custom spelling)
+        ncmoe = None  # (value, label); ik's -cmoe sets ncmoe = 999
+        try:
+            if self.launcher.cpu_moe.get():
+                ncmoe = ("999", "--cpu-moe")
+        except Exception:
+            pass
+        gui_ncmoe = str(self.launcher.n_cpu_moe.get()).strip()
+        if gui_ncmoe:
+            value = self._normalized_count(gui_ncmoe)
+            ncmoe = (value, f"--n-cpu-moe {value}")
+        moe_cache = None
+        overrides = []
+        tokens = self._custom_param_tokens()
+        tokens.extend(self.launcher.ik_llama_tab.get_ik_llama_flags() or [])
+        for i, tok in enumerate(tokens):
+            name, eq, inline_value = tok.partition("=")
+            # A trailing flag with no value is a parse error in ik; never "auto".
+            value = inline_value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "<missing>")
+            if name in self._IK_GPU_LAYERS_FLAGS:
+                ngl = (self._normalized_count(value), name)
+            elif name in ("-cmoe", "--cpu-moe"):
+                ncmoe = ("999", name)
+            elif name in ("-ncmoe", "--n-cpu-moe"):
+                ncmoe = (self._normalized_count(value), f"{name} {value}".strip())
+            elif name == "--moe-cache-mib":
+                moe_cache = (self._normalized_count(value), f"{name} {value}".strip())
+            elif name in ("-ot", "--override-tensor") and name not in overrides:
+                overrides.append(name)
+
+        conflicts = []
+        ngl_value, ngl_flag = ngl
+        if ngl_value not in ("", "-1", "all", "auto"):
+            if ngl_flag is None:
+                label = "CPU only" if ngl_value == "0" else "a fixed layer count"
+                conflicts.append(f"--n-gpu-layers {ngl_value} ({label})")
+            else:
+                conflicts.append(f"{ngl_flag} {ngl_value}")
+        # ik only refuses --fit with ncmoe > 0 (src/llama.cpp) and
+        # moe_cache_size > 0 (common.cpp); 0 switches both off.
+        for setting in (ncmoe, moe_cache):
+            if setting is not None and setting[0] != "0":
+                conflicts.append(setting[1])
+        conflicts.extend(overrides)  # tensor overrides accumulate; any one conflicts
+        return conflicts
 
     def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
         """Append ik_llama fit args, translating from the shared UI fields:
@@ -292,6 +479,23 @@ class LaunchManager:
             # ik_llama has no `--fit off` — fit is opt-in via the bare flag,
             # so leaving it unchecked just means emitting nothing.
             print("DEBUG: ik_llama fit disabled — omitting --fit flag", file=sys.stderr)
+            return
+
+        # ik_llama's --fit places every tensor itself: it forces
+        # n_gpu_layers = 999 (validated: "-ngl 0 --fit" and "-ngl 10 --fit"
+        # both offload 25/25) and aborts the load when combined with manual
+        # placement (src/llama.cpp: tensor overrides, --n-cpu-moe/--cpu-moe;
+        # common.cpp: --moe-cache-mib). So fit only goes out when -ngl is
+        # auto (empty) or all (-1) and nothing places tensors by hand.
+        # llama.cpp's --fit on honours an explicit -ngl and needs no gate.
+        conflicts = self._ik_llama_fit_conflicts()
+        if conflicts:
+            print(
+                f"WARNING: omitting ik_llama --fit/--fit-margin: ik_llama's fit ignores or rejects "
+                f"{'; '.join(conflicts)}. Clear GPU Layers (auto) or set -1 (all) and remove manual "
+                f"tensor placement to use Fit.",
+                file=sys.stderr,
+            )
             return
 
         fit_supported = (not probe) or self._backend_supports_flag(exe_path, "--fit")
@@ -335,10 +539,14 @@ class LaunchManager:
         """Builds the command list for the server based on selected backend.
 
         ``probe_backend`` (default False) controls whether we may run
-        ``<exe> --help`` to detect optional CLI flags (currently used only
-        for the ik_llama --fit / --fit-margin gate). The launch flow opts
-        in; save-script flows leave it off so writing a script never
-        executes the binary or hangs the UI on a probe timeout.
+        ``<exe> --help`` to detect optional CLI flags (the ik_llama --fit /
+        --fit-margin gate, reasoning flags). The launch flow opts in;
+        save-script flows leave it off and emit those optimistically.
+
+        Two llama.cpp spellings are probed (once per binary, cached) in BOTH
+        flows because no optimistic guess is safe across builds and the
+        saved script runs this same exe: the no-mmap/mlock toggles
+        (``--load-mode`` vs the legacy switches) and ``-ngl -1`` (``all``).
         """
         # New build → reset the per-build failure memo so a later launch
         # against a fixed binary can re-probe. Successes stay in
@@ -554,26 +762,22 @@ class LaunchManager:
 
         # Only add standard cache type flags if ik_llama is not using -ctk/-ctv
         if not ik_llama_uses_cache_flags:
-            # llama.cpp default is f16. Add args only if different.
-            kv_cache_type_val = self.launcher.cache_type_k.get().strip()
-            # Note: llama.cpp's --cache-type-v defaults to the value of --cache-type-k if not specified.
-            # So just setting --cache-type-k is usually sufficient.
-            if kv_cache_type_val and kv_cache_type_val != "f16":
-                cmd.extend(["--cache-type-k", kv_cache_type_val])
-                print(f"DEBUG: Adding --cache-type-k {kv_cache_type_val} (non-default)", file=sys.stderr)
-                # Always set V cache type to match K cache type to avoid unsupported combinations
-                cmd.extend(["--cache-type-v", kv_cache_type_val])
-                print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
+            # Both backends default K and V to f16 independently (V does NOT
+            # follow K), so each control drives its own flag and is added only
+            # when it differs from f16. The GUI keeps V following K until the
+            # user picks a different V, and old configs load that way too.
+            for flag, var in (
+                ("--cache-type-k", self.launcher.cache_type_k),
+                ("--cache-type-v", self.launcher.cache_type_v),
+            ):
+                cache_type_val = var.get().strip()
+                if cache_type_val and cache_type_val != "f16":
+                    cmd.extend([flag, cache_type_val])
+                    print(f"DEBUG: Adding {flag} {cache_type_val} (non-default)", file=sys.stderr)
         else:
             print(
                 "DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk/-ctv is enabled", file=sys.stderr
             )
-
-        # Remove the separate V cache type handling since we always want it to match K
-        # v_cache_type_val = self.launcher.cache_type_v.get().strip()
-        # if v_cache_type_val and v_cache_type_val != kv_cache_type_val:
-        #     cmd.extend(["--cache-type-v", v_cache_type_val])
-        #     print(f"DEBUG: Adding --cache-type-v {v_cache_type_val} (different from K cache type)", file=sys.stderr)
 
         # --- Threads & Batching ---
         # Llama.cpp internal defaults: --threads=hardware_concurrency() (logical), --threads-batch=4
@@ -591,23 +795,45 @@ class LaunchManager:
         self.add_arg(cmd, "--batch-size", self.launcher.batch_size.get())
         self.add_arg(cmd, "--ubatch-size", self.launcher.ubatch_size.get())
 
-        # Llama.cpp internal defaults: --ctx-size=2048, --seed=-1, --temp=0.8, --min-p=0.05
-        self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()), "2048")  # Use str() for int var
+        # Pass any positive --ctx-size: both backends default to 0 (= the
+        # model's n_ctx_train), so omitting the user's 2048 would silently load
+        # the full context. 0 (or a blank field) means "the model's context",
+        # which is also what lets llama.cpp's --fit shrink it, so omit it then.
+        # Sampling defaults below still match both backends: --seed=-1, --temp=0.8, --min-p=0.05
+        ctx_size_val = self._ctx_size_value()
+        if ctx_size_val > 0:
+            self.add_arg(cmd, "--ctx-size", str(ctx_size_val))
+        else:
+            print("DEBUG: Omitting --ctx-size (0 = model's context)", file=sys.stderr)
         self.add_arg(cmd, "--seed", self.launcher.seed.get(), "-1")
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
 
         # --- Handle GPU arguments: Now ADDING BOTH if set ---
         tensor_split_val = self.launcher.tensor_split.get().strip()
-        n_gpu_layers_val = self.launcher.n_gpu_layers.get().strip()
+        n_gpu_layers_val = self._normalized_gpu_layers()
 
         # Add --tensor-split if the value is non-empty
         # Use add_arg which handles the non-empty check
         self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
 
-        # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
+        # Empty = auto: omit --n-gpu-layers (llama.cpp offloads what fits;
+        # ik_llama puts every layer on the GPU). Any value, including "0"
+        # (CPU only), is sent in canonical integer form.
+        # With llama.cpp's --fit on, -1 stays -1 (auto) so fit can still size
+        # the offload: "all" makes fit abort ("n_gpu_layers already set by
+        # user") and then OOM on a model that doesn't fit.
         # This argument will now be added regardless of the --tensor-split value
-        self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "0")
+        if n_gpu_layers_val == "-1" and backend != "ik_llama":
+            if self._llama_cpp_effective_fit():
+                print(
+                    "INFO: GPU Layers -1 (All) with Fit on: sending -1 (auto) so llama.cpp's --fit "
+                    "decides the offload; turn Fit off to force every layer onto the GPU.",
+                    file=sys.stderr,
+                )
+            else:
+                n_gpu_layers_val = self._llama_cpp_all_gpu_layers_value(exe_path)
+        self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "")
 
         # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)
         # It specifies which GPU is considered the "primary" one, often GPU 0.
@@ -642,7 +868,7 @@ class LaunchManager:
             self._build_llama_cpp_fit_args(cmd)
 
         # Memory options
-        self._build_memory_args(cmd, backend, exe_path, probe=probe_backend)
+        self._build_memory_args(cmd, backend, exe_path)
         self.add_arg(cmd, "--no-kv-offload", self.launcher.no_kv_offload.get())  # Omit if False (default)
 
         # Performance options
@@ -657,7 +883,9 @@ class LaunchManager:
         # applies the override + stderr warning when MTP is active; see
         # modules/spec_launch.py for rationale.
         parallel_val = resolve_effective_parallel(self.launcher, backend)
-        self.add_arg(cmd, "--parallel", parallel_val, "1")  # Omit if 1 (default)
+        # Always pass a non-empty value: llama.cpp's default is -1 (auto = 4
+        # slots), so omitting "1" would also defeat the MTP override above.
+        self.add_arg(cmd, "--parallel", parallel_val)
 
         # --- MoE CPU options ---
         self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get())  # Omit if False (default)
@@ -669,7 +897,8 @@ class LaunchManager:
 
         # --- Network Settings ---
         self.add_arg(cmd, "--host", self.launcher.host.get(), "127.0.0.1")  # Add host if not default
-        self.add_arg(cmd, "--port", self.launcher.port.get(), "8080")  # Add port if not default
+        # Always pass the port: llama.cpp's default moved from 8080 to 9931.
+        self.add_arg(cmd, "--port", self.launcher.port.get())
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Add --chat-template option ONLY if the source is not "default" (llama.cpp decides)
@@ -796,6 +1025,21 @@ class LaunchManager:
                 file=sys.stderr,
             )
 
+        # Both backends abort at startup on a quantized V cache with flash
+        # attention off ("Quantized V cache cannot be used without flash
+        # attention"); the launcher itself emits --flash-attn off for an
+        # unchecked box on ik_llama. Refuse here (live launch and saved
+        # script alike) instead of handing the user a crashing command.
+        quantized_v = self._quantized_v_cache_without_flash_attn(cmd)
+        if quantized_v:
+            messagebox.showerror(
+                "Invalid KV Cache Settings",
+                f"The V cache type '{quantized_v}' is quantized, but flash attention is off.\n\n"
+                f"{backend_name} refuses to start with a quantized V cache unless flash attention "
+                f"is on. Enable Flash Attention, or set the V cache type to f16/bf16/f32.",
+            )
+            return None
+
         print("\n--- Generated Command ---", file=sys.stderr)
         # Use shlex.quote to make command printable and copy-pasteable in shells
         # Note: This quoting is primarily for display. The actual launch script
@@ -805,6 +1049,36 @@ class LaunchManager:
         print("-------------------------\n", file=sys.stderr)
 
         return cmd
+
+    # KV cache types that are not quantized (both backends accept a V cache
+    # of these with flash attention off).
+    _UNQUANTIZED_CACHE_TYPES = frozenset({"f32", "f16", "bf16"})
+
+    @classmethod
+    def _quantized_v_cache_without_flash_attn(cls, cmd):
+        """Return the V cache type when ``cmd`` pairs a quantized V cache with
+        an explicit ``--flash-attn off``, else ``None``.
+
+        Reads the final argv (last occurrence wins, as in the binaries'
+        parsers), so ik_llama ``-ctv`` and custom parameters count too. An
+        absent flash-attn flag is fine: ik_llama defaults to on and llama.cpp
+        to auto, which turns flash attention on for a quantized V cache.
+        """
+        v_type = None
+        fa_value = None
+        for i, tok in enumerate(cmd[:-1]):
+            if tok in ("--cache-type-v", "-ctv"):
+                v_type = cmd[i + 1].strip()
+            elif tok in ("--flash-attn", "-fa"):
+                fa_value = cmd[i + 1].strip().lower()
+        # llama.cpp's is_falsey(): off/disabled/false/0; ik_llama: off/0.
+        if (
+            fa_value in ("off", "0", "false", "disabled")
+            and v_type
+            and v_type.lower() not in cls._UNQUANTIZED_CACHE_TYPES
+        ):
+            return v_type
+        return None
 
     def _find_server_executable(self, llama_base_dir, backend):
         """Finds the llama-server executable within the llama.cpp directory."""

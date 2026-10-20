@@ -111,7 +111,7 @@ from modules.benchmark import BenchmarkTab
 from modules.launch import LaunchManager
 
 # Import the configuration management module
-from modules.config import ConfigManager
+from modules.config import ConfigManager, fit_ctx_for_ctx_size
 
 # Import spec persistence helpers (re-sync block extracted to spec_persistence)
 from modules.spec_persistence import resync_spec_tk_vars_from_app_settings
@@ -484,8 +484,8 @@ class LlamaCppLauncher:
         self.root_dir_help_text = tk.StringVar(value="Select the main 'llama.cpp' folder. The app will search for the server executable.")
 
         # --- Basic Server Settings ---
-        self.cache_type_k    = tk.StringVar(value="f16") # KV cache type (applies to k & v)
-        self.cache_type_v    = tk.StringVar(value="f16") # V cache type
+        self.cache_type_k    = tk.StringVar(value="f16") # K cache type
+        self.cache_type_v    = tk.StringVar(value="f16") # V cache type (follows K until changed)
         # Initial default thread values before fetching system info.
         # These will be updated by SystemInfoManager or load_config.
         self.threads         = tk.StringVar(value="4")
@@ -494,12 +494,12 @@ class LlamaCppLauncher:
         self.ubatch_size     = tk.StringVar(value="512") # --ubatch-size (unconditional batch)
         self.temperature     = tk.StringVar(value="0.8")
         self.min_p           = tk.StringVar(value="0.05")
-        self.ctx_size        = tk.IntVar(value=2048)
+        self.ctx_size        = tk.IntVar(value=0)  # 0 = model's context (no --ctx-size)
         self.seed            = tk.StringVar(value="-1")
 
         # --- GPU Settings ---
         # String var for the entry (-1, 0, N)
-        self.n_gpu_layers    = tk.StringVar(value="0")
+        self.n_gpu_layers    = tk.StringVar(value="")  # "" = auto (no --n-gpu-layers)
         # Int var for the slider (0 to MaxLayers), updated when a model is loaded
         self.n_gpu_layers_int = tk.IntVar(value=0)
         # Max layers detected in the currently loaded model for slider max, updated with model info
@@ -659,7 +659,7 @@ class LlamaCppLauncher:
 
         # --- Fit Parameters (memory fitting) ---
         self.fit_enabled     = tk.BooleanVar(value=True)   # --fit on/off (default: on)
-        self.fit_ctx         = tk.StringVar(value="2048")  # --fit-ctx (synced with ctx_size by default)
+        self.fit_ctx         = tk.StringVar(value="")  # --fit-ctx (synced with ctx_size by default; "" = upstream default)
         self.fit_ctx_synced  = True                        # Track if fit_ctx is synced with ctx_size
         self.fit_target      = tk.StringVar(value="1024")  # --fit-target (MiB to reserve per device)
 
@@ -868,6 +868,13 @@ class LlamaCppLauncher:
         # or startup don't each trigger a synchronous tensor-split recompute.
         # The slider trace already uses the same debounce helper.
         self.cache_type_k.trace_add("write", lambda *args: self._schedule_recommendations_update())
+        # V follows K until the user picks a different V, which keeps the
+        # pre-split "one KV type" behavior (and the K == V that MLA models
+        # need on llama.cpp) for anyone who only sets K.
+        # Explicit follow/decoupled state: only the V control (and config
+        # load) change it, never an equality guess.
+        self.cache_type_v_follows_k = True
+        self.cache_type_k.trace_add("write", lambda *args: self._sync_cache_type_v_with_k())
         # Context size updates handled in _override_ctx_size and _update_ctx_label_from_slider
         # n_gpu_layers updates handled in _set_gpu_layers (called by entry/slider sync)
         # GPU selection updates handled in _on_gpu_selection_changed
@@ -887,6 +894,7 @@ class LlamaCppLauncher:
         self.jinja_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.cache_type_v.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads_batch.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.batch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -1411,7 +1419,7 @@ class LlamaCppLauncher:
         # Setting the variable triggers the linked slider
         self.ctx_size.set(self.ctx_size.get()) # Sync display initially
         ctx_f.columnconfigure(0, weight=3) # Slider expands
-        ttk.Label(inner, text="Prompt context size in tokens (-c)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Prompt context size in tokens (-c). 0 or blank = the model's context (llama.cpp Fit may shrink it)", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Temperature ---
@@ -1486,9 +1494,13 @@ class LlamaCppLauncher:
     def _override_ctx_size(self, event=None):
         """Manually set context size from entry."""
         try:
-            value = int(self.ctx_entry.get())
+            raw = self.ctx_entry.get().strip()
+            # Blank or 0 = the model's context (no --ctx-size).
+            value = int(raw) if raw else 0
             # Allow any positive value, not just clamped to slider range
-            if value < 1024:
+            if value <= 0:
+                value = 0
+            elif value < 1024:
                 value = 1024  # Minimum reasonable context size
             self.ctx_size.set(value)
             self._sync_ctx_display(value) # Update entry/label to value
@@ -1712,7 +1724,7 @@ class LlamaCppLauncher:
 
         gpu_layers_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Layers to offload (empty=auto, 0=CPU only, -1=all; with llama.cpp Fit on, -1 lets fit decide). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Manual Model Entry (when analysis fails) ---
@@ -1861,12 +1873,12 @@ class LlamaCppLauncher:
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
 
-        ttk.Label(inner, text="KV Cache Type (--cache-type-k):")\
+        ttk.Label(inner, text="K Cache Type (--cache-type-k):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         # Combobox state is "readonly" for selection, but not disabled
         self.cache_type_k_combo = ttk.Combobox(inner, textvariable=self.cache_type_k, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_k_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="Quantization for KV cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Quantization for K cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
         ttk.Label(inner, text="V Cache Type (--cache-type-v):")\
@@ -1874,7 +1886,8 @@ class LlamaCppLauncher:
         # Combobox state is "readonly" for selection, but not disabled
         self.cache_type_v_combo = ttk.Combobox(inner, textvariable=self.cache_type_v, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_v_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="Quantization for V cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
+        self.cache_type_v_combo.bind("<<ComboboxSelected>>", self._on_cache_type_v_selected)
+        ttk.Label(inner, text="Follows K until changed. Quantized V needs Flash Attention; MLA models need V = K on llama.cpp", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
         ttk.Label(inner, text="Disable mmap (--no-mmap):")\
@@ -2355,7 +2368,11 @@ class LlamaCppLauncher:
     def _sync_fit_ctx_to_ctx_size(self, *args):
         """Sync fit_ctx to ctx_size slider value if still synced."""
         if self.fit_ctx_synced:
-            self.fit_ctx.set(str(self.ctx_size.get()))
+            try:
+                ctx = int(self.ctx_size.get())
+            except (tk.TclError, ValueError):
+                ctx = 0
+            self.fit_ctx.set(fit_ctx_for_ctx_size(ctx))
 
     def _on_fit_ctx_changed(self, *args):
         """Detect manual changes to fit_ctx and break sync if different from ctx_size."""
@@ -4097,11 +4114,10 @@ class LlamaCppLauncher:
             if hasattr(self, 'gpu_layers_slider') and self.gpu_layers_slider.winfo_exists():
                 self.gpu_layers_slider.config(to=max_offloadable, state=tk.NORMAL) # Enable slider
 
-            # If tensor split is not blank, set max layers to the maximum quantity instead of defaulting to 0
-            tensor_split_val = self.tensor_split.get().strip()
-            if tensor_split_val and self.n_gpu_layers.get().strip() in ["0", ""]:
-                # Set to max layers (show actual number instead of -1)
-                self.n_gpu_layers.set(str(max_offloadable))
+            # A tensor split no longer rewrites GPU Layers. Empty (auto) already
+            # offloads on both backends (llama.cpp auto, ik_llama all layers)
+            # and lets Fit decide; a fixed count would also drop ik's --fit.
+            # An explicit 0 is a CPU-only request and is never overwritten.
 
             # Sync the controls based on the *current* value in the n_gpu_layers StringVar.
             # This already calls _update_recommendations internally via
@@ -4253,9 +4269,10 @@ class LlamaCppLauncher:
 
         current_str = self.n_gpu_layers.get().strip() # Use stripped value from entry
 
-        # If entry is empty, treat as 0
+        # Empty = auto (no --n-gpu-layers); the slider just rests at 0.
         if current_str == "":
-            current_str = "0"
+            self._set_gpu_layers(0)
+            return
 
         try:
             value = int(current_str)
@@ -5217,6 +5234,19 @@ class LlamaCppLauncher:
     def _generate_default_config_name(self):
         """Delegates to config manager."""
         return self.config_manager.generate_default_config_name()
+
+    def _sync_cache_type_v_with_k(self):
+        """Trace callback for ``cache_type_k``: carry V along while V follows
+        K. Only the V control (``_on_cache_type_v_selected``) and config load
+        change that state, so V values that merely happen to match K are
+        never mistaken for "following". A config load sets K before V, so the
+        loaded V always wins."""
+        if getattr(self, "cache_type_v_follows_k", True):
+            self.cache_type_v.set(self.cache_type_k.get())
+
+    def _on_cache_type_v_selected(self, event=None):
+        """The user picked a V type: V follows K again only if they picked K's type."""
+        self.cache_type_v_follows_k = self.cache_type_v.get() == self.cache_type_k.get()
 
     def _update_default_config_name_if_needed(self, *args):
         """Delegates to config manager."""

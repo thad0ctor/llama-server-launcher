@@ -18,6 +18,12 @@ from modules.spec_persistence import (
 )
 
 
+def fit_ctx_for_ctx_size(ctx):
+    """The --fit-ctx value synced to a context size: blank (upstream minimum)
+    when the context is the model's own (0)."""
+    return str(ctx) if ctx and ctx > 0 else ""
+
+
 class ConfigManager:
     """Configuration management for LLaMa.cpp Server Launcher."""
 
@@ -85,11 +91,11 @@ class ConfigManager:
             "threads_batch": "4",  # Llama.cpp default for threads-batch is 4
             "batch_size": "512",  # Llama.cpp default
             "ubatch_size": "512",  # Llama.cpp default
-            "ctx_size": 2048,  # Llama.cpp default
+            "ctx_size": 0,  # 0 = model's context (GUI default)
             "seed": "-1",  # Llama.cpp default
             "temperature": "0.8",  # Llama.cpp default
             "min_p": "0.05",  # Llama.cpp default
-            "n_gpu_layers": "0",  # Llama.cpp default for n-gpu-layers
+            "n_gpu_layers": "",  # Empty = auto (no --n-gpu-layers)
             "tensor_split": "",  # Omitted if empty string
             "main_gpu": "0",  # Llama.cpp default
             "prio": "0",  # Llama.cpp default
@@ -114,7 +120,7 @@ class ConfigManager:
             "threads_batch": self.launcher.threads_batch.get().strip(),
             "batch_size": self.launcher.batch_size.get().strip(),
             "ubatch_size": self.launcher.ubatch_size.get().strip(),
-            "ctx_size": self.launcher.ctx_size.get(),  # int
+            "ctx_size": self._ctx_size_or_zero(self.launcher.ctx_size),  # int
             "seed": self.launcher.seed.get().strip(),
             "temperature": self.launcher.temperature.get().strip(),
             "min_p": self.launcher.min_p.get().strip(),
@@ -150,6 +156,16 @@ class ConfigManager:
                         parts.append("gpu-all")
                     else:
                         parts.append(f"gpu={gpu_layers_int}")
+                else:
+                    # Empty (auto) adds no token, which is what the old default
+                    # "0" got (it ran as auto). An explicit 0 is CPU only and
+                    # gets its own token so it can't overwrite the auto config.
+                    try:
+                        explicit_zero = str(current_val).strip() != "" and int(str(current_val).strip(), 10) == 0
+                    except ValueError:
+                        explicit_zero = False
+                    if explicit_zero:
+                        parts.append("cpu-only")
                 # Note: If input was -1 and max_layers is 0, gpu_layers_int is 0, which is correctly treated as default
             # Special handling for Context Size: compare the integer value
             elif key == "ctx_size":
@@ -317,16 +333,24 @@ class ConfigManager:
             "selected_mmproj_path": self.launcher.selected_mmproj_path.get(),
             "cache_type_k": self.launcher.cache_type_k.get(),
             "cache_type_v": self.launcher.cache_type_v.get(),
+            # Marks cache_type_v as authoritative; see _loaded_cache_type_v.
+            "cache_type_v_explicit": True,
+            # Whether V follows K in the GUI (explicit state, not V == K).
+            "cache_type_v_follows_k": bool(getattr(self.launcher, "cache_type_v_follows_k", True)),
             "threads": self.launcher.threads.get(),  # Save the user-set value
             "threads_batch": self.launcher.threads_batch.get(),  # Save the user-set value
             "batch_size": self.launcher.batch_size.get(),  # Save the user-set value
             "ubatch_size": self.launcher.ubatch_size.get(),  # Save the user-set value
-            "n_gpu_layers": gpu_layers_to_save,  # Save the string value (can be -1)
+            "n_gpu_layers": gpu_layers_to_save,  # Save the string value ("" = auto, can be -1)
+            # Marks n_gpu_layers as authoritative; see _loaded_n_gpu_layers.
+            "n_gpu_layers_explicit": True,
             "no_mmap": self.launcher.no_mmap.get(),
             "prio": self.launcher.prio.get(),
             "temperature": self.launcher.temperature.get(),
             "min_p": self.launcher.min_p.get(),
-            "ctx_size": self.launcher.ctx_size.get(),
+            "ctx_size": self._ctx_size_or_zero(self.launcher.ctx_size),
+            # Marks ctx_size as authoritative; see _loaded_ctx_size.
+            "ctx_size_explicit": True,
             "seed": self.launcher.seed.get(),
             "flash_attn": self.launcher.flash_attn.get(),
             "tensor_split": self.launcher.tensor_split.get().strip(),
@@ -477,6 +501,82 @@ class ConfigManager:
                 cfg.clear()
                 cfg.update(prior_cfg_snapshot)
 
+    @staticmethod
+    def _loaded_cache_type_v(cfg):
+        """Return the V cache type to restore from a saved config.
+
+        Configs saved before the V control was wired up (no
+        ``cache_type_v_explicit`` marker) ran with V = K whatever the V box
+        said. Keep that effective behavior: without the marker V = K, even
+        when the old config holds some other (never applied) V value.
+        """
+        if cfg.get("cache_type_v_explicit"):
+            return cfg.get("cache_type_v", "f16")
+        return cfg.get("cache_type_k", "f16")
+
+    @staticmethod
+    def _loaded_cache_type_v_follows_k(cfg, cache_type_k, cache_type_v):
+        """Follow state for the GUI's K -> V trace.
+
+        Saved state wins (``cache_type_v_follows_k``), so a decoupled V that
+        happens to equal K at save time stays decoupled. Marked configs from
+        before that key infer it from V == K; unmarked configs load V = K and
+        follow. A V that differs from K can never be "following".
+        """
+        if cache_type_v != cache_type_k:
+            return False
+        if "cache_type_v_follows_k" in cfg:
+            return bool(cfg["cache_type_v_follows_k"])
+        return True
+
+    @staticmethod
+    def _loaded_n_gpu_layers(cfg):
+        """Return the GPU-layers field to restore from a saved config.
+
+        Empty now means auto (no --n-gpu-layers). Configs saved before that
+        (no ``n_gpu_layers_explicit`` marker) stored the old GUI default "0",
+        which the launcher used to drop, so it ran as auto; restore that as
+        empty. Marked configs keep an explicit "0" = CPU only.
+        """
+        raw = cfg.get("n_gpu_layers", "")
+        value = "" if raw is None else str(raw).strip()
+        if cfg.get("n_gpu_layers_explicit"):
+            return value
+        try:
+            if int(value, 10) == 0:
+                return ""
+        except ValueError:
+            pass
+        return value
+
+    @staticmethod
+    def _loaded_ctx_size(cfg):
+        """Return the context size to restore from a saved config.
+
+        0 now means the model's context (no --ctx-size). Configs saved before
+        that (no ``ctx_size_explicit`` marker) ran without --ctx-size whenever
+        they held 2048, because the launcher dropped it as a "default"; a
+        missing key behaved the same. Restore those as 0, which reproduces
+        what they ran on old builds (default 2048) and current ones (model
+        context). Marked configs keep every explicit value, 2048 included.
+        Unparseable values fall back to 0.
+        """
+        try:
+            ctx = int(cfg.get("ctx_size", 0))
+        except (TypeError, ValueError):
+            return 0
+        if not cfg.get("ctx_size_explicit") and ctx == 2048:
+            return 0
+        return max(ctx, 0)
+
+    @staticmethod
+    def _ctx_size_or_zero(var):
+        """Read the ctx IntVar; a blank/invalid field means 0 (model's context)."""
+        try:
+            return int(var.get())
+        except Exception:
+            return 0
+
     def _apply_loaded_configuration(self, name, cfg):
         """Mutates launcher state from a named-config dict.
 
@@ -489,7 +589,10 @@ class ConfigManager:
         self.launcher.ik_llama_dir.set(cfg.get("ik_llama_dir", ""))
         self.launcher.venv_dir.set(cfg.get("venv_dir", ""))  # Setting this triggers the venv trace -> flash attn check
         self.launcher.cache_type_k.set(cfg.get("cache_type_k", "f16"))
-        self.launcher.cache_type_v.set(cfg.get("cache_type_v", "f16"))
+        self.launcher.cache_type_v.set(self._loaded_cache_type_v(cfg))
+        self.launcher.cache_type_v_follows_k = self._loaded_cache_type_v_follows_k(
+            cfg, self.launcher.cache_type_k.get(), self.launcher.cache_type_v.get()
+        )
         # Load parameters, providing defaults for backward compatibility with older configs
         # Default to the *current* detected cores if not in the config for threads
         self.launcher.threads.set(
@@ -510,11 +613,8 @@ class ConfigManager:
         # ``"ctx_size": []`` — both would raise inside ``IntVar.set()``
         # / ``_sync_ctx_display()`` AFTER earlier fields have already
         # been applied, leaving the load half-done. Coerce to int up
-        # front with the same 2048 default the ``get`` falls back to.
-        try:
-            ctx = int(cfg.get("ctx_size", 2048))
-        except (TypeError, ValueError):
-            ctx = 2048
+        # front; see _loaded_ctx_size for the back-compat rule.
+        ctx = self._loaded_ctx_size(cfg)
         self.launcher.ctx_size.set(ctx)
         self.launcher._sync_ctx_display(ctx)  # Manually sync display
         self.launcher.seed.set(cfg.get("seed", "-1"))
@@ -574,10 +674,11 @@ class ConfigManager:
         self.launcher.fit_enabled.set(cfg.get("fit_enabled", True))  # Default: True (on)
         self.launcher.fit_ctx_synced = cfg.get("fit_ctx_synced", True)  # Default: synced
         # Load fit_ctx value, or sync from ctx_size if synced
+        synced_fit_ctx = fit_ctx_for_ctx_size(self._ctx_size_or_zero(self.launcher.ctx_size))
         if self.launcher.fit_ctx_synced:
-            self.launcher.fit_ctx.set(str(self.launcher.ctx_size.get()))
+            self.launcher.fit_ctx.set(synced_fit_ctx)
         else:
-            self.launcher.fit_ctx.set(cfg.get("fit_ctx", str(self.launcher.ctx_size.get())))
+            self.launcher.fit_ctx.set(cfg.get("fit_ctx", synced_fit_ctx))
         self.launcher.fit_target.set(cfg.get("fit_target", "1024"))  # Default: 1024
         # Update fit fields state based on loaded value
         self.launcher._update_fit_fields_state()
@@ -744,14 +845,15 @@ class ConfigManager:
         # grid will be refreshed with the loaded indices. No second call needed.
 
         # Load n_gpu_layers - This interacts with model analysis results
-        loaded_gpu_layers_str = cfg.get("n_gpu_layers", "0")
+        loaded_gpu_layers_str = self._loaded_n_gpu_layers(cfg)
         self.launcher.n_gpu_layers.set(loaded_gpu_layers_str)
         try:
             val = int(loaded_gpu_layers_str)
             # Use _set_gpu_layers to set the int var (no clamping for manual entry values)
             self.launcher._set_gpu_layers(val)
         except ValueError:
-            self.launcher.n_gpu_layers.set("0")
+            # Empty (auto) or unparseable: keep auto, slider at 0.
+            self.launcher.n_gpu_layers.set("")
             self.launcher._set_gpu_layers(0)
 
         # Load Model Path - This will trigger model selection logic and analysis

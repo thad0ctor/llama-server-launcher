@@ -879,7 +879,7 @@ class TestSpecSeparateDraftTypesIkLlama:
         self._enable(launcher_mock, spec_type, draft)
         launcher_mock.parallel.set("4")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd or cmd[cmd.index("--parallel") + 1] == "1"
+        assert cmd[cmd.index("--parallel") + 1] == "1"
 
     def test_rejected_on_llama_cpp(self, manager, launcher_mock, spec_type):
         launcher_mock.backend_selection.set("llama.cpp")
@@ -887,6 +887,71 @@ class TestSpecSeparateDraftTypesIkLlama:
         launcher_mock.spec_type.set(spec_type)
         cmd = manager.build_cmd()
         assert "--spec-type" not in cmd
+
+
+@pytest.mark.parametrize("spec_type", ["draft-dflash", "draft-dspark"])
+class TestSpecDflashDsparkLlamaCpp:
+    """Mainline llama.cpp (b11718) accepts ``--spec-type draft-dflash`` and
+    ``draft-dspark``; both draft from --spec-draft-model. Regression: the
+    launcher used to drop them with "not valid for backend 'llama.cpp'"."""
+
+    def _enable(self, launcher_mock, spec_type, draft=None):
+        launcher_mock.backend_selection.set("llama.cpp")
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set(spec_type)
+        if draft is not None:
+            launcher_mock.spec_draft_model.set(str(draft))
+
+    def test_emits_spec_type_and_draft_model(self, manager, launcher_mock, tmp_path, capsys, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        launcher_mock.spec_draft_n_max.set("15")
+        launcher_mock.spec_draft_ngl.set("99")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert cmd[cmd.index("--spec-draft-model") + 1] == str(draft.resolve())
+        assert cmd[cmd.index("--spec-draft-n-max") + 1] == "15"
+        assert cmd[cmd.index("--spec-draft-ngl") + 1] == "99"
+        assert "not valid for backend" not in capsys.readouterr().err
+
+    def test_listed_in_llama_cpp_dropdown_and_whitelists(self, spec_type):
+        from modules.spec_launch import (
+            _ALLOWED_SPEC_TYPES_LLAMA_CPP,
+            _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP,
+            _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP,
+        )
+        from modules.spec_tab import SpecTab
+
+        assert spec_type in SpecTab._SPEC_TYPES_LLAMA_CPP
+        assert spec_type in _ALLOWED_SPEC_TYPES_LLAMA_CPP
+        assert spec_type in _DRAFT_CAPABLE_SPEC_TYPES_LLAMA_CPP
+        assert spec_type in _SEPARATE_DRAFT_GPU_SPEC_TYPES_LLAMA_CPP
+
+    def test_warns_without_draft_model(self, manager, launcher_mock, tmp_path, capsys, spec_type):
+        """QA-2: b11718 starts such a stage but logs "no implementations
+        specified for speculative decoding" (speculation silently off)."""
+        self._enable(launcher_mock, spec_type)
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--spec-type") + 1] == spec_type
+        assert "--spec-draft-model" not in cmd
+        assert "speculative decoding OFF" in capsys.readouterr().err
+        self._enable(launcher_mock, spec_type, tmp_path / "gone.gguf")
+        manager.build_cmd()
+        assert "speculative decoding OFF" in capsys.readouterr().err
+
+    def test_no_warning_with_draft_model(self, manager, launcher_mock, tmp_path, capsys, spec_type):
+        draft = tmp_path / "draft.gguf"
+        draft.write_bytes(b"GGUF\x00")
+        self._enable(launcher_mock, spec_type, draft)
+        manager.build_cmd()
+        assert "speculative decoding OFF" not in capsys.readouterr().err
+
+    def test_does_not_force_single_slot(self, manager, launcher_mock, spec_type):
+        self._enable(launcher_mock, spec_type)
+        launcher_mock.parallel.set("4")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--parallel") + 1] == "4"
 
 
 # ============================================================================
@@ -2032,8 +2097,8 @@ class TestMtpParallelDefault:
 
 
 class TestMtpParallelEmissionOverride:
-    """build_cmd() forces --parallel 1 (omitted because it matches default)
-    whenever MTP is active, even if launcher.parallel still says something
+    """build_cmd() forces --parallel 1 (always emitted: llama.cpp's own
+    default is -1 = auto = 4 slots) whenever MTP is active, even if launcher.parallel still says something
     else. This is the authoritative last line of defense — protects against
     any future UI surface setting --parallel without coordinating with the
     MTP/Spec tab."""
@@ -2044,10 +2109,10 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("draft-mtp")
         launcher_mock.parallel.set("8")
         cmd = manager.build_cmd()
-        # --parallel 1 is the binary default so it's omitted from argv,
-        # but the wrong value (8) must NOT appear.
-        assert "--parallel" not in cmd
-        # Specifically: no "8" right after a --parallel token.
+        # The forced value reaches argv; omitting it would let llama.cpp
+        # fall back to auto (4 slots) and silently defeat the override.
+        assert cmd[cmd.index("--parallel") + 1] == "1"
+        assert cmd.count("--parallel") == 1
         captured = capsys.readouterr()
         assert "MTP requires --parallel 1" in captured.err
         assert "'8'" in captured.err
@@ -2058,7 +2123,7 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("draft-mtp")
         launcher_mock.parallel.set("1")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd  # matches default, omitted
+        assert cmd[cmd.index("--parallel") + 1] == "1"
         captured = capsys.readouterr()
         assert "MTP requires --parallel" not in captured.err
 
@@ -2093,7 +2158,7 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("ngram-simple")
         launcher_mock.parallel.set("4")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "1"
         assert "requires --parallel 1" in capsys.readouterr().err
 
     def test_ik_llama_mtp_with_parallel_4_also_overrides(self, manager, launcher_mock, capsys):
@@ -2103,7 +2168,7 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("mtp")
         launcher_mock.parallel.set("4")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "1"
         captured = capsys.readouterr()
         assert "MTP requires --parallel 1" in captured.err
         assert "'4'" in captured.err

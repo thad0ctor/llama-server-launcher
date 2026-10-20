@@ -209,3 +209,13 @@ def test_markdown_escapes_pipe_in_header():
     rows = [results.ResultRow(columns={"a|b": "1"})]
     md = results.export(rows, "markdown")
     assert "| a\\|b |" in md
+
+
+def test_parse_llama_bench_json_prefixes_split_run_combo():
+    """A split ik llama-bench run (one per -rtr value) tags its rows with the
+    pinned value, like sweep-bench rows."""
+    payload = json.dumps([{"test": "pp512", "avg_ts": 100.0, "model_type": "qwen2 1B"}])
+    rows = results.parse_llama_bench_json(payload, {"rtr": "1"})
+    assert rows[0].get("[rtr]") == "1"
+    assert rows[0].get("t/s") == "100.00"
+    assert "[rtr]" not in results.parse_llama_bench_json(payload)[0].columns

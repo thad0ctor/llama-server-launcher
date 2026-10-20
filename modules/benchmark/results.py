@@ -111,13 +111,16 @@ def _model_name(obj: dict) -> str:
     return ""
 
 
-def parse_llama_bench_json(stdout: str) -> list[ResultRow]:
+def parse_llama_bench_json(stdout: str, combo: dict[str, str] | None = None) -> list[ResultRow]:
     """Parse ``llama-bench -o json`` stdout into rows.
 
     Tolerates leading/trailing non-JSON noise by extracting the outermost
     JSON array. Returns ``[]`` if nothing parseable is found (the caller can
-    then fall back to showing raw output).
+    then fall back to showing raw output). ``combo`` (the single-value levers
+    a split llama-bench run pinned) is prefixed as ``[key]`` columns, like
+    :func:`parse_sweep_bench_table`.
     """
+    prefix_cols = {f"[{k}]": v for k, v in (combo or {}).items()}
     text = (stdout or "").strip()
     if not text:
         return []
@@ -129,6 +132,7 @@ def parse_llama_bench_json(stdout: str) -> list[ResultRow]:
         if not isinstance(obj, dict):
             continue
         cols: dict[str, str] = {"model": _model_name(obj)}
+        cols.update(prefix_cols)
         for field_name, display in _LLAMA_BENCH_FIELD_MAP.items():
             if field_name in obj:
                 cols[display] = _stringify(obj[field_name])

@@ -197,11 +197,16 @@ jobs:
           git clone --depth 1 https://github.com/ikawrakow/ik_llama.cpp.git ik_llama.cpp
           git -C ik_llama.cpp rev-parse HEAD > ik-llama-commit.txt
 
+      # GGML_RPC=ON makes llama_supports_gpu_offload() true on this CPU-only
+      # build, so --help advertises the GPU flags (-ngl, -ts, -dev, -mg, -devd,
+      # -ngld, -sm, ...) exactly like a CUDA build and their input shapes get
+      # checked. It needs no toolkit and adds ~2.5 min.
       - name: Build ik_llama llama-server
         run: |
           cmake -S ik_llama.cpp -B ik-llama-build \
             -DGGML_NATIVE=OFF \
             -DGGML_CUDA=OFF \
+            -DGGML_RPC=ON \
             -DGGML_VULKAN=OFF \
             -DGGML_OPENMP=OFF \
             -DLLAMA_BUILD_TESTS=OFF \

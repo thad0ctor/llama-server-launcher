@@ -51,6 +51,10 @@ class FlagInput:
     takes_value: bool
     intended_input: str
     sample_value: str = "1"
+    # Literal values the launcher itself emits for this flag (not free-form
+    # user input). Upstream help must still list each one, or the binary must
+    # accept it, so a renamed/removed value fails the weekly drift check.
+    emitted_values: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,7 @@ class AuditResult:
     tracked_alias_flags: frozenset[str]
     missing_upstream_flags: tuple[str, ...]
     input_shape_mismatches: tuple[str, ...]
+    missing_emitted_values: tuple[str, ...]
     uncategorized_source_flags: tuple[str, ...]
     unused_tracked_flags: tuple[str, ...]
     untracked_upstream_flags: tuple[str, ...]
@@ -154,6 +159,38 @@ LLAMA_CPP_FLAGS = frozenset(
 )
 
 
+# ``--spec-type`` values the launcher emits per backend: the UI whitelists
+# (``_ALLOWED_SPEC_TYPES_*`` in modules/spec_launch.py) plus stages
+# emit_spec_args derives itself (ik mtp + separate draft model -> "draft").
+# A unit test keeps them in sync without importing launcher code here.
+LLAMA_CPP_SPEC_TYPES = (
+    "none",
+    "draft-simple",
+    "draft-eagle3",
+    "draft-mtp",
+    "draft-dflash",
+    "draft-dspark",
+    "ngram-simple",
+    "ngram-map-k",
+    "ngram-map-k4v",
+    "ngram-mod",
+    "ngram-cache",
+)
+IK_LLAMA_SPEC_TYPES = (
+    "none",
+    "mtp",
+    "dflash",
+    "dspark",
+    "ngram-cache",
+    "ngram-simple",
+    "ngram-map-k",
+    "ngram-map-k4v",
+    "ngram-mod",
+    "suffix",
+    "draft",  # derived: mtp with the opt-in separate draft model
+)
+
+
 LLAMA_CPP_FLAG_INPUTS = {
     "-m": FlagInput("path", True, "main GGUF model file path"),
     "--batch-size": FlagInput("integer", True, "logical prompt batch size"),
@@ -173,12 +210,20 @@ LLAMA_CPP_FLAG_INPUTS = {
     "--ignore-eos": FlagInput("switch", False, "ignore end-of-stream token during generation"),
     "--jinja": FlagInput("switch", False, "enable server-side Jinja chat template rendering"),
     "--kv-unified": FlagInput("switch", False, "enable unified KV cache"),
-    "--load-mode": FlagInput("enum", True, "model loading mode mapped from the no-mmap/mlock toggles", "none"),
+    "--load-mode": FlagInput(
+        "enum",
+        True,
+        "model loading mode mapped from the no-mmap/mlock toggles",
+        "none",
+        emitted_values=("none", "mlock", "mmap+mlock"),
+    ),
     "--main-gpu": FlagInput("integer", True, "main GPU index"),
     "--min-p": FlagInput("float", True, "min-p sampling value"),
     "--mmproj": FlagInput("path", True, "multimodal projector file path"),
     "--n-cpu-moe": FlagInput("integer", True, "number of MoE layers to keep on CPU"),
-    "--n-gpu-layers": FlagInput("integer", True, "number of model layers to offload to GPU"),
+    "--n-gpu-layers": FlagInput(
+        "integer", True, "number of model layers to offload to GPU, or 'all' for the GUI's -1", emitted_values=("all",)
+    ),
     "--n-predict": FlagInput("integer", True, "maximum generated tokens"),
     "--no-cache-idle-slots": FlagInput("switch", False, "disable idle-slot KV cache behavior"),
     "--no-kv-offload": FlagInput("switch", False, "disable KV cache GPU offload"),
@@ -215,7 +260,12 @@ LLAMA_CPP_FLAG_INPUTS = {
     "--spec-ngram-simple-min-hits": FlagInput("integer", True, "minimum hits for simple ngram speculation"),
     "--spec-ngram-simple-size-m": FlagInput("integer", True, "M size for simple ngram speculation"),
     "--spec-ngram-simple-size-n": FlagInput("integer", True, "N size for simple ngram speculation"),
-    "--spec-type": FlagInput("enum", True, "speculative decoding type selected by backend"),
+    "--spec-type": FlagInput(
+        "enum",
+        True,
+        "speculative decoding type selected by backend",
+        emitted_values=LLAMA_CPP_SPEC_TYPES,
+    ),
     "--temp": FlagInput("float", True, "sampling temperature"),
     "--tensor-split": FlagInput("csv", True, "comma-separated tensor split values"),
     "--threads": FlagInput("integer", True, "CPU generation thread count"),
@@ -268,7 +318,13 @@ IK_LLAMA_FLAG_INPUTS = {
     "--seed": FlagInput("integer", True, "sampling RNG seed"),
     "--run-time-repack": FlagInput("switch", False, "enable ik_llama run-time repack"),
     "--spec-autotune": FlagInput("switch", False, "enable ik_llama speculative autotune"),
-    "--spec-type": FlagInput("enum", True, "ik_llama speculative decoding type", "mtp:n_max=1,p_min=0.0"),
+    "--spec-type": FlagInput(
+        "enum",
+        True,
+        "ik_llama speculative decoding type",
+        "mtp:n_max=1,p_min=0.0",
+        emitted_values=IK_LLAMA_SPEC_TYPES,
+    ),
     "--temp": FlagInput("float", True, "sampling temperature"),
     "--tensor-split": FlagInput("csv", True, "comma-separated tensor split values"),
     "--threads": FlagInput("integer", True, "CPU generation thread count"),
@@ -279,9 +335,16 @@ IK_LLAMA_FLAG_INPUTS = {
 IK_LLAMA_FLAGS = frozenset(IK_LLAMA_FLAG_INPUTS)
 
 
-# ik_llama hides some GPU-only flags from --help when compiled without GPU
-# offload, even though the parser still accepts them in GPU-enabled builds.
+# ik_llama hides its GPU-only flags from --help when compiled without GPU
+# offload (``llama_supports_gpu_offload()``). CI builds with -DGGML_RPC=ON,
+# which advertises them like a CUDA build, so this source-scan fallback stays
+# minimal: every extra entry here would let a flag that upstream actually
+# removed pass as "hidden" whenever its string survives anywhere in the scan.
 IK_LLAMA_HELP_HIDDEN_FLAGS = frozenset({"--tensor-split"})
+
+# Only the server's own parsing code may confirm a help-hidden flag. A scan of
+# the whole tree would also find the spelling in llama-bench, tests or docs.
+UPSTREAM_SERVER_SOURCE_SUBDIRS = ("common", "examples/server", "tools/server")
 
 
 # Option tokens present in the same emission modules but intentionally excluded
@@ -574,12 +637,19 @@ def extract_text_flags(paths: list[Path]) -> set[str]:
 
 
 def upstream_source_files(paths: list[Path]) -> list[Path]:
-    """Expand upstream source files or directories for hidden-flag checks."""
+    """Expand upstream source files or directories for hidden-flag checks.
+
+    A directory that looks like an upstream checkout (it has any of
+    ``UPSTREAM_SERVER_SOURCE_SUBDIRS``) is narrowed to those server/common
+    sources; any other directory is scanned whole.
+    """
     files: list[Path] = []
     suffixes = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
     for path in paths:
         if path.is_dir():
-            files.extend(candidate for candidate in path.rglob("*") if candidate.suffix in suffixes)
+            roots = [path / sub for sub in UPSTREAM_SERVER_SOURCE_SUBDIRS if (path / sub).is_dir()] or [path]
+            for root in roots:
+                files.extend(candidate for candidate in root.rglob("*") if candidate.suffix in suffixes)
         else:
             files.append(path)
     return files
@@ -697,6 +767,92 @@ def detect_input_shape_mismatches(
     return mismatches
 
 
+def help_flag_blocks(help_text: str) -> dict[str, list[str]]:
+    """Map each option token to its help entries: the advertising line plus
+    the continuation lines indented deeper than it (value lists such as
+    ``--load-mode``'s ``- none: ...`` items live there)."""
+    blocks: dict[str, list[str]] = {}
+    lines = help_text.splitlines()
+    for index, raw_line in enumerate(lines):
+        line = raw_line.rstrip()
+        if not line.lstrip().startswith("-"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        block = [line]
+        for cont in lines[index + 1 :]:
+            if len(cont) - len(cont.lstrip()) <= indent:
+                break
+            block.append(cont.rstrip())
+        text = "\n".join(block)
+        for match in FLAG_LINE_RE.finditer(line):
+            blocks.setdefault(match.group(1), []).append(text)
+    return blocks
+
+
+_VALUE_TOKEN = r"[A-Za-z0-9][\w.+-]*"
+
+
+def enumerated_values(block: str) -> set[str]:
+    """Return the values a help entry enumerates, ignoring free prose.
+
+    Recognized shapes (all seen in llama.cpp / ik_llama help):
+      - a list metavar on the option line: ``--spec-type none,draft-simple,...``
+        or ``{a,b}`` / ``a|b``
+      - bullet items: ``- mlock: force system to keep model in RAM``
+      - a ``types: a, b, c`` line (ik ``--spec-type``)
+      - quoted choices: ``'auto', or 'all'``
+    """
+    lines = block.splitlines()
+    if not lines:
+        return set()
+    values: set[str] = set()
+    # Option-line segments that start with a flag hold the flags and metavar;
+    # the description is a separate (2+-space separated) segment.
+    for segment in re.split(r"\s{2,}", lines[0].strip()):
+        if not segment.startswith("-"):
+            continue
+        for token in segment.split():
+            if token.startswith("-") or not re.search(r"[,|{}]", token):
+                continue
+            values.update(re.findall(_VALUE_TOKEN, token))
+    for line in lines:
+        bullet = re.match(rf"\s*-\s+({_VALUE_TOKEN}):", line)
+        if bullet:
+            values.add(bullet.group(1))
+        types = re.search(r"\btypes?:\s*(.+)", line)
+        if types:
+            values.update(re.findall(_VALUE_TOKEN, types.group(1)))
+        values.update(re.findall(rf"'({_VALUE_TOKEN})'", line))
+    return values
+
+
+def detect_missing_emitted_values(
+    help_text: str,
+    flag_inputs: dict[str, FlagInput] = LLAMA_CPP_FLAG_INPUTS,
+) -> dict[str, list[str]]:
+    """Return launcher-emitted literal values that a flag's help no longer
+    enumerates (see :func:`enumerated_values`; prose, examples and defaults
+    don't count). Used in ``--help-file`` mode; with a binary every value is
+    probed instead.
+
+    Flags absent from help are skipped here; they are reported as missing
+    flags instead.
+    """
+    blocks_by_flag = help_flag_blocks(help_text)
+    missing: dict[str, list[str]] = {}
+    for flag, spec in flag_inputs.items():
+        blocks = blocks_by_flag.get(flag)
+        if not spec.emitted_values or not blocks:
+            continue
+        listed: set[str] = set()
+        for block in blocks:
+            listed |= enumerated_values(block)
+        absent = [value for value in spec.emitted_values if value not in listed]
+        if absent:
+            missing[flag] = absent
+    return missing
+
+
 def sample_value_for(spec: FlagInput) -> str:
     samples = {
         "csv": "1,0",
@@ -776,6 +932,12 @@ def _format_failures_from_result(result: AuditResult) -> list[str]:
             + indent("\n".join(result.input_shape_mismatches), "  ")
         )
 
+    if result.missing_emitted_values:
+        failures.append(
+            f"launcher {result.backend_name} flag values missing from upstream help:\n"
+            + indent("\n".join(result.missing_emitted_values), "  ")
+        )
+
     if result.uncategorized_source_flags:
         failures.append(
             "option-like source literals are not categorized in scripts/check_llama_cpp_args.py:\n"
@@ -846,6 +1008,30 @@ def audit_result(
     else:
         shape_mismatch_lines = []
 
+    # With a binary, ask it: every emitted value is probed, because help text
+    # can mention a value in prose or examples after the parser dropped it.
+    # Without one (--help-file), only the help's enumerated value lists count.
+    if probe_binary is not None:
+        missing_values = {}
+        for flag, spec in flag_inputs.items():
+            rejected = [
+                value
+                for value in spec.emitted_values
+                if not binary_accepts_flag(probe_binary, flag, FlagInput(spec.kind, True, spec.intended_input, value))
+            ]
+            if rejected:
+                missing_values[flag] = rejected
+        verdict = "the binary rejects"
+    else:
+        missing_values = detect_missing_emitted_values(help_text, flag_inputs)
+        verdict = "upstream help no longer lists"
+    missing_value_lines = []
+    for flag, values in sorted(missing_values.items()):
+        missing_value_lines.append(
+            f"- {flag}: launcher emits {', '.join(values)} but {verdict} "
+            f"{'it' if len(values) == 1 else 'them'} ({flag_inputs[flag].intended_input})"
+        )
+
     uncategorized: set[str] = set()
     unused_tracked: set[str] = set()
     if source_paths:
@@ -873,6 +1059,7 @@ def audit_result(
         tracked_alias_flags=frozenset(tracked_aliases),
         missing_upstream_flags=tuple(sorted(missing_upstream)),
         input_shape_mismatches=tuple(shape_mismatch_lines),
+        missing_emitted_values=tuple(missing_value_lines),
         uncategorized_source_flags=tuple(sorted(uncategorized)),
         unused_tracked_flags=tuple(sorted(unused_tracked)),
         untracked_upstream_flags=tuple(sorted(untracked_upstream)),
@@ -928,7 +1115,12 @@ def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launc
         ]
     )
 
-    if result.failures or result.missing_upstream_flags or result.input_shape_mismatches:
+    if (
+        result.failures
+        or result.missing_upstream_flags
+        or result.input_shape_mismatches
+        or result.missing_emitted_values
+    ):
         status = "Breaking compatibility issue detected"
     elif result.untracked_upstream_flags:
         status = "No compatibility failures; upstream classification backlog present"
@@ -940,6 +1132,7 @@ def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launc
         ("Compatibility failures", result.failures),
         ("Missing tracked flags", result.missing_upstream_flags),
         ("Input shape mismatches", result.input_shape_mismatches),
+        ("Missing emitted values", result.missing_emitted_values),
         ("Uncategorized launcher source flags", result.uncategorized_source_flags),
         ("Launcher manifest flags not seen by static source scan", result.unused_tracked_flags),
         ("Upstream flags not currently classified", result.untracked_upstream_flags),
@@ -952,6 +1145,10 @@ def render_markdown_report(result: AuditResult, *, upstream_ref: str = "", launc
             "Launcher-tracked flags that upstream no longer advertises, accepts, or exposes in source."
         ),
         "Input shape mismatches": "Launcher value/switch expectations that disagree with upstream help.",
+        "Missing emitted values": (
+            "Literal values the launcher emits (e.g. -ngl all, --spec-type names) that the binary rejects "
+            "(or, with --help-file, that the help's enumerated value lists no longer contain)."
+        ),
         "Uncategorized launcher source flags": (
             "Option-looking tokens emitted by scanned launcher source but not assigned to this backend manifest "
             "or its source-scan ignore list."
@@ -1089,7 +1286,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"OK: {len(backend.flag_inputs)} tracked {backend.name} launcher flags are advertised "
         "by upstream help, accepted by the binary, or present as CPU-hidden upstream flags "
-        "with expected input shapes."
+        "with expected input shapes and emitted values."
     )
     return 0
 

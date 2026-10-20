@@ -334,7 +334,10 @@ class BenchmarkTab:
         sec = self._section(parent, "MTP / speculative (llama-sweep-bench only)")
         ttk.Label(
             sec,
-            text="MTP uses the model's embedded head (no draft model). " "Sweep MTP enable = 0,1 to measure speedup.",
+            text="Rendered as ik_llama's --spec-type mtp[:n_max=…,n_min=…,p_min=…] using the model's embedded "
+            "head (no draft model). llama-sweep-bench has no speculative-decoding loop: MTP stage = 0,1 "
+            "measures the cost of loading/running the MTP head, not a speculative speedup, and "
+            "n_max/n_min/p_min don't change its numbers (single values only).",
             foreground="#666",
             wraplength=1020,
             justify="left",
@@ -386,7 +389,9 @@ class BenchmarkTab:
             text="Sweep an arbitrary flag not listed above (e.g. -ot, --override-tensor, --cache-reuse). "
             "Tick to include; use 'list' for comma-separated values or 'range' for numeric min/max/step. "
             "Each value becomes its own matrix combo on llama-sweep-bench; on llama-bench the values are "
-            "passed as one comma-list, so a custom flag only sweeps there if it accepts comma-separated values.",
+            "passed as one comma-list, so a custom flag only sweeps there if it accepts comma-separated values "
+            "(known single-value ik_llama flags such as -fmoe or -rtr run once per value instead; an -ot "
+            "comma list is several overrides in one run, so it stays a single run).",
             foreground="#666",
             wraplength=1020,
             justify="left",
@@ -1155,7 +1160,12 @@ class BenchmarkTab:
         except SweepError as exc:
             self._set_preview(f"(incomplete) {exc}")
             return
-        if tool == TOOL_LLAMA_BENCH:
+        if tool == TOOL_LLAMA_BENCH and len(pairs) > 1:
+            # A swept single-value ik_llama lever (-rtr, -fmoe, …) splits the run.
+            lines.append(
+                f"# {len(pairs)} invocation(s) (one per single-value ik_llama lever combo), {size} matrix row(s)"
+            )
+        elif tool == TOOL_LLAMA_BENCH:
             lines.append(f"# 1 invocation, {size} matrix row(s)")
         else:
             lines.append(f"# {len(pairs)} invocation(s) (cartesian product)")
@@ -1224,6 +1234,14 @@ class BenchmarkTab:
                 text = str(raw).strip()
                 if text == "":
                     continue
+                # The launcher's ctx 0 means "the model's context"; as a
+                # sweep-bench -c it would sweep up to n_ctx_train, so don't seed it.
+                if lever.key == "ctx_size":
+                    try:
+                        if int(text) <= 0:
+                            continue
+                    except ValueError:
+                        continue
                 v["values"].set(text)
             v["mode"].set("list")
             v["include"].set(True)
@@ -1539,9 +1557,13 @@ class BenchmarkTab:
             self._append_console(f"(run exited with code {result.rc})", tag="error")
         # Parse into rows.
         if result.tool == TOOL_LLAMA_BENCH:
-            rows = results.parse_llama_bench_json(result.stdout)
+            rows = results.parse_llama_bench_json(result.stdout, result.combo)
         else:
             rows = results.parse_sweep_bench_table(result.stdout, result.combo)
+            # ik_llama c446f1e prints the table to stderr; fall back to the
+            # stderr table rows only when stdout had none (no double count).
+            if not rows and result.stderr_table:
+                rows = results.parse_sweep_bench_table(result.stderr_table, result.combo)
         if rows:
             self._result_rows.extend(rows)
             self._refresh_results_grid()

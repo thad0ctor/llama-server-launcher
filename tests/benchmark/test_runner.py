@@ -227,3 +227,52 @@ def test_env_unset_removes_inherited_var(tmp_path, monkeypatch):
 
     results = [p for k, p in events if k == EVENT_STEP_RESULT]
     assert results and results[0].stdout.strip() == "VAL=<absent>"
+
+
+_SWEEP_TABLE = (
+    "|    PP |     TG |   N_KV |   T_PP s | S_PP t/s |   T_TG s | S_TG t/s |\n"
+    "|-------|--------|--------|----------|----------|----------|----------|\n"
+    "|   128 |     32 |      0 |    0.153 |   839.32 |    0.245 |   130.80 |\n"
+)
+
+
+def test_runner_collects_table_rows_printed_to_stderr():
+    """QA-1: ik_llama c446f1e llama-sweep-bench prints its table to stderr;
+    the table lines are kept on the StepResult (log noise is not)."""
+    step = BenchStep(cmd=_py_stub("", "llama_model_load: loading\n" + _SWEEP_TABLE), combo={"mtp": "1"})
+    runner = BenchRunner()
+    assert runner.start(BenchPlan(tool="llama-sweep-bench", steps=[step])) is True
+    events = _drain_until_terminal(runner, timeout=30.0)
+    result = next(p for k, p in events if k == EVENT_STEP_RESULT)
+    assert result.stdout == ""
+    assert result.stderr_table.splitlines() == _SWEEP_TABLE.splitlines()
+    # The console still gets every stderr line.
+    lines = [p for k, p in events if k == EVENT_LINE]
+    assert "llama_model_load: loading" in lines
+
+
+def test_runner_collects_whitespace_table_printed_to_stderr():
+    """Codex: some ik builds print sweep-bench's whitespace-delimited table;
+    keep its header/separator/rows from stderr but not interleaved log noise."""
+    table = (
+        "llama_model_load: loading model\n"
+        "    PP     TG   N_KV   T_PP s   S_PP t/s   T_TG s   S_TG t/s\n"
+        "  ----   ----   ----   ------   --------   ------   --------\n"
+        "   128     32      0    0.153     839.32    0.245     130.80\n"
+        "main: decode took 12 ms on 4 threads\n"
+        "   128     32    128    0.089    1441.17    0.271     118.03\n"
+        "llama_perf_context_print: total time = 1 2 3 4 5 6 7\n"
+    )
+    step = BenchStep(cmd=_py_stub("", table), combo={"mtp": "0"})
+    runner = BenchRunner()
+    assert runner.start(BenchPlan(tool="llama-sweep-bench", steps=[step])) is True
+    events = _drain_until_terminal(runner, timeout=30.0)
+    result = next(p for k, p in events if k == EVENT_STEP_RESULT)
+    kept = result.stderr_table.splitlines()
+    assert len(kept) == 4
+    assert all("llama_" not in line and "main:" not in line for line in kept)
+    from modules.benchmark import results
+
+    rows = results.parse_sweep_bench_table(result.stderr_table, result.combo)
+    assert [r.get("N_KV") for r in rows] == ["0", "128"]
+    assert rows[0].get("[mtp]") == "0"
