@@ -18,7 +18,8 @@ def _synthetic_help_for(flag_inputs=None):
     lines = []
     for flag, spec in sorted(flag_inputs.items()):
         suffix = " VALUE" if spec.takes_value else ""
-        lines.append(f"  {flag}{suffix}    synthetic help for {spec.intended_input}")
+        values = f" (values: {', '.join(spec.emitted_values)})" if spec.emitted_values else ""
+        lines.append(f"  {flag}{suffix}    synthetic help for {spec.intended_input}{values}")
     return "\n".join(lines)
 
 
@@ -444,3 +445,111 @@ def test_ik_llama_manifest_source_scan_passes_when_all_tracked_flags_are_adverti
     )
 
     assert failures == []
+
+
+# ---------------------------------------------------------------------------
+# Launcher-emitted literal values (-ngl all, --spec-type names, --load-mode)
+# ---------------------------------------------------------------------------
+
+# Excerpts from llama.cpp b11718 --help: values on the flag line and on
+# indented continuation lines.
+_B11718_HELP = (
+    "-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM, either an exact number,\n"
+    "                                        'auto', or 'all' (default: auto)\n"
+    "-lm,   --load-mode MODE                 model loading mode (default: auto)\n"
+    "                                        - none: no special loading mode\n"
+    "                                        - mlock: force system to keep model in RAM\n"
+    "                                        - mmap+mlock: mmap + force system to keep model in RAM\n"
+    "--spec-type none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,"
+    "ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache\n"
+    "                                        comma-separated list of types of speculative decoding\n"
+)
+
+
+def _value_specs():
+    inputs = check_llama_cpp_args.LLAMA_CPP_FLAG_INPUTS
+    return {flag: inputs[flag] for flag in ("--n-gpu-layers", "--load-mode", "--spec-type")}
+
+
+def test_emitted_values_found_on_flag_and_continuation_lines():
+    assert check_llama_cpp_args.detect_missing_emitted_values(_B11718_HELP, _value_specs()) == {}
+
+
+def test_missing_emitted_values_are_reported():
+    # A b10107-era build: no 'all', no mmap+mlock, no dflash/dspark.
+    help_text = (
+        "-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM\n"
+        "-lm,   --load-mode MODE                 model loading mode (default: mmap)\n"
+        "                                        - none: no special loading mode\n"
+        "                                        - mlock: mmap + force system to keep model in RAM\n"
+        "--spec-type none,draft-simple,draft-eagle3,draft-mtp,ngram-simple,ngram-map-k,ngram-map-k4v,"
+        "ngram-mod,ngram-cache\n"
+    )
+    missing = check_llama_cpp_args.detect_missing_emitted_values(help_text, _value_specs())
+    # 'mlock' must not be satisfied by 'mmap+mlock' and vice versa.
+    assert missing == {
+        "--n-gpu-layers": ["all"],
+        "--load-mode": ["mmap+mlock"],
+        "--spec-type": ["draft-dflash", "draft-dspark"],
+    }
+    failures = check_llama_cpp_args.audit(
+        help_text=help_text,
+        source_paths=[],
+        expected_flags=set(_value_specs()),
+        known_non_llama_cpp_flags=set(),
+        flag_inputs=_value_specs(),
+    )
+    assert len(failures) == 1
+    assert "values missing from upstream help" in failures[0]
+    assert "draft-dflash" in failures[0] and "all" in failures[0]
+
+
+def test_missing_emitted_value_rescued_when_binary_accepts_it(monkeypatch, tmp_path):
+    seen = []
+
+    def _accepts(binary, flag, spec):
+        seen.append((flag, spec.sample_value))
+        return True
+
+    monkeypatch.setattr(check_llama_cpp_args, "binary_accepts_flag", _accepts)
+    help_text = "-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM\n"
+    inputs = {"--n-gpu-layers": check_llama_cpp_args.LLAMA_CPP_FLAG_INPUTS["--n-gpu-layers"]}
+    result = check_llama_cpp_args.audit_result(
+        help_text=help_text,
+        source_paths=[],
+        expected_flags=set(inputs),
+        known_non_llama_cpp_flags=set(),
+        flag_inputs=inputs,
+        probe_binary=tmp_path / "llama-server",
+    )
+    assert result.missing_emitted_values == ()
+    assert ("--n-gpu-layers", "all") in seen
+
+
+def test_spec_type_manifest_matches_launcher_whitelists():
+    from modules.spec_launch import _ALLOWED_SPEC_TYPES_IK_LLAMA, _ALLOWED_SPEC_TYPES_LLAMA_CPP
+
+    assert set(check_llama_cpp_args.LLAMA_CPP_SPEC_TYPES) == _ALLOWED_SPEC_TYPES_LLAMA_CPP
+    assert set(check_llama_cpp_args.IK_LLAMA_SPEC_TYPES) == _ALLOWED_SPEC_TYPES_IK_LLAMA
+
+
+def test_load_mode_manifest_matches_launcher_mapping():
+    from modules.launch import LaunchManager
+
+    spec = check_llama_cpp_args.LLAMA_CPP_FLAG_INPUTS["--load-mode"]
+    assert set(spec.emitted_values) == set(LaunchManager._LLAMA_CPP_LOAD_MODES.values())
+
+
+def test_ik_hidden_flag_fallback_covers_emitted_gpu_flags():
+    """A CPU-only ik build without -DGGML_RPC hides these from --help."""
+    hidden = check_llama_cpp_args.IK_LLAMA_HELP_HIDDEN_FLAGS
+    assert {"--n-gpu-layers", "--tensor-split", "--device", "--main-gpu", "-devd", "-ngld"} <= hidden
+    assert hidden <= set(check_llama_cpp_args.IK_LLAMA_FLAG_INPUTS)
+
+
+def test_ik_ci_build_enables_rpc_so_gpu_flags_are_in_help():
+    workflow = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "llama-cpp-compatibility.yml"
+    text = workflow.read_text(encoding="utf-8")
+    ik_build = text[text.index("cmake -S ik_llama.cpp") :]
+    ik_build = ik_build[: ik_build.index("cmake --build")]
+    assert "-DGGML_RPC=ON" in ik_build
