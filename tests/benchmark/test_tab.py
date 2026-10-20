@@ -463,7 +463,7 @@ def test_mtp_rows_visible_only_on_sweep_bench(bench_tab):
     assert bench_tab._lever_rows["fmoe"]["chk"].grid_info() != {}
 
 
-def test_mtp_command_renders_bare_flag_and_draft_max(bench_tab):
+def test_mtp_command_renders_canonical_spec_type(bench_tab):
     from modules.benchmark.detection import TOOL_SWEEP_BENCH
 
     bench_tab.backend_var.set("ik_llama")
@@ -480,11 +480,10 @@ def test_mtp_command_renders_bare_flag_and_draft_max(bench_tab):
     commands, _ = bench_tab._build_command_list()
     assert len(commands) == 1
     cmd = commands[0]
-    # -mtp is a BARE flag: the token immediately after it must be the next flag,
-    # not a value (guards against a regression that renders `-mtp 1`).
-    assert "-mtp" in cmd
-    assert cmd[cmd.index("-mtp") + 1] == "--draft-max"
-    assert cmd[cmd.index("--draft-max") + 1] == "4"
+    # Current ik_llama rejects the legacy -mtp / --draft-max flags; the stage
+    # and its keys travel in one --spec-type payload.
+    assert cmd[cmd.index("--spec-type") + 1] == "mtp:n_max=4"
+    assert "-mtp" not in cmd and "--draft-max" not in cmd
 
 
 def test_mtp_sweep_roundtrips_through_save_load(bench_tab):

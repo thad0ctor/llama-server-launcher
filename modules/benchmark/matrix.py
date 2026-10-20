@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from ..spec_launch import _append_ik_spec_type
 from .detection import TOOL_LLAMA_BENCH, TOOL_SWEEP_BENCH
 
 # Value kinds
@@ -245,51 +246,52 @@ LEVERS: tuple[Lever, ...] = (
         help='A tensor-override pattern is ONE value; sweep several with ";".',
     ),
     # ── MTP / speculative-decoding levers (llama-sweep-bench + ik_llama only) ─
-    # ik_llama's llama-sweep-bench supports embedded-head multi-token prediction:
-    # the bare ``-mtp`` legacy shortcut (the embedded head — NO draft model) plus
-    # the ``--draft-*`` controls and the ``-mtprot`` requant-output knob. ik
-    # llama-bench REJECTS all of these ("invalid parameter for argument"), so they
-    # are scoped to sweep-bench only. ``-mtp`` is itself a BARE on/off flag on
-    # sweep-bench (present when enabled, absent otherwise), so it renders via the
-    # same ``sweep_bare`` path as -rtr/-mqkv and can sweep 0/1 to measure MTP's
-    # speedup. ``-mtp`` cannot be combined with ``--spec-stage``, so only the
-    # shortcut + ``--draft-*`` controls are exposed (no --spec-stage lever).
+    # Current ik_llama rejects the legacy ``-mtp`` / ``--draft-max`` /
+    # ``--draft-min`` / ``--draft-p-min`` flags ("legacy speculative option ...
+    # is disabled; use --spec-type"), so these levers render ONE canonical
+    # ``--spec-type mtp[:n_max=..,n_min=..,p_min=..]`` stage instead (see
+    # :func:`_render_mtp_stage`). ik llama-bench rejects all of them, so they are
+    # scoped to sweep-bench. llama-sweep-bench has NO speculative-decoding loop:
+    # the stage only loads/builds the embedded MTP head, so ``mtp`` 0/1 measures
+    # that cost (not a speculative speedup) and the n_max/n_min/p_min keys are
+    # parsed but cannot change its numbers — sweeping them is refused.
     Lever(
         "mtp",
-        "MTP enable (-mtp)",
-        "-mtp",
+        "MTP stage (--spec-type mtp)",
+        "--spec-type",
         KIND_INT,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        sweep_bare=True,
-        help="ik_llama embedded-head multi-token prediction (0/1); no draft model.",
+        help="0/1: load the model's embedded MTP head (no draft model). sweep-bench has no "
+        "speculative loop, so this measures the head's cost, not MTP speedup.",
     ),
     Lever(
         "draft_max",
-        "MTP draft max (--draft-max)",
-        "--draft-max",
+        "MTP n_max (--spec-type key)",
+        "n_max",
         KIND_INT,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        help="Max speculative draft tokens per step.",
+        help="Max draft tokens, passed inside --spec-type mtp. No effect on sweep-bench numbers; single value only.",
     ),
     Lever(
         "draft_min",
-        "MTP draft min (--draft-min)",
-        "--draft-min",
+        "MTP n_min (--spec-type key)",
+        "n_min",
         KIND_INT,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        help="Min speculative draft tokens per step.",
+        help="Min draft tokens, passed inside --spec-type mtp. No effect on sweep-bench numbers; single value only.",
     ),
     Lever(
         "draft_p_min",
-        "MTP draft p-min (--draft-p-min)",
-        "--draft-p-min",
+        "MTP p_min (--spec-type key)",
+        "p_min",
         KIND_STR,
         _SWEEP_ONLY,
         backends=_IK_BACKEND,
-        help="Min draft acceptance probability, a float like 0.5.",
+        help="Min draft probability (e.g. 0.5), passed inside --spec-type mtp. No effect on sweep-bench "
+        "numbers; single value only.",
     ),
     Lever(
         "mtprot",
@@ -654,6 +656,44 @@ def _cartesian(applicable: list[Axis]) -> list[dict[str, str]]:
     return combos
 
 
+# The MTP stage lever and the ``--spec-type mtp`` payload keys its sibling
+# levers feed, in payload order.
+_MTP_STAGE_KEY = "mtp"
+_MTP_PAYLOAD_KEYS = (("draft_max", "n_max"), ("draft_min", "n_min"), ("draft_p_min", "p_min"))
+
+
+def _check_mtp_axes(applicable: list[Axis]) -> None:
+    """Reject MTP payload levers that would render nothing or sweep nothing."""
+    keys = {axis.key: axis for axis in applicable}
+    payload = [keys[k] for k, _ in _MTP_PAYLOAD_KEYS if k in keys]
+    if payload and _MTP_STAGE_KEY not in keys:
+        raise SweepError(
+            f"{payload[0].label} only applies inside --spec-type mtp; also tick "
+            f"{LEVERS_BY_KEY[_MTP_STAGE_KEY].label}."
+        )
+    for axis in payload:
+        if axis.is_swept:
+            raise SweepError(
+                f"{axis.label}: llama-sweep-bench has no speculative-decoding loop, so sweeping it "
+                f"would produce identical rows; give a single value."
+            )
+
+
+def _render_mtp_stage(cmd: list[str], combo: dict[str, str]) -> None:
+    """Append ik_llama's canonical ``--spec-type mtp[:k=v,...]`` for ``combo``.
+
+    Reuses the server launch path's payload builder so the benchmark and
+    ``modules/spec_launch.py`` can't drift apart. The payload keys are only
+    rendered while the stage is on, and are dropped from ``combo`` otherwise
+    so an "off" row isn't labelled with values it never used.
+    """
+    if _is_truthy(combo[_MTP_STAGE_KEY]):
+        _append_ik_spec_type(cmd, "mtp", [(key, combo.get(lever_key, "")) for lever_key, key in _MTP_PAYLOAD_KEYS])
+    else:
+        for lever_key, _key in _MTP_PAYLOAD_KEYS:
+            combo.pop(lever_key, None)
+
+
 def sweep_bench_commands(
     exe: str,
     model: str,
@@ -689,11 +729,16 @@ def sweep_bench_commands(
             f"sweep expands to {total} llama-sweep-bench runs (max {MAX_SWEEP_COMBOS}); "
             f"narrow the parameter ranges."
         )
+    _check_mtp_axes(applicable)
     extra = _extra_tokens(extra_args)
     out: list[tuple[list[str], dict[str, str]]] = []
     for combo in _cartesian(applicable):
         cmd: list[str] = [exe, "-m", model]
         for axis in applicable:
+            if not axis.is_custom and axis.key in (_MTP_STAGE_KEY, *(k for k, _ in _MTP_PAYLOAD_KEYS)):
+                if axis.key == _MTP_STAGE_KEY:
+                    _render_mtp_stage(cmd, combo)
+                continue
             value = combo[axis.key]
             if axis.sweep_bare:
                 # A handful of ik_llama toggles (-rtr, -mqkv) are BARE flags on

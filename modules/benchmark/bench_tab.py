@@ -334,7 +334,10 @@ class BenchmarkTab:
         sec = self._section(parent, "MTP / speculative (llama-sweep-bench only)")
         ttk.Label(
             sec,
-            text="MTP uses the model's embedded head (no draft model). " "Sweep MTP enable = 0,1 to measure speedup.",
+            text="Rendered as ik_llama's --spec-type mtp[:n_max=…,n_min=…,p_min=…] using the model's embedded "
+            "head (no draft model). llama-sweep-bench has no speculative-decoding loop: MTP stage = 0,1 "
+            "measures the cost of loading/running the MTP head, not a speculative speedup, and "
+            "n_max/n_min/p_min don't change its numbers (single values only).",
             foreground="#666",
             wraplength=1020,
             justify="left",
