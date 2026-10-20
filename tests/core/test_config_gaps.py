@@ -194,7 +194,7 @@ class TestLoadConfiguration:
         assert launcher.threads_batch.get() == str(launcher.logical_cores)
         assert launcher.batch_size.get() == "512"
         assert launcher.ubatch_size.get() == "512"
-        assert launcher.ctx_size.get() == 2048
+        assert launcher.ctx_size.get() == 0  # missing key: model context (old configs ran without --ctx-size)
         assert launcher.seed.get() == "-1"
         # Default flipped to True: ik_llama enables FA by default in the
         # binary, and llama.cpp benefits from it on most modern GPUs.
@@ -400,6 +400,38 @@ class TestLoadConfiguration:
         with patch("modules.config.messagebox"):
             cm.load_configuration()
         assert launcher.n_gpu_layers.get() == expected
+
+    # Context back-compat (round 2): the old launcher dropped --ctx-size when
+    # it equalled 2048, so unmarked 2048 / missing configs ran without it.
+    @pytest.mark.parametrize(
+        "saved,expected",
+        [
+            ({"ctx_size": 2048}, 0),  # unmarked 2048 -> omit (what it ran)
+            ({}, 0),  # key missing -> omit
+            ({"ctx_size": 4096}, 4096),  # unmarked explicit value kept
+            ({"ctx_size": "junk"}, 0),
+            ({"ctx_size": 2048, "ctx_size_explicit": True}, 2048),  # saved by this launcher
+            ({"ctx_size": 0, "ctx_size_explicit": True}, 0),
+        ],
+    )
+    def test_ctx_size_back_compat(self, rich_launcher_factory, tmp_path, saved, expected):
+        cfg = _full_cfg()
+        cfg.pop("ctx_size", None)
+        cfg.pop("ctx_size_explicit", None)
+        cfg.update(saved)
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher.ctx_size.get() == expected
+
+    def test_ctx_size_2048_round_trips_once_marked(self, rich_launcher_factory, tmp_path):
+        from modules.config import ConfigManager
+
+        launcher = rich_launcher_factory(tmp_path / "cfg.json")
+        launcher.ctx_size.set(2048)
+        cfg = ConfigManager(launcher).current_cfg()
+        assert cfg["ctx_size_explicit"] is True
+        assert ConfigManager._loaded_ctx_size(cfg) == 2048
 
     def test_current_cfg_marks_n_gpu_layers_explicit(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager

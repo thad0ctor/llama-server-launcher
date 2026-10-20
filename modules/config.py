@@ -337,6 +337,8 @@ class ConfigManager:
             "temperature": self.launcher.temperature.get(),
             "min_p": self.launcher.min_p.get(),
             "ctx_size": self._ctx_size_or_zero(self.launcher.ctx_size),
+            # Marks ctx_size as authoritative; see _loaded_ctx_size.
+            "ctx_size_explicit": True,
             "seed": self.launcher.seed.get(),
             "flash_attn": self.launcher.flash_attn.get(),
             "tensor_split": self.launcher.tensor_split.get().strip(),
@@ -521,6 +523,26 @@ class ConfigManager:
         return value
 
     @staticmethod
+    def _loaded_ctx_size(cfg):
+        """Return the context size to restore from a saved config.
+
+        0 now means the model's context (no --ctx-size). Configs saved before
+        that (no ``ctx_size_explicit`` marker) ran without --ctx-size whenever
+        they held 2048, because the launcher dropped it as a "default"; a
+        missing key behaved the same. Restore those as 0, which reproduces
+        what they ran on old builds (default 2048) and current ones (model
+        context). Marked configs keep every explicit value, 2048 included.
+        Unparseable values fall back to 0.
+        """
+        try:
+            ctx = int(cfg.get("ctx_size", 0))
+        except (TypeError, ValueError):
+            return 0
+        if not cfg.get("ctx_size_explicit") and ctx == 2048:
+            return 0
+        return max(ctx, 0)
+
+    @staticmethod
     def _ctx_size_or_zero(var):
         """Read the ctx IntVar; a blank/invalid field means 0 (model's context)."""
         try:
@@ -561,11 +583,8 @@ class ConfigManager:
         # ``"ctx_size": []`` — both would raise inside ``IntVar.set()``
         # / ``_sync_ctx_display()`` AFTER earlier fields have already
         # been applied, leaving the load half-done. Coerce to int up
-        # front with the same 2048 default the ``get`` falls back to.
-        try:
-            ctx = int(cfg.get("ctx_size", 2048))
-        except (TypeError, ValueError):
-            ctx = 2048
+        # front; see _loaded_ctx_size for the back-compat rule.
+        ctx = self._loaded_ctx_size(cfg)
         self.launcher.ctx_size.set(ctx)
         self.launcher._sync_ctx_display(ctx)  # Manually sync display
         self.launcher.seed.set(cfg.get("seed", "-1"))
