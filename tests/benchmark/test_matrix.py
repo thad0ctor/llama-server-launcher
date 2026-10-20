@@ -437,7 +437,9 @@ def test_single_scalar_value_stays_one_run():
     assert cmd[cmd.index("-t") + 1] == "8,16"
 
 
-@pytest.mark.parametrize("flag", ["-fmoe", "--fused-moe", "-rtr", "-thp", "-sas", "-no-ooae", "--n-cpu-moe", "-w", "-ot"])
+@pytest.mark.parametrize(
+    "flag", ["-fmoe", "--fused-moe", "-rtr", "-thp", "-sas", "-no-ooae", "--n-cpu-moe", "-w", "-ot"]
+)
 def test_custom_single_value_flag_sweep_splits_on_ik_llama_bench(flag):
     """R2-3: a custom ``-fmoe 0,1`` axis on ik llama-bench silently ran only 0."""
     axes = [Axis(flag, ["0", "1"], custom_flag=flag), Axis("threads", ["8", "16"])]
@@ -451,11 +453,19 @@ def test_custom_comma_list_flag_still_single_run():
     """Flags llama-bench splits itself (e.g. -mla on ik, anything on mainline)
     keep the one-invocation comma list."""
     ik = build_commands(
-        TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", [Axis("-mla", ["0", "1"], custom_flag="-mla")], backend="ik_llama"
+        TOOL_LLAMA_BENCH,
+        "/b/llama-bench",
+        "/m.gguf",
+        [Axis("-mla", ["0", "1"], custom_flag="-mla")],
+        backend="ik_llama",
     )
     assert len(ik) == 1 and ik[0][0][ik[0][0].index("-mla") + 1] == "0,1"
     main = build_commands(
-        TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", [Axis("-fmoe", ["0", "1"], custom_flag="-fmoe")], backend="llama.cpp"
+        TOOL_LLAMA_BENCH,
+        "/b/llama-bench",
+        "/m.gguf",
+        [Axis("-fmoe", ["0", "1"], custom_flag="-fmoe")],
+        backend="llama.cpp",
     )
     assert len(main) == 1
 

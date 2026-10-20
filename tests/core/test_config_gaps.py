@@ -350,7 +350,6 @@ class TestLoadConfiguration:
         launcher.env_vars_manager.load_from_config.assert_called()
         launcher.ik_llama_tab.load_from_config.assert_called()
 
-
     # V cache back-compat. Configs saved before the V control was wired up
     # (no ``cache_type_v_explicit`` marker) ran with V = K regardless of the
     # V box, so they always load as V = K.
@@ -420,7 +419,7 @@ class TestLoadConfiguration:
 
         class _BlankIntVar:
             def get(self):
-                raise ValueError("expected integer but got \"\"")
+                raise ValueError('expected integer but got ""')
 
         launcher.ctx_size = _BlankIntVar()
         assert ConfigManager(launcher).current_cfg()["ctx_size"] == 0

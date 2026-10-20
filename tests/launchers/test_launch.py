@@ -430,9 +430,11 @@ class TestBackendSupportsFlag:
         return lambda *a, **kw: result
 
     # Shape of ik_llama c446f1e's ``--help`` (printed in full, then exit 1).
-    _IK_HELP = "usage: llama-server [options]\n\ngeneral:\n\n" + "".join(
-        f"  -o{i}, --option-{i} N     synthetic option {i}\n" for i in range(12)
-    ) + "         --fit                    automatically determine which tensors to offload\n"
+    _IK_HELP = (
+        "usage: llama-server [options]\n\ngeneral:\n\n"
+        + "".join(f"  -o{i}, --option-{i} N     synthetic option {i}\n" for i in range(12))
+        + "         --fit                    automatically determine which tensors to offload\n"
+    )
 
     def test_rc1_with_valid_help_page_is_accepted(self, manager, monkeypatch):
         """Regression: ik_llama exits 1 after a complete --help page, so every
@@ -769,7 +771,9 @@ class TestBuildCmdHappyPath:
 
     @pytest.mark.parametrize("probe", [True, False])
     @pytest.mark.parametrize("ngl", ["0", "00", "20", "+20"])
-    def test_ik_llama_fit_omitted_for_fixed_ngl(self, manager, launcher_mock, built_tree, monkeypatch, capsys, probe, ngl):
+    def test_ik_llama_fit_omitted_for_fixed_ngl(
+        self, manager, launcher_mock, built_tree, monkeypatch, capsys, probe, ngl
+    ):
         """ik_llama's --fit forces n_gpu_layers = 999 (validated: "-ngl 0 --fit"
         and "-ngl 10 --fit" offload 25/25), so an explicit layer count drops
         --fit/--fit-margin with a warning, in live launches and saved scripts."""
@@ -1213,7 +1217,9 @@ class TestBuildCmdHappyPath:
         assert "--load-mode" not in cmd
 
     @pytest.mark.parametrize("no_mmap,mlock", [(False, True), (True, True)])
-    def test_saved_script_uses_legacy_flags_on_transition_build(self, manager, launcher_mock, monkeypatch, no_mmap, mlock):
+    def test_saved_script_uses_legacy_flags_on_transition_build(
+        self, manager, launcher_mock, monkeypatch, no_mmap, mlock
+    ):
         """Regression: saved scripts used to skip the probe and always emit
         --load-mode. On b10107-era builds mlock-only became --load-mode
         mmap+mlock (exits: invalid value) and no-mmap+mlock became --load-mode
