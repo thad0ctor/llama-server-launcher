@@ -825,10 +825,35 @@ class TestBuildCmdHappyPath:
         assert "--fit" not in cmd and "--fit-margin" not in cmd
         assert "omitting ik_llama --fit" in capsys.readouterr().err
 
-    def test_ik_llama_fit_kept_with_n_cpu_moe_zero(self, manager, launcher_mock, built_tree):
+    @pytest.mark.parametrize("n_cpu_moe", ["0", "00", "+0"])
+    def test_ik_llama_fit_kept_with_n_cpu_moe_zero(self, manager, launcher_mock, built_tree, n_cpu_moe):
         launcher_mock.backend_selection.set("ik_llama")
         launcher_mock.fit_enabled.set(True)
-        launcher_mock.n_cpu_moe.set("0")
+        launcher_mock.n_cpu_moe.set(n_cpu_moe)
+        assert "--fit" in manager.build_cmd()
+
+    def test_ik_llama_fit_conflict_shows_normalized_n_cpu_moe(self, manager, launcher_mock, built_tree, capsys):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_cpu_moe.set("004")
+        assert "--fit" not in manager.build_cmd()
+        assert "--n-cpu-moe 4." in capsys.readouterr().err
+
+    @pytest.mark.parametrize("custom", ["-ngl 10", "--gpu-layers 0", "--n-gpu-layers=20", "-ngl=5", "--n-gpu-layers"])
+    def test_ik_llama_fit_omitted_for_custom_layer_count(self, manager, launcher_mock, built_tree, capsys, custom):
+        """Round 2 N3: a layer count in custom params comes after the GUI
+        field in argv and wins, but ik's fit would ignore it."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.custom_parameters_list = [custom]
+        assert "--fit" not in manager.build_cmd()
+        assert "omitting ik_llama --fit" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("custom", ["-ngl -1", "--gpu-layers all", "--n-gpu-layers=auto", "-ngl=-1"])
+    def test_ik_llama_fit_kept_for_custom_all_layers(self, manager, launcher_mock, built_tree, custom):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.custom_parameters_list = [custom]
         assert "--fit" in manager.build_cmd()
 
     def test_llama_cpp_fit_kept_with_ngl_zero(self, manager, launcher_mock):

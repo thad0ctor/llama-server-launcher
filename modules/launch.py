@@ -374,6 +374,8 @@ class LaunchManager:
         "--moe-cache-mib",
     )
 
+    _IK_GPU_LAYERS_FLAGS = ("-ngl", "--gpu-layers", "--n-gpu-layers")
+
     def _ik_llama_fit_conflicts(self):
         """Return why ik_llama --fit must not be emitted (empty list = emit).
 
@@ -391,18 +393,29 @@ class LaunchManager:
         except Exception:
             pass
         n_cpu_moe = str(self.launcher.n_cpu_moe.get()).strip()
-        if n_cpu_moe and n_cpu_moe != "0":
-            conflicts.append(f"--n-cpu-moe {n_cpu_moe}")
+        if n_cpu_moe:
+            try:
+                n_cpu_moe = str(int(n_cpu_moe, 10))
+            except ValueError:
+                pass  # not a number: let the binary judge, still manual placement
+            if n_cpu_moe != "0":
+                conflicts.append(f"--n-cpu-moe {n_cpu_moe}")
         tokens = list(self.launcher.ik_llama_tab.get_ik_llama_flags() or [])
         for param_string in self.launcher.custom_parameters_list:
             try:
                 tokens.extend(shlex.split(param_string))
             except ValueError:
                 continue
-        for tok in tokens:
-            name = tok.split("=", 1)[0]
+        for i, tok in enumerate(tokens):
+            name, eq, inline_value = tok.partition("=")
             if name in self._IK_FIT_CONFLICT_FLAGS and name not in conflicts:
                 conflicts.append(name)
+            elif name in self._IK_GPU_LAYERS_FLAGS:
+                # A layer count in custom params overrides the GUI field (it
+                # comes later in argv); fit ignores it unless it means all.
+                value = inline_value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
+                if value.strip().lower() not in ("-1", "auto", "all"):
+                    conflicts.append(f"{name} {value}".strip())
         return conflicts
 
     def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
