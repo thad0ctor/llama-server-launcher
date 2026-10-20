@@ -1465,21 +1465,22 @@ class SpecTab:
             "p_min": self.spec_draft_p_min,
             "p_split": self.spec_draft_p_split,
         }
-        try:
-            current = {key: var.get().strip() for key, var in var_map.items()}
-        except Exception:
-            current = {}
-        # Fields still holding another type's untouched prefill (e.g. MTP's
-        # p_min=0.75 after switching to DSpark) were auto-filled, not typed,
-        # so they are replaced too. Any user edit breaks the match.
-        replace_prefill = current != defaults and current in SPEC_DRAFT_DEFAULTS.values()
+        # Values the launcher itself wrote (this prefill or Reset) are replaced
+        # too, so switching e.g. MTP -> DSpark doesn't keep MTP's p_min=0.75.
+        # Anything typed or loaded from a config is not in this record.
+        prefilled = getattr(self, "_spec_draft_prefilled", None)
+        if prefilled is None:
+            prefilled = {}
+            self._spec_draft_prefilled = prefilled
         for key, default_value in defaults.items():
             var = var_map.get(key)
             if var is None:
                 continue
             try:
-                if replace_prefill or not var.get().strip():
+                current = var.get().strip()
+                if not current or prefilled.get(key) == current:
                     var.set(default_value)
+                    prefilled[key] = default_value
             except Exception:
                 pass
 
@@ -1501,6 +1502,8 @@ class SpecTab:
             "p_min": self.spec_draft_p_min,
             "p_split": self.spec_draft_p_split,
         }
+        # Reset values are launcher-written, so a later type switch may replace them.
+        self._spec_draft_prefilled = {key: value for key, value in values.items() if value}
         for key, value in values.items():
             var = var_map.get(key)
             if var is None:

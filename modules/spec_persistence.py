@@ -223,6 +223,11 @@ def load_spec_from_cfg(launcher, cfg):
     launcher.spec_suffix_max_depth.set(_spec_str("spec_suffix_max_depth"))
     launcher.spec_autotune.set(_spec_bool("spec_autotune"))
     launcher.spec_draft_params.set(_spec_str("spec_draft_params"))
+    # Loaded draft values are the user's; only fill the ones the config left blank.
+    launcher._spec_draft_prefilled = {}
+    apply_defaults = getattr(launcher, "_apply_spec_defaults_if_blank", None)
+    if callable(apply_defaults):
+        apply_defaults()
     launcher.no_mmproj.set(_spec_bool("no_mmproj"))
     # --- Reasoning / Thinking (both backends) ---
     launcher.reasoning_mode.set(_spec_str("reasoning_mode"))

@@ -1226,6 +1226,13 @@ class LlamaCppLauncher:
             self._apply_mtp_parallel_default()
         except Exception as exc:
             print(f"DEBUG: initial _apply_mtp_parallel_default failed: {exc}", file=sys.stderr)
+        # Same for draft-tuning defaults: the spec traces are registered after
+        # persisted settings are restored, so a saved draft-dspark config with
+        # blank fields would otherwise launch with the binary defaults.
+        try:
+            self._apply_spec_defaults_if_blank()
+        except Exception as exc:
+            print(f"DEBUG: initial _apply_spec_defaults_if_blank failed: {exc}", file=sys.stderr)
         # Initial refresh of KV-unification combobox gating.
         try:
             self._refresh_kv_unify_state()

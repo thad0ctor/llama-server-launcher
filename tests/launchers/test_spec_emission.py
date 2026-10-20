@@ -1933,17 +1933,60 @@ class TestSpecDefaultsPrefill:
         assert spec_defaults_stub.spec_draft_n_max.get() == "2"
         assert spec_defaults_stub.spec_draft_p_min.get() == "0"
 
+    def test_user_preset_matching_other_type_is_kept(self, spec_defaults_stub, entry_module):
+        """Values the user typed are kept even when they happen to equal
+        another type's defaults — only launcher-written values are replaced."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-dspark")
+        for var, value in (
+            (spec_defaults_stub.spec_draft_n_max, "3"),
+            (spec_defaults_stub.spec_draft_n_min, "0"),
+            (spec_defaults_stub.spec_draft_p_min, "0.75"),
+            (spec_defaults_stub.spec_draft_p_split, "0.10"),
+        ):
+            var.set(value)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "3"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+
     def test_switch_type_keeps_user_edited_values(self, spec_defaults_stub, entry_module):
-        """A single user edit means the fields are no longer an untouched
-        prefill, so switching types leaves all of them alone."""
+        """Switching types keeps a field the user edited and only moves the
+        untouched prefill fields to the new type's defaults."""
         spec_defaults_stub.spec_enabled.set(True)
         spec_defaults_stub.spec_type.set("draft-mtp")
         entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
         spec_defaults_stub.spec_draft_n_max.set("5")
         spec_defaults_stub.spec_type.set("draft-dspark")
         entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        # The edited field is kept; untouched prefill fields move to DSpark's values.
         assert spec_defaults_stub.spec_draft_n_max.get() == "5"
-        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0"
+
+    def test_loading_config_fills_blanks_and_keeps_saved_values(self, tk_root, entry_module):
+        """load_spec_from_cfg prefills blank draft fields once the config is
+        applied, so a saved draft-dspark config with blank tuning launches
+        with the DSpark defaults; saved values (even ones equal to another
+        type's defaults) are kept."""
+        from modules.spec_persistence import load_spec_from_cfg
+
+        class _Launcher(SimpleNamespace):
+            def __getattr__(self, name):
+                var = tk.StringVar(master=tk_root, value="")
+                setattr(self, name, var)
+                return var
+
+        launcher = _Launcher(spec_enabled=tk.BooleanVar(master=tk_root, value=False))
+        launcher._apply_spec_defaults_if_blank = lambda: entry_module.SpecTab._apply_spec_defaults_if_blank(launcher)
+        # Leftover launcher-written prefill from a previously loaded type must not leak.
+        launcher._spec_draft_prefilled = {"p_min": "0.75"}
+        load_spec_from_cfg(
+            launcher,
+            {"spec_enabled": True, "spec_type": "draft-dspark", "spec_draft_p_min": "0.75"},
+        )
+        assert launcher.spec_draft_n_max.get() == "2"
+        assert launcher.spec_draft_n_min.get() == "0"
+        assert launcher.spec_draft_p_min.get() == "0.75"
+        assert launcher.spec_draft_p_split.get() == "0.10"
 
     def test_ngram_simple_no_prefill(self, spec_defaults_stub, entry_module):
         """ngram-* types don't use the draft tuning knobs and must not be
