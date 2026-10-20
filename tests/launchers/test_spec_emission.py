@@ -879,7 +879,7 @@ class TestSpecSeparateDraftTypesIkLlama:
         self._enable(launcher_mock, spec_type, draft)
         launcher_mock.parallel.set("4")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd or cmd[cmd.index("--parallel") + 1] == "1"
+        assert cmd[cmd.index("--parallel") + 1] == "1"
 
     def test_rejected_on_llama_cpp(self, manager, launcher_mock, spec_type):
         launcher_mock.backend_selection.set("llama.cpp")
@@ -2032,8 +2032,8 @@ class TestMtpParallelDefault:
 
 
 class TestMtpParallelEmissionOverride:
-    """build_cmd() forces --parallel 1 (omitted because it matches default)
-    whenever MTP is active, even if launcher.parallel still says something
+    """build_cmd() forces --parallel 1 (always emitted: llama.cpp's own
+    default is -1 = auto = 4 slots) whenever MTP is active, even if launcher.parallel still says something
     else. This is the authoritative last line of defense — protects against
     any future UI surface setting --parallel without coordinating with the
     MTP/Spec tab."""
@@ -2044,10 +2044,10 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("draft-mtp")
         launcher_mock.parallel.set("8")
         cmd = manager.build_cmd()
-        # --parallel 1 is the binary default so it's omitted from argv,
-        # but the wrong value (8) must NOT appear.
-        assert "--parallel" not in cmd
-        # Specifically: no "8" right after a --parallel token.
+        # The forced value reaches argv; omitting it would let llama.cpp
+        # fall back to auto (4 slots) and silently defeat the override.
+        assert cmd[cmd.index("--parallel") + 1] == "1"
+        assert cmd.count("--parallel") == 1
         captured = capsys.readouterr()
         assert "MTP requires --parallel 1" in captured.err
         assert "'8'" in captured.err
@@ -2058,7 +2058,7 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("draft-mtp")
         launcher_mock.parallel.set("1")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd  # matches default, omitted
+        assert cmd[cmd.index("--parallel") + 1] == "1"
         captured = capsys.readouterr()
         assert "MTP requires --parallel" not in captured.err
 
@@ -2093,7 +2093,7 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("ngram-simple")
         launcher_mock.parallel.set("4")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "1"
         assert "requires --parallel 1" in capsys.readouterr().err
 
     def test_ik_llama_mtp_with_parallel_4_also_overrides(self, manager, launcher_mock, capsys):
@@ -2103,7 +2103,7 @@ class TestMtpParallelEmissionOverride:
         launcher_mock.spec_type.set("mtp")
         launcher_mock.parallel.set("4")
         cmd = manager.build_cmd()
-        assert "--parallel" not in cmd
+        assert cmd[cmd.index("--parallel") + 1] == "1"
         captured = capsys.readouterr()
         assert "MTP requires --parallel 1" in captured.err
         assert "'4'" in captured.err

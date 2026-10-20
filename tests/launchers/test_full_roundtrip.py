@@ -632,6 +632,47 @@ class TestScriptExportIncludesNewFlags:
             )
 
 
+class TestScriptExportKeepsExplicitDefaults:
+    """Saved scripts come from the same ``build_cmd()`` as a live launch, so
+    the GUI values that used to be dropped as stale "llama.cpp defaults"
+    (ctx 2048, ngl 0, parallel 1, port 8080) must be in the script body too.
+    Upstream now defaults to ctx 0 (model), ngl auto, parallel auto and port
+    9931, so a script without them silently runs a different server."""
+
+    @staticmethod
+    def _assert_pairs(text, pairs, quote):
+        for flag, value in pairs:
+            assert f"{quote}{flag}{quote} {quote}{value}{quote}" in text, f"script missing {flag} {value}:\n{text[:2000]}"
+
+    def test_sh_script_keeps_gui_defaults(self, manager, launcher_mock, tmp_path):
+        out = tmp_path / "launch.sh"
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
+            fd.asksaveasfilename.return_value = str(out)
+            manager.save_sh_script()
+        pairs = [("--ctx-size", "2048"), ("--n-gpu-layers", "0"), ("--parallel", "1"), ("--port", "8080")]
+        self._assert_pairs(out.read_text(encoding="utf-8"), pairs, "")
+
+    def test_ps1_script_keeps_gui_defaults(self, manager, launcher_mock, tmp_path):
+        out = tmp_path / "launch.ps1"
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
+            fd.asksaveasfilename.return_value = str(out)
+            manager.save_ps1_script()
+        pairs = [("--ctx-size", "2048"), ("--n-gpu-layers", "0"), ("--parallel", "1"), ("--port", "8080")]
+        self._assert_pairs(out.read_text(encoding="utf-8"), pairs, "'")
+
+    def test_sh_script_mtp_forces_parallel_1(self, manager, launcher_mock, tmp_path):
+        launcher_mock.spec_enabled.set(True)
+        launcher_mock.spec_type.set("draft-mtp")
+        launcher_mock.parallel.set("4")
+        out = tmp_path / "launch.sh"
+        with patch("modules.launch.filedialog") as fd, patch("modules.launch.messagebox"):
+            fd.asksaveasfilename.return_value = str(out)
+            manager.save_sh_script()
+        text = out.read_text(encoding="utf-8")
+        self._assert_pairs(text, [("--parallel", "1")], "")
+        assert "--parallel 4" not in text
+
+
 # ---------------------------------------------------------------------------
 # 5. Defaults remain blank after a fresh app_settings round-trip
 # ---------------------------------------------------------------------------

@@ -752,10 +752,12 @@ class TestBuildCmdHappyPath:
         assert "--fit-ctx" not in cmd
         probe_spy.assert_not_called()
 
-    def test_ctx_size_default_omitted(self, manager, launcher_mock):
+    def test_ctx_size_2048_is_emitted(self, manager, launcher_mock):
+        """Regression: 2048 used to be dropped as a "default", but current
+        llama.cpp defaults to 0 (= the model's full training context)."""
         launcher_mock.ctx_size.set(2048)
         cmd = manager.build_cmd()
-        assert "--ctx-size" not in cmd
+        assert cmd[cmd.index("--ctx-size") + 1] == "2048"
 
     def test_ctx_size_non_default_emitted(self, manager, launcher_mock):
         launcher_mock.ctx_size.set(4096)
@@ -763,11 +765,18 @@ class TestBuildCmdHappyPath:
         assert "--ctx-size" in cmd
         assert cmd[cmd.index("--ctx-size") + 1] == "4096"
 
-    def test_host_port_defaults_omitted(self, manager, launcher_mock):
+    def test_host_default_omitted_port_8080_emitted(self, manager, launcher_mock):
+        """Regression: llama.cpp's default port moved 8080 -> 9931, so the
+        GUI's 8080 must always reach argv. The host default is unchanged."""
         launcher_mock.host.set("127.0.0.1")
         launcher_mock.port.set("8080")
         cmd = manager.build_cmd()
         assert "--host" not in cmd
+        assert cmd[cmd.index("--port") + 1] == "8080"
+
+    def test_empty_port_omitted(self, manager, launcher_mock):
+        launcher_mock.port.set("")
+        cmd = manager.build_cmd()
         assert "--port" not in cmd
 
     def test_host_port_non_defaults_emitted(self, manager, launcher_mock):
@@ -777,8 +786,17 @@ class TestBuildCmdHappyPath:
         assert "--host" in cmd and cmd[cmd.index("--host") + 1] == "0.0.0.0"
         assert "--port" in cmd and cmd[cmd.index("--port") + 1] == "9090"
 
-    def test_n_gpu_layers_zero_omitted(self, manager, launcher_mock):
+    @pytest.mark.parametrize("backend", ["llama.cpp", "ik_llama"])
+    def test_n_gpu_layers_zero_emitted(self, manager, launcher_mock, backend):
+        """Regression: omitting -ngl is NOT CPU-only (llama.cpp: auto,
+        ik_llama: every layer on the GPU), so an explicit 0 must be sent."""
+        launcher_mock.backend_selection.set(backend)
         launcher_mock.n_gpu_layers.set("0")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
+
+    def test_n_gpu_layers_empty_omitted(self, manager, launcher_mock):
+        launcher_mock.n_gpu_layers.set("")
         cmd = manager.build_cmd()
         assert "--n-gpu-layers" not in cmd
 
@@ -972,8 +990,15 @@ class TestBuildCmdHappyPath:
         assert "--mlock" in cmd
         assert "--load-mode" not in cmd
 
-    def test_parallel_default_omitted(self, manager, launcher_mock):
+    def test_parallel_1_emitted(self, manager, launcher_mock):
+        """Regression: llama.cpp's default is -1 (auto = 4 slots), so "1"
+        is not a default and must be sent."""
         launcher_mock.parallel.set("1")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--parallel") + 1] == "1"
+
+    def test_parallel_empty_omitted(self, manager, launcher_mock):
+        launcher_mock.parallel.set("")
         cmd = manager.build_cmd()
         assert "--parallel" not in cmd
 

@@ -591,8 +591,10 @@ class LaunchManager:
         self.add_arg(cmd, "--batch-size", self.launcher.batch_size.get())
         self.add_arg(cmd, "--ubatch-size", self.launcher.ubatch_size.get())
 
-        # Llama.cpp internal defaults: --ctx-size=2048, --seed=-1, --temp=0.8, --min-p=0.05
-        self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()), "2048")  # Use str() for int var
+        # Always pass --ctx-size: current llama.cpp defaults to 0 (= the model's
+        # n_ctx_train), so omitting the GUI's 2048 silently loads the full context.
+        # Sampling defaults below still match both backends: --seed=-1, --temp=0.8, --min-p=0.05
+        self.add_arg(cmd, "--ctx-size", str(self.launcher.ctx_size.get()))  # Use str() for int var
         self.add_arg(cmd, "--seed", self.launcher.seed.get(), "-1")
         self.add_arg(cmd, "--temp", self.launcher.temperature.get(), "0.8")
         self.add_arg(cmd, "--min-p", self.launcher.min_p.get(), "0.05")
@@ -605,9 +607,11 @@ class LaunchManager:
         # Use add_arg which handles the non-empty check
         self.add_arg(cmd, "--tensor-split", tensor_split_val, "")  # Add if non-empty string is provided by user
 
-        # Add --n-gpu-layers if the value is non-empty AND not the default "0" string
+        # Add --n-gpu-layers whenever the field is non-empty, including "0".
+        # Omitting it is NOT CPU-only: llama.cpp defaults to auto (offloads
+        # what fits) and ik_llama puts every layer on the GPU.
         # This argument will now be added regardless of the --tensor-split value
-        self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "0")
+        self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "")
 
         # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)
         # It specifies which GPU is considered the "primary" one, often GPU 0.
@@ -657,7 +661,9 @@ class LaunchManager:
         # applies the override + stderr warning when MTP is active; see
         # modules/spec_launch.py for rationale.
         parallel_val = resolve_effective_parallel(self.launcher, backend)
-        self.add_arg(cmd, "--parallel", parallel_val, "1")  # Omit if 1 (default)
+        # Always pass a non-empty value: llama.cpp's default is -1 (auto = 4
+        # slots), so omitting "1" would also defeat the MTP override above.
+        self.add_arg(cmd, "--parallel", parallel_val)
 
         # --- MoE CPU options ---
         self.add_arg(cmd, "--cpu-moe", self.launcher.cpu_moe.get())  # Omit if False (default)
@@ -669,7 +675,8 @@ class LaunchManager:
 
         # --- Network Settings ---
         self.add_arg(cmd, "--host", self.launcher.host.get(), "127.0.0.1")  # Add host if not default
-        self.add_arg(cmd, "--port", self.launcher.port.get(), "8080")  # Add port if not default
+        # Always pass the port: llama.cpp's default moved from 8080 to 9931.
+        self.add_arg(cmd, "--port", self.launcher.port.get())
 
         # --- CHANGES FOR JSON TEMPLATES / DEFAULT OPTION ---
         # Add --chat-template option ONLY if the source is not "default" (llama.cpp decides)
