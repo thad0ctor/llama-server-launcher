@@ -329,6 +329,36 @@ class LaunchManager:
                 return "\n".join(block)
         return ""
 
+    # llama.cpp's is_truthy()/is_falsey() (common/arg.cpp) for --fit values.
+    _LLAMA_CPP_TRUTHY = ("on", "enabled", "true", "1")
+    _LLAMA_CPP_FALSEY = ("off", "disabled", "false", "0")
+
+    def _custom_param_tokens(self):
+        """Custom parameters as argv tokens (unparseable strings skipped)."""
+        tokens = []
+        for param_string in self.launcher.custom_parameters_list:
+            try:
+                tokens.extend(shlex.split(param_string))
+            except ValueError:
+                continue
+        return tokens
+
+    def _llama_cpp_effective_fit(self):
+        """Whether llama.cpp will actually run --fit: the checkbox emits
+        ``--fit on|off`` before custom parameters, and a later custom
+        ``--fit``/``-fit`` value wins (last occurrence, as in the parser).
+        ``name=value`` forms are rejected by llama.cpp, so they don't count."""
+        fit = bool(self.launcher.fit_enabled.get())
+        tokens = self._custom_param_tokens()
+        for i, tok in enumerate(tokens[:-1]):
+            if tok in ("--fit", "-fit"):
+                value = tokens[i + 1].strip()
+                if value in self._LLAMA_CPP_TRUTHY:
+                    fit = True
+                elif value in self._LLAMA_CPP_FALSEY:
+                    fit = False
+        return fit
+
     def _ctx_size_value(self):
         """The context-size field as an int; a blank/invalid IntVar is 0."""
         try:
@@ -398,12 +428,7 @@ class LaunchManager:
             ncmoe = (value, f"--n-cpu-moe {value}")
         moe_cache = None
         overrides = []
-        tokens = []
-        for param_string in self.launcher.custom_parameters_list:
-            try:
-                tokens.extend(shlex.split(param_string))
-            except ValueError:
-                continue
+        tokens = self._custom_param_tokens()
         tokens.extend(self.launcher.ik_llama_tab.get_ik_llama_flags() or [])
         for i, tok in enumerate(tokens):
             name, eq, inline_value = tok.partition("=")
@@ -800,7 +825,7 @@ class LaunchManager:
         # user") and then OOM on a model that doesn't fit.
         # This argument will now be added regardless of the --tensor-split value
         if n_gpu_layers_val == "-1" and backend != "ik_llama":
-            if self.launcher.fit_enabled.get():
+            if self._llama_cpp_effective_fit():
                 print(
                     "INFO: GPU Layers -1 (All) with Fit on: sending -1 (auto) so llama.cpp's --fit "
                     "decides the offload; turn Fit off to force every layer onto the GPU.",

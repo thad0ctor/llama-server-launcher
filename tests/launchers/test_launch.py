@@ -1043,6 +1043,26 @@ class TestBuildCmdHappyPath:
         assert "--fit decides" in capsys.readouterr().err
         probe.assert_not_called()
 
+    @pytest.mark.parametrize("custom", ["--fit on", "-fit on", "--fit enabled", "--fit 1", "--fit true"])
+    def test_n_gpu_layers_minus_one_honours_custom_fit_on(self, manager, launcher_mock, monkeypatch, custom):
+        """Codex: Fit box off but custom params turn fit on (custom comes
+        later and wins) -> 'all' would make fit abort; send -1 instead."""
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: self._LLAMA_CPP_NGL_HELP)
+        launcher_mock.fit_enabled.set(False)
+        launcher_mock.n_gpu_layers.set("-1")
+        launcher_mock.custom_parameters_list = [custom]
+        cmd = manager.build_cmd(probe_backend=True)
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"
+
+    @pytest.mark.parametrize("custom", ["--fit off", "-fit off", "--fit disabled", "--fit on --fit off"])
+    def test_n_gpu_layers_minus_one_maps_to_all_when_custom_fit_off(self, manager, launcher_mock, monkeypatch, custom):
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: self._LLAMA_CPP_NGL_HELP)
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("-1")
+        launcher_mock.custom_parameters_list = [custom]
+        cmd = manager.build_cmd(probe_backend=True)
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "all"
+
     def test_n_gpu_layers_minus_one_maps_to_all_when_advertised(self, manager, launcher_mock, monkeypatch):
         """Regression: on current llama.cpp -1 means *auto* (validated: 0/25
         layers offloaded under memory pressure vs 25/25 for 'all'). Fit off."""
