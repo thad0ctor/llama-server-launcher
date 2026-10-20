@@ -156,6 +156,16 @@ class ConfigManager:
                         parts.append("gpu-all")
                     else:
                         parts.append(f"gpu={gpu_layers_int}")
+                else:
+                    # Empty (auto) adds no token, which is what the old default
+                    # "0" got (it ran as auto). An explicit 0 is CPU only and
+                    # gets its own token so it can't overwrite the auto config.
+                    try:
+                        explicit_zero = str(current_val).strip() != "" and int(str(current_val).strip(), 10) == 0
+                    except ValueError:
+                        explicit_zero = False
+                    if explicit_zero:
+                        parts.append("cpu-only")
                 # Note: If input was -1 and max_layers is 0, gpu_layers_int is 0, which is correctly treated as default
             # Special handling for Context Size: compare the integer value
             elif key == "ctx_size":

@@ -1065,6 +1065,26 @@ class TestGenerateDefaultConfigName:
         name = cm.generate_default_config_name()
         assert "gpu-all" in name
 
+    def test_explicit_cpu_only_gets_distinct_name_from_auto(self, rich_launcher_factory, tmp_path):
+        """Codex: auto ("") and CPU only ("0") generated the same name, so
+        saving one overwrote the other. Auto keeps the old (token-less) name
+        that the old default "0" produced; other values are unchanged."""
+        from modules.config import ConfigManager
+
+        names = {}
+        for ngl, ngl_int in (("", 0), ("0", 0), ("00", 0), ("12", 12)):
+            launcher = self._launcher(rich_launcher_factory, tmp_path)
+            launcher.model_path.set("/tmp/m.gguf")
+            launcher.threads.set("8")
+            launcher.threads_batch.set("4")
+            launcher.n_gpu_layers.set(ngl)
+            launcher.n_gpu_layers_int.set(ngl_int)
+            names[ngl] = ConfigManager(launcher).generate_default_config_name()
+        assert names[""] == "m"
+        assert names["0"] == names["00"] != names[""]
+        assert "cpu-only" in names["0"]
+        assert "gpu=12" in names["12"] and "cpu-only" not in names["12"]
+
     def test_all_defaults_no_suffix_params(self, rich_launcher_factory, tmp_path):
         from modules.config import ConfigManager
 
