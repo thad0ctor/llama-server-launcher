@@ -70,6 +70,20 @@ SPEC_STR_KEYS = (
 )
 
 
+def coerce_spec_draft_prefilled(raw_value):
+    """Canonical shape for ``spec_draft_prefilled``: a dict of the common
+    draft-control keys to the non-empty string the launcher wrote there.
+    Anything else is dropped, so a hand-edited value can never mark a
+    user's setting as replaceable by more than its own key."""
+    if not isinstance(raw_value, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw_value.items()
+        if key in ("n_max", "n_min", "p_min", "p_split") and isinstance(value, str) and value
+    }
+
+
 def collect_spec_into_cfg(launcher, cfg):
     """Mirror every spec/reasoning/kvu Tk var into the named-config ``cfg``
     dict.
@@ -89,6 +103,9 @@ def collect_spec_into_cfg(launcher, cfg):
     cfg["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(
         launcher.app_settings.get("spec_draft_selected_gpus", [])
     )
+    # Which draft values were launcher-written, so a type switch after loading
+    # this config can still replace them (see spec_tab._spec_draft_prefill_record).
+    cfg["spec_draft_prefilled"] = coerce_spec_draft_prefilled(launcher.app_settings.get("spec_draft_prefilled"))
     cfg["spec_enabled"] = launcher.spec_enabled.get()
     cfg["spec_type"] = launcher.spec_type.get()
     cfg["spec_draft_n_max"] = launcher.spec_draft_n_max.get()
@@ -223,8 +240,10 @@ def load_spec_from_cfg(launcher, cfg):
     launcher.spec_suffix_max_depth.set(_spec_str("spec_suffix_max_depth"))
     launcher.spec_autotune.set(_spec_bool("spec_autotune"))
     launcher.spec_draft_params.set(_spec_str("spec_draft_params"))
-    # Loaded draft values are the user's; only fill the ones the config left blank.
-    launcher._spec_draft_prefilled = {}
+    # Restore which loaded draft values were launcher-written (older configs
+    # carry no record, so their values count as the user's), then fill the
+    # fields the config left blank.
+    launcher.app_settings["spec_draft_prefilled"] = coerce_spec_draft_prefilled(cfg.get("spec_draft_prefilled"))
     apply_defaults = getattr(launcher, "_apply_spec_defaults_if_blank", None)
     if callable(apply_defaults):
         apply_defaults()
@@ -315,6 +334,7 @@ def validate_spec_app_settings(app_settings):
     app_settings["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(
         app_settings.get("spec_draft_selected_gpus", [])
     )
+    app_settings["spec_draft_prefilled"] = coerce_spec_draft_prefilled(app_settings.get("spec_draft_prefilled"))
 
     # If ``spec_draft_device`` is a NON-CUDA override (``Vulkan0``,
     # ``Metal0``, ``SYCL1``, ``ROCm0``, ``HIP1``, ``CPU0``), the user

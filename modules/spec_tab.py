@@ -70,6 +70,23 @@ SPEC_DRAFT_DEFAULTS = {
 }
 
 
+def _spec_draft_prefill_record(owner):
+    """The draft-tuning values the launcher itself wrote (prefill or Reset),
+    keyed like SPEC_DRAFT_DEFAULTS entries. Lives in ``app_settings`` so it is
+    shared by the launcher and SpecTab, saved to disk, and carried in named
+    configs; anything typed or loaded without a record counts as user input."""
+    launcher = getattr(owner, "launcher", owner)
+    settings = getattr(launcher, "app_settings", None)
+    if not isinstance(settings, dict):
+        # Test stubs without app_settings: keep the record on the stub itself.
+        settings = owner.__dict__.setdefault("app_settings", {})
+    record = settings.get("spec_draft_prefilled")
+    if not isinstance(record, dict):
+        record = {}
+        settings["spec_draft_prefilled"] = record
+    return record
+
+
 class SpecTab:
     """MTP / Speculative Decoding tab.
 
@@ -1456,9 +1473,6 @@ class SpecTab:
             return
         spec_type = (self.spec_type.get() or "").strip()
         defaults = SPEC_DRAFT_DEFAULTS.get(spec_type)
-        if defaults is None:
-            # ngram-*, suffix, cache, none, or unknown — no defaults to pre-fill.
-            return
         var_map = {
             "n_max": self.spec_draft_n_max,
             "n_min": self.spec_draft_n_min,
@@ -1467,11 +1481,20 @@ class SpecTab:
         }
         # Values the launcher itself wrote (this prefill or Reset) are replaced
         # too, so switching e.g. MTP -> DSpark doesn't keep MTP's p_min=0.75.
-        # Anything typed or loaded from a config is not in this record.
-        prefilled = getattr(self, "_spec_draft_prefilled", None)
-        if prefilled is None:
-            prefilled = {}
-            self._spec_draft_prefilled = prefilled
+        # Anything the user typed is not in this record.
+        prefilled = _spec_draft_prefill_record(self)
+        if defaults is None:
+            # ngram-*, suffix, cache, dflash, none, or unknown — no defaults to
+            # pre-fill, but don't leave the previous type's prefill behind to be
+            # emitted as explicit flags.
+            for key, var in var_map.items():
+                try:
+                    if prefilled.get(key) and var.get().strip() == prefilled[key]:
+                        var.set("")
+                        del prefilled[key]
+                except Exception:
+                    pass
+            return
         for key, default_value in defaults.items():
             var = var_map.get(key)
             if var is None:
@@ -1503,7 +1526,9 @@ class SpecTab:
             "p_split": self.spec_draft_p_split,
         }
         # Reset values are launcher-written, so a later type switch may replace them.
-        self._spec_draft_prefilled = {key: value for key, value in values.items() if value}
+        prefilled = _spec_draft_prefill_record(self)
+        prefilled.clear()
+        prefilled.update({key: value for key, value in values.items() if value})
         for key, value in values.items():
             var = var_map.get(key)
             if var is None:

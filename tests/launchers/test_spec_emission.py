@@ -1975,10 +1975,26 @@ class TestSpecDefaultsPrefill:
                 setattr(self, name, var)
                 return var
 
-        launcher = _Launcher(spec_enabled=tk.BooleanVar(master=tk_root, value=False))
-        launcher._apply_spec_defaults_if_blank = lambda: entry_module.SpecTab._apply_spec_defaults_if_blank(launcher)
+        launcher = _Launcher(spec_enabled=tk.BooleanVar(master=tk_root, value=False), app_settings={})
+        # Mirror the real binding: the launcher's re-exported helper is a
+        # SpecTab method, so ``self`` is a separate object sharing the vars.
+        spec_tab = SimpleNamespace(
+            launcher=launcher,
+            **{
+                name: getattr(launcher, name)
+                for name in (
+                    "spec_enabled",
+                    "spec_type",
+                    "spec_draft_n_max",
+                    "spec_draft_n_min",
+                    "spec_draft_p_min",
+                    "spec_draft_p_split",
+                )
+            },
+        )
+        launcher._apply_spec_defaults_if_blank = lambda: entry_module.SpecTab._apply_spec_defaults_if_blank(spec_tab)
         # Leftover launcher-written prefill from a previously loaded type must not leak.
-        launcher._spec_draft_prefilled = {"p_min": "0.75"}
+        launcher.app_settings["spec_draft_prefilled"] = {"p_min": "0.75"}
         load_spec_from_cfg(
             launcher,
             {"spec_enabled": True, "spec_type": "draft-dspark", "spec_draft_p_min": "0.75"},
@@ -1987,6 +2003,74 @@ class TestSpecDefaultsPrefill:
         assert launcher.spec_draft_n_min.get() == "0"
         assert launcher.spec_draft_p_min.get() == "0.75"
         assert launcher.spec_draft_p_split.get() == "0.10"
+        # The loaded p_min is the user's, so switching to a type without
+        # defaults keeps it while clearing the launcher-written n_max.
+        launcher.spec_type.set("draft-dflash")
+        launcher._apply_spec_defaults_if_blank()
+        assert launcher.spec_draft_p_min.get() == "0.75"
+        assert launcher.spec_draft_n_max.get() == ""
+
+    def test_loading_config_restores_saved_prefill_record(self, tk_root, entry_module):
+        """A named config carries which values were launcher-written, so
+        switching type after loading still replaces them."""
+        from modules.spec_persistence import collect_spec_into_cfg, load_spec_from_cfg
+
+        class _Launcher(SimpleNamespace):
+            def __getattr__(self, name):
+                var = tk.StringVar(master=tk_root, value="")
+                setattr(self, name, var)
+                return var
+
+        launcher = _Launcher(spec_enabled=tk.BooleanVar(master=tk_root, value=False), app_settings={})
+        launcher._apply_spec_defaults_if_blank = lambda: entry_module.SpecTab._apply_spec_defaults_if_blank(launcher)
+        launcher.spec_enabled.set(True)
+        launcher.spec_type.set("draft-mtp")
+        launcher._apply_spec_defaults_if_blank()
+        cfg = {}
+        collect_spec_into_cfg(launcher, cfg)
+        assert cfg["spec_draft_prefilled"] == {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+
+        launcher.app_settings["spec_draft_prefilled"] = {}
+        load_spec_from_cfg(launcher, cfg)
+        launcher.spec_type.set("draft-dspark")
+        launcher._apply_spec_defaults_if_blank()
+        assert launcher.spec_draft_n_max.get() == "2"
+        assert launcher.spec_draft_p_min.get() == "0"
+
+    def test_prefill_record_survives_restart(self, tk_root, entry_module):
+        """The record lives in app_settings (saved to disk), so MTP values
+        auto-filled in an earlier session are still replaced by DSpark's."""
+        stub = SimpleNamespace(
+            launcher=SimpleNamespace(
+                app_settings={
+                    "spec_draft_prefilled": {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+                }
+            ),
+            spec_enabled=tk.BooleanVar(master=tk_root, value=True),
+            spec_type=tk.StringVar(master=tk_root, value="draft-dspark"),
+            spec_draft_n_max=tk.StringVar(master=tk_root, value="3"),
+            spec_draft_n_min=tk.StringVar(master=tk_root, value="0"),
+            spec_draft_p_min=tk.StringVar(master=tk_root, value="0.75"),
+            spec_draft_p_split=tk.StringVar(master=tk_root, value="0.10"),
+        )
+        entry_module.SpecTab._apply_spec_defaults_if_blank(stub)
+        assert stub.spec_draft_n_max.get() == "2"
+        assert stub.spec_draft_p_min.get() == "0"
+
+    def test_switch_to_type_without_defaults_clears_only_prefill(self, spec_defaults_stub, entry_module):
+        """draft-dflash has no benchmarked defaults: DSpark's auto-filled
+        values are cleared so they aren't emitted as explicit flags, while
+        a value the user typed stays."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-dspark")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        spec_defaults_stub.spec_draft_n_max.set("4")
+        spec_defaults_stub.spec_type.set("draft-dflash")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "4"
+        assert spec_defaults_stub.spec_draft_n_min.get() == ""
+        assert spec_defaults_stub.spec_draft_p_min.get() == ""
+        assert spec_defaults_stub.spec_draft_p_split.get() == ""
 
     def test_ngram_simple_no_prefill(self, spec_defaults_stub, entry_module):
         """ngram-* types don't use the draft tuning knobs and must not be
