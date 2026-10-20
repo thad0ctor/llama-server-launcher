@@ -867,6 +867,48 @@ class TestBuildCmdHappyPath:
         launcher_mock.custom_parameters_list = [custom]
         assert "--fit" not in manager.build_cmd()
 
+    @pytest.mark.parametrize("custom", ["--n-gpu-layers all", "-ngl -1", "--gpu-layers=auto"])
+    def test_ik_llama_fit_kept_when_custom_all_overrides_gui_count(self, manager, launcher_mock, built_tree, custom):
+        """Codex: custom params come later in argv and win, so a GUI fixed
+        count overridden by a custom 'all' must not block --fit."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("10")
+        launcher_mock.custom_parameters_list = [custom]
+        assert "--fit" in manager.build_cmd()
+
+    def test_ik_llama_fit_omitted_when_custom_count_overrides_gui_auto(
+        self, manager, launcher_mock, built_tree, capsys
+    ):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.n_gpu_layers.set("")
+        launcher_mock.custom_parameters_list = ["-ngl -1", "-ngl 12"]  # last one wins
+        assert "--fit" not in manager.build_cmd()
+        assert "-ngl 12" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "gui,custom,expect_fit",
+        [
+            ({"n_cpu_moe": "2"}, ["--n-cpu-moe 0"], True),
+            ({"cpu_moe": True}, ["-ncmoe 0"], True),  # -cmoe sets 999, then 0 wins
+            ({"n_cpu_moe": "0"}, ["-cmoe"], False),
+            ({"n_cpu_moe": "0"}, ["--n-cpu-moe 3", "--n-cpu-moe 0"], True),
+            ({}, ["--moe-cache-mib 512", "--moe-cache-mib 0"], True),
+        ],
+    )
+    def test_ik_llama_fit_uses_last_effective_moe_values(
+        self, manager, launcher_mock, built_tree, gui, custom, expect_fit
+    ):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        if "n_cpu_moe" in gui:
+            launcher_mock.n_cpu_moe.set(gui["n_cpu_moe"])
+        if gui.get("cpu_moe"):
+            launcher_mock.cpu_moe.set(True)
+        launcher_mock.custom_parameters_list = custom
+        assert ("--fit" in manager.build_cmd()) is expect_fit
+
     @pytest.mark.parametrize("custom", ["-ngl -1", "--gpu-layers all", "--n-gpu-layers=auto", "-ngl=-1"])
     def test_ik_llama_fit_kept_for_custom_all_layers(self, manager, launcher_mock, built_tree, custom):
         launcher_mock.backend_selection.set("ik_llama")

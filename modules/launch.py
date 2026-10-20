@@ -363,72 +363,77 @@ class LaunchManager:
         )
         return "-1"
 
-    # ik_llama options that place tensors by hand; its --fit refuses them.
-    _IK_FIT_CONFLICT_FLAGS = (
-        "-ot",
-        "--override-tensor",
-        "-cmoe",
-        "--cpu-moe",
-        "-ncmoe",
-        "--n-cpu-moe",
-        "--moe-cache-mib",
-    )
-
+    # ik_llama spellings of the GPU-layer count (custom params can override the field).
     _IK_GPU_LAYERS_FLAGS = ("-ngl", "--gpu-layers", "--n-gpu-layers")
-    # Value-taking members of _IK_FIT_CONFLICT_FLAGS that ik treats as off at 0.
-    _IK_FIT_ZERO_OK_FLAGS = ("-ncmoe", "--n-cpu-moe", "--moe-cache-mib")
+
+    @staticmethod
+    def _normalized_count(value):
+        """An int-like CLI value in canonical form ("00" -> "0"); other text
+        lower-cased ("all", "auto") or "" when missing."""
+        text = str(value).strip()
+        try:
+            return str(int(text, 10))
+        except ValueError:
+            return text.lower()
 
     def _ik_llama_fit_conflicts(self):
         """Return why ik_llama --fit must not be emitted (empty list = emit).
 
-        Looks at the GPU-layers field, the MoE CPU fields, the ik_llama tab
-        flags and custom parameters (``-ot x``, ``--n-cpu-moe=4``, ...).
+        Uses the LAST effective value of each placement setting, in argv
+        order (later wins in ik's parser): GUI fields, then custom parameters,
+        then the ik_llama tab flags. So a GUI ``-ngl 10`` overridden by a
+        custom ``-ngl -1`` does not block fit, and a GUI ``--n-cpu-moe 2``
+        overridden by a custom ``--n-cpu-moe 0`` doesn't either.
         """
-        conflicts = []
-        ngl = self._normalized_gpu_layers()
-        if ngl not in ("", "-1", "all"):
-            label = "CPU only" if ngl == "0" else "a fixed layer count"
-            conflicts.append(f"--n-gpu-layers {ngl} ({label})")
+        ngl = (self._normalized_gpu_layers(), None)  # (value, custom spelling)
+        ncmoe = None  # (value, label); ik's -cmoe sets ncmoe = 999
         try:
             if self.launcher.cpu_moe.get():
-                conflicts.append("--cpu-moe")
+                ncmoe = ("999", "--cpu-moe")
         except Exception:
             pass
-        n_cpu_moe = str(self.launcher.n_cpu_moe.get()).strip()
-        if n_cpu_moe:
-            try:
-                n_cpu_moe = str(int(n_cpu_moe, 10))
-            except ValueError:
-                pass  # not a number: let the binary judge, still manual placement
-            if n_cpu_moe != "0":
-                conflicts.append(f"--n-cpu-moe {n_cpu_moe}")
-        tokens = list(self.launcher.ik_llama_tab.get_ik_llama_flags() or [])
+        gui_ncmoe = str(self.launcher.n_cpu_moe.get()).strip()
+        if gui_ncmoe:
+            value = self._normalized_count(gui_ncmoe)
+            ncmoe = (value, f"--n-cpu-moe {value}")
+        moe_cache = None
+        overrides = []
+        tokens = []
         for param_string in self.launcher.custom_parameters_list:
             try:
                 tokens.extend(shlex.split(param_string))
             except ValueError:
                 continue
+        tokens.extend(self.launcher.ik_llama_tab.get_ik_llama_flags() or [])
         for i, tok in enumerate(tokens):
             name, eq, inline_value = tok.partition("=")
-            value = inline_value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
-            if name in self._IK_FIT_ZERO_OK_FLAGS:
-                # ik only refuses these with --fit when > 0 (src/llama.cpp
-                # ``ml.ncmoe > 0``; common.cpp ``moe_cache_size > 0``).
-                try:
-                    if int(value.strip(), 10) == 0:
-                        continue
-                except ValueError:
-                    pass
-                entry = f"{name} {value}".strip()
-                if entry not in conflicts:
-                    conflicts.append(entry)
-            elif name in self._IK_FIT_CONFLICT_FLAGS and name not in conflicts:
-                conflicts.append(name)
-            elif name in self._IK_GPU_LAYERS_FLAGS:
-                # A layer count in custom params overrides the GUI field (it
-                # comes later in argv); fit ignores it unless it means all.
-                if value.strip().lower() not in ("-1", "auto", "all"):
-                    conflicts.append(f"{name} {value}".strip())
+            # A trailing flag with no value is a parse error in ik; never "auto".
+            value = inline_value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "<missing>")
+            if name in self._IK_GPU_LAYERS_FLAGS:
+                ngl = (self._normalized_count(value), name)
+            elif name in ("-cmoe", "--cpu-moe"):
+                ncmoe = ("999", name)
+            elif name in ("-ncmoe", "--n-cpu-moe"):
+                ncmoe = (self._normalized_count(value), f"{name} {value}".strip())
+            elif name == "--moe-cache-mib":
+                moe_cache = (self._normalized_count(value), f"{name} {value}".strip())
+            elif name in ("-ot", "--override-tensor") and name not in overrides:
+                overrides.append(name)
+
+        conflicts = []
+        ngl_value, ngl_flag = ngl
+        if ngl_value not in ("", "-1", "all", "auto"):
+            if ngl_flag is None:
+                label = "CPU only" if ngl_value == "0" else "a fixed layer count"
+                conflicts.append(f"--n-gpu-layers {ngl_value} ({label})")
+            else:
+                conflicts.append(f"{ngl_flag} {ngl_value}")
+        # ik only refuses --fit with ncmoe > 0 (src/llama.cpp) and
+        # moe_cache_size > 0 (common.cpp); 0 switches both off.
+        for setting in (ncmoe, moe_cache):
+            if setting is not None and setting[0] != "0":
+                conflicts.append(setting[1])
+        conflicts.extend(overrides)  # tensor overrides accumulate; any one conflicts
         return conflicts
 
     def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
