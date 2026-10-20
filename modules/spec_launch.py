@@ -84,6 +84,10 @@ _DRAFT_CAPABLE_SPEC_TYPES_IK_LLAMA = frozenset({"mtp", "dflash", "dspark"})
 # ik_llama spec_types that always load a separate ``--model-draft`` GGUF
 # (mtp only does so behind the ``spec_use_draft_model`` opt-in).
 _REQUIRES_DRAFT_MODEL_SPEC_TYPES_IK_LLAMA = frozenset({"dflash", "dspark"})
+# The --spec-type stage ik_llama mtp turns into when the opt-in separate draft
+# model is used. Not selectable in the UI, but emitted (the CI drift manifest
+# lists it so the weekly check probes it).
+_IK_SEPARATE_DRAFT_SPEC_TYPE = "draft"
 
 # Spec types that load a SEPARATE draft model on its own GPU subset.
 # MTP (both backends) is excluded because the MTP head is embedded in
@@ -852,7 +856,7 @@ def emit_spec_args(launcher, backend, cmd):
                                     cmd.extend(["--model-draft", str(draft_path.resolve())])
                                     draft_model_emitted = True
                                     if not requires_draft:
-                                        emit_spec_type = "draft"
+                                        emit_spec_type = _IK_SEPARATE_DRAFT_SPEC_TYPE
                                 elif draft_path is not None:
                                     print(
                                         f"WARNING: draft model path '{mp}' is not a file; skipping --model-draft emission.",

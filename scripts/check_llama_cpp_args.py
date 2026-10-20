@@ -159,9 +159,10 @@ LLAMA_CPP_FLAGS = frozenset(
 )
 
 
-# ``--spec-type`` values the launcher offers per backend. Mirrors the
-# ``_ALLOWED_SPEC_TYPES_*`` whitelists in modules/spec_launch.py (a unit test
-# keeps them in sync) without importing launcher code into this script.
+# ``--spec-type`` values the launcher emits per backend: the UI whitelists
+# (``_ALLOWED_SPEC_TYPES_*`` in modules/spec_launch.py) plus stages
+# emit_spec_args derives itself (ik mtp + separate draft model -> "draft").
+# A unit test keeps them in sync without importing launcher code here.
 LLAMA_CPP_SPEC_TYPES = (
     "none",
     "draft-simple",
@@ -186,6 +187,7 @@ IK_LLAMA_SPEC_TYPES = (
     "ngram-map-k4v",
     "ngram-mod",
     "suffix",
+    "draft",  # derived: mtp with the opt-in separate draft model
 )
 
 

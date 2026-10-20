@@ -555,10 +555,40 @@ def test_binary_mode_probes_every_emitted_value(monkeypatch, tmp_path):
 
 
 def test_spec_type_manifest_matches_launcher_whitelists():
-    from modules.spec_launch import _ALLOWED_SPEC_TYPES_IK_LLAMA, _ALLOWED_SPEC_TYPES_LLAMA_CPP
+    from modules.spec_launch import (
+        _ALLOWED_SPEC_TYPES_IK_LLAMA,
+        _ALLOWED_SPEC_TYPES_LLAMA_CPP,
+        _IK_SEPARATE_DRAFT_SPEC_TYPE,
+    )
 
     assert set(check_llama_cpp_args.LLAMA_CPP_SPEC_TYPES) == _ALLOWED_SPEC_TYPES_LLAMA_CPP
-    assert set(check_llama_cpp_args.IK_LLAMA_SPEC_TYPES) == _ALLOWED_SPEC_TYPES_IK_LLAMA
+    # ik also emits the derived "draft" stage (mtp + separate draft model).
+    assert set(check_llama_cpp_args.IK_LLAMA_SPEC_TYPES) == _ALLOWED_SPEC_TYPES_IK_LLAMA | {
+        _IK_SEPARATE_DRAFT_SPEC_TYPE
+    }
+
+
+def test_ik_derived_draft_stage_is_probed(monkeypatch, tmp_path):
+    """Codex: ik mtp with a separate draft model emits --spec-type draft,
+    which no UI whitelist lists, so the binary probe never covered it."""
+    seen = []
+
+    def _accepts(binary, flag, spec):
+        seen.append((flag, spec.sample_value))
+        return True
+
+    monkeypatch.setattr(check_llama_cpp_args, "binary_accepts_flag", _accepts)
+    inputs = {"--spec-type": check_llama_cpp_args.IK_LLAMA_FLAG_INPUTS["--spec-type"]}
+    check_llama_cpp_args.audit_result(
+        help_text="  --spec-type SPEC   stage\n",
+        source_paths=[],
+        expected_flags=set(inputs),
+        known_non_llama_cpp_flags=set(),
+        flag_inputs=inputs,
+        backend_name="ik_llama",
+        probe_binary=tmp_path / "llama-server",
+    )
+    assert ("--spec-type", "draft") in seen
 
 
 def test_load_mode_manifest_matches_launcher_mapping():
