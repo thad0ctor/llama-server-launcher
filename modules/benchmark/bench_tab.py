@@ -1158,7 +1158,12 @@ class BenchmarkTab:
         except SweepError as exc:
             self._set_preview(f"(incomplete) {exc}")
             return
-        if tool == TOOL_LLAMA_BENCH:
+        if tool == TOOL_LLAMA_BENCH and len(pairs) > 1:
+            # A swept single-value ik_llama lever (-rtr, -fmoe, …) splits the run.
+            lines.append(
+                f"# {len(pairs)} invocation(s) (one per single-value ik_llama lever combo), {size} matrix row(s)"
+            )
+        elif tool == TOOL_LLAMA_BENCH:
             lines.append(f"# 1 invocation, {size} matrix row(s)")
         else:
             lines.append(f"# {len(pairs)} invocation(s) (cartesian product)")
@@ -1542,7 +1547,7 @@ class BenchmarkTab:
             self._append_console(f"(run exited with code {result.rc})", tag="error")
         # Parse into rows.
         if result.tool == TOOL_LLAMA_BENCH:
-            rows = results.parse_llama_bench_json(result.stdout)
+            rows = results.parse_llama_bench_json(result.stdout, result.combo)
         else:
             rows = results.parse_sweep_bench_table(result.stdout, result.combo)
         if rows:

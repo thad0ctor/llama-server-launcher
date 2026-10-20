@@ -285,8 +285,8 @@ def test_launcher_backend_change_mirrors_into_tab(bench_tab):
 
 
 def test_ik_value_lever_renders_in_command(bench_tab):
-    # -mqkv is a VALUE lever (0/1), not a bare flag: on ik_llama's llama-bench
-    # it renders as a native comma-swept value.
+    # -mqkv is a VALUE lever (0/1), not a bare flag. ik_llama's llama-bench
+    # reads ONE value per run (std::stoi), so a 0,1 sweep becomes two runs.
     from modules.benchmark.detection import TOOL_LLAMA_BENCH
 
     bench_tab.backend_var.set("ik_llama")
@@ -297,11 +297,11 @@ def test_ik_value_lever_renders_in_command(bench_tab):
     bench_tab.lever_vars["mqkv"]["mode"].set("list")
     bench_tab.lever_vars["mqkv"]["values"].set("0,1")
 
-    commands, _ = bench_tab._build_command_list()
-    assert len(commands) == 1
-    cmd = commands[0]
-    idx = cmd.index("-mqkv")
-    assert cmd[idx + 1] == "0,1"
+    commands, combos = bench_tab._build_command_list()
+    assert [cmd[cmd.index("-mqkv") + 1] for cmd in commands] == ["0", "1"]
+    assert combos == [{"mqkv": "0"}, {"mqkv": "1"}]
+    bench_tab.refresh_preview()
+    assert "# 2 invocation(s)" in bench_tab._preview.get("1.0", "end")
 
 
 def test_ik_sweep_lever_roundtrips_through_save_load(bench_tab):

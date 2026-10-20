@@ -5,7 +5,10 @@ work:
 
 * **llama-bench** accepts comma-separated *lists* for most parameters and
   builds the matrix itself in a single process. :func:`llama_bench_command`
-  therefore emits one command with each swept lever joined by commas.
+  therefore emits one command with each swept lever joined by commas. A few
+  ik_llama levers are parsed as a single value (``bench_scalar``); sweeping
+  one of those splits the run into one invocation per value
+  (:func:`llama_bench_commands`).
 
 * **llama-sweep-bench** (ik_llama) takes server-style flags and has no list
   syntax, so :func:`sweep_bench_commands` computes the cartesian product of
@@ -62,6 +65,10 @@ class Lever:
     # keep on llama-bench. When True, :func:`sweep_bench_commands` renders this
     # lever like flash-attn's bare pattern; llama-bench rendering is unaffected.
     sweep_bare: bool = False
+    # ik_llama's llama-bench parses this flag with ``std::stoi`` (one value, no
+    # list): ``-rtr 0,1`` silently runs only 0. When True and swept,
+    # :func:`llama_bench_commands` runs one llama-bench invocation per value.
+    bench_scalar: bool = False
     # Attribute on the launcher to seed a baseline value from, if any.
     seed_attr: str = ""
     help: str = ""
@@ -132,9 +139,11 @@ LEVERS: tuple[Lever, ...] = (
     # These flags exist only in ik_llama's builds (not upstream llama.cpp), so
     # they are scoped to the ik_llama backend. Some apply to llama-bench only;
     # others (verified against the real binaries) also apply to
-    # llama-sweep-bench. On llama-bench every value lever is natively
-    # comma-sweepable just like the built-in list levers; on sweep-bench the
-    # ``sweep_bare`` toggles below render as bare present/absent flags instead.
+    # llama-sweep-bench. On ik llama-bench only -mla/-amb (and -fa/-gr) take a
+    # comma list; the 0/1 toggles and --n-cpu-moe are parsed with std::stoi
+    # (``"0,1"`` -> 0), so they are ``bench_scalar`` and a sweep becomes one
+    # invocation per value. On sweep-bench the ``sweep_bare`` toggles below
+    # render as bare present/absent flags instead.
     Lever(
         "rtr",
         "Run-time repack (-rtr)",
@@ -143,6 +152,7 @@ LEVERS: tuple[Lever, ...] = (
         _BOTH,
         backends=_IK_BACKEND,
         sweep_bare=True,
+        bench_scalar=True,
         help="ik_llama run-time tensor repack (0/1).",
     ),
     Lever(
@@ -152,6 +162,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama fused mixture-of-experts (0/1).",
     ),
     Lever(
@@ -161,6 +172,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama grouped expert routing (0/1).",
     ),
     Lever(
@@ -170,6 +182,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama disable fused up-gate (0/1).",
     ),
     Lever(
@@ -197,6 +210,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BOTH,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama number of MoE layers kept on CPU.",
     ),
     Lever(
@@ -207,6 +221,7 @@ LEVERS: tuple[Lever, ...] = (
         _BOTH,
         backends=_IK_BACKEND,
         sweep_bare=True,
+        bench_scalar=True,
         help="ik_llama merge QKV (0/1).",
     ),
     Lever(
@@ -216,6 +231,7 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
+        bench_scalar=True,
         help="ik_llama merge up-gate experts (0/1).",
     ),
     Lever(
@@ -225,7 +241,9 @@ LEVERS: tuple[Lever, ...] = (
         KIND_INT,
         _BENCH_ONLY,
         backends=_IK_BACKEND,
-        help="ik_llama rope cache (0/1).",
+        bench_scalar=True,
+        help="ik_llama rope cache (0/1). Only llama-bench still wires it up (server/sweep-bench ignore it), "
+        "and only some architectures (glm4, qwen3, deepseek2, gemma3, ...) use it.",
     ),
     Lever(
         "ser",
@@ -601,6 +619,8 @@ def llama_bench_command(
     Swept levers become comma-joined list arguments; llama-bench expands
     them internally. Levers that don't apply to llama-bench are silently
     skipped (use :func:`split_axes_for_tool` to surface them in the UI).
+    A swept ``bench_scalar`` lever can't be expressed in one invocation and
+    raises :class:`SweepError`; use :func:`llama_bench_commands`.
 
     ``backend`` selects flash-attn rendering: ``"ik_llama"`` emits numeric
     ``-fa 1,0``; any other value keeps the upstream ``-fa on,off`` tokens.
@@ -611,6 +631,12 @@ def llama_bench_command(
         raise SweepError("no model selected")
     cmd: list[str] = [exe, "-m", model]
     applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
+    scalar = _swept_bench_scalar_axes(applicable)
+    if scalar:
+        raise SweepError(
+            f"llama-bench takes a single {scalar[0].flag!r} value per run; "
+            f"use llama_bench_commands() to split the sweep into one run per value"
+        )
     for axis in applicable:
         if axis.kind == KIND_FA:
             values = _render_fa_values(axis.values, backend)
@@ -646,6 +672,60 @@ def llama_bench_command(
         cmd += ["-o", output_format]
     cmd += _extra_tokens(extra_args)
     return cmd
+
+
+def _swept_bench_scalar_axes(applicable: list[Axis]) -> list[Axis]:
+    """Swept axes whose lever llama-bench parses as a single value."""
+    return [axis for axis in applicable if not axis.is_custom and axis.lever.bench_scalar and axis.is_swept]
+
+
+def llama_bench_commands(
+    exe: str,
+    model: str,
+    axes: list[Axis],
+    *,
+    backend: str = "llama.cpp",
+    output_format: str = "json",
+    repetitions: int | None = None,
+    extra_args: str | list[str] | None = None,
+) -> list[tuple[list[str], dict[str, str]]]:
+    """Build the llama-bench invocation(s) covering the whole matrix.
+
+    Normally one command with an empty combo (llama-bench expands the comma
+    lists itself). Swept ``bench_scalar`` levers (ik_llama's -rtr, -fmoe, …)
+    are expanded here instead: one invocation per combination of their
+    values, each still carrying the native comma lists, and tagged with the
+    scalar values it pins so result rows stay labelled.
+    """
+    applicable, _ = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, backend)
+    scalar = _swept_bench_scalar_axes(applicable)
+
+    def _command(run_axes: list[Axis]) -> list[str]:
+        return llama_bench_command(
+            exe,
+            model,
+            run_axes,
+            backend=backend,
+            output_format=output_format,
+            repetitions=repetitions,
+            extra_args=extra_args,
+        )
+
+    if not scalar:
+        return [(_command(axes), {})]
+    total = 1
+    for axis in scalar:
+        total *= len(axis.values)
+    if total > MAX_SWEEP_COMBOS:
+        raise SweepError(
+            f"sweep expands to {total} llama-bench runs (max {MAX_SWEEP_COMBOS}); narrow the parameter ranges."
+        )
+    scalar_keys = {axis.key for axis in scalar}
+    out: list[tuple[list[str], dict[str, str]]] = []
+    for combo in _cartesian(scalar):
+        pinned = [Axis(axis.key, [combo[axis.key]]) if axis.key in scalar_keys else axis for axis in axes]
+        out.append((_command(pinned), combo))
+    return out
 
 
 def _cartesian(applicable: list[Axis]) -> list[dict[str, str]]:
@@ -774,11 +854,12 @@ def build_commands(
     """Uniform entry point returning ``(command, combo)`` pairs for ``tool``.
 
     llama-bench yields a single pair with an empty combo (it emits the whole
-    matrix itself); sweep-bench yields one pair per combination. ``backend``
-    is forwarded to :func:`llama_bench_command` for flash-attn rendering.
+    matrix itself) unless a single-value ik_llama lever is swept, which adds
+    one pair per value (:func:`llama_bench_commands`); sweep-bench yields one
+    pair per combination. ``backend`` is forwarded for flash-attn rendering.
     """
     if tool == TOOL_LLAMA_BENCH:
-        cmd = llama_bench_command(
+        return llama_bench_commands(
             exe,
             model,
             axes,
@@ -787,7 +868,6 @@ def build_commands(
             repetitions=repetitions,
             extra_args=extra_args,
         )
-        return [(cmd, {})]
     if tool == TOOL_SWEEP_BENCH:
         # ``repetitions`` is intentionally NOT forwarded: llama-sweep-bench has
         # no -r/--repetitions flag (it sweeps context internally), so there is

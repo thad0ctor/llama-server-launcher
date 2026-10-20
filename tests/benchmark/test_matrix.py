@@ -377,8 +377,8 @@ def test_ik_lever_applies_only_to_ik_backend():
     from modules.benchmark.matrix import LEVERS_BY_KEY
 
     rtr = LEVERS_BY_KEY["rtr"]
-    # Applies on the ik_llama backend for BOTH tools (as a native comma sweep on
-    # llama-bench, as a bare flag on llama-sweep-bench).
+    # Applies on the ik_llama backend for BOTH tools (one value per llama-bench
+    # run, as a bare flag on llama-sweep-bench).
     assert rtr.applies_to(TOOL_LLAMA_BENCH, "ik_llama")
     assert rtr.applies_to(TOOL_SWEEP_BENCH, "ik_llama")
     # NOT on the llama.cpp backend for either tool (the flag doesn't exist
@@ -387,18 +387,64 @@ def test_ik_lever_applies_only_to_ik_backend():
     assert not rtr.applies_to(TOOL_SWEEP_BENCH, "llama.cpp")
 
 
-def test_ik_lever_renders_native_comma_sweep_on_llama_bench():
+_IK_BENCH_SCALAR_KEYS = ("rtr", "fmoe", "ger", "no_fug", "mqkv", "muge", "rcache", "ik_n_cpu_moe")
+
+
+def test_rtr_sweep_on_llama_bench_produces_two_runs():
+    # Regression: ik llama-bench parses -rtr with std::stoi, so "-rtr 0,1"
+    # silently ran only 0 (one result row, rc=0). Each value needs its own run.
     axes = [Axis("rtr", ["0", "1"])]
     pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 2
+    by_value = {combo["rtr"]: cmd for cmd, combo in pairs}
+    assert set(by_value) == {"0", "1"}
+    for value, cmd in by_value.items():
+        assert cmd[cmd.index("-rtr") + 1] == value
+        assert cmd.count("-rtr") == 1
+
+
+@pytest.mark.parametrize("key", _IK_BENCH_SCALAR_KEYS)
+def test_single_value_ik_levers_never_render_a_comma_list(key):
+    from modules.benchmark.matrix import LEVERS_BY_KEY
+
+    assert LEVERS_BY_KEY[key].bench_scalar is True
+    axes = [Axis(key, ["0", "1"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    flag = LEVERS_BY_KEY[key].flag
+    assert [cmd[cmd.index(flag) + 1] for cmd, _ in pairs] == ["0", "1"]
+
+
+def test_scalar_split_keeps_native_comma_lists_and_crosses_scalars():
+    axes = [Axis("rtr", ["0", "1"]), Axis("fmoe", ["0", "1"]), Axis("amb", ["0", "512"]), Axis("threads", ["8"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 4
+    assert {(c["rtr"], c["fmoe"]) for _, c in pairs} == {("0", "0"), ("0", "1"), ("1", "0"), ("1", "1")}
+    for cmd, _ in pairs:
+        # -amb/-mla/-fa stay native comma sweeps inside each run.
+        assert cmd[cmd.index("-amb") + 1] == "0,512"
+        assert cmd[-2:] == ["-o", "json"]
+    # Row count is unchanged: 4 runs x 2 -amb values.
+    assert matrix_size(axes, TOOL_LLAMA_BENCH, "ik_llama") == 8
+
+
+def test_single_scalar_value_stays_one_run():
+    axes = [Axis("rtr", ["1"]), Axis("threads", ["8", "16"])]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
     assert len(pairs) == 1
-    cmd = pairs[0][0]
-    idx = cmd.index("-rtr")
-    assert cmd[idx + 1] == "0,1"
+    cmd, combo = pairs[0]
+    assert combo == {}
+    assert cmd[cmd.index("-rtr") + 1] == "1"
+    assert cmd[cmd.index("-t") + 1] == "8,16"
+
+
+def test_llama_bench_command_refuses_swept_scalar_lever():
+    with pytest.raises(SweepError, match="single '-rtr' value"):
+        llama_bench_command("/b/llama-bench", "/m.gguf", [Axis("rtr", ["0", "1"])], backend="ik_llama")
 
 
 def test_mqkv_is_value_lever_on_llama_bench_bare_on_sweep():
-    # -mqkv takes a <0|1> value on llama-bench (native comma-sweepable) but is a
-    # BARE flag on sweep-bench; it is dropped on the llama.cpp backend entirely.
+    # -mqkv takes ONE <0|1> value per llama-bench run but is a BARE flag on
+    # sweep-bench; it is dropped on the llama.cpp backend entirely.
     from modules.benchmark.matrix import LEVERS_BY_KEY
 
     mqkv = LEVERS_BY_KEY["mqkv"]
@@ -409,9 +455,7 @@ def test_mqkv_is_value_lever_on_llama_bench_bare_on_sweep():
 
     axes = [Axis("mqkv", ["0", "1"])]
     pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
-    cmd = pairs[0][0]
-    idx = cmd.index("-mqkv")
-    assert cmd[idx + 1] == "0,1"
+    assert [cmd[cmd.index("-mqkv") + 1] for cmd, _ in pairs] == ["0", "1"]
     # Dropped entirely on the llama.cpp backend.
     applicable, ignored = split_axes_for_tool(axes, TOOL_LLAMA_BENCH, "llama.cpp")
     assert applicable == []
@@ -527,12 +571,12 @@ def test_rtr_renders_bare_flag_on_sweep_bench():
     assert "-rtr" not in off_cmd
 
 
-def test_rtr_still_native_comma_sweep_on_llama_bench():
-    # On llama-bench the same lever keeps its native "<flag> 0,1" value form.
-    axes = [Axis("rtr", ["0", "1"])]
+def test_rtr_keeps_value_form_on_llama_bench():
+    # On llama-bench the same lever keeps its "<flag> <0|1>" value form.
+    axes = [Axis("rtr", ["1"])]
     cmd = llama_bench_command("/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
     idx = cmd.index("-rtr")
-    assert cmd[idx + 1] == "0,1"
+    assert cmd[idx + 1] == "1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
