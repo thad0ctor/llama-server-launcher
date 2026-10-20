@@ -1233,6 +1233,14 @@ class BenchmarkTab:
                 text = str(raw).strip()
                 if text == "":
                     continue
+                # The launcher's ctx 0 means "the model's context"; as a
+                # sweep-bench -c it would sweep up to n_ctx_train, so don't seed it.
+                if lever.key == "ctx_size":
+                    try:
+                        if int(text) <= 0:
+                            continue
+                    except ValueError:
+                        continue
                 v["values"].set(text)
             v["mode"].set("list")
             v["include"].set(True)

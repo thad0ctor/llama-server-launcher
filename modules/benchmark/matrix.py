@@ -678,8 +678,10 @@ def llama_bench_command(
 # single pattern), verified against examples/llama-bench/llama-bench.cpp at
 # c446f1e. A custom-flag axis using one of them is split like a
 # ``bench_scalar`` lever instead of comma-joined (``-fmoe 0,1`` runs only 0).
-# -ot is included because a comma list there means several simultaneous
-# overrides in one run, not a sweep. (-ncmoe is not a llama-bench spelling.)
+# -ot is NOT here: parse_buft_overrides takes a comma list of overrides that
+# all apply to ONE run, so ``-ot a=CPU,b=CPU`` must stay one value (the
+# built-in ``ot`` lever sweeps whole patterns separated by ';'). (-ncmoe is
+# not a llama-bench spelling.)
 _IK_LLAMA_BENCH_SINGLE_VALUE_FLAGS = frozenset(
     {
         "-w", "--warmup",
@@ -695,7 +697,6 @@ _IK_LLAMA_BENCH_SINGLE_VALUE_FLAGS = frozenset(
         "-no-fug", "--no-fused-up-gate",
         "-no-ooae", "--no-offload-only-active-experts",
         "--n-cpu-moe",
-        "-ot", "--override-tensor",
         "--print-overrides",
     }
 )  # fmt: skip
@@ -854,6 +855,12 @@ def sweep_bench_commands(
             f"narrow the parameter ranges."
         )
     _check_mtp_axes(applicable)
+    for axis in applicable:
+        if not axis.is_custom and axis.key == "ctx_size" and any(int(v) <= 0 for v in axis.values):
+            raise SweepError(
+                "llama-sweep-bench -c 0 means the model's full training context (it sweeps all the way "
+                "up to it, which can be huge or OOM); give an explicit context size."
+            )
     extra = _extra_tokens(extra_args)
     out: list[tuple[list[str], dict[str, str]]] = []
     for combo in _cartesian(applicable):

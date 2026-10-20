@@ -867,3 +867,20 @@ def test_sweep_bench_rows_parsed_from_stdout_or_stderr_once(bench_tab, where):
     bench_tab._ingest_result(result)
     assert len(bench_tab._result_rows) == 1
     assert bench_tab._result_rows[0].get("[mtp]") == "1"
+
+
+@pytest.mark.parametrize("ctx,expected", [(0, None), (-5, None), (8192, "8192")])
+def test_seed_skips_model_context_ctx_size(bench_tab, ctx, expected):
+    """Round 2 N1: the launcher's new ctx default 0 (model's context) must not
+    seed sweep-bench -c 0, which sweeps up to n_ctx_train."""
+    import tkinter as tk
+
+    bench_tab.launcher.ctx_size = tk.IntVar(value=ctx)
+    bench_tab.lever_vars["ctx_size"]["include"].set(False)
+    bench_tab.lever_vars["ctx_size"]["values"].set("")
+    bench_tab.seed_from_config()
+    if expected is None:
+        assert bool(bench_tab.lever_vars["ctx_size"]["include"].get()) is False
+        assert bench_tab.lever_vars["ctx_size"]["values"].get() == ""
+    else:
+        assert bench_tab.lever_vars["ctx_size"]["values"].get() == expected

@@ -437,9 +437,7 @@ def test_single_scalar_value_stays_one_run():
     assert cmd[cmd.index("-t") + 1] == "8,16"
 
 
-@pytest.mark.parametrize(
-    "flag", ["-fmoe", "--fused-moe", "-rtr", "-thp", "-sas", "-no-ooae", "--n-cpu-moe", "-w", "-ot"]
-)
+@pytest.mark.parametrize("flag", ["-fmoe", "--fused-moe", "-rtr", "-thp", "-sas", "-no-ooae", "--n-cpu-moe", "-w"])
 def test_custom_single_value_flag_sweep_splits_on_ik_llama_bench(flag):
     """R2-3: a custom ``-fmoe 0,1`` axis on ik llama-bench silently ran only 0."""
     axes = [Axis(flag, ["0", "1"], custom_flag=flag), Axis("threads", ["8", "16"])]
@@ -447,6 +445,26 @@ def test_custom_single_value_flag_sweep_splits_on_ik_llama_bench(flag):
     assert [(cmd[cmd.index(flag) + 1], combo) for cmd, combo in pairs] == [("0", {flag: "0"}), ("1", {flag: "1"})]
     for cmd, _ in pairs:
         assert cmd[cmd.index("-t") + 1] == "8,16"
+
+
+@pytest.mark.parametrize("flag", ["-ot", "--override-tensor"])
+def test_custom_override_tensor_list_stays_one_run(flag):
+    """Round 2: ik llama-bench's parse_buft_overrides reads a comma list of
+    overrides that all apply to ONE run; splitting it benchmarked a different
+    placement per run."""
+    axes = [Axis(flag, ["a=CPU", "b=CPU"], custom_flag=flag)]
+    pairs = build_commands(TOOL_LLAMA_BENCH, "/b/llama-bench", "/m.gguf", axes, backend="ik_llama")
+    assert len(pairs) == 1
+    cmd, combo = pairs[0]
+    assert cmd[cmd.index(flag) + 1] == "a=CPU,b=CPU"
+    assert combo == {}
+
+
+@pytest.mark.parametrize("values", [["0"], ["4096", "0"], ["-1"]])
+def test_sweep_bench_refuses_ctx_zero(values):
+    """-c 0 makes llama-sweep-bench sweep up to n_ctx_train (huge/OOM)."""
+    with pytest.raises(SweepError, match="model's full training context"):
+        sweep_bench_commands("/b/sb", "/m.gguf", [Axis("ctx_size", values)], backend="ik_llama")
 
 
 def test_custom_comma_list_flag_still_single_run():
