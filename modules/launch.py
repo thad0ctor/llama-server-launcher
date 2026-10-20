@@ -606,26 +606,22 @@ class LaunchManager:
 
         # Only add standard cache type flags if ik_llama is not using -ctk/-ctv
         if not ik_llama_uses_cache_flags:
-            # llama.cpp default is f16. Add args only if different.
-            kv_cache_type_val = self.launcher.cache_type_k.get().strip()
-            # Note: llama.cpp's --cache-type-v defaults to the value of --cache-type-k if not specified.
-            # So just setting --cache-type-k is usually sufficient.
-            if kv_cache_type_val and kv_cache_type_val != "f16":
-                cmd.extend(["--cache-type-k", kv_cache_type_val])
-                print(f"DEBUG: Adding --cache-type-k {kv_cache_type_val} (non-default)", file=sys.stderr)
-                # Always set V cache type to match K cache type to avoid unsupported combinations
-                cmd.extend(["--cache-type-v", kv_cache_type_val])
-                print(f"DEBUG: Adding --cache-type-v {kv_cache_type_val} (matching K cache type)", file=sys.stderr)
+            # Both backends default K and V to f16 independently (V does NOT
+            # follow K), so each control drives its own flag and is added only
+            # when it differs from f16. The GUI keeps V following K until the
+            # user picks a different V, and old configs load that way too.
+            for flag, var in (
+                ("--cache-type-k", self.launcher.cache_type_k),
+                ("--cache-type-v", self.launcher.cache_type_v),
+            ):
+                cache_type_val = var.get().strip()
+                if cache_type_val and cache_type_val != "f16":
+                    cmd.extend([flag, cache_type_val])
+                    print(f"DEBUG: Adding {flag} {cache_type_val} (non-default)", file=sys.stderr)
         else:
             print(
                 "DEBUG: Skipping standard --cache-type-k/v flags because ik_llama -ctk/-ctv is enabled", file=sys.stderr
             )
-
-        # Remove the separate V cache type handling since we always want it to match K
-        # v_cache_type_val = self.launcher.cache_type_v.get().strip()
-        # if v_cache_type_val and v_cache_type_val != kv_cache_type_val:
-        #     cmd.extend(["--cache-type-v", v_cache_type_val])
-        #     print(f"DEBUG: Adding --cache-type-v {v_cache_type_val} (different from K cache type)", file=sys.stderr)
 
         # --- Threads & Batching ---
         # Llama.cpp internal defaults: --threads=hardware_concurrency() (logical), --threads-batch=4
@@ -857,6 +853,21 @@ class LaunchManager:
                 file=sys.stderr,
             )
 
+        # Both backends abort at startup on a quantized V cache with flash
+        # attention off ("Quantized V cache cannot be used without flash
+        # attention"); the launcher itself emits --flash-attn off for an
+        # unchecked box on ik_llama. Refuse here (live launch and saved
+        # script alike) instead of handing the user a crashing command.
+        quantized_v = self._quantized_v_cache_without_flash_attn(cmd)
+        if quantized_v:
+            messagebox.showerror(
+                "Invalid KV Cache Settings",
+                f"The V cache type '{quantized_v}' is quantized, but flash attention is off.\n\n"
+                f"{backend_name} refuses to start with a quantized V cache unless flash attention "
+                f"is on. Enable Flash Attention, or set the V cache type to f16/bf16/f32.",
+            )
+            return None
+
         print("\n--- Generated Command ---", file=sys.stderr)
         # Use shlex.quote to make command printable and copy-pasteable in shells
         # Note: This quoting is primarily for display. The actual launch script
@@ -866,6 +877,31 @@ class LaunchManager:
         print("-------------------------\n", file=sys.stderr)
 
         return cmd
+
+    # KV cache types that are not quantized (both backends accept a V cache
+    # of these with flash attention off).
+    _UNQUANTIZED_CACHE_TYPES = frozenset({"f32", "f16", "bf16"})
+
+    @classmethod
+    def _quantized_v_cache_without_flash_attn(cls, cmd):
+        """Return the V cache type when ``cmd`` pairs a quantized V cache with
+        an explicit ``--flash-attn off``, else ``None``.
+
+        Reads the final argv (last occurrence wins, as in the binaries'
+        parsers), so ik_llama ``-ctv`` and custom parameters count too. An
+        absent flash-attn flag is fine: ik_llama defaults to on and llama.cpp
+        to auto, which turns flash attention on for a quantized V cache.
+        """
+        v_type = None
+        fa_value = None
+        for i, tok in enumerate(cmd[:-1]):
+            if tok in ("--cache-type-v", "-ctv"):
+                v_type = cmd[i + 1].strip()
+            elif tok in ("--flash-attn", "-fa"):
+                fa_value = cmd[i + 1].strip().lower()
+        if fa_value in ("off", "0", "false") and v_type and v_type.lower() not in cls._UNQUANTIZED_CACHE_TYPES:
+            return v_type
+        return None
 
     def _find_server_executable(self, llama_base_dir, backend):
         """Finds the llama-server executable within the llama.cpp directory."""

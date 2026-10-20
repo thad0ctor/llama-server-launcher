@@ -909,20 +909,82 @@ class TestBuildCmdHappyPath:
         cmd = manager.build_cmd()
         assert "--cache-type-k" not in cmd
 
-    def test_cache_type_k_emits_both_k_and_v(self, manager, launcher_mock):
+    @pytest.mark.parametrize("backend", ["llama.cpp", "ik_llama"])
+    def test_cache_type_v_drives_its_own_flag(self, manager, launcher_mock, backend):
+        """Regression: --cache-type-v used to be a copy of K, so the V control
+        was dead on both backends."""
+        launcher_mock.backend_selection.set(backend)
+        launcher_mock.flash_attn.set(True)
         launcher_mock.cache_type_k.set("q8_0")
+        launcher_mock.cache_type_v.set("q4_0")
         cmd = manager.build_cmd()
-        assert "--cache-type-k" in cmd
         assert cmd[cmd.index("--cache-type-k") + 1] == "q8_0"
-        # When K is set non-default, V is also forcibly set to match K.
-        assert "--cache-type-v" in cmd
+        assert cmd[cmd.index("--cache-type-v") + 1] == "q4_0"
+
+    def test_quantized_k_with_f16_v_emits_only_k(self, manager, launcher_mock):
+        """Quantized K + f16 V is valid even without flash attention; it used
+        to be forced to V=K, which crashed ik_llama with FA off."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.cache_type_k.set("q8_0")
+        launcher_mock.cache_type_v.set("f16")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--cache-type-k") + 1] == "q8_0"
+        assert "--cache-type-v" not in cmd
+        assert cmd[cmd.index("--flash-attn") + 1] == "off"
+
+    def test_f16_k_with_quantized_v_emits_only_v(self, manager, launcher_mock):
+        launcher_mock.flash_attn.set(True)
+        launcher_mock.cache_type_v.set("q8_0")
+        cmd = manager.build_cmd()
+        assert "--cache-type-k" not in cmd
         assert cmd[cmd.index("--cache-type-v") + 1] == "q8_0"
+
+    def test_quantized_v_with_flash_attn_off_is_refused_on_ik_llama(self, manager, launcher_mock):
+        """ik_llama aborts with "Quantized V cache cannot be used without
+        flash attention"; the launcher's unchecked FA box emits --flash-attn
+        off there, so refuse with an error instead of a crashing command."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.cache_type_k.set("q8_0")
+        launcher_mock.cache_type_v.set("q8_0")
+        with patch("modules.launch.messagebox") as mb:
+            assert manager.build_cmd() is None
+        title, message = mb.showerror.call_args.args
+        assert "q8_0" in message and "flash attention" in message.lower()
+
+    def test_quantized_ik_tab_ctv_with_flash_attn_off_is_refused(self, manager, launcher_mock):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.ik_llama_tab.get_ik_llama_flags.return_value = ["-ctv", "q4_0"]
+        with patch("modules.launch.messagebox") as mb:
+            assert manager.build_cmd() is None
+        assert mb.showerror.called
+
+    def test_quantized_v_with_custom_fa_off_is_refused_on_llama_cpp(self, manager, launcher_mock):
+        launcher_mock.cache_type_v.set("q8_0")
+        launcher_mock.custom_parameters_list = ["-fa off"]
+        with patch("modules.launch.messagebox") as mb:
+            assert manager.build_cmd() is None
+        assert mb.showerror.called
+
+    def test_quantized_v_on_llama_cpp_without_fa_flag_is_allowed(self, manager, launcher_mock):
+        """llama.cpp's unchecked box emits no --flash-attn (auto), and auto
+        turns flash attention on for a quantized V cache."""
+        launcher_mock.cache_type_v.set("q8_0")
+        cmd = manager.build_cmd()
+        assert "--flash-attn" not in cmd
+        assert cmd[cmd.index("--cache-type-v") + 1] == "q8_0"
+
+    def test_unquantized_v_with_flash_attn_off_is_allowed(self, manager, launcher_mock):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.cache_type_v.set("bf16")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--cache-type-v") + 1] == "bf16"
 
     def test_ik_llama_ctk_suppresses_standard_cache_flags(self, manager, launcher_mock):
         """When ik_llama's -ctk/-ctv flags are used, build_cmd should
         NOT also add the standard --cache-type-k even if the UI value is
         non-default."""
         launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.flash_attn.set(True)  # quantized -ctv needs flash attention
         launcher_mock.cache_type_k.set("q8_0")
         launcher_mock.ik_llama_tab.get_ik_llama_flags.return_value = [
             "-ctk",

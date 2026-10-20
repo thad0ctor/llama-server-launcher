@@ -317,6 +317,8 @@ class ConfigManager:
             "selected_mmproj_path": self.launcher.selected_mmproj_path.get(),
             "cache_type_k": self.launcher.cache_type_k.get(),
             "cache_type_v": self.launcher.cache_type_v.get(),
+            # Marks cache_type_v as authoritative; see _loaded_cache_type_v.
+            "cache_type_v_explicit": True,
             "threads": self.launcher.threads.get(),  # Save the user-set value
             "threads_batch": self.launcher.threads_batch.get(),  # Save the user-set value
             "batch_size": self.launcher.batch_size.get(),  # Save the user-set value
@@ -477,6 +479,23 @@ class ConfigManager:
                 cfg.clear()
                 cfg.update(prior_cfg_snapshot)
 
+    @staticmethod
+    def _loaded_cache_type_v(cfg):
+        """Return the V cache type to restore from a saved config.
+
+        Configs saved before the V control was wired up (no
+        ``cache_type_v_explicit`` marker) ran with V = K whatever the V box
+        said, and their V box almost always holds the untouched ``f16``
+        default. Keep that effective behavior: V follows K unless the old
+        config holds a non-default V, which only a deliberate pick produces.
+        """
+        cache_type_v = cfg.get("cache_type_v", "f16")
+        if cfg.get("cache_type_v_explicit"):
+            return cache_type_v
+        if not cache_type_v or cache_type_v == "f16":
+            return cfg.get("cache_type_k", "f16")
+        return cache_type_v
+
     def _apply_loaded_configuration(self, name, cfg):
         """Mutates launcher state from a named-config dict.
 
@@ -489,7 +508,7 @@ class ConfigManager:
         self.launcher.ik_llama_dir.set(cfg.get("ik_llama_dir", ""))
         self.launcher.venv_dir.set(cfg.get("venv_dir", ""))  # Setting this triggers the venv trace -> flash attn check
         self.launcher.cache_type_k.set(cfg.get("cache_type_k", "f16"))
-        self.launcher.cache_type_v.set(cfg.get("cache_type_v", "f16"))
+        self.launcher.cache_type_v.set(self._loaded_cache_type_v(cfg))
         # Load parameters, providing defaults for backward compatibility with older configs
         # Default to the *current* detected cores if not in the config for threads
         self.launcher.threads.set(

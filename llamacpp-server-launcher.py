@@ -484,8 +484,8 @@ class LlamaCppLauncher:
         self.root_dir_help_text = tk.StringVar(value="Select the main 'llama.cpp' folder. The app will search for the server executable.")
 
         # --- Basic Server Settings ---
-        self.cache_type_k    = tk.StringVar(value="f16") # KV cache type (applies to k & v)
-        self.cache_type_v    = tk.StringVar(value="f16") # V cache type
+        self.cache_type_k    = tk.StringVar(value="f16") # K cache type
+        self.cache_type_v    = tk.StringVar(value="f16") # V cache type (follows K until changed)
         # Initial default thread values before fetching system info.
         # These will be updated by SystemInfoManager or load_config.
         self.threads         = tk.StringVar(value="4")
@@ -868,6 +868,11 @@ class LlamaCppLauncher:
         # or startup don't each trigger a synchronous tensor-split recompute.
         # The slider trace already uses the same debounce helper.
         self.cache_type_k.trace_add("write", lambda *args: self._schedule_recommendations_update())
+        # V follows K until the user picks a different V, which keeps the
+        # pre-split "one KV type" behavior (and the K == V that MLA models
+        # need on llama.cpp) for anyone who only sets K.
+        self._last_cache_type_k = self.cache_type_k.get()
+        self.cache_type_k.trace_add("write", lambda *args: self._sync_cache_type_v_with_k())
         # Context size updates handled in _override_ctx_size and _update_ctx_label_from_slider
         # n_gpu_layers updates handled in _set_gpu_layers (called by entry/slider sync)
         # GPU selection updates handled in _on_gpu_selection_changed
@@ -887,6 +892,7 @@ class LlamaCppLauncher:
         self.jinja_enabled.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         # Bind trace to other variables that affect the default config name
         self.cache_type_k.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
+        self.cache_type_v.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.threads_batch.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
         self.batch_size.trace_add("write", lambda *args: self._update_default_config_name_if_needed())
@@ -1861,12 +1867,12 @@ class LlamaCppLauncher:
         ttk.Separator(inner, orient="horizontal")\
             .grid(column=0, row=r, columnspan=4, sticky="ew", padx=10, pady=5); r += 1
 
-        ttk.Label(inner, text="KV Cache Type (--cache-type-k):")\
+        ttk.Label(inner, text="K Cache Type (--cache-type-k):")\
             .grid(column=0, row=r, sticky="w", padx=10, pady=3)
         # Combobox state is "readonly" for selection, but not disabled
         self.cache_type_k_combo = ttk.Combobox(inner, textvariable=self.cache_type_k, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_k_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="Quantization for KV cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Quantization for K cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
         ttk.Label(inner, text="V Cache Type (--cache-type-v):")\
@@ -1874,7 +1880,7 @@ class LlamaCppLauncher:
         # Combobox state is "readonly" for selection, but not disabled
         self.cache_type_v_combo = ttk.Combobox(inner, textvariable=self.cache_type_v, width=10, values=("f16","f32","q8_0","q4_0","q4_1","q5_0","q5_1","q6_k"), state="readonly")
         self.cache_type_v_combo.grid(column=1, row=r, sticky="w", padx=5, pady=3); r += 1
-        ttk.Label(inner, text="Quantization for V cache (f16 is default, lower Q=more memory saved)", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Follows K until changed. Quantized V needs Flash Attention; MLA models need V = K on llama.cpp", font=("TkSmallCaptionFont"))\
             .grid(column=2, row=r-1, columnspan=2, sticky="w", padx=5, pady=3);
 
         ttk.Label(inner, text="Disable mmap (--no-mmap):")\
@@ -5217,6 +5223,15 @@ class LlamaCppLauncher:
     def _generate_default_config_name(self):
         """Delegates to config manager."""
         return self.config_manager.generate_default_config_name()
+
+    def _sync_cache_type_v_with_k(self):
+        """Trace callback for ``cache_type_k``: carry V along while it still
+        equals the previous K (i.e. the user hasn't picked a separate V).
+        A config load sets K before V, so the loaded V always wins."""
+        new_k = self.cache_type_k.get()
+        if self.cache_type_v.get() == getattr(self, "_last_cache_type_k", new_k):
+            self.cache_type_v.set(new_k)
+        self._last_cache_type_k = new_k
 
     def _update_default_config_name_if_needed(self, *args):
         """Delegates to config manager."""

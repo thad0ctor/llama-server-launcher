@@ -327,3 +327,58 @@ class TestLaunchServerLinuxBranch:
         ) as popen, patch("modules.launch.messagebox"):
             manager.launch_server()
         assert not popen.called
+
+
+# ---------------------------------------------------------------------------
+# V cache follows K in the GUI until the user picks a separate V
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def launcher_entry_module():
+    import importlib.util
+
+    entry_path = Path(__file__).resolve().parents[2] / "llamacpp-server-launcher.py"
+    spec = importlib.util.spec_from_file_location("entry_module_cache_type_sync", entry_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["entry_module_cache_type_sync"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestCacheTypeVFollowsK:
+    """The V control now drives --cache-type-v on its own; the K trace keeps
+    the old single-type behavior for users who only touch K."""
+
+    def _stub(self, tk_root, launcher_entry_module, k="f16", v="f16"):
+        from types import SimpleNamespace
+
+        stub = SimpleNamespace(
+            cache_type_k=tk.StringVar(master=tk_root, value=k),
+            cache_type_v=tk.StringVar(master=tk_root, value=v),
+            _last_cache_type_k=k,
+        )
+        sync = launcher_entry_module.LlamaCppLauncher._sync_cache_type_v_with_k
+        stub.cache_type_k.trace_add("write", lambda *a: sync(stub))
+        return stub
+
+    def test_v_follows_k_while_untouched(self, tk_root, launcher_entry_module):
+        stub = self._stub(tk_root, launcher_entry_module)
+        stub.cache_type_k.set("q8_0")
+        assert stub.cache_type_v.get() == "q8_0"
+        stub.cache_type_k.set("q4_0")
+        assert stub.cache_type_v.get() == "q4_0"
+
+    def test_separately_chosen_v_is_kept(self, tk_root, launcher_entry_module):
+        stub = self._stub(tk_root, launcher_entry_module)
+        stub.cache_type_k.set("q8_0")
+        stub.cache_type_v.set("f16")
+        stub.cache_type_k.set("q4_0")
+        assert stub.cache_type_v.get() == "f16"
+
+    def test_config_load_order_keeps_loaded_v(self, tk_root, launcher_entry_module):
+        """ConfigManager sets K then V, so the loaded V wins over the trace."""
+        stub = self._stub(tk_root, launcher_entry_module)
+        stub.cache_type_k.set("q8_0")
+        stub.cache_type_v.set("f16")
+        assert (stub.cache_type_k.get(), stub.cache_type_v.get()) == ("q8_0", "f16")

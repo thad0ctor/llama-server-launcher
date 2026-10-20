@@ -350,6 +350,44 @@ class TestLoadConfiguration:
         launcher.ik_llama_tab.load_from_config.assert_called()
 
 
+    # V cache back-compat. Configs saved before the V control was wired up
+    # (no ``cache_type_v_explicit`` marker) ran with V = K regardless of the
+    # V box, which almost always held the untouched f16 default.
+    @pytest.mark.parametrize(
+        "saved,expected_v",
+        [
+            ({"cache_type_k": "q8_0", "cache_type_v": "f16"}, "q8_0"),  # untouched V box: V followed K
+            ({"cache_type_k": "q8_0"}, "q8_0"),  # pre-V-control config: K only
+            ({"cache_type_k": "q8_0", "cache_type_v": "q4_0"}, "q4_0"),  # deliberate V pick is honored
+            ({"cache_type_k": "f16", "cache_type_v": "f16"}, "f16"),
+            ({"cache_type_k": "q8_0", "cache_type_v": "f16", "cache_type_v_explicit": True}, "f16"),
+            ({"cache_type_k": "q4_0", "cache_type_v": "q8_0", "cache_type_v_explicit": True}, "q8_0"),
+        ],
+    )
+    def test_cache_type_v_back_compat(self, rich_launcher_factory, tmp_path, saved, expected_v):
+        cfg = _full_cfg()
+        cfg.pop("cache_type_v", None)
+        cfg.pop("cache_type_v_explicit", None)
+        cfg.update(saved)
+        cm, launcher = self._prepare(rich_launcher_factory, tmp_path, cfg)
+        with patch("modules.config.messagebox"):
+            cm.load_configuration()
+        assert launcher.cache_type_k.get() == saved["cache_type_k"]
+        assert launcher.cache_type_v.get() == expected_v
+
+    def test_current_cfg_marks_cache_type_v_explicit(self, rich_launcher_factory, tmp_path):
+        """New saves carry the marker so an explicit f16 V next to a quantized
+        K survives the round-trip instead of being migrated to V = K."""
+        from modules.config import ConfigManager
+
+        launcher = rich_launcher_factory(tmp_path / "cfg.json")
+        launcher.cache_type_k.set("q8_0")
+        launcher.cache_type_v.set("f16")
+        cfg = ConfigManager(launcher).current_cfg()
+        assert cfg["cache_type_v_explicit"] is True
+        assert ConfigManager._loaded_cache_type_v(cfg) == "f16"
+
+
 # ===========================================================================
 # delete_configuration
 # ===========================================================================
