@@ -849,6 +849,24 @@ class TestBuildCmdHappyPath:
         assert "--fit" not in manager.build_cmd()
         assert "omitting ik_llama --fit" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "custom", ["--n-cpu-moe 0", "--n-cpu-moe=00", "-ncmoe 0", "--moe-cache-mib 0", "--moe-cache-mib=0"]
+    )
+    def test_ik_llama_fit_kept_for_custom_zero_placement_values(self, manager, launcher_mock, built_tree, custom):
+        """Codex: ik only rejects --fit with ncmoe > 0 / moe_cache_size > 0, so
+        an explicit 0 in custom params is not a conflict (like the GUI field)."""
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.custom_parameters_list = [custom]
+        assert "--fit" in manager.build_cmd()
+
+    @pytest.mark.parametrize("custom", ["--n-cpu-moe 3", "-ncmoe=2", "--moe-cache-mib 512", "-cmoe", "--cpu-moe"])
+    def test_ik_llama_fit_omitted_for_custom_nonzero_placement(self, manager, launcher_mock, built_tree, custom):
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.fit_enabled.set(True)
+        launcher_mock.custom_parameters_list = [custom]
+        assert "--fit" not in manager.build_cmd()
+
     @pytest.mark.parametrize("custom", ["-ngl -1", "--gpu-layers all", "--n-gpu-layers=auto", "-ngl=-1"])
     def test_ik_llama_fit_kept_for_custom_all_layers(self, manager, launcher_mock, built_tree, custom):
         launcher_mock.backend_selection.set("ik_llama")

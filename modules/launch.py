@@ -375,6 +375,8 @@ class LaunchManager:
     )
 
     _IK_GPU_LAYERS_FLAGS = ("-ngl", "--gpu-layers", "--n-gpu-layers")
+    # Value-taking members of _IK_FIT_CONFLICT_FLAGS that ik treats as off at 0.
+    _IK_FIT_ZERO_OK_FLAGS = ("-ncmoe", "--n-cpu-moe", "--moe-cache-mib")
 
     def _ik_llama_fit_conflicts(self):
         """Return why ik_llama --fit must not be emitted (empty list = emit).
@@ -408,12 +410,23 @@ class LaunchManager:
                 continue
         for i, tok in enumerate(tokens):
             name, eq, inline_value = tok.partition("=")
-            if name in self._IK_FIT_CONFLICT_FLAGS and name not in conflicts:
+            value = inline_value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
+            if name in self._IK_FIT_ZERO_OK_FLAGS:
+                # ik only refuses these with --fit when > 0 (src/llama.cpp
+                # ``ml.ncmoe > 0``; common.cpp ``moe_cache_size > 0``).
+                try:
+                    if int(value.strip(), 10) == 0:
+                        continue
+                except ValueError:
+                    pass
+                entry = f"{name} {value}".strip()
+                if entry not in conflicts:
+                    conflicts.append(entry)
+            elif name in self._IK_FIT_CONFLICT_FLAGS and name not in conflicts:
                 conflicts.append(name)
             elif name in self._IK_GPU_LAYERS_FLAGS:
                 # A layer count in custom params overrides the GUI field (it
                 # comes later in argv); fit ignores it unless it means all.
-                value = inline_value if eq else (tokens[i + 1] if i + 1 < len(tokens) else "")
                 if value.strip().lower() not in ("-1", "auto", "all"):
                     conflicts.append(f"{name} {value}".strip())
         return conflicts
