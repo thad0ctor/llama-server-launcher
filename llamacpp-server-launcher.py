@@ -1712,7 +1712,7 @@ class LlamaCppLauncher:
 
         gpu_layers_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
+        ttk.Label(inner, text="Layers to offload (0=CPU only, -1=All; sent as 'all' to llama.cpp builds that list it). Max = repeating blocks + 1 output layer; slider updates after model analysis.", font=("TkSmallCaptionFont"))\
             .grid(column=1, row=r+1, columnspan=3, sticky="w", padx=5); r += 2
 
         # --- Manual Model Entry (when analysis fails) ---

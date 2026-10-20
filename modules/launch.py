@@ -274,6 +274,51 @@ class LaunchManager:
         self.add_arg(cmd, "--no-mmap", no_mmap)
         self.add_arg(cmd, "--mlock", mlock)
 
+    @staticmethod
+    def _help_block(help_text, flag):
+        """Return the ``--help`` line advertising ``flag`` plus its continuation
+        lines (indented deeper than the option itself), or "" when the flag
+        isn't listed."""
+        lines = help_text.splitlines()
+        pattern = re.compile(rf"(?:^|[\s,]){re.escape(flag)}(?:[\s,=]|$)")
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith("-") and pattern.search(line):
+                indent = len(line) - len(line.lstrip())
+                block = [line]
+                for cont in lines[i + 1 :]:
+                    if len(cont) - len(cont.lstrip()) <= indent:
+                        break
+                    block.append(cont)
+                return "\n".join(block)
+        return ""
+
+    def _llama_cpp_all_gpu_layers_value(self, exe_path):
+        """Map the GUI's "-1 = All" to the llama.cpp spelling of "all layers".
+
+        Current llama.cpp reads ``-ngl -1`` as *auto* (``--fit`` may then keep
+        layers on the CPU); "every layer" is ``-ngl all``. Builds from before
+        ``auto``/``all`` existed reject ``all`` but read ``-1`` as their
+        all-layers model default. So emit ``all`` only when the binary's
+        ``--help`` lists it, otherwise keep ``-1``, which starts on every build.
+
+        Probed in the save-script flow too: the script runs this same local
+        exe, the ``--help`` text is cached per binary, and only a "-1" entry
+        pays for it. ik_llama never gets here (it rejects ``all``; ``-1``
+        already means every layer there).
+        """
+        help_text = self._get_help_text(exe_path)
+        if help_text is not None:
+            block = self._help_block(help_text, "--n-gpu-layers") or self._help_block(help_text, "-ngl")
+            if re.search(r"['\"]all['\"]", block):
+                print("DEBUG: Mapping --n-gpu-layers -1 (All) to 'all'", file=sys.stderr)
+                return "all"
+        print(
+            "INFO: llama.cpp --help does not list '--n-gpu-layers all' (or could not be read); "
+            "sending -1, which current llama.cpp treats as 'auto' rather than 'all'.",
+            file=sys.stderr,
+        )
+        return "-1"
+
     def _build_ik_llama_fit_args(self, cmd, exe_path, probe=False):
         """Append ik_llama fit args, translating from the shared UI fields:
           - shared `fit_enabled` -> bare `--fit` flag (no on/off arg)
@@ -611,6 +656,8 @@ class LaunchManager:
         # Omitting it is NOT CPU-only: llama.cpp defaults to auto (offloads
         # what fits) and ik_llama puts every layer on the GPU.
         # This argument will now be added regardless of the --tensor-split value
+        if n_gpu_layers_val == "-1" and backend != "ik_llama":
+            n_gpu_layers_val = self._llama_cpp_all_gpu_layers_value(exe_path)
         self.add_arg(cmd, "--n-gpu-layers", n_gpu_layers_val, "")
 
         # --main-gpu is usually needed when offloading layers (either via --n-gpu-layers or --tensor-split)

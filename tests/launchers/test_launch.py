@@ -795,6 +795,52 @@ class TestBuildCmdHappyPath:
         cmd = manager.build_cmd()
         assert cmd[cmd.index("--n-gpu-layers") + 1] == "0"
 
+    # Help excerpts copied from real binaries: llama.cpp b11718 and ik_llama c446f1e.
+    _LLAMA_CPP_NGL_HELP = (
+        "-ngl,  --gpu-layers, --n-gpu-layers N   max. number of layers to store in VRAM, either an exact number,\n"
+        "                                        'auto', or 'all' (default: auto)\n"
+        "                                        (env: LLAMA_ARG_N_GPU_LAYERS)\n"
+        "-sm,   --split-mode {none,layer,row,tensor}\n"
+    )
+    _PRE_AUTO_NGL_HELP = "-ngl,  --gpu-layers, --n-gpu-layers N   number of layers to store in VRAM\n"
+
+    def test_n_gpu_layers_minus_one_maps_to_all_when_advertised(self, manager, launcher_mock, monkeypatch):
+        """Regression: on current llama.cpp -1 means *auto* (validated: 0/25
+        layers offloaded under memory pressure vs 25/25 for 'all')."""
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: self._LLAMA_CPP_NGL_HELP)
+        launcher_mock.n_gpu_layers.set("-1")
+        for probe in (True, False):  # live launch and saved scripts alike
+            cmd = manager.build_cmd(probe_backend=probe)
+            assert cmd[cmd.index("--n-gpu-layers") + 1] == "all"
+
+    @pytest.mark.parametrize("help_text", [_PRE_AUTO_NGL_HELP, None])
+    def test_n_gpu_layers_minus_one_kept_when_all_not_advertised(self, manager, launcher_mock, monkeypatch, help_text):
+        """Builds that predate 'all' reject it but read -1 as all layers; an
+        unreadable --help also keeps -1, which starts on every build."""
+        monkeypatch.setattr(manager, "_get_help_text", lambda *a, **kw: help_text)
+        launcher_mock.n_gpu_layers.set("-1")
+        cmd = manager.build_cmd(probe_backend=True)
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"
+
+    def test_n_gpu_layers_minus_one_stays_on_ik_llama(self, manager, launcher_mock, monkeypatch):
+        """ik_llama c446f1e rejects '-ngl all' (std::stoi); -1 already means
+        every layer there, so it is never rewritten or probed."""
+        probe = MagicMock(return_value=self._LLAMA_CPP_NGL_HELP)
+        monkeypatch.setattr(manager, "_get_help_text", probe)
+        launcher_mock.backend_selection.set("ik_llama")
+        launcher_mock.n_gpu_layers.set("-1")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "-1"
+        probe.assert_not_called()
+
+    def test_n_gpu_layers_other_values_do_not_probe(self, manager, launcher_mock, monkeypatch):
+        probe = MagicMock(return_value=self._LLAMA_CPP_NGL_HELP)
+        monkeypatch.setattr(manager, "_get_help_text", probe)
+        launcher_mock.n_gpu_layers.set("99")
+        cmd = manager.build_cmd()
+        assert cmd[cmd.index("--n-gpu-layers") + 1] == "99"
+        probe.assert_not_called()
+
     def test_n_gpu_layers_empty_omitted(self, manager, launcher_mock):
         launcher_mock.n_gpu_layers.set("")
         cmd = manager.build_cmd()
