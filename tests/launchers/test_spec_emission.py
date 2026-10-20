@@ -1921,6 +1921,30 @@ class TestSpecDefaultsPrefill:
         assert spec_defaults_stub.spec_draft_p_min.get() == "0"
         assert spec_defaults_stub.spec_draft_p_split.get() == "0.10"
 
+    @pytest.mark.parametrize("prior_type", ["draft-mtp", "draft-simple"])
+    def test_switch_to_dspark_replaces_untouched_prior_prefill(self, spec_defaults_stub, entry_module, prior_type):
+        """Switching types replaces the previous type's auto-filled values,
+        otherwise DSpark would launch with MTP's slower p_min=0.75."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set(prior_type)
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        spec_defaults_stub.spec_type.set("draft-dspark")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "2"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0"
+
+    def test_switch_type_keeps_user_edited_values(self, spec_defaults_stub, entry_module):
+        """A single user edit means the fields are no longer an untouched
+        prefill, so switching types leaves all of them alone."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-mtp")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        spec_defaults_stub.spec_draft_n_max.set("5")
+        spec_defaults_stub.spec_type.set("draft-dspark")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "5"
+        assert spec_defaults_stub.spec_draft_p_min.get() == "0.75"
+
     def test_ngram_simple_no_prefill(self, spec_defaults_stub, entry_module):
         """ngram-* types don't use the draft tuning knobs and must not be
         autofilled (would clutter the UI for users picking ngram)."""

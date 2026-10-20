@@ -51,6 +51,25 @@ def empty_draft_path_text(spec_type):
     return "(none — a draft model is required for this type)"
 
 
+# Recommended draft-tuning values per spec_type, shared by the blank-fill
+# prefill and the Reset button. n_min=0 means "always try speculation" — the
+# most generally useful baseline; users tuning further can raise it.
+# n_max/p_min/p_split are spec-type specific: MTP is essentially free so
+# n_max=3 is the benchmark-validated sweet spot; classical draft models gain
+# from the binary's larger default of 16; DSpark verification cost grows fast
+# with draft length, so n_max=2 with no confidence cutoff wins.
+_MTP_DRAFT_DEFAULTS = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+_CLASSICAL_DRAFT_DEFAULTS = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+_DSPARK_DRAFT_DEFAULTS = {"n_max": "2", "n_min": "0", "p_min": "0", "p_split": "0.10"}
+SPEC_DRAFT_DEFAULTS = {
+    "draft-mtp": _MTP_DRAFT_DEFAULTS,
+    "mtp": _MTP_DRAFT_DEFAULTS,
+    "draft-simple": _CLASSICAL_DRAFT_DEFAULTS,
+    "draft-eagle3": _CLASSICAL_DRAFT_DEFAULTS,
+    "draft-dspark": _DSPARK_DRAFT_DEFAULTS,
+}
+
+
 class SpecTab:
     """MTP / Speculative Decoding tab.
 
@@ -1436,19 +1455,8 @@ class SpecTab:
         except Exception:
             return
         spec_type = (self.spec_type.get() or "").strip()
-        # n_min=0 means "always try speculation" — the most generally useful
-        # baseline; users tuning further can raise it. n_max/p_min/p_split are
-        # spec-type specific (MTP is essentially free so n_max=3 is the
-        # benchmark-validated sweet spot; classical draft models gain from
-        # the binary's larger default of 16; DSpark verification cost grows
-        # fast with draft length, so n_max=2 with no confidence cutoff wins).
-        if spec_type in ("draft-mtp", "mtp"):
-            defaults = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        elif spec_type in ("draft-simple", "draft-eagle3"):
-            defaults = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        elif spec_type == "draft-dspark":
-            defaults = {"n_max": "2", "n_min": "0", "p_min": "0", "p_split": "0.10"}
-        else:
+        defaults = SPEC_DRAFT_DEFAULTS.get(spec_type)
+        if defaults is None:
             # ngram-*, suffix, cache, none, or unknown — no defaults to pre-fill.
             return
         var_map = {
@@ -1457,12 +1465,20 @@ class SpecTab:
             "p_min": self.spec_draft_p_min,
             "p_split": self.spec_draft_p_split,
         }
+        try:
+            current = {key: var.get().strip() for key, var in var_map.items()}
+        except Exception:
+            current = {}
+        # Fields still holding another type's untouched prefill (e.g. MTP's
+        # p_min=0.75 after switching to DSpark) were auto-filled, not typed,
+        # so they are replaced too. Any user edit breaks the match.
+        replace_prefill = current != defaults and current in SPEC_DRAFT_DEFAULTS.values()
         for key, default_value in defaults.items():
             var = var_map.get(key)
             if var is None:
                 continue
             try:
-                if not var.get().strip():
+                if replace_prefill or not var.get().strip():
                     var.set(default_value)
             except Exception:
                 pass
@@ -1477,15 +1493,8 @@ class SpecTab:
         are cleared.
         """
         spec_type = (self.spec_type.get() or "").strip()
-        if spec_type in ("draft-mtp", "mtp"):
-            values = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        elif spec_type in ("draft-simple", "draft-eagle3"):
-            values = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        elif spec_type == "draft-dspark":
-            values = {"n_max": "2", "n_min": "0", "p_min": "0", "p_split": "0.10"}
-        else:
-            # ngram-*, suffix, cache, blank — clear to "use binary default".
-            values = {"n_max": "", "n_min": "", "p_min": "", "p_split": ""}
+        # ngram-*, suffix, cache, blank — clear to "use binary default".
+        values = SPEC_DRAFT_DEFAULTS.get(spec_type, {"n_max": "", "n_min": "", "p_min": "", "p_split": ""})
         var_map = {
             "n_max": self.spec_draft_n_max,
             "n_min": self.spec_draft_n_min,
