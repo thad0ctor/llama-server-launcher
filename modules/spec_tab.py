@@ -51,6 +51,55 @@ def empty_draft_path_text(spec_type):
     return "(none — a draft model is required for this type)"
 
 
+# Recommended draft-tuning values per spec_type, shared by the blank-fill
+# prefill and the Reset button. n_min=0 means "always try speculation" — the
+# most generally useful baseline; users tuning further can raise it.
+# n_max/p_min/p_split are spec-type specific: MTP is essentially free so
+# n_max=3 is the benchmark-validated sweet spot; classical draft models gain
+# from the binary's larger default of 16; DSpark verification cost grows fast
+# with draft length, so n_max=2 with no confidence cutoff wins.
+_MTP_DRAFT_DEFAULTS = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+_CLASSICAL_DRAFT_DEFAULTS = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
+_DSPARK_DRAFT_DEFAULTS = {"n_max": "2", "n_min": "0", "p_min": "0", "p_split": "0.10"}
+SPEC_DRAFT_DEFAULTS = {
+    "draft-mtp": _MTP_DRAFT_DEFAULTS,
+    "mtp": _MTP_DRAFT_DEFAULTS,
+    "draft-simple": _CLASSICAL_DRAFT_DEFAULTS,
+    "draft-eagle3": _CLASSICAL_DRAFT_DEFAULTS,
+    "draft-dspark": _DSPARK_DRAFT_DEFAULTS,
+}
+
+
+def _spec_draft_prefill_record(owner):
+    """The draft-tuning values the launcher itself wrote (prefill or Reset),
+    keyed like SPEC_DRAFT_DEFAULTS entries. Lives in ``app_settings`` so it is
+    shared by the launcher and SpecTab, saved to disk, and carried in named
+    configs; anything typed or loaded without a record counts as user input."""
+    launcher = getattr(owner, "launcher", owner)
+    settings = getattr(launcher, "app_settings", None)
+    if not isinstance(settings, dict):
+        # Test stubs without app_settings: keep the record on the stub itself.
+        settings = owner.__dict__.setdefault("app_settings", {})
+    record = settings.get("spec_draft_prefilled")
+    if not isinstance(record, dict):
+        record = {}
+        settings["spec_draft_prefilled"] = record
+    return record
+
+
+def _forget_stale_spec_draft_prefill(owner, var_map):
+    """Drop record entries whose field no longer holds the launcher-written
+    value: once the user edits a field it is theirs, even if they later type
+    the old auto-filled value back in."""
+    record = _spec_draft_prefill_record(owner)
+    for key, var in var_map.items():
+        try:
+            if key in record and var.get().strip() != record[key]:
+                del record[key]
+        except Exception:
+            pass
+
+
 class SpecTab:
     """MTP / Speculative Decoding tab.
 
@@ -128,6 +177,15 @@ class SpecTab:
         self.spec_draft_n_min = tk.StringVar(value=is_(app_settings, "spec_draft_n_min"))
         self.spec_draft_p_min = tk.StringVar(value=is_(app_settings, "spec_draft_p_min"))
         self.spec_draft_p_split = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))  # llama.cpp only
+        # Any write that moves a field off its launcher-written value (a user
+        # edit) ends launcher ownership of it; the prefill re-records its own writes.
+        for _key, _var in (
+            ("n_max", self.spec_draft_n_max),
+            ("n_min", self.spec_draft_n_min),
+            ("p_min", self.spec_draft_p_min),
+            ("p_split", self.spec_draft_p_split),
+        ):
+            _var.trace_add("write", lambda *_a, k=_key, v=_var: _forget_stale_spec_draft_prefill(self, {k: v}))
         # Draft model selection.
         self.spec_draft_model = tk.StringVar(value=is_(app_settings, "spec_draft_model"))  # -md path
         # Opt-in for ik_llama+mtp: when False, hide the draft picker UI AND
@@ -1436,31 +1494,39 @@ class SpecTab:
         except Exception:
             return
         spec_type = (self.spec_type.get() or "").strip()
-        # n_min=0 means "always try speculation" — the most generally useful
-        # baseline; users tuning further can raise it. n_max/p_min/p_split are
-        # spec-type specific (MTP is essentially free so n_max=3 is the
-        # benchmark-validated sweet spot; classical draft models gain from
-        # the binary's larger default of 16).
-        if spec_type in ("draft-mtp", "mtp"):
-            defaults = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        elif spec_type in ("draft-simple", "draft-eagle3"):
-            defaults = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        else:
-            # ngram-*, suffix, cache, none, or unknown — no defaults to pre-fill.
-            return
+        defaults = SPEC_DRAFT_DEFAULTS.get(spec_type)
         var_map = {
             "n_max": self.spec_draft_n_max,
             "n_min": self.spec_draft_n_min,
             "p_min": self.spec_draft_p_min,
             "p_split": self.spec_draft_p_split,
         }
+        # Values the launcher itself wrote (this prefill or Reset) are replaced
+        # too, so switching e.g. MTP -> DSpark doesn't keep MTP's p_min=0.75.
+        # Anything the user typed is not in this record.
+        _forget_stale_spec_draft_prefill(self, var_map)
+        prefilled = _spec_draft_prefill_record(self)
+        if defaults is None:
+            # ngram-*, suffix, cache, dflash, none, or unknown — no defaults to
+            # pre-fill, but don't leave the previous type's prefill behind to be
+            # emitted as explicit flags.
+            for key, var in var_map.items():
+                try:
+                    if prefilled.get(key) and var.get().strip() == prefilled[key]:
+                        var.set("")
+                        del prefilled[key]
+                except Exception:
+                    pass
+            return
         for key, default_value in defaults.items():
             var = var_map.get(key)
             if var is None:
                 continue
             try:
-                if not var.get().strip():
+                current = var.get().strip()
+                if not current or prefilled.get(key) == current:
                     var.set(default_value)
+                    prefilled[key] = default_value
             except Exception:
                 pass
 
@@ -1474,19 +1540,18 @@ class SpecTab:
         are cleared.
         """
         spec_type = (self.spec_type.get() or "").strip()
-        if spec_type in ("draft-mtp", "mtp"):
-            values = {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        elif spec_type in ("draft-simple", "draft-eagle3"):
-            values = {"n_max": "16", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}
-        else:
-            # ngram-*, suffix, cache, blank — clear to "use binary default".
-            values = {"n_max": "", "n_min": "", "p_min": "", "p_split": ""}
+        # ngram-*, suffix, cache, blank — clear to "use binary default".
+        values = SPEC_DRAFT_DEFAULTS.get(spec_type, {"n_max": "", "n_min": "", "p_min": "", "p_split": ""})
         var_map = {
             "n_max": self.spec_draft_n_max,
             "n_min": self.spec_draft_n_min,
             "p_min": self.spec_draft_p_min,
             "p_split": self.spec_draft_p_split,
         }
+        # Reset values are launcher-written, so a later type switch may replace them.
+        prefilled = _spec_draft_prefill_record(self)
+        prefilled.clear()
+        prefilled.update({key: value for key, value in values.items() if value})
         for key, value in values.items():
             var = var_map.get(key)
             if var is None:
