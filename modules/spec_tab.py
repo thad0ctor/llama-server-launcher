@@ -87,6 +87,19 @@ def _spec_draft_prefill_record(owner):
     return record
 
 
+def _forget_stale_spec_draft_prefill(owner, var_map):
+    """Drop record entries whose field no longer holds the launcher-written
+    value: once the user edits a field it is theirs, even if they later type
+    the old auto-filled value back in."""
+    record = _spec_draft_prefill_record(owner)
+    for key, var in var_map.items():
+        try:
+            if key in record and var.get().strip() != record[key]:
+                del record[key]
+        except Exception:
+            pass
+
+
 class SpecTab:
     """MTP / Speculative Decoding tab.
 
@@ -164,6 +177,15 @@ class SpecTab:
         self.spec_draft_n_min = tk.StringVar(value=is_(app_settings, "spec_draft_n_min"))
         self.spec_draft_p_min = tk.StringVar(value=is_(app_settings, "spec_draft_p_min"))
         self.spec_draft_p_split = tk.StringVar(value=is_(app_settings, "spec_draft_p_split"))  # llama.cpp only
+        # Any write that moves a field off its launcher-written value (a user
+        # edit) ends launcher ownership of it; the prefill re-records its own writes.
+        for _key, _var in (
+            ("n_max", self.spec_draft_n_max),
+            ("n_min", self.spec_draft_n_min),
+            ("p_min", self.spec_draft_p_min),
+            ("p_split", self.spec_draft_p_split),
+        ):
+            _var.trace_add("write", lambda *_a, k=_key, v=_var: _forget_stale_spec_draft_prefill(self, {k: v}))
         # Draft model selection.
         self.spec_draft_model = tk.StringVar(value=is_(app_settings, "spec_draft_model"))  # -md path
         # Opt-in for ik_llama+mtp: when False, hide the draft picker UI AND
@@ -1482,6 +1504,7 @@ class SpecTab:
         # Values the launcher itself wrote (this prefill or Reset) are replaced
         # too, so switching e.g. MTP -> DSpark doesn't keep MTP's p_min=0.75.
         # Anything the user typed is not in this record.
+        _forget_stale_spec_draft_prefill(self, var_map)
         prefilled = _spec_draft_prefill_record(self)
         if defaults is None:
             # ngram-*, suffix, cache, dflash, none, or unknown — no defaults to

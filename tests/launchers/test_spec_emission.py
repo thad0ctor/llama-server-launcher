@@ -2080,6 +2080,42 @@ class TestSpecDefaultsPrefill:
         assert stub.spec_draft_n_max.get() == "2"
         assert stub.spec_draft_p_min.get() == "0"
 
+    def test_retyped_old_prefill_value_stays_user_owned(self, spec_defaults_stub, entry_module):
+        """Auto-fill MTP n_max=3, edit to 5, switch to DSpark, type 3 back,
+        switch to DFlash: the retyped 3 is the user's and must survive."""
+        spec_defaults_stub.spec_enabled.set(True)
+        spec_defaults_stub.spec_type.set("draft-mtp")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        spec_defaults_stub.spec_draft_n_max.set("5")
+        spec_defaults_stub.spec_type.set("draft-dspark")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        spec_defaults_stub.spec_draft_n_max.set("3")
+        spec_defaults_stub.spec_type.set("draft-dflash")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(spec_defaults_stub)
+        assert spec_defaults_stub.spec_draft_n_max.get() == "3"
+
+    def test_user_edit_ends_prefill_ownership_via_trace(self, tk_root, entry_module):
+        """On a real SpecTab the write trace drops ownership immediately, so
+        editing away and back to the auto-filled value (no type switch in
+        between) still leaves the field user-owned."""
+        launcher = SimpleNamespace(
+            app_settings={},
+            backend_selection=tk.StringVar(master=tk_root, value="llama.cpp"),
+            parallel=tk.StringVar(master=tk_root, value="1"),
+        )
+        tab = entry_module.SpecTab(launcher)
+        tab.spec_enabled.set(True)
+        tab.spec_type.set("draft-mtp")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(tab)
+        assert launcher.app_settings["spec_draft_prefilled"]["n_max"] == "3"
+        tab.spec_draft_n_max.set("5")
+        tab.spec_draft_n_max.set("3")
+        assert "n_max" not in launcher.app_settings["spec_draft_prefilled"]
+        tab.spec_type.set("draft-dspark")
+        entry_module.SpecTab._apply_spec_defaults_if_blank(tab)
+        assert tab.spec_draft_n_max.get() == "3"
+        assert tab.spec_draft_p_min.get() == "0"
+
     def test_switch_to_type_without_defaults_clears_only_prefill(self, spec_defaults_stub, entry_module):
         """draft-dflash has no benchmarked defaults: DSpark's auto-filled
         values are cleared so they aren't emitted as explicit flags, while
