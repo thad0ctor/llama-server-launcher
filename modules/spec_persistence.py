@@ -84,6 +84,20 @@ def coerce_spec_draft_prefilled(raw_value):
     }
 
 
+def spec_draft_prefilled_from_settings(settings):
+    """``spec_draft_prefilled`` for a saved settings/config dict, migrating
+    data saved before the record existed: when the key is absent and the four
+    draft fields exactly equal one of the launcher's preset sets, they were
+    almost certainly auto-filled, so they are marked launcher-written (lets
+    e.g. old MTP prefill give way to DSpark's defaults on a type switch)."""
+    if "spec_draft_prefilled" in settings:
+        return coerce_spec_draft_prefilled(settings["spec_draft_prefilled"])
+    from modules.spec_tab import SPEC_DRAFT_DEFAULTS
+
+    current = {key: settings.get(f"spec_draft_{key}", "") for key in ("n_max", "n_min", "p_min", "p_split")}
+    return dict(current) if current in SPEC_DRAFT_DEFAULTS.values() else {}
+
+
 def collect_spec_into_cfg(launcher, cfg):
     """Mirror every spec/reasoning/kvu Tk var into the named-config ``cfg``
     dict.
@@ -241,9 +255,8 @@ def load_spec_from_cfg(launcher, cfg):
     launcher.spec_autotune.set(_spec_bool("spec_autotune"))
     launcher.spec_draft_params.set(_spec_str("spec_draft_params"))
     # Restore which loaded draft values were launcher-written (older configs
-    # carry no record, so their values count as the user's), then fill the
-    # fields the config left blank.
-    launcher.app_settings["spec_draft_prefilled"] = coerce_spec_draft_prefilled(cfg.get("spec_draft_prefilled"))
+    # without a record are migrated), then fill the fields the config left blank.
+    launcher.app_settings["spec_draft_prefilled"] = spec_draft_prefilled_from_settings(cfg)
     apply_defaults = getattr(launcher, "_apply_spec_defaults_if_blank", None)
     if callable(apply_defaults):
         apply_defaults()
@@ -334,7 +347,7 @@ def validate_spec_app_settings(app_settings):
     app_settings["spec_draft_selected_gpus"] = coerce_spec_draft_selected_gpus(
         app_settings.get("spec_draft_selected_gpus", [])
     )
-    app_settings["spec_draft_prefilled"] = coerce_spec_draft_prefilled(app_settings.get("spec_draft_prefilled"))
+    app_settings["spec_draft_prefilled"] = spec_draft_prefilled_from_settings(app_settings)
 
     # If ``spec_draft_device`` is a NON-CUDA override (``Vulkan0``,
     # ``Metal0``, ``SYCL1``, ``ROCm0``, ``HIP1``, ``CPU0``), the user

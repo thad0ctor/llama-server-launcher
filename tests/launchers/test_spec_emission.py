@@ -2037,6 +2037,29 @@ class TestSpecDefaultsPrefill:
         assert launcher.spec_draft_n_max.get() == "2"
         assert launcher.spec_draft_p_min.get() == "0"
 
+    @pytest.mark.parametrize(
+        "saved, expected",
+        [
+            # Legacy (no record) + exact MTP preset -> treated as launcher-written.
+            ({"spec_draft_n_max": "3", "spec_draft_n_min": "0", "spec_draft_p_min": "0.75", "spec_draft_p_split": "0.10"},
+             {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}),
+            # Legacy + anything the user changed -> all kept as user input.
+            ({"spec_draft_n_max": "4", "spec_draft_n_min": "0", "spec_draft_p_min": "0.75", "spec_draft_p_split": "0.10"}, {}),
+            # Legacy + blank fields -> nothing to migrate.
+            ({}, {}),
+            # A saved record (even empty) is authoritative, never re-inferred.
+            ({"spec_draft_prefilled": {}, "spec_draft_n_max": "3", "spec_draft_n_min": "0",
+              "spec_draft_p_min": "0.75", "spec_draft_p_split": "0.10"}, {}),
+        ],
+    )
+    def test_legacy_settings_prefill_migration(self, saved, expected):
+        from modules.spec_persistence import spec_draft_prefilled_from_settings, validate_spec_app_settings
+
+        assert spec_draft_prefilled_from_settings(dict(saved)) == expected
+        app_settings = dict(saved)
+        validate_spec_app_settings(app_settings)
+        assert app_settings["spec_draft_prefilled"] == expected
+
     def test_prefill_record_survives_restart(self, tk_root, entry_module):
         """The record lives in app_settings (saved to disk), so MTP values
         auto-filled in an earlier session are still replaced by DSpark's."""
