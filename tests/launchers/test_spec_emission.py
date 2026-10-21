@@ -2037,19 +2037,26 @@ class TestSpecDefaultsPrefill:
         assert launcher.spec_draft_n_max.get() == "2"
         assert launcher.spec_draft_p_min.get() == "0"
 
+    _MTP_SAVED = {
+        "spec_draft_n_max": "3",
+        "spec_draft_n_min": "0",
+        "spec_draft_p_min": "0.75",
+        "spec_draft_p_split": "0.10",
+    }
+
     @pytest.mark.parametrize(
         "saved, expected",
         [
-            # Legacy (no record) + exact MTP preset -> treated as launcher-written.
-            ({"spec_draft_n_max": "3", "spec_draft_n_min": "0", "spec_draft_p_min": "0.75", "spec_draft_p_split": "0.10"},
-             {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}),
+            # Legacy (no record) + the saved type's own preset -> launcher-written.
+            ({"spec_type": "draft-mtp", **_MTP_SAVED}, {"n_max": "3", "n_min": "0", "p_min": "0.75", "p_split": "0.10"}),
+            # Legacy + another type's preset can't be this type's prefill -> user's.
+            ({"spec_type": "draft-dspark", **_MTP_SAVED}, {}),
             # Legacy + anything the user changed -> all kept as user input.
-            ({"spec_draft_n_max": "4", "spec_draft_n_min": "0", "spec_draft_p_min": "0.75", "spec_draft_p_split": "0.10"}, {}),
-            # Legacy + blank fields -> nothing to migrate.
+            ({"spec_type": "draft-mtp", **_MTP_SAVED, "spec_draft_n_max": "4"}, {}),
+            # Legacy + blank fields / no type -> nothing to migrate.
             ({}, {}),
             # A saved record (even empty) is authoritative, never re-inferred.
-            ({"spec_draft_prefilled": {}, "spec_draft_n_max": "3", "spec_draft_n_min": "0",
-              "spec_draft_p_min": "0.75", "spec_draft_p_split": "0.10"}, {}),
+            ({"spec_type": "draft-mtp", "spec_draft_prefilled": {}, **_MTP_SAVED}, {}),
         ],
     )
     def test_legacy_settings_prefill_migration(self, saved, expected):
@@ -2059,6 +2066,23 @@ class TestSpecDefaultsPrefill:
         app_settings = dict(saved)
         validate_spec_app_settings(app_settings)
         assert app_settings["spec_draft_prefilled"] == expected
+
+    def test_loading_legacy_dspark_config_keeps_mtp_like_values(self, tk_root, entry_module):
+        """A pre-record draft-dspark config holding 3/0/0.75/0.10 is loaded as
+        saved: those values can't be DSpark's prefill, so they are the user's."""
+        from modules.spec_persistence import load_spec_from_cfg
+
+        class _Launcher(SimpleNamespace):
+            def __getattr__(self, name):
+                var = tk.StringVar(master=tk_root, value="")
+                setattr(self, name, var)
+                return var
+
+        launcher = _Launcher(spec_enabled=tk.BooleanVar(master=tk_root, value=False), app_settings={})
+        launcher._apply_spec_defaults_if_blank = lambda: entry_module.SpecTab._apply_spec_defaults_if_blank(launcher)
+        load_spec_from_cfg(launcher, {"spec_enabled": True, "spec_type": "draft-dspark", **self._MTP_SAVED})
+        assert launcher.spec_draft_n_max.get() == "3"
+        assert launcher.spec_draft_p_min.get() == "0.75"
 
     def test_prefill_record_survives_restart(self, tk_root, entry_module):
         """The record lives in app_settings (saved to disk), so MTP values

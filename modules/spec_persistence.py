@@ -87,15 +87,18 @@ def coerce_spec_draft_prefilled(raw_value):
 def spec_draft_prefilled_from_settings(settings):
     """``spec_draft_prefilled`` for a saved settings/config dict, migrating
     data saved before the record existed: when the key is absent and the four
-    draft fields exactly equal one of the launcher's preset sets, they were
-    almost certainly auto-filled, so they are marked launcher-written (lets
-    e.g. old MTP prefill give way to DSpark's defaults on a type switch)."""
+    draft fields exactly equal the preset of the saved ``spec_type`` itself,
+    they are what the launcher auto-filled for that type, so they are marked
+    launcher-written (lets e.g. old MTP prefill give way to DSpark's defaults
+    on a type switch). Values matching some *other* type's preset can't have
+    come from the prefill for this type, so they stay the user's."""
     if "spec_draft_prefilled" in settings:
         return coerce_spec_draft_prefilled(settings["spec_draft_prefilled"])
     from modules.spec_tab import SPEC_DRAFT_DEFAULTS
 
+    preset = SPEC_DRAFT_DEFAULTS.get(str(settings.get("spec_type") or "").strip())
     current = {key: settings.get(f"spec_draft_{key}", "") for key in ("n_max", "n_min", "p_min", "p_split")}
-    return dict(current) if current in SPEC_DRAFT_DEFAULTS.values() else {}
+    return dict(current) if preset is not None and current == preset else {}
 
 
 def collect_spec_into_cfg(launcher, cfg):
